@@ -1,0 +1,539 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>EVA · INSTRUMENT CONSOLE</title>
+<link rel="stylesheet" href="/css/console.css" />
+</head>
+<body>
+
+  <!-- ============ telemetry bar ============ -->
+  <div class="telemetry">
+    <span class="brand">EVA <b>CONSOLE</b></span>
+    <span class="tele-seg"><span class="lbl">robot</span><span class="val" id="t-robot">—</span></span>
+    <span class="tele-seg"><span class="dot" id="t-tx-dot"></span><span class="lbl">tx</span><span class="val" id="t-tx">—</span></span>
+    <span class="tele-seg"><span class="dot" id="t-state-dot"></span><span class="lbl">state</span><span class="val" id="t-state">—</span></span>
+    <span class="spacer"></span>
+    <span class="tele-metric"><span class="lbl">infer</span> <span class="val tnum" id="t-infer">0ms</span></span>
+    <span class="tele-metric"><span class="lbl">step</span> <span class="val tnum" id="t-step">0</span></span>
+    <span class="tele-metric"><span class="lbl">t+</span> <span class="val tnum" id="t-elapsed">0.0s</span></span>
+  </div>
+
+  <!-- ============ tab strip ============ -->
+  <div class="tabs">
+    <span class="tab-thumb" id="tab-thumb"></span>
+    <button class="tab active" data-tab="debug"><span class="idx">01</span> DEBUG</button>
+    <button class="tab" data-tab="manual"><span class="idx">02</span> MANUAL</button>
+    <button class="tab" data-tab="collect"><span class="idx">03</span> COLLECT</button>
+    <button class="tab" data-tab="replay"><span class="idx">04</span> REPLAY</button>
+    <button class="tab" data-tab="eval"><span class="idx">05</span> EVAL</button>
+    <button class="tab" data-tab="result"><span class="idx">06</span> RESULT</button>
+  </div>
+
+  <!-- ============ onboarding guide bar ============ -->
+  <div class="guidebar" id="guidebar">
+    <span class="gb-step" id="gb-step">STEP 1/4</span>
+    <span class="gb-status" id="gb-policy" style="display:none">policy —</span>
+    <span class="timer" id="be-elapsed" style="display:none">⏱ 0.0s</span>
+    <span class="gb-status" id="replay-episode-task" style="display:none">no episode selected</span>
+    <span class="gb-status" id="collect-replay-status" style="display:none"></span>
+    <span class="gb-status" id="manual-conn" style="display:none"></span>
+    <span class="gb-msg" id="gb-msg"></span>
+    <span class="gb-hint" id="gb-hint">Follow steps 1 → 4 on the left to run</span>
+  </div>
+
+  <!-- ============ workspace ============ -->
+  <div class="workspace">
+
+    <!-- ---- DEBUG ---- -->
+    <div class="view active" id="view-debug">
+
+      <!-- control column -->
+      <div class="col col-control" id="debug-control-col">
+        <div class="panel" id="panel-prompt">
+          <div class="panel-h"><span class="step-badge">1</span><span id="prompt-title">PROMPT</span> <span class="n" id="prompt-n"></span><span class="sel-chip" id="prompt-chip"></span></div>
+          <select class="choice-select task-select" id="prompt-list" aria-label="Task"></select>
+        </div>
+
+        <div class="panel" id="panel-config">
+          <div class="panel-h"><span class="step-badge">2</span>CONFIG</div>
+          <div class="card">
+            <div class="sub-h">MODE<span class="sel-chip" id="mode-chip"></span></div>
+            <div class="row-2" id="mode-list"></div>
+            <div class="sub-h" id="strategy-h">STRATEGY<span class="sel-chip" id="strategy-chip"></span></div>
+            <select class="choice-select strategy-select" id="strategy-list" aria-label="Strategy"></select>
+            <div class="lock-note">↑ select a task first</div>
+          </div>
+        </div>
+
+        <div class="panel setup-panel" id="panel-setup">
+          <div class="panel-h"><span class="step-badge">3</span>SETUP</div>
+          <div class="card">
+            <div class="auto-setup" id="auto-setup">
+              <div class="auto-setup-row">
+                <span class="auto-spinner"></span>
+                <span class="auto-setup-msg" id="auto-setup-msg">AUTO · PREPARING ROBOT…</span>
+              </div>
+              <div class="auto-bar"><i></i></div>
+            </div>
+            <div class="setup-ctl" style="margin-top:8px">
+              <button class="btn danger full" id="b-setup-pause" style="display:none">PAUSE ‖</button>
+              <button class="btn primary full" id="b-setup-resume" style="display:none">RESUME ▶</button>
+              <button class="btn danger full" id="b-setup-retry" style="display:none">RETRY ↻</button>
+            </div>
+            <div class="lock-note">↑ finish task &amp; config first</div>
+            <div class="errline" id="err"></div>
+          </div>
+        </div>
+
+        <div class="panel" id="panel-control">
+          <div class="panel-h"><span class="step-badge">4</span>CONTROL</div>
+          <div class="card">
+            <!-- continuous controls: shown for REAL / SIM modes -->
+            <div class="btn-grid" id="control-run">
+              <button class="btn primary full" id="b-run"><span class="rec-dot"></span><span class="rec-label">RUN ▶</span></button>
+              <button class="btn full" id="b-reset">RESET ⟲</button>
+            </div>
+            <!-- breakpoint controls: shown for STEP (sim_real) mode -->
+            <div id="control-step" style="display:none">
+              <div class="step-state" id="step-state">IDLE</div>
+              <div class="btn-grid">
+                <button class="btn primary" id="b-step">SIM ↻</button>
+                <button class="btn primary" id="b-commit">REAL ▶</button>
+                <button class="btn danger" id="b-step-halt">STOP ■</button>
+                <button class="btn" id="b-step-reset">RESET ⟲</button>
+              </div>
+            </div>
+            <div class="lock-note">↑ run SETUP first</div>
+          </div>
+        </div>
+
+        <div class="panel" id="panel-gripper">
+          <div class="panel-h">GRIPPER</div>
+          <div class="card">
+            <div class="btn-grid" id="gripper-buttons"></div>
+          </div>
+        </div>
+
+        <div class="panel" id="panel-tune">
+          <div class="panel-h">TUNING</div>
+          <div class="card">
+            <div class="tune-row"><span>inference rate Hz</span><input type="number" id="tune-inference-rate" min="0.1" step="0.1" /></div>
+            <div class="tune-row"><span>publish rate Hz</span><input type="number" id="tune-publish-rate" min="1" step="1" /></div>
+            <div class="sub-h" id="tune-strategy-h">STRATEGY · <span id="tune-strategy-key">—</span></div>
+            <div id="tune-strategy-args"></div>
+            <button class="btn primary full" id="b-tune-apply" style="margin-top:6px">APPLY ⤓</button>
+            <div class="tune-status" id="tune-status"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- collection column -->
+      <div class="col col-control" id="collect-control-col">
+        <div class="panel" id="collect-panel-task">
+          <div class="panel-h"><span class="step-badge">1</span>TASK <span class="n" id="collect-fps"></span><span class="sel-chip" id="collect-prompt-chip"></span></div>
+          <div class="card">
+            <select class="choice-select task-select" id="collect-prompt-list" aria-label="Collection task"></select>
+          </div>
+        </div>
+
+        <div class="panel" id="collect-panel-record">
+          <div class="panel-h"><span class="step-badge">2</span>RECORD</div>
+          <div class="card">
+            <div class="collect-actions">
+              <label class="collect-arm-gate" title="Enable collection motion">
+                <span class="collect-arm-text" id="collect-arm-label">ARM OFF</span>
+                <input type="checkbox" id="collect-arm-enable" aria-label="Enable collection motion">
+                <span class="ios-sw"></span>
+              </label>
+              <button class="btn primary full" id="b-collect-toggle"><span class="rec-dot"></span><span class="rec-label">START RECORD</span></button>
+              <button class="btn danger full" id="b-collect-cancel">CANCEL</button>
+            </div>
+            <div class="errline" id="collect-err"></div>
+          </div>
+        </div>
+
+        <div class="panel" id="collect-panel-queue">
+          <div class="panel-h"><span class="step-badge">3</span>CONVERT QUEUE <span class="n" id="collect-progress-label">0%</span></div>
+          <div class="card">
+            <div class="collect-queue-head">
+              <span><span id="collect-count">0/0</span> done</span>
+              <button class="btn" id="collect-queue-toggle">EXPAND</button>
+            </div>
+            <div class="collect-progress"><i id="collect-progress-fill"></i></div>
+            <div class="kv"><span class="k">eta</span><span class="v tnum" id="collect-eta">—</span></div>
+            <div class="collect-tiles" id="collect-queue-tiles"></div>
+            <div class="collect-tiles-hint" id="collect-tiles-hint" style="display:none">Green means saved</div>
+            <div class="collect-list" id="collect-queue-list" style="display:none"></div>
+          </div>
+        </div>
+
+        <div class="panel" id="collect-panel-replay">
+          <div class="panel-h"><span class="step-badge">4</span>QUALITY CHECK</div>
+          <div class="card">
+            <div class="kv"><span class="k">frame</span><span class="v tnum" id="collect-replay-frame">—</span></div>
+            <div class="collect-progress"><i id="collect-replay-fill"></i></div>
+            <div class="review-actions">
+              <button class="btn primary full" id="b-collect-replay-toggle">REPLAY ▶</button>
+              <button class="btn" id="b-collect-qc-pass">PASS ✓</button>
+              <button class="btn danger" id="b-goto-qc">FAIL ✗</button>
+            </div>
+            <textarea class="review-note" id="collect-qc-note" rows="3" placeholder="QC note (optional)" style="margin-top:8px"></textarea>
+            <button class="btn full" id="b-collect-note-save" style="margin-top:6px">SAVE NOTE</button>
+            <div class="qc-status" id="collect-qc-status"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ============ stage (shared, reparented between tabs) ============
+           3D + cameras are always shared; ACTION/STATE charts are shown only
+           for REPLAY. One WebGL context lives in #canvas-col; the whole
+           #stage node is moved into the active view. -->
+      <div class="stage no-series" id="stage">
+
+        <!-- row 1: 3D canvas + camera strip -->
+        <div class="stage-top">
+          <div class="col-canvas" id="canvas-col">
+            <div class="ticks"><i></i></div>
+            <span class="canvas-tag">3D · URDF</span>
+            <canvas id="gl"></canvas>
+            <div class="canvas-empty" id="canvas-empty">
+              <div class="big">LOADING 3D…</div>
+              <div>fetching URDF meshes</div>
+            </div>
+            <div class="canvas-readout" id="readout" style="display:none">
+              <div><span class="k">STEP </span><span id="r-step">0</span> · <span class="k">CHUNK </span><span id="r-chunk">0</span></div>
+            </div>
+          </div>
+          <div class="cam-strip" id="cam-strip">
+            <div class="cam-empty">awaiting frame…</div>
+          </div>
+        </div>
+
+        <!-- charts region: ACTION + STATE side-by-side, each expandable to a modal -->
+        <div class="stage-charts" id="stage-charts">
+          <!-- ACTION t-x chart -->
+          <div class="stage-chart" id="stage-action">
+            <div class="chart-head">
+              <span class="chart-title">ACTION <span class="chart-sub" id="action-sub">t · x</span></span>
+              <div class="chart-dims" id="chart-action-dims"></div>
+              <button class="chart-allbtn" id="action-all">ALL</button>
+              <button class="chart-expand" id="action-expand" title="expand">⤢</button>
+            </div>
+            <div class="chart-body"><canvas id="chart-action-cv"></canvas></div>
+          </div>
+
+          <!-- STATE t-x chart -->
+          <div class="stage-chart" id="stage-state">
+            <div class="chart-head">
+              <span class="chart-title">STATE <span class="chart-sub" id="state-sub">t · x</span></span>
+              <div class="chart-dims" id="chart-state-dims"></div>
+              <button class="chart-allbtn" id="state-all">ALL</button>
+              <button class="chart-expand" id="state-expand" title="expand">⤢</button>
+            </div>
+            <div class="chart-body"><canvas id="chart-state-cv"></canvas></div>
+          </div>
+        </div>
+
+        <!-- floating scrub bar (history review when stopped) -->
+        <div class="stage-scrub" id="stage-scrub">
+          <button class="scrub-play" id="scrub-play" onclick="replayToggle()" style="display:none">▶</button>
+          <span class="scrub-state" id="scrub-state">LIVE</span>
+          <input type="range" id="scrub-range" min="0" max="0" value="0" disabled>
+          <span class="tnum scrub-pos" id="scrub-pos">0 / 0</span>
+          <span class="tnum scrub-time" id="scrub-time">0.0s</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- shared big-chart modal: opened from either chart's expand button -->
+    <div class="chart-modal" id="chart-modal">
+      <div class="chart-modal-card">
+        <div class="chart-modal-head">
+          <span class="chart-title" id="chart-modal-title">CHART</span>
+          <div class="chart-dims" id="chart-modal-dims"></div>
+          <button class="chart-allbtn" id="chart-modal-all">ALL</button>
+          <button class="chart-modal-close" id="chart-modal-close">CLOSE ✕</button>
+        </div>
+        <div class="chart-modal-body"><canvas id="chart-modal-cv"></canvas></div>
+      </div>
+    </div>
+
+    <!-- ---- REPLAY ---- -->
+    <div class="view" id="view-replay">
+      <div class="col col-control" id="replay-control-col">
+        <div class="panel" id="replay-panel-episode">
+          <div class="panel-h"><span class="step-badge">1</span>EPISODE <span class="n" id="replay-episode-n"></span></div>
+          <div class="card">
+            <input type="text" id="replay-dataset-input" class="replay-ds-input" placeholder="dataset dir (e.g. datasets/sft/.../push_black_block)" />
+            <div class="replay-id-row">
+              <select id="replay-key-action-mode"><option value="joint">joint</option><option value="eef">eef</option></select>
+              <input type="number" id="replay-episode-input" min="0" step="1" value="0" placeholder="episode id" />
+            </div>
+            <button class="btn primary full" id="replay-b-episode-confirm">LOAD ▶</button>
+            <button class="btn full" id="replay-b-episode-next" style="margin-top:6px">NEXT EP ▶▶</button>
+            <div class="qc-box" id="replay-qc-box" style="display:none">
+              <div class="qc-actions">
+                <button class="btn" id="replay-b-qc-pass">PASS ✓</button>
+                <button class="btn danger" id="replay-b-qc-fail">FAIL ✗</button>
+              </div>
+              <textarea id="replay-qc-note" class="review-note" rows="3" placeholder="QC note (optional)"></textarea>
+              <div class="qc-status" id="replay-qc-status"></div>
+              <textarea id="replay-anno-text" class="qc-anno" rows="3" placeholder="language annotation"></textarea>
+              <button class="btn primary full" id="replay-b-anno-save">SAVE ANNOTATION</button>
+              <div class="qc-status" id="replay-anno-status"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel setup-panel" id="replay-panel-config">
+          <div class="panel-h"><span class="step-badge">2</span>CONFIG &amp; SETUP<span class="sel-chip" id="replay-mode-chip"></span></div>
+          <div class="card">
+            <div class="sub-h">MODE</div>
+            <div class="row-2" id="replay-mode-list"></div>
+            <div class="auto-setup" id="replay-auto-setup" style="margin-top:10px">
+              <div class="auto-setup-row">
+                <span class="auto-spinner"></span>
+                <span class="auto-setup-msg" id="replay-auto-setup-msg">AUTO · PREPARING ROBOT…</span>
+              </div>
+              <div class="auto-bar"><i></i></div>
+            </div>
+            <div class="setup-ctl" style="margin-top:8px">
+              <button class="btn danger full" id="b-replay-setup-pause" style="display:none">PAUSE ‖</button>
+              <button class="btn primary full" id="b-replay-setup-resume" style="display:none">RESUME ▶</button>
+              <button class="btn danger full" id="b-replay-setup-retry" style="display:none">RETRY ↻</button>
+            </div>
+            <div class="lock-note">↑ load an episode first</div>
+            <div class="errline" id="replay-err"></div>
+          </div>
+        </div>
+
+        <div class="panel" id="replay-panel-control">
+          <div class="panel-h"><span class="step-badge">4</span>CONTROL</div>
+          <div class="card">
+            <div class="btn-grid" id="replay-control-run">
+              <button class="btn primary full" id="b-replay-run">REPLAY ▶</button>
+              <button class="btn full" id="b-replay-reset">RESET ⟲</button>
+            </div>
+            <div class="lock-note">↑ run SETUP first</div>
+          </div>
+        </div>
+
+        <div class="panel" id="replay-panel-tune">
+          <div class="panel-h">TUNING</div>
+          <div class="card">
+            <div class="tune-row"><span>REPLAY FPS</span><input type="number" id="replay-tune-fps" min="1" step="1" value="10" /></div>
+            <button class="btn primary full" id="b-replay-tune-apply" style="margin-top:6px">APPLY ⤓</button>
+            <div class="tune-status" id="replay-tune-status"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ---- MANUAL (real-robot hand control) ---- -->
+    <div class="view" id="view-manual">
+
+      <!-- control column -->
+      <div class="col col-control">
+        <div class="panel">
+          <div class="panel-h">MANUAL · REAL ROBOT</div>
+          <div class="card">
+            <div class="btn-grid">
+              <button class="btn primary full" id="bm-connect">CONNECT</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-h">TARGET QPOS</div>
+          <div class="card">
+            <div class="manual-sliders" id="manual-sliders-m"></div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-h">DISPATCH</div>
+          <div class="card">
+            <div class="btn-grid">
+              <button class="btn primary full" id="bm-send">SEND TO REAL ▶</button>
+            </div>
+            <div class="btn-grid">
+              <button class="btn full" id="bm-home">HOME ⌂</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel" id="manual-panel-tune">
+          <div class="panel-h">TUNING</div>
+          <div class="card">
+            <div class="tune-row"><span>publish rate Hz</span><input type="number" id="manual-tune-publish-rate" min="1" step="1" /></div>
+            <button class="btn primary full" id="b-manual-tune-apply" style="margin-top:6px">APPLY ⤓</button>
+            <div class="tune-status" id="manual-tune-status"></div>
+          </div>
+        </div>
+      </div>
+      <!-- #stage (3D + ACTION/STATE charts) is reparented here when MANUAL is active -->
+    </div>
+
+    <!-- ---- EVAL ---- -->
+    <!-- Left/right split like DEBUG/REPLAY: left = debug-style numbered panels driving the
+         ① model → ② task → ③ trial → ④ setup → ⑤ run → ⑥ gripper → ⑦ score flow (vertical milestone rail); right = the
+         shared #trial-pop replay engine, inlined to mirror the REPLAY instrument stage.
+         #trial-pop is reparented out to .workspace (floating) for the RESULT tab. -->
+    <div class="view" id="view-eval">
+
+      <!-- left control column: model → task → trial → setup → run → gripper → score -->
+      <div class="col col-control" id="eval-control-col">
+        <div class="eval-meta">
+          <span class="run-id" id="eval-run-id">run —</span>
+        </div>
+
+        <div class="panel" id="eval-panel-model" style="display:none">
+          <div class="panel-h"><span class="step-badge">1</span>MODEL</div>
+          <select class="choice-select task-select" id="eval-model-list" aria-label="Evaluation model"></select>
+        </div>
+
+        <div class="panel" id="eval-panel-task">
+          <div class="panel-h"><span class="step-badge">2</span>TASK</div>
+          <select class="choice-select task-select" id="eval-prompt-list" aria-label="Evaluation task"></select>
+        </div>
+
+        <div class="panel" id="eval-panel-trial">
+          <div class="panel-h"><span class="step-badge">3</span>TRIAL <span class="ctx-trial" id="ctx-trial">—/—</span></div>
+          <div class="card">
+            <div class="eval-trial-row" id="eval-trial-row"></div>
+            <div class="lock-note">↑ select a task first</div>
+          </div>
+        </div>
+
+        <div class="panel setup-panel" id="eval-panel-setup">
+          <div class="panel-h"><span class="step-badge">4</span>SETUP</div>
+          <div class="card">
+            <div class="auto-setup" id="eval-auto-setup">
+              <div class="auto-setup-row">
+                <span class="auto-spinner"></span>
+                <span class="auto-setup-msg" id="eval-auto-setup-msg">AUTO · PREPARING ROBOT…</span>
+              </div>
+              <div class="auto-bar"><i></i></div>
+            </div>
+            <div class="setup-ctl" style="margin-top:8px">
+              <button class="btn full" id="be-setup">SETUP ⚙</button>
+            </div>
+            <div class="lock-note">↑ select a trial first</div>
+          </div>
+        </div>
+
+        <div class="panel" id="eval-panel-run">
+          <div class="panel-h"><span class="step-badge">5</span>RUN</div>
+          <div class="card">
+            <div class="btn-grid" id="eval-control-run">
+              <button class="btn primary full" id="be-run"><span class="rec-dot"></span><span class="rec-label">RUN ▶</span></button>
+              <button class="btn full" id="be-reset">RESET ⟲</button>
+            </div>
+            <div class="lock-note">↑ run SETUP first</div>
+            <div class="errline" id="be-err"></div>
+          </div>
+        </div>
+
+        <div class="panel" id="eval-panel-gripper">
+          <div class="panel-h"><span class="step-badge">6</span>GRIPPER</div>
+          <div class="card">
+            <div class="eval-gripper" id="eval-gripper-buttons"></div>
+            <div class="lock-note">↑ run SETUP first</div>
+          </div>
+        </div>
+
+        <div class="panel" id="eval-panel-score">
+          <div class="panel-h"><span class="step-badge">7</span>SCORE</div>
+          <div class="card">
+            <div class="ms-wrap vertical">
+              <div class="ms-top">
+                <span class="ms-title">milestone · click a node</span>
+                <span class="ms-score" id="ms-score">0/0</span>
+              </div>
+              <div class="ms-track">
+                <div class="ms-rail"><div class="ms-rail-fill" id="ms-rail-fill"></div></div>
+                <div class="ms-nodes" id="ms-nodes"></div>
+              </div>
+            </div>
+            <textarea id="eval-note" rows="3" placeholder="note (optional)"></textarea>
+            <button id="be-submit" class="btn-save">SAVE SCORE · NEXT</button>
+            <div class="lock-note">↑ run this trial first</div>
+            <div class="eval-gate-hint" id="eval-gate-hint"></div>
+          </div>
+        </div>
+
+        <!-- hidden mirrors so legacy status code referencing these keeps working -->
+        <span id="be-phase" style="display:none">idle</span>
+        <span id="eval-score-trial" style="display:none">trial</span>
+        <span id="eval-cur-prompt" style="display:none"></span>
+        <span id="eval-saved" style="display:none"></span>
+      </div>
+
+      <!-- right column: hosts the shared live #stage (3D + cameras), reparented in at
+           runtime by relocateCanvas() — same live view as DEBUG, no recorded replay. -->
+      <div class="col-canvas" id="eval-replay-col"></div>
+    </div>
+
+    <!-- ---- RESULT ---- -->
+    <!-- 3-level tree (model → task → trial) on the left; clicking a trial drives the -->
+    <!-- shared #trial-pop replay (styled REPLAY-like: camera strip + 3D + charts + scrub). -->
+    <div class="view" id="view-result">
+      <div class="rv-split">
+        <div class="rv-tree" id="rv-tree"></div>
+        <div class="rv-detail-replay" id="rv-detail-replay">
+          <div class="rv-replay-empty" id="rv-replay-empty">Expand a model and task, then select a trial to replay</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- shared trial replay (RESULT tab): docked into #rv-detail-replay by relocateTrialPop(),
+         floats over .workspace otherwise. EVAL no longer uses it (its right column is live). -->
+    <div class="trial-pop" id="trial-pop">
+      <!-- REPLAY-style stage: 3D URDF + all camera views laid out in one row -->
+      <div class="rt-top">
+        <div class="rt-pane" id="tp-urdf">
+          <span class="canvas-tag">3D · URDF</span>
+          <div id="tp-urdf-wrap"><canvas id="rt-gl"></canvas>
+            <div id="tp-urdf-empty">no URDF replay</div>
+          </div>
+        </div>
+        <div class="rt-pane" id="tp-camera"><div id="tp-cam-strip"></div></div>
+      </div>
+      <div class="rt-charts" id="tp-chart">
+        <div class="rt-chart-card">
+          <div class="rt-chart-head"><span class="rt-chart-title">ACTION</span><div class="rt-cdims" id="tp-achart-dims"></div></div>
+          <canvas id="tp-achart-cv"></canvas>
+        </div>
+        <div class="rt-chart-card">
+          <div class="rt-chart-head"><span class="rt-chart-title">STATE</span><div class="rt-cdims" id="tp-chart-dims"></div></div>
+          <canvas id="tp-chart-cv"></canvas>
+        </div>
+      </div>
+      <div class="rt-replay">
+        <button id="tp-play" onclick="tpToggle()">▶</button>
+        <input type="range" id="tp-seek" min="0" max="0" value="0" oninput="tpSeek(this.value)">
+        <span class="tnum" id="tp-time">0.0s</span>
+      </div>
+      <!-- read-only milestones + note -->
+      <div class="tp-steps-ro" id="tp-steps"></div>
+      <div class="kv"><span class="k">NOTE</span></div>
+      <div class="tp-note-ro" id="tp-note"></div>
+    </div>
+
+  </div>
+
+<script type="importmap">
+{ "imports": {
+  "three": "/vendor/three/three.module.min.js",
+  "three/addons/": "/vendor/three/addons/"
+} }
+</script>
+
+<script type="module" src="/js/scene.js"></script>
+
+
+<script type="module" src="/js/main.js"></script>
+</body>
+</html>
