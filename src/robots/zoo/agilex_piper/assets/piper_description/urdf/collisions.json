@@ -1,0 +1,16 @@
+[
+  ["base_link", "link3"],
+  ["base_link", "link4"],
+  ["base_link", "link5"],
+  ["base_link", "link6"],
+  ["base_link", "gripper_base"],
+  ["link1", "link4"],
+  ["link1", "link5"],
+  ["link1", "link6"],
+  ["link1", "gripper_base"],
+  ["link2", "link5"],
+  ["link2", "link6"],
+  ["link2", "gripper_base"],
+  ["link3", "link6"],
+  ["link3", "gripper_base"]
+]

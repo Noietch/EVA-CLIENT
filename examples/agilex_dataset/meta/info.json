@@ -1,0 +1,268 @@
+{
+  "codebase_version": "v2.1",
+  "robot_type": "agile_x",
+  "total_episodes": 1,
+  "total_frames": 398,
+  "total_tasks": 10,
+  "total_videos": 3,
+  "total_chunks": 1,
+  "chunks_size": 1000,
+  "fps": 30,
+  "splits": {
+    "train": "0:1"
+  },
+  "data_path": "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet",
+  "video_path": "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4",
+  "features": {
+    "observation.images.cam_high": {
+      "dtype": "video",
+      "shape": [
+        480,
+        640,
+        3
+      ],
+      "names": [
+        "height",
+        "width",
+        "channels"
+      ],
+      "info": {
+        "video.height": 480,
+        "video.width": 640,
+        "video.codec": "h264",
+        "video.pix_fmt": "yuv420p",
+        "video.is_depth_map": false,
+        "video.fps": 30,
+        "video.channels": 3,
+        "has_audio": false
+      }
+    },
+    "observation.images.cam_left_wrist": {
+      "dtype": "video",
+      "shape": [
+        480,
+        640,
+        3
+      ],
+      "names": [
+        "height",
+        "width",
+        "channels"
+      ],
+      "info": {
+        "video.height": 480,
+        "video.width": 640,
+        "video.codec": "h264",
+        "video.pix_fmt": "yuv420p",
+        "video.is_depth_map": false,
+        "video.fps": 30,
+        "video.channels": 3,
+        "has_audio": false
+      }
+    },
+    "observation.images.cam_right_wrist": {
+      "dtype": "video",
+      "shape": [
+        480,
+        640,
+        3
+      ],
+      "names": [
+        "height",
+        "width",
+        "channels"
+      ],
+      "info": {
+        "video.height": 480,
+        "video.width": 640,
+        "video.codec": "h264",
+        "video.pix_fmt": "yuv420p",
+        "video.is_depth_map": false,
+        "video.fps": 30,
+        "video.channels": 3,
+        "has_audio": false
+      }
+    },
+    "observation.qpos": {
+      "dtype": "float32",
+      "shape": [
+        14
+      ],
+      "names": [
+        "left.j0",
+        "left.j1",
+        "left.j2",
+        "left.j3",
+        "left.j4",
+        "left.j5",
+        "left.gripper",
+        "right.j0",
+        "right.j1",
+        "right.j2",
+        "right.j3",
+        "right.j4",
+        "right.j5",
+        "right.gripper"
+      ]
+    },
+    "observation.qvel": {
+      "dtype": "float32",
+      "shape": [
+        14
+      ],
+      "names": [
+        "left.j0",
+        "left.j1",
+        "left.j2",
+        "left.j3",
+        "left.j4",
+        "left.j5",
+        "left.gripper",
+        "right.j0",
+        "right.j1",
+        "right.j2",
+        "right.j3",
+        "right.j4",
+        "right.j5",
+        "right.gripper"
+      ]
+    },
+    "observation.effort": {
+      "dtype": "float32",
+      "shape": [
+        14
+      ],
+      "names": [
+        "left.j0",
+        "left.j1",
+        "left.j2",
+        "left.j3",
+        "left.j4",
+        "left.j5",
+        "left.gripper",
+        "right.j0",
+        "right.j1",
+        "right.j2",
+        "right.j3",
+        "right.j4",
+        "right.j5",
+        "right.gripper"
+      ]
+    },
+    "observation.eef": {
+      "dtype": "float32",
+      "shape": [
+        16
+      ],
+      "names": [
+        "left.x",
+        "left.y",
+        "left.z",
+        "left.qw",
+        "left.qx",
+        "left.qy",
+        "left.qz",
+        "left.gripper",
+        "right.x",
+        "right.y",
+        "right.z",
+        "right.qw",
+        "right.qx",
+        "right.qy",
+        "right.qz",
+        "right.gripper"
+      ]
+    },
+    "action": {
+      "dtype": "float32",
+      "shape": [
+        14
+      ],
+      "names": [
+        "left.j0",
+        "left.j1",
+        "left.j2",
+        "left.j3",
+        "left.j4",
+        "left.j5",
+        "left.gripper",
+        "right.j0",
+        "right.j1",
+        "right.j2",
+        "right.j3",
+        "right.j4",
+        "right.j5",
+        "right.gripper"
+      ]
+    },
+    "action_eef": {
+      "dtype": "float32",
+      "shape": [
+        16
+      ],
+      "names": [
+        "left.x",
+        "left.y",
+        "left.z",
+        "left.qw",
+        "left.qx",
+        "left.qy",
+        "left.qz",
+        "left.gripper",
+        "right.x",
+        "right.y",
+        "right.z",
+        "right.qw",
+        "right.qx",
+        "right.qy",
+        "right.qz",
+        "right.gripper"
+      ]
+    },
+    "base_action": {
+      "dtype": "float32",
+      "shape": [
+        2
+      ],
+      "names": [
+        "base.linear_x",
+        "base.angular_z"
+      ]
+    },
+    "timestamp": {
+      "dtype": "float32",
+      "shape": [
+        1
+      ],
+      "names": null
+    },
+    "frame_index": {
+      "dtype": "int64",
+      "shape": [
+        1
+      ],
+      "names": null
+    },
+    "episode_index": {
+      "dtype": "int64",
+      "shape": [
+        1
+      ],
+      "names": null
+    },
+    "index": {
+      "dtype": "int64",
+      "shape": [
+        1
+      ],
+      "names": null
+    },
+    "task_index": {
+      "dtype": "int64",
+      "shape": [
+        1
+      ],
+      "names": null
+    }
+  }
+}

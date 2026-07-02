@@ -1,0 +1,178 @@
+[project]
+name = "eva-client"
+version = "0.1.0"
+description = "A unified framework for deployment, evaluation, and data collection on real robots."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "addict>=2.4.0",
+    "av>=17.1.0",
+    "h5py==3.13.0",
+    "imageio==2.37.3",
+    "imageio-ffmpeg==0.6.0",
+    "jax==0.7.1",
+    "jaxlib==0.7.1",
+    "jaxls @ git+https://github.com/brentyi/jaxls.git@50a58be88c5ef74532f09e3f55268b4f02c490e3",
+    "msgpack==1.1.2",
+    "msgpack-numpy==0.4.8",
+    "numpy==1.26.4",
+    "opencv-python==4.10.0.84",
+    "openpi-client==0.1.2",
+    "pillow==12.2.0",
+    "psutil==7.1.0",
+    "pyarrow==23.0.0",
+    "pycollada==0.9.3",
+    "pydantic==2.11.7",
+    "pyroki @ git+https://github.com/chungmin99/pyroki.git@388e43e1fc0d0ee382968d3dd72970fd62a0450c",
+    "pyyaml==6.0.3",
+    "pyzmq>=25.0.0",
+    "rospkg==1.6.1",
+    "scipy==1.15.3",
+    "tqdm==4.67.3",
+    "trimesh==4.11.5",
+    "viser==1.0.26",
+    "websockets==13.1",
+    "yourdfpy==0.0.60",
+]
+
+[project.optional-dependencies]
+dev = [
+    "huggingface-hub>=1.20.1",
+    "pyright==1.1.408",
+    "pytest==8.3.5",
+    "pytest-cov==6.0.0",
+    "ruff==0.15.9",
+]
+franka = [
+    "franky-control==1.1.1",
+]
+arx = [
+    "alicia_d_sdk",
+    "pybind11==3.0.4",
+]
+camera = [
+    "pyorbbecsdk2 @ https://github.com/orbbec/pyorbbecsdk/releases/download/v2.1.1/pyorbbecsdk2-2.1.1-cp311-cp311-linux_x86_64.whl ; python_full_version >= '3.11' and python_full_version < '3.12' and sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "pyorbbecsdk2 @ https://github.com/orbbec/pyorbbecsdk/releases/download/v2.1.1/pyorbbecsdk2-2.1.1-cp311-cp311-linux_aarch64.whl ; python_full_version >= '3.11' and python_full_version < '3.12' and sys_platform == 'linux' and platform_machine == 'aarch64'",
+    "pyorbbecsdk2 @ https://github.com/orbbec/pyorbbecsdk/releases/download/v2.1.1/pyorbbecsdk2-2.1.1-cp311-cp311-macosx_13_0_arm64.whl ; python_full_version >= '3.11' and python_full_version < '3.12' and sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
+ur5e = [
+    "alicia_d_sdk",
+    "pydhgripper==1.0.2",
+    "synria-robocore>=2.0.0a1",
+    "ur-rtde==1.6.3",
+]
+viz = [
+    "fast-simplification==0.1.13",
+]
+
+[project.scripts]
+eva = "main:main"
+
+[tool.uv]
+environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+# pyorbbecsdk2 hard-pins its bundled-example deps (av, open3d, pygame, pynput),
+# but orbbec_camera.py only imports the SDK core. Override the conflicting pins
+# so the project keeps av>=17 (used by src/transport/dataset.py) and skips the
+# example-only extras.
+override-dependencies = [
+    "av>=17.1.0",
+    "open3d; sys_platform == 'never'",
+    "pygame; sys_platform == 'never'",
+    "pynput; sys_platform == 'never'",
+]
+
+[tool.uv.sources]
+alicia_d_sdk = { path = "examples/hardware/arx/SDK/alicia_d", editable = true }
+
+[tool.eva.hardware.arx]
+sdk_path = "examples/hardware/arx/SDK/ARX_R5_python"
+ros_setup_path = "/opt/ros/jazzy/setup.sh"
+native_rpath = ["$ORIGIN/../arx_r5_src", "$ORIGIN/.."]
+native_library_paths = [
+    "examples/hardware/arx/SDK/ARX_R5_python/bimanual/api",
+    "examples/hardware/arx/SDK/ARX_R5_python/bimanual/api/arx_r5_src",
+    "/opt/ros/jazzy/lib",
+    "/usr/local/lib",
+]
+
+[[tool.uv.index]]
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+sources = ["src"]
+include = ["src"]
+
+[tool.ruff]
+line-length = 100
+# Vendored third-party SDKs (ARX / alicia_d) ship their own style; never lint or format them.
+extend-exclude = ["examples/hardware/arx/SDK"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+# UP042 wants `enum.StrEnum`, but we keep `class X(str, enum.Enum)` for Python 3.10
+# compatibility (StrEnum is 3.11+).
+ignore = ["UP042"]
+
+# These modules must run setup before importing project code: manual verify scripts
+# stub the `av` package and extend sys.path; test_solver gates imports behind
+# pytest.importorskip. E402 (import not at top) is unavoidable and intended here.
+[tool.ruff.lint.per-file-ignores]
+"tests/manual/*.py" = ["E402"]
+"tests/ik/test_solver.py" = ["E402"]
+# Asserts exact HTML/JS substrings from the console template; wrapping them would
+# break the literal match, so long lines are unavoidable here.
+"tests/integration/web/test_console_static.py" = ["E501"]
+
+[tool.pyright]
+include = ["src", "tests"]
+typeCheckingMode = "basic"
+venvPath = "."
+venv = ".venv"
+reportMissingImports = false
+extraPaths = [
+    "src",
+    "/opt/ros/noetic/lib/python3/dist-packages",
+    "/home/agilex/cobot_magic/Piper_ros_private-ros-noetic/devel/lib/python3/dist-packages",
+]
+
+# Tests use numpy-heavy fixtures and access private helpers by design. Silence the
+# strict-only diagnostics (basedpyright defaults) for tests/ without relaxing src/.
+[[tool.pyright.executionEnvironments]]
+root = "tests"
+reportUnknownParameterType = false
+reportUnknownVariableType = false
+reportUnknownMemberType = false
+reportUnknownArgumentType = false
+reportUnknownLambdaType = false
+reportMissingParameterType = false
+reportMissingTypeArgument = false
+reportPrivateUsage = false
+reportImplicitOverride = false
+reportUnusedCallResult = false
+reportUnusedFunction = false
+
+[tool.pytest.ini_options]
+addopts = [
+    "-p", "no:ament_lint",
+    "-p", "no:ament_xmllint",
+    "-p", "no:launch_testing",
+    "-p", "no:ament_pep257",
+    "-p", "no:ament_flake8",
+    "-p", "no:ament_copyright",
+    "-p", "no:launch_ros",
+]
+pythonpath = ["src", "."]
+testpaths = ["tests"]
+markers = [
+    "slow: requires heavy deps (pyroki/jax/URDF, HDF5)",
+]

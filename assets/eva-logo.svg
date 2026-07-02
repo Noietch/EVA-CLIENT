@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 380 140" role="img" aria-label="EVA Client">
+  <defs>
+    <linearGradient id="eva-piece" x1="70" y1="58" x2="196" y2="140" gradientUnits="userSpaceOnUse">
+      <stop offset="0"    stop-color="#FFC98A"/>
+      <stop offset="0.45" stop-color="#FB8C2E"/>
+      <stop offset="1"    stop-color="#C2410C"/>
+    </linearGradient>
+    <linearGradient id="eva-base" x1="70" y1="90" x2="196" y2="210" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#3a3a44"/>
+      <stop offset="1" stop-color="#242429"/>
+    </linearGradient>
+    <linearGradient id="eva-underline" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0"    stop-color="#FFC98A"/>
+      <stop offset="0.5"  stop-color="#FB8C2E"/>
+      <stop offset="1"    stop-color="#C2410C"/>
+    </linearGradient>
+    <filter id="eva-glow" x="-80%" y="-80%" width="260%" height="260%">
+      <feGaussianBlur stdDeviation="7"/>
+    </filter>
+  </defs>
+
+  <!-- white card -->
+  <rect x="0" y="0" width="380" height="140" rx="16" fill="#ffffff"/>
+
+  <!-- ring mark (from the original eva-logo.svg, transformed to fit) -->
+  <g transform="translate(-2 4) scale(0.55)">
+    <path d="M 192.09 91.00 A 74 74 0 1 1 85.56 67.38"
+          fill="none" stroke="url(#eva-base)" stroke-width="26" stroke-linecap="butt"/>
+    <path d="M 85.56 67.38 A 74 74 0 0 1 192.09 91.00"
+          fill="none" stroke="url(#eva-piece)" stroke-width="26" stroke-linecap="butt"
+          opacity="0.45" filter="url(#eva-glow)"/>
+    <path d="M 85.56 67.38 A 74 74 0 0 1 192.09 91.00"
+          fill="none" stroke="url(#eva-piece)" stroke-width="26" stroke-linecap="butt"/>
+    <path d="M 85.56 67.38 A 74 74 0 0 1 192.09 91.00"
+          fill="none" stroke="#ffffff" stroke-opacity="0.28" stroke-width="3"
+          stroke-linecap="butt" transform="translate(0 -5)"/>
+  </g>
+
+  <!-- wordmark: EVA / Client -->
+  <g font-family="'Space Grotesk', 'Inter', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif"
+     font-weight="700" fill="#0a0a0a">
+    <text x="152" y="60"  font-size="42" letter-spacing="1.2">EVA</text>
+    <text x="152" y="108" font-size="42" letter-spacing="0.4">Client</text>
+  </g>
+
+  <!-- orange underline under "Client" -->
+  <rect x="152" y="116" width="132" height="4" rx="2" fill="url(#eva-underline)"/>
+</svg>

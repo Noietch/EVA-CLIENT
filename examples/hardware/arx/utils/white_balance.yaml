@@ -1,0 +1,35 @@
+white_balance:
+  cam_high: 4600
+  cam_left_wrist: 4600
+  cam_right_wrist: 4600
+cameras:
+- image_key: cam_high
+  serial: CP0HC530000Z
+  white_balance: 4600
+  frames: 78
+  auto_supported: true
+  center_rgb_mean:
+  - 113.23063151041667
+  - 121.27213541666667
+  - 120.57698567708333
+  image_path: work_dirs/arx_orbbec_white_balance/20260619_225943/cam_high_CP0HC530000Z.jpg
+- image_key: cam_left_wrist
+  serial: CV2L360000CL
+  white_balance: 4600
+  frames: 74
+  auto_supported: true
+  center_rgb_mean:
+  - 137.952392578125
+  - 143.95174153645834
+  - 143.81778971354166
+  image_path: work_dirs/arx_orbbec_white_balance/20260619_225943/cam_left_wrist_CV2L360000CL.jpg
+- image_key: cam_right_wrist
+  serial: CV2R1610003Z
+  white_balance: 4600
+  frames: 74
+  auto_supported: true
+  center_rgb_mean:
+  - 118.74739583333333
+  - 123.720703125
+  - 123.6904296875
+  image_path: work_dirs/arx_orbbec_white_balance/20260619_225943/cam_right_wrist_CV2R1610003Z.jpg
