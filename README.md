@@ -9,19 +9,9 @@
 <p align="center">
 <a href="https://colalab.net/projects/eva-client/"><img src="https://img.shields.io/badge/Project%20Page-colalab.net-blue?style=for-the-badge&logo=googlechrome&logoColor=white" alt="Project Page"></a>
 <a href="https://colalab.net/projects/eva-client/paper/EVA_Client_Report.pdf"><img src="https://img.shields.io/badge/Technical%20Report-PDF-red?style=for-the-badge&logo=adobeacrobatreader&logoColor=white" alt="Technical Report"></a>
+<a href="https://colalab.net/projects/eva-client/docs/introduction.html"><img src="https://img.shields.io/badge/Docs-English-2ea44f?style=for-the-badge&logo=readthedocs&logoColor=white" alt="Documentation (English)"></a>
+<a href="https://colalab.net/projects/eva-client/docs/introduction.zh.html"><img src="https://img.shields.io/badge/文档-中文-2ea44f?style=for-the-badge&logo=readthedocs&logoColor=white" alt="Documentation (中文)"></a>
 <a href="https://github.com/Noietch/EVA-CLIENT/stargazers"><img src="https://img.shields.io/github/stars/Noietch/EVA-CLIENT?style=for-the-badge&logo=github&logoColor=white&color=0a0a0a&cacheSeconds=60" alt="GitHub Stars"></a>
-<a href="./LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-orange?style=for-the-badge&logo=apache&logoColor=white" alt="License"></a>
-</p>
-
-<p align="center">
-  <img src="https://img.shields.io/badge/python-%3E%3D3.10-3776AB?logo=python&logoColor=white">
-  <img src="https://img.shields.io/badge/dataset-LeRobot%20v2.1-ffb703">
-  <img src="https://img.shields.io/badge/policy-OpenPI%20%C2%B7%20StarVLA%20%C2%B7%20GR00T-fb8500">
-  <img src="https://img.shields.io/badge/transport-ROS1%20%C2%B7%20ROS2%20%C2%B7%20ZeroMQ-8ecae6">
-</p>
-
-<p align="center">
-  <video src="https://github.com/user-attachments/assets/09cf8c98-396d-45d0-bd38-8603412ec3c2" controls muted></video>
 </p>
 
 <p align="center"><em>EVA-Client driving an AgileX bimanual arm end-to-end from the browser — teleop → record → π₀ checkpoint → smooth async deploy. Real hardware, not a rendering.</em></p>
@@ -244,10 +234,10 @@ runs a silent no-op link so the web console still opens.
 
 | `policy.type` | Protocol                       | Server? | Notes                                                                                        |
 |---------------|--------------------------------|---------|----------------------------------------------------------------------------------------------|
-| <img src="assets/media/policy_icons/pi.svg" height="14" align="absmiddle"> `openpi`      | WebSocket + msgpack            | yes     | OpenPI-compatible server, stateless                                                          |
-| <img src="assets/media/policy_icons/pi.svg" height="14" align="absmiddle"> `openpi_rtc`  | WebSocket + msgpack            | yes     | Real-Time Chunking variant; feeds `prev_action` back for alignment (`latency_k`, start at 4) |
-| <img src="assets/media/policy_icons/StarVLA.svg" height="14" align="absmiddle"> `starvla`     | WebSocket + msgpack            | yes     | typed envelope, configurable `camera_key` / `unnorm_key`                                     |
-| <img src="assets/media/policy_icons/GR00T.png" height="14" align="absmiddle"> `gr00t`       | ZeroMQ REQ/REP + msgpack-numpy | yes     | Isaac-GR00T; payloads keyed by modality (`video_keys`, `state_key`, `language_key`, …)       |
+| `openpi`      | WebSocket + msgpack            | yes     | [OpenPI](https://github.com/Physical-Intelligence/openpi)-compatible server, stateless      |
+| `openpi_rtc`  | WebSocket + msgpack            | yes     | [Real-Time Chunking](https://www.pi.website/research/real_time_chunking) variant; feeds `prev_action` back for alignment (`latency_k`, start at 4) |
+| `starvla`     | WebSocket + msgpack            | yes     | [StarVLA](https://github.com/starVLA/starVLA); typed envelope, configurable `camera_key` / `unnorm_key` |
+| `gr00t`       | ZeroMQ REQ/REP + msgpack-numpy | yes     | [Isaac-GR00T](https://github.com/Nvidia/Isaac-GR00T); payloads keyed by modality (`video_keys`, `state_key`, `language_key`, …) |
 | `mock`        | local                          | no      | smooth random actions, offline integration testing                                           |
 | `replay`      | local                          | no      | replays a dataset's recorded action trajectory                                               |
 
@@ -369,9 +359,10 @@ flow, rollout, LeRobot meta, and viser chunk tracking.
 
 ## 🗺️ Roadmap
 
-- [ ] **More robots.** Extend the robot zoo beyond the current 6 arms to
-      humanoids (Unitree H1/G1, Fourier GR-1, Booster T1, …) and mobile /
-      wheeled platforms (mobile ALOHA, Galaxea R1 base, quadruped + arm).
+- [ ] **More robots.** Extend the robot zoo to more embodiments — dual-arm
+      manipulators (YAM, Tianji, …), humanoids
+      (Unitree H1/G1, Fourier GR-1, Booster T1, …) and mobile / wheeled
+      platforms (mobile ALOHA, Galaxea R1 base, quadruped + arm).
 - [ ] **Human-in-the-loop data collection for RL.** Interventions during
       policy rollout captured as preference / correction data, DAgger-style
       relabeling, and reward-model signals piped back through the LeRobot
@@ -380,6 +371,11 @@ flow, rollout, LeRobot meta, and viser chunk tracking.
       language-driven planner (VLM / VLA + tool use) so long-horizon tasks
       can be decomposed, executed, verified, and re-planned end-to-end from
       the same console.
+- [ ] **Data annotation.** Extend Collect mode with fine-grained task and
+      sub-task annotation, segmenting long-horizon episodes into labeled
+      sub-task units and milestones within the same LeRobot dataset. This
+      makes a collection reusable at the level of individual manipulation
+      phases.
 
 ---
 
