@@ -12,6 +12,8 @@
 <a href="https://colalab.net/projects/eva-client/docs/introduction.html"><img src="https://img.shields.io/badge/Docs-English-2ea44f?style=for-the-badge&logo=readthedocs&logoColor=white" alt="Documentation (English)"></a>
 <a href="https://colalab.net/projects/eva-client/docs/introduction.zh.html"><img src="https://img.shields.io/badge/文档-中文-2ea44f?style=for-the-badge&logo=readthedocs&logoColor=white" alt="Documentation (中文)"></a>
 <a href="https://github.com/Noietch/EVA-CLIENT/stargazers"><img src="https://img.shields.io/github/stars/Noietch/EVA-CLIENT?style=for-the-badge&logo=github&logoColor=white&color=0a0a0a&cacheSeconds=60" alt="GitHub Stars"></a>
+<p align="center">
+  <video src="https://github.com/user-attachments/assets/09cf8c98-396d-45d0-bd38-8603412ec3c2" controls muted></video>
 </p>
 
 <p align="center"><em>EVA-Client driving an AgileX bimanual arm end-to-end from the browser — teleop → record → π₀ checkpoint → smooth async deploy. Real hardware, not a rendering.</em></p>
@@ -34,17 +36,17 @@
 ## ✨ What you get
 
 * **🚀 Deployment.** One command brings up a real-robot closed loop:
-  `.py` config → transport (ROS1 / ROS2 / ZeroMQ / offline dataset) → policy
-  backend (OpenPI, OpenPI-RTC, StarVLA, GR00T, mock, replay) → inference
-  strategy (sync / async / naive / ACT-ensemble / RTC) with live latency
-  compensation. **6 robots today** — joint-space or EEF-space (PyRoki IK),
+  `.py` config → transport ([ROS1](https://github.com/ros/ros) / [ROS2](https://github.com/ros2/ros2) / [ZeroMQ](https://github.com/zeromq/pyzmq) / offline dataset) → policy
+  backend ([OpenPI](https://github.com/Physical-Intelligence/openpi), [OpenPI-RTC](https://www.pi.website/research/real_time_chunking), [StarVLA](https://github.com/starVLA/starVLA), [GR00T](https://github.com/Nvidia/Isaac-GR00T), mock, replay) → inference
+  strategy (sync / [async](https://github.com/OpenDriveLab/kai0#train-deploy-alignment) / naive / [ACT-ensemble](https://github.com/tonyzhaozh/act) / RTC) with live latency
+  compensation. **6 robots already** — joint-space or EEF-space (PyRoki IK),
   all live-switchable from the DEBUG tab.
 * **📊 Evaluation.** Multi-checkpoint sweeps with per-trial records: every
   rollout captures camera video, 3D URDF scene, per-dimension state charts,
   and per-prompt milestone scores into dataset metadata, then replays
-  synchronously in the RESULT tab. Blind A/B, prompt shuffling, and remote
+  synchronously in the RESULT tab. Prompt shuffling, and remote
   policy servers over SSH port-forward are first-class.
-* **🎥 Data collection.** Teleop capture straight into LeRobot v2.1 episodes
+* **🎥 Data collection.** Teleop capture straight into [LeRobot](https://github.com/huggingface/lerobot) v2.1 episodes
   from the COLLECT tab — background saver, in-tab QC PASS/FAIL replay, camera
   streams encoded to mp4, per-frame green/red quality flags. Teleop demos and
   model rollouts share one on-disk layout.
@@ -222,7 +224,7 @@ command (EEF poses are converted upstream via IK), report link health.
 
 | `transport.type` | Use when                                                          | Prerequisite      |
 |------------------|-------------------------------------------------------------------|-------------------|
-| `ros1`           | real robot on a ROS 1 stack                                       | ROS Noetic        |
+| `ros1`           | real robot on a ROS 1 stack                                       | ROS        |
 | `ros2`           | real robot on a ROS 2 stack; decodes `/compressed` camera streams | ROS 2             |
 | `zmq`            | real robot fronted by a ZeroMQ execution node                     | — (in-tree)       |
 | `dataset`        | offline LeRobot v2.x (v2.1 layout) replay                         | — (fully offline) |
@@ -234,10 +236,10 @@ runs a silent no-op link so the web console still opens.
 
 | `policy.type` | Protocol                       | Server? | Notes                                                                                        |
 |---------------|--------------------------------|---------|----------------------------------------------------------------------------------------------|
-| `openpi`      | WebSocket + msgpack            | yes     | [OpenPI](https://github.com/Physical-Intelligence/openpi)-compatible server, stateless      |
-| `openpi_rtc`  | WebSocket + msgpack            | yes     | [Real-Time Chunking](https://www.pi.website/research/real_time_chunking) variant; feeds `prev_action` back for alignment (`latency_k`, start at 4) |
-| `starvla`     | WebSocket + msgpack            | yes     | [StarVLA](https://github.com/starVLA/starVLA); typed envelope, configurable `camera_key` / `unnorm_key` |
-| `gr00t`       | ZeroMQ REQ/REP + msgpack-numpy | yes     | [Isaac-GR00T](https://github.com/Nvidia/Isaac-GR00T); payloads keyed by modality (`video_keys`, `state_key`, `language_key`, …) |
+| `openpi`      | WebSocket + msgpack            | yes     | OpenPI-compatible server, stateless                                                          |
+| `openpi_rtc`  | WebSocket + msgpack            | yes     | Real-Time Chunking variant; feeds `prev_action` back for alignment (`latency_k`, start at 4) |
+| `starvla`     | WebSocket + msgpack            | yes     | typed envelope, configurable `camera_key` / `unnorm_key`                                     |
+| `gr00t`       | ZeroMQ REQ/REP + msgpack-numpy | yes     | Isaac-GR00T; payloads keyed by modality (`video_keys`, `state_key`, `language_key`, …)       |
 | `mock`        | local                          | no      | smooth random actions, offline integration testing                                           |
 | `replay`      | local                          | no      | replays a dataset's recorded action trajectory                                               |
 
