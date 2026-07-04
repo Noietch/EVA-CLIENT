@@ -9,6 +9,7 @@ robot = dict(
 
 transport = dict(
     type='dataset',
+    dataset_dir='examples/agilex_dataset',
     dataset_keys=dict(
         state_key='observation.qpos',
         video_keys=dict(
