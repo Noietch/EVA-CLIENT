@@ -225,7 +225,7 @@ def test_collect_status_follows_selected_collect_task():
 
     with serve_console(console_config()) as h:
         logger = _Logger()
-        h.runtime.episode_logger = logger
+        h.runtime.episode_logger = logger  # type: ignore[assignment]
 
         h.post("/api/select_collect_task", {"task": "pick up cup"})
         collect = h.status()["collect"]
@@ -681,6 +681,7 @@ def test_step_sim_chunk_updates_preview_for_each_action():
 
             class _Rate:
                 def sleep(self) -> None:
+                    assert session.sim_preview_qpos is not None
                     transport.preview_snapshots.append(session.sim_preview_qpos.copy())
 
             return _Rate()
@@ -693,6 +694,8 @@ def test_step_sim_chunk_updates_preview_for_each_action():
 
     assert [target for target, _ in transport.published] == ["sim"] * len(actions)
     np.testing.assert_allclose(np.asarray(transport.preview_snapshots), actions)
+    assert session.pending_real_chunk is not None
+    assert session.sim_preview_qpos is not None
     np.testing.assert_allclose(session.pending_real_chunk, actions)
     np.testing.assert_allclose(session.sim_preview_qpos, actions[-1])
     assert session.chunk_index == len(actions)
@@ -751,6 +754,8 @@ def test_manual_halt_aborts_staged_real_publish():
     assert len(transport.published) == 1
     assert session.interrupt_requested is False
     assert session.manual_publish_active is False
+    assert session.manual_real_qpos is not None
+    assert session.manual_qpos is not None
     np.testing.assert_allclose(session.manual_real_qpos, transport.published[-1][1])
     assert not np.allclose(session.manual_real_qpos, session.manual_qpos)
 

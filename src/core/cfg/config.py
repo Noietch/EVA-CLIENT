@@ -792,7 +792,7 @@ warnings.filterwarnings(
 )
 
 if platform.system() == "Windows":
-    import regex as re
+    import regex as re  # type: ignore[import-not-found]
 else:
     import re  # type: ignore
 

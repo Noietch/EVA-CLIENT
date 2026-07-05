@@ -10,6 +10,7 @@ import logging
 import queue
 import threading
 import time
+from pathlib import Path
 
 import numpy as np
 
@@ -877,7 +878,7 @@ def run(
     else:
         free_local_ports([web_port])
 
-    start_console_server(config, runtime, session, port=web_port, output_dir=output_dir)
+    start_console_server(config, runtime, session, port=web_port, output_dir=output_dir, config_path=Path(config_path) if config_path else None)
     logger.info("Console web server started on port %d", web_port)
     # An eval config bootstraps the eval state machine (connect ckpt policy, select
     # mode/strategy); plain console configs stay idle until the operator drives a tab.

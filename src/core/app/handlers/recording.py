@@ -81,6 +81,109 @@ def _fill_record_eef(
         frame.action_eef = state_to_eef(config, runtime, np.asarray(action, dtype=np.float32))
 
 
+def _fill_record_eef_uv(
+    config: ConfigDict,
+    runtime: RuntimeState,
+    frame: Observation,
+) -> None:
+    """Project the EEF world-frame position into every calibrated camera.
+
+    Populates ``frame.eef_uv`` = ``{observation_key: (n_arms, 2) float32}``. Falls
+    through as a no-op when calibration is absent or kinematics is unavailable —
+    this keeps existing configs that don't opt into uv-tracking byte-identical.
+    """
+    calib = getattr(config, "calibration", None)
+    if not calib:
+        return
+    cams = calib.get("cameras") if isinstance(calib, dict) else getattr(calib, "cameras", {})
+    if not cams:
+        return
+    if frame.state_qpos is None:
+        return
+
+    # Get world-frame EEF xyz via FK. Always run FK for uv — do NOT reuse
+    # state_to_eef which returns qpos unchanged in JointState mode.
+    from core.app.handlers.io import ensure_ik_solver
+
+    try:
+        solver = ensure_ik_solver(config, runtime)
+        eef_flat = solver.fk_chunk(frame.state_qpos[np.newaxis, :])[0]  # (n_arms*8,)
+    except Exception:
+        return
+    from tools.calibration import project_eef_uv
+
+    robot = runtime.robot
+    n_arms = max(1, len(robot.arm_groups))
+    eef_flat = np.asarray(eef_flat, dtype=np.float64).reshape(-1)
+    if eef_flat.size < n_arms * 8:
+        return
+    eef_world = eef_flat.reshape(-1, 8)[:, :3]  # (n_arms, 3)
+
+    # FK for the camera's attach link. Cache the FK output per (link, qpos) — this
+    # runs once per record so the ingest loop stays lean.
+    from robots.utils import UrdfScene  # deferred; recorder module doesn't need it
+
+    scene = getattr(runtime, "scene", None) or getattr(runtime, "_uv_scene", None)
+    if scene is None:
+        try:
+            scene = UrdfScene(robot, gripper_open=config.robot.gripper_open, gripper_close=config.robot.gripper_close)
+        except Exception:
+            return
+        runtime._uv_scene = scene  # type: ignore[attr-defined]
+
+    uv_by_cam: dict[str, np.ndarray] = {}
+    for cam_spec in robot.observation_schema.cameras:
+        camera_key = cam_spec.observation_key
+        cc = cams.get(cam_spec.name) or cams.get(camera_key)
+        if cc is None:
+            continue
+        K = getattr(cc, "K", None)
+        dist = getattr(cc, "dist", None)
+        T_cam_link = getattr(cc, "T_cam_link", None)
+        attach_link = getattr(cc, "attach_link", "") or ""
+        if K is None or dist is None or T_cam_link is None:
+            continue
+        # Resolve the world transform of the attach link. When the attach link
+        # matches the base (empty), the link is the robot base and its world
+        # pose is identity — the camera is fixed in the scene.
+        try:
+            T_world_link = _resolve_link_world_transform(scene, robot, frame.state_qpos, attach_link)
+        except Exception:
+            continue
+        if T_world_link is None:
+            continue
+        uv = project_eef_uv(eef_world, T_world_link, np.asarray(T_cam_link), np.asarray(K), np.asarray(dist))
+        uv_by_cam[camera_key] = uv.reshape(n_arms, 2).astype(np.float32)
+    if uv_by_cam:
+        frame.eef_uv = uv_by_cam
+
+
+def _resolve_link_world_transform(
+    scene: Any, robot: Any, qpos: np.ndarray, link_name: str
+) -> np.ndarray | None:
+    """Return the 4x4 world-frame transform of ``link_name`` at ``qpos``.
+
+    An empty ``link_name`` means the camera is bolted to the world / robot base
+    — the identity transform is returned. Otherwise we look up the pose from
+    the UrdfScene's cached link transforms.
+    """
+    if not link_name:
+        return np.eye(4, dtype=np.float64)
+    try:
+        transforms = scene.transforms(qpos)
+    except Exception:
+        return None
+    for arm_name, tf_list in (transforms or {}).items():
+        for entry in tf_list:
+            # Different UrdfScene versions return {name, matrix} or (name, matrix).
+            if isinstance(entry, dict) and entry.get("name") == link_name:
+                mat = np.asarray(entry.get("matrix"), dtype=np.float64).reshape(4, 4)
+                return mat
+            if isinstance(entry, (list, tuple)) and len(entry) >= 2 and entry[0] == link_name:
+                return np.asarray(entry[1], dtype=np.float64).reshape(4, 4)
+    return None
+
+
 def build_policy_observation(
     frame: Observation,
     prompt: str,
@@ -173,6 +276,7 @@ def maybe_build_episode_logger(config: ConfigDict, runtime: RuntimeState) -> Non
         eval_mode=False,
         save_image_height=storage.get("image_height"),
         save_image_width=storage.get("image_width"),
+        on_collection_frame=lambda frame: _fill_record_eef_uv(config, runtime, frame),
     )
 
 
@@ -372,6 +476,7 @@ def collect_step(config: ConfigDict, runtime: RuntimeState) -> bool:
         # No teleop command aligned to this frame yet; skip until one arrives.
         return False
     _fill_record_eef(config, runtime, frame, action)
+    _fill_record_eef_uv(config, runtime, frame)
     runtime.episode_logger.record_step(frame, action)
     return True
 
@@ -429,6 +534,7 @@ def record_executed_action(
     if frame is None:
         return
     _fill_record_eef(config, runtime, frame, action)
+    _fill_record_eef_uv(config, runtime, frame)
     for logger_obj in loggers:
         logger_obj.record_step(frame, action)
     _ = session

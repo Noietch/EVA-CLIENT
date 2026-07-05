@@ -690,3 +690,52 @@ def test_image_episode_stats_matches_stacked_formula():
     np.testing.assert_allclose(flat(stats["mean"]), per_channel.mean(axis=0))
     np.testing.assert_allclose(flat(stats["std"]), per_channel.std(axis=0))
     assert stats["count"] == [3]
+
+
+def test_collection_writes_eef_uv_column_when_frames_carry_it(tmp_path):
+    """When an Observation carries eef_uv dict, per-camera uv columns land in parquet."""
+    logger = _collection_logger(tmp_path)
+    qpos = np.zeros(_DIM, dtype=np.float32)
+    image = np.zeros((8, 8, 3), dtype=np.uint8)
+
+    logger.start_episode("t")
+    for i in range(3):
+        logger.record_collection_frame(
+            Observation(
+                timestamp=i / 10.0,
+                images={"cam_high": image},
+                state_qpos=qpos,
+                action_qpos=qpos,
+                eef_uv={
+                    "cam_high": np.array([[100.0 + i, 200.0 + i]], dtype=np.float32),
+                },
+            )
+        )
+    logger.end_episode()
+
+    task_dir = _collection_task_dir(tmp_path)
+    table = pq.read_table(task_dir / "data" / "chunk-000" / "episode_000000.parquet")
+    assert "observation.eef_uv.cam_high" in table.column_names
+    rows = table.column("observation.eef_uv.cam_high").to_pylist()
+    assert rows == [[100.0, 200.0], [101.0, 201.0], [102.0, 202.0]]
+
+
+def test_collection_omits_eef_uv_column_when_frames_lack_it(tmp_path):
+    logger = _collection_logger(tmp_path)
+    qpos = np.zeros(_DIM, dtype=np.float32)
+    image = np.zeros((8, 8, 3), dtype=np.uint8)
+    logger.start_episode("t")
+    for i in range(2):
+        logger.record_collection_frame(
+            Observation(
+                timestamp=i / 10.0,
+                images={"cam_high": image},
+                state_qpos=qpos,
+                action_qpos=qpos,
+            )
+        )
+    logger.end_episode()
+    task_dir = _collection_task_dir(tmp_path)
+    table = pq.read_table(task_dir / "data" / "chunk-000" / "episode_000000.parquet")
+    uv_cols = [c for c in table.column_names if c.startswith("observation.eef_uv")]
+    assert uv_cols == []

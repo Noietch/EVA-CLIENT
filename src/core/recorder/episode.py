@@ -26,7 +26,7 @@ import logging
 import threading
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Callable, cast
 
 import imageio.v2 as imageio
 import numpy as np
@@ -149,6 +149,7 @@ class EpisodeLogger:
         eval_mode: bool = False,
         save_image_height: int | None = None,
         save_image_width: int | None = None,
+        on_collection_frame: Callable[[Observation], None] | None = None,
     ) -> None:
         self._log_dir = Path(log_dir)
         self._robot = robot
@@ -157,6 +158,7 @@ class EpisodeLogger:
         self._keys = dataset_keys
         self._convert_bgr_to_rgb = convert_bgr_to_rgb
         self._collection = collection
+        self._on_collection_frame = on_collection_frame
         # Target saved-video resolution; both None keeps each camera's native size.
         self._save_image_height = save_image_height
         self._save_image_width = save_image_width
