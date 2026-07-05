@@ -112,6 +112,8 @@ class ConsoleContext:
     active_tab: str = "debug"
     output_dir: str = ""  # results root; debug results land in <output_dir>/console/
     preview: Any = None  # EpisodePreview for RESULT-tab playback (lazily set)
+    calibrate: Any = None  # calibrate_session.CalibrateSession | None (lazy on /start)
+    config_path: Any = None  # pathlib.Path | None; source config path for SAVE + reload
 
     def ckpt_label(self, slot: int | None) -> str | None:
         """Anonymized operator label for a blind ckpt slot (0 -> "Model A"); None when slot None."""
@@ -186,6 +188,36 @@ def _resolve_dataset_dir(dataset_dir: str) -> str:
     if not dataset_dir:
         return dataset_dir
     return str(_resolve_runtime_path(dataset_dir))
+
+
+def _serialize_calibration(ctx: ConsoleContext) -> dict:
+    """Wire-form of cfg.calibration.cameras keyed by camera name. Uncalibrated
+    cameras (present in the observation schema but not in the calibration block)
+    are included with ``calibrated: False`` so the frontend can list them with a
+    Missing badge. K/dist/T_cam_link are converted to nested lists so json.dumps
+    works. Consumed by the DEBUG CAMERAS panel and the 3D-stage frustum overlay.
+    """
+    config = ctx.runtime.active_config or ctx.config
+    calib = getattr(config, "calibration", None) or {}
+    cams = calib.get("cameras") if isinstance(calib, dict) else getattr(calib, "cameras", {})
+    cams = cams or {}
+    out: dict[str, dict] = {}
+    for spec in ctx.runtime.robot.observation_schema.cameras:
+        out[spec.name] = {"calibrated": False}
+    for name, cc in cams.items():
+        entry: dict = {"calibrated": True}
+        K = getattr(cc, "K", None)
+        dist = getattr(cc, "dist", None)
+        attach_link = getattr(cc, "attach_link", "")
+        T_cam_link = getattr(cc, "T_cam_link", None)
+        image_size = getattr(cc, "image_size", None)
+        entry["K"] = K.tolist() if K is not None else None
+        entry["dist"] = dist.tolist() if dist is not None else None
+        entry["attach_link"] = str(attach_link or "")
+        entry["T_cam_link"] = T_cam_link.tolist() if T_cam_link is not None else None
+        entry["image_size"] = list(image_size) if image_size else None
+        out[name] = entry
+    return out
 
 
 def _serialize_config(ctx: ConsoleContext) -> dict:
@@ -367,6 +399,89 @@ def _encode_jpeg(image: np.ndarray, convert_bgr_to_rgb: bool, quality: int = 60)
     if not ok:
         return None
     return buf.tobytes()
+
+
+def _compute_T_gripper_base(
+    ctx: "ConsoleContext", attach_link: str
+) -> np.ndarray | None:
+    """Compute the current gripper->base transform for hand-eye calibration.
+
+    Reads the transport's latest joint positions, runs FK via the robot's built-
+    in kinematics solver, and returns a 4x4 SE(3) matrix (identity fallback with
+    None when qpos or solver are unavailable). ``attach_link`` selects which arm
+    frame to report — currently unused because the solver returns a single-arm
+    frame; kept as a signature hook for multi-arm robots.
+    """
+    del attach_link
+    transport = ctx.runtime.transport
+    qpos = getattr(transport, "get_latest_qpos", lambda: None)()
+    if qpos is None:
+        return None
+    try:
+        kin = ctx.runtime.robot.build_kinematics(
+            initial_qpos_groups=ctx.runtime.robot.initial_qpos_by_group()
+        )
+    except Exception as exc:
+        logger.warning("kinematics unavailable for hand-eye T_gripper_base: %s", exc)
+        return None
+    if kin is None:
+        return None
+    fk = getattr(kin, "fk_arm", None) or getattr(kin, "fk_chunk", None)
+    if fk is None:
+        return None
+    try:
+        pose = fk(np.asarray(qpos, dtype=np.float32))
+    except Exception as exc:
+        logger.debug("FK failed for T_gripper_base: %s", exc)
+        return None
+    arr = np.asarray(pose)
+    if arr.shape[-2:] != (4, 4):
+        return None
+    if arr.ndim == 3:
+        arr = arr[0]
+    return arr.astype(np.float64)
+
+
+def _apply_calibrate_overlay(
+    ctx: ConsoleContext, key: str, image: np.ndarray
+) -> tuple[np.ndarray, int]:
+    """Draw ChArUco detection on ``image`` when the calibrate session is live.
+
+    Returns ``(possibly_annotated_image, overlay_sig)``. When no session is
+    active or the camera isn't participating, returns the original image and 0.
+    The signature is bumped each time a fresh detection is recorded so the
+    MJPEG cache re-encodes; the sensor buffer itself is never mutated.
+    """
+    session = getattr(ctx, "calibrate", None)
+    if session is None or not getattr(session, "active", False):
+        return image, 0
+    if key not in session.camera_keys:
+        return image, 0
+    try:
+        from tools.calibration import detect_board, draw_overlay
+    except Exception as exc:
+        logger.warning("calibrate overlay disabled: %s", exc)
+        return image, 0
+    arr_bgr = np.asarray(image)
+    if arr_bgr.ndim == 3 and arr_bgr.shape[2] == 3 and ctx.config.transport.convert_bgr_to_rgb:
+        arr_bgr = cv2.cvtColor(arr_bgr, cv2.COLOR_RGB2BGR)
+    try:
+        detection = detect_board(arr_bgr, session.board)
+    except Exception as exc:
+        logger.debug("charuco detection failed: %s", exc)
+        return image, 0
+    session.detections[key] = detection
+    session.overlay_tick += 1
+    if not detection.detected:
+        return image, session.overlay_tick
+    copy = arr_bgr.copy()
+    intrinsic = session.intrinsics.get(key)
+    K = intrinsic.K if intrinsic is not None else None
+    dist = intrinsic.dist if intrinsic is not None else None
+    draw_overlay(copy, detection, K=K, dist=dist, board_spec=session.board)
+    if ctx.config.transport.convert_bgr_to_rgb:
+        copy = cv2.cvtColor(copy, cv2.COLOR_BGR2RGB)
+    return copy, session.overlay_tick
 
 
 def _list_camera_keys(ctx: ConsoleContext) -> list[str]:
@@ -905,8 +1020,9 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                     image = None if frame is None else frame.images.get(key)
                 jpeg = None
                 if image is not None:
+                    image, overlay_sig = _apply_calibrate_overlay(ctx, key, image)
                     arr = np.asarray(image)
-                    sig = (arr.shape, int(arr[::32, ::32].sum(dtype=np.int64)))
+                    sig = (arr.shape, int(arr[::32, ::32].sum(dtype=np.int64)), overlay_sig)
                     if sig != last_sig:
                         jpeg = _encode_jpeg(image, convert)
                         last_sig = sig
@@ -973,6 +1089,9 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
 
     def _get_config(self) -> None:
         self._send_json(200, _serialize_config(self.ctx))
+
+    def _get_calibration(self) -> None:
+        self._send_json(200, _serialize_calibration(self.ctx))
 
     def _get_status(self) -> None:
         # This poll doubles as the client-liveness heartbeat the main loop watches.
@@ -1415,11 +1534,336 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         arg = f"{action}:{side}" if side in ("l", "r") else action
         self._enqueue_ok(f"web:init_gripper:{arg}")
 
+    def _post_calibration_reload(self, _body: dict) -> None:
+        # PR#1 stub: re-serialize what's already loaded. Full hot-reload is PR#3.
+        self._send_json(200, {"ok": True, "cameras": _serialize_calibration(self.ctx)})
+
+    # --- CALIBRATE workspace (MANUAL tab) ---
+
+    def _get_calibrate_session(self) -> None:
+        from core.app.calibrate_session import serialize_session
+
+        self._send_json(200, serialize_session(getattr(self.ctx, "calibrate", None)))
+
+    def _post_calibrate_start(self, _body: dict) -> None:
+        from core.app.calibrate_session import (
+            new_calibrate_session,
+            serialize_session,
+        )
+        from tools.calibration import CharucoBoardSpec
+
+        # Use observation_key (the string the transport/MJPEG stream and /api/config expose),
+        # not spec.name — the frontend, MJPEG stream and observation reader all key by it.
+        keys = tuple(
+            spec.observation_key for spec in self.ctx.runtime.robot.observation_schema.cameras
+        )
+        board = getattr(self.ctx.calibrate, "board", None) if self.ctx.calibrate is not None else None
+        self.ctx.calibrate = new_calibrate_session(board or CharucoBoardSpec(), keys)
+        for spec in self.ctx.runtime.robot.observation_schema.cameras:
+            if spec.calibration is not None:
+                self.ctx.calibrate.attach_links[spec.observation_key] = spec.calibration.attach_link
+        # Seed pose list: config override wins over robot's built-in default.
+        cfg_poses = list(self.ctx.config.get("calibration_poses") or [])
+        if cfg_poses:
+            self.ctx.calibrate.poses = [
+                np.asarray(p, dtype=np.float64).reshape(-1).tolist() for p in cfg_poses
+            ]
+        else:
+            robot_poses = self.ctx.runtime.robot.default_calibration_poses()
+            self.ctx.calibrate.poses = [list(map(float, np.asarray(p).reshape(-1))) for p in robot_poses]
+        self.ctx.calibrate.pose_capture_state = [False] * len(self.ctx.calibrate.poses)
+        self.ctx.calibrate.current_pose_index = 0 if self.ctx.calibrate.poses else -1
+        self._send_json(200, serialize_session(self.ctx.calibrate))
+
+    def _post_calibrate_mode(self, body: dict) -> None:
+        from core.app.calibrate_session import MODES, serialize_session
+
+        session = self.ctx.calibrate
+        if session is None:
+            self._send_json(409, {"ok": False, "error": "session not started"})
+            return
+        mode = str(body.get("mode") or "sim").lower()
+        if mode not in MODES:
+            self._send_json(400, {"ok": False, "error": f"mode must be one of {MODES}"})
+            return
+        session.mode = mode
+        self._send_json(200, serialize_session(session))
+
+    def _post_calibrate_poses(self, body: dict) -> None:
+        """Body = {op, index?, qpos?}. op ∈ {add, replace, delete, select}.
+
+        add: append a new pose at end (uses qpos or current live robot qpos).
+        replace: replace pose at index with qpos.
+        delete: remove pose at index.
+        select: set current_pose_index to index.
+        """
+        from core.app.calibrate_session import serialize_session
+
+        session = self.ctx.calibrate
+        if session is None:
+            self._send_json(409, {"ok": False, "error": "session not started"})
+            return
+        op = str(body.get("op") or "")
+        idx = int(body.get("index", -1))
+        raw_qpos = body.get("qpos")
+        if op == "add":
+            if raw_qpos is None:
+                transport = self.ctx.runtime.transport
+                qpos = getattr(transport, "get_latest_qpos", lambda: None)()
+                if qpos is None:
+                    self._send_json(503, {"ok": False, "error": "no live qpos to add"})
+                    return
+                qpos = np.asarray(qpos, dtype=np.float32).reshape(-1).tolist()
+            else:
+                qpos = [float(x) for x in raw_qpos]
+            session.poses.append(qpos)
+            session.pose_capture_state.append(False)
+        elif op == "replace":
+            if idx < 0 or idx >= len(session.poses):
+                self._send_json(400, {"ok": False, "error": "index out of range"})
+                return
+            if raw_qpos is None:
+                self._send_json(400, {"ok": False, "error": "replace needs qpos"})
+                return
+            session.poses[idx] = [float(x) for x in raw_qpos]
+            session.pose_capture_state[idx] = False
+        elif op == "delete":
+            if idx < 0 or idx >= len(session.poses):
+                self._send_json(400, {"ok": False, "error": "index out of range"})
+                return
+            del session.poses[idx]
+            del session.pose_capture_state[idx]
+            if session.current_pose_index >= len(session.poses):
+                session.current_pose_index = len(session.poses) - 1
+        elif op == "select":
+            if idx < -1 or idx >= len(session.poses):
+                self._send_json(400, {"ok": False, "error": "index out of range"})
+                return
+            session.current_pose_index = idx
+        else:
+            self._send_json(400, {"ok": False, "error": f"unknown op '{op}'"})
+            return
+        self._send_json(200, serialize_session(session))
+
+    def _post_calibrate_move_to(self, body: dict) -> None:
+        """SIM: no-op (frontend renders the ghost). REAL: dispatch via manual_send."""
+        from core.app.calibrate_session import serialize_session
+
+        session = self.ctx.calibrate
+        if session is None:
+            self._send_json(409, {"ok": False, "error": "session not started"})
+            return
+        idx = int(body.get("index", session.current_pose_index))
+        if idx < 0 or idx >= len(session.poses):
+            self._send_json(400, {"ok": False, "error": "index out of range"})
+            return
+        session.current_pose_index = idx
+        dispatched = False
+        if session.mode == "real":
+            qpos = session.poses[idx]
+            try:
+                self._enqueue(
+                    "web:manual_send:" + json.dumps({"qpos": [float(x) for x in qpos]})
+                )
+                dispatched = True
+            except Exception as exc:
+                logger.warning("move_to real dispatch failed: %s", exc)
+                session.last_error = str(exc)
+        payload = serialize_session(session)
+        payload["ok"] = True
+        payload["dispatched"] = dispatched
+        self._send_json(200, payload)
+
+    def _post_calibrate_reset(self, _body: dict) -> None:
+        from core.app.calibrate_session import serialize_session
+
+        self.ctx.calibrate = None
+        self._send_json(200, serialize_session(None))
+
+    def _post_calibrate_board(self, body: dict) -> None:
+        from core.app.calibrate_session import serialize_session
+        from tools.calibration import CharucoBoardSpec
+
+        session = self.ctx.calibrate
+        if session is None:
+            self._send_json(409, {"ok": False, "error": "session not started"})
+            return
+        board = CharucoBoardSpec(
+            dict_name=str(body.get("dict") or session.board.dict_name),
+            cols=int(body.get("cols") or session.board.cols),
+            rows=int(body.get("rows") or session.board.rows),
+            square_length=float(body.get("square") or session.board.square_length),
+            marker_length=float(body.get("marker") or session.board.marker_length),
+        )
+        session.board = board
+        self._send_json(200, serialize_session(session))
+
+    def _post_calibrate_intrinsic_source(self, body: dict) -> None:
+        from core.app.calibrate_session import INTRINSIC_SOURCES, serialize_session
+
+        session = self.ctx.calibrate
+        if session is None:
+            self._send_json(409, {"ok": False, "error": "session not started"})
+            return
+        key = str(body.get("camera_key") or "")
+        source = str(body.get("source") or "")
+        if source not in INTRINSIC_SOURCES:
+            self._send_json(400, {"ok": False, "error": f"source must be one of {INTRINSIC_SOURCES}"})
+            return
+        session.ensure_camera(key)
+        session.intrinsic_source[key] = source
+        # Also let the operator flip attach_link here so scene vs hand-eye can be chosen.
+        if "attach_link" in body:
+            session.attach_links[key] = str(body.get("attach_link") or "")
+        self._send_json(200, serialize_session(session))
+
+    def _post_calibrate_capture(self, body: dict) -> None:
+        from core.app.calibrate_session import capture_sample, serialize_session
+
+        session = self.ctx.calibrate
+        if session is None:
+            self._send_json(409, {"ok": False, "error": "session not started"})
+            return
+        # SIM mode blocks CAPTURE: user explicitly asked for SIM to be preview-only.
+        if session.mode == "sim":
+            self._send_json(409, {"ok": False, "error": "SIM mode — switch to REAL to capture"})
+            return
+        key = str(body.get("camera_key") or "")
+        if key not in session.camera_keys:
+            self._send_json(400, {"ok": False, "error": f"unknown camera '{key}'"})
+            return
+        reader = _observation_reader(self.ctx)
+        image = None
+        get_one = getattr(reader, "get_camera_frame", None)
+        if get_one is not None:
+            image = get_one(key)
+        if image is None:
+            frame = reader.get_frame()
+            image = None if frame is None else frame.images.get(key)
+        if image is None:
+            self._send_json(503, {"ok": False, "error": f"no frame available for '{key}'"})
+            return
+        arr = np.asarray(image)
+        if arr.dtype != np.uint8:
+            arr = np.clip(arr, 0, 255).astype(np.uint8)
+        if arr.ndim == 3 and arr.shape[2] == 3 and self.ctx.config.transport.convert_bgr_to_rgb:
+            arr = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+        # Compute T_gripper_base via FK of the current qpos. This is what feeds
+        # cv2.calibrateHandEye downstream — without it we'd never build pose pairs.
+        T_gripper_base = _compute_T_gripper_base(self.ctx, session.attach_links.get(key, ""))
+        encode = lambda img: _encode_jpeg(img, convert_bgr_to_rgb=False) or b""
+        ok, _sample, msg = capture_sample(session, key, arr, T_gripper_base, encode)
+        # Mark the current pose as captured if the operator moved to a preset.
+        if ok and 0 <= session.current_pose_index < len(session.pose_capture_state):
+            session.pose_capture_state[session.current_pose_index] = True
+        payload = serialize_session(session)
+        payload["capture_ok"] = ok
+        payload["capture_msg"] = msg
+        self._send_json(200, payload)
+
+    def _post_calibrate_solve(self, body: dict) -> None:
+        from core.app.calibrate_session import serialize_session, solve_all
+
+        session = self.ctx.calibrate
+        if session is None:
+            self._send_json(409, {"ok": False, "error": "session not started"})
+            return
+        method = str(body.get("method") or session.method or "TSAI").upper()
+        session.method = method
+        transport = self.ctx.runtime.transport
+
+        def _sdk(key: str):
+            fn = getattr(transport, "get_intrinsics", None)
+            return None if fn is None else fn(key)
+
+        solve_all(session, _sdk, method=method)
+        self._send_json(200, serialize_session(session))
+
+    def _post_calibrate_save(self, _body: dict) -> None:
+        from core.app.calibrate_session import (
+            compose_save_payload,
+            rebuild_camera_specs,
+            serialize_session,
+        )
+        from core.config import _coerce_calibration
+        from tools.calibration import write_raiden_json
+
+        session = self.ctx.calibrate
+        if session is None:
+            self._send_json(409, {"ok": False, "error": "session not started"})
+            return
+        entries = compose_save_payload(session, self.ctx.runtime.robot)
+        if not entries:
+            self._send_json(400, {"ok": False, "error": "no solved cameras to save"})
+            return
+        cfg_path = self.ctx.config_path or Path("./calibration_results.json")
+        dest = Path(cfg_path).expanduser().parent / "calibration_results.json"
+        write_raiden_json(dest, entries)
+        session.saved_path = str(dest)
+        # Refresh the config so downstream reads see the new values immediately.
+        if self.ctx.config.get("calibration") is None:
+            from core.cfg import ConfigDict as _CD
+
+            self.ctx.config.calibration = _CD({"cameras": {}, "results_path": str(dest)})
+        else:
+            self.ctx.config.calibration.results_path = str(dest)
+            self.ctx.config.calibration.cameras = {}
+        _coerce_calibration(self.ctx.config, cfg_path)
+        rebuild_camera_specs(self.ctx)
+        payload = serialize_session(session)
+        payload["ok"] = True
+        payload["cameras"] = _serialize_calibration(self.ctx)
+        self._send_json(200, payload)
+
+    def _get_calibrate_print_board(self) -> None:
+        from tools.calibration import CharucoBoardSpec, build_charuco_pdf
+        from urllib.parse import parse_qs, urlparse
+
+        board = getattr(getattr(self.ctx, "calibrate", None), "board", None) or CharucoBoardSpec()
+        query = parse_qs(urlparse(self.path).query)
+        paper = (query.get("paper") or ["a4"])[0]
+        try:
+            pdf = build_charuco_pdf(board, paper=str(paper))
+        except ValueError as exc:
+            self._send_json(400, {"ok": False, "error": str(exc)})
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/pdf")
+        self.send_header("Content-Length", str(len(pdf)))
+        self.send_header(
+            "Content-Disposition",
+            f'attachment; filename="charuco_{board.dict_name}_{board.cols}x{board.rows}.pdf"',
+        )
+        self.end_headers()
+        self.wfile.write(pdf)
+
+    def _post_calibrate_preview(self, body: dict) -> None:
+        """Return the FK transforms for an arbitrary qpos so the frontend can
+        render a ghost URDF at the target pose. Never touches live state.
+        """
+        raw = body.get("qpos") or []
+        if not raw:
+            self._send_json(400, {"ok": False, "error": "qpos required"})
+            return
+        qpos = np.asarray(raw, dtype=np.float32).reshape(-1)
+        if self.ctx.scene is None:
+            self._send_json(503, {"ok": False, "error": "URDF unavailable"})
+            return
+        try:
+            transforms = self.ctx.scene.transforms(qpos)  # type: ignore[attr-defined]
+        except Exception as exc:
+            self._send_json(500, {"ok": False, "error": f"FK failed: {exc}"})
+            return
+        self._send_json(200, {"available": True, "arms": transforms})
+
 
 # Exact-path GET routes (prefix routes — camera/assets/meshes — are handled inline in
 # do_GET because they own a path subtree). Values are unbound handler methods.
 _GET_ROUTES = {
     "/api/config": ConsoleRequestHandler._get_config,
+    "/api/calibration": ConsoleRequestHandler._get_calibration,
+    "/api/calibrate/session": ConsoleRequestHandler._get_calibrate_session,
+    "/api/calibrate/print_board": ConsoleRequestHandler._get_calibrate_print_board,
     "/api/status": ConsoleRequestHandler._get_status,
     "/api/frame": ConsoleRequestHandler._get_frame,
     "/api/scene": ConsoleRequestHandler._get_scene,
@@ -1490,6 +1934,18 @@ _POST_ROUTES = {
     "/api/select_ckpt": ConsoleRequestHandler._post_select_ckpt,
     "/api/init_move": ConsoleRequestHandler._post_init_move,
     "/api/init_gripper": ConsoleRequestHandler._post_init_gripper,
+    "/api/calibration/reload": ConsoleRequestHandler._post_calibration_reload,
+    "/api/calibrate/start": ConsoleRequestHandler._post_calibrate_start,
+    "/api/calibrate/reset": ConsoleRequestHandler._post_calibrate_reset,
+    "/api/calibrate/board": ConsoleRequestHandler._post_calibrate_board,
+    "/api/calibrate/mode": ConsoleRequestHandler._post_calibrate_mode,
+    "/api/calibrate/poses": ConsoleRequestHandler._post_calibrate_poses,
+    "/api/calibrate/move_to": ConsoleRequestHandler._post_calibrate_move_to,
+    "/api/calibrate/intrinsic_source": ConsoleRequestHandler._post_calibrate_intrinsic_source,
+    "/api/calibrate/capture": ConsoleRequestHandler._post_calibrate_capture,
+    "/api/calibrate/solve": ConsoleRequestHandler._post_calibrate_solve,
+    "/api/calibrate/save": ConsoleRequestHandler._post_calibrate_save,
+    "/api/calibrate/preview": ConsoleRequestHandler._post_calibrate_preview,
     "/api/eval_start": ConsoleRequestHandler._eval_start,
     "/api/score": ConsoleRequestHandler._eval_score,
 }
@@ -1502,6 +1958,7 @@ def start_console_server(
     port: int,
     host: str = "0.0.0.0",
     output_dir: str = "",
+    config_path: Path | None = None,
 ) -> threading.Thread:
     """Launch a daemon HTTP server thread bound to ``host:port``."""
     scene: object | None = None
@@ -1522,6 +1979,7 @@ def start_console_server(
         obs_reader=runtime.transport.create_observation_reader(),
         scene=scene,
         output_dir=output_dir,
+        config_path=config_path,
     )
     # RESULT-tab playback reads recorded episodes under <output_dir>/episodes.
     if output_dir:

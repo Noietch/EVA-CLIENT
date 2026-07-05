@@ -6,6 +6,7 @@ import { applyTune, applyManualTune, renderConfig, manualConnect, manualDisconne
 import { collectConfigured, renderCollect, startCollectFromTab, toggleSelectedCollectReplay, saveAnnotation, submitEpisodeNote, submitEpisodeQc, submitQc, clearReviewPlayback, reviewActiveInCurrentTab } from "./collect.js";
 import { evalEnabled, evalReset, evalSetup, evalRunToggle, evalResumeOnEnter, submitEvalScore, loadEvalResults, renderEvalSelectors, loadResultsAll, tpSeek, tpToggle, trialPopClose } from "./eval.js";
 import { replayPlay, replayStop, replayToggle, seekReplay, loop, pollFrame, pollScene, refreshCameraStreams, exitReplayMode } from "./replay.js";
+import { refreshCameras, reloadCameras, renderCalibratePanels, applyBoard, startCalibrate, resetCalibrate, setMode, captureSample, currentCalibCam, solveAll, saveCalibration, moveToPose, addPoseFromCurrent, commitEditPose, cancelEditPose, estop } from "./calibrate.js";
 
 // ===== tabs =====
 function moveTabThumb() {
@@ -119,6 +120,7 @@ function setActiveTab(tab) {
     // so the sliders drive the sim/3D preview immediately. Connecting to the REAL
     // robot is a separate, optional step gated on the backend's live link state.
     if (tab === "manual") enterManualSim();
+    if (tab === "calibrate") renderCalibratePanels();
     if (tab === "eval") { renderEvalSelectors(); loadEvalResults().then(evalResumeOnEnter); }
     if (tab === "result") { loadResultsAll(); }
     updateGuide();
@@ -135,6 +137,7 @@ Object.assign(window, { tpToggle, tpSeek, trialPopClose, replayToggle });
 async function boot() {
     S.CFG = await apiGet("/api/config");
     renderConfig();
+    refreshCameras();
     // EVAL/RESULT use inline onclick handlers; expose them.
     window.tpToggle = tpToggle; window.tpSeek = tpSeek;
     window.trialPopClose = trialPopClose;
@@ -309,5 +312,20 @@ $("bm-send").onclick = manualDispatchToggle;
 $("bm-home").onclick  = () => apiPost("/api/manual_home");
 $("b-manual-tune-apply").onclick = applyManualTune;
 $("manual-tune-publish-rate").onkeydown = (e) => { if (e.key === "Enter") applyManualTune(); };
+const _calibReload = $("b-calib-reload");
+if (_calibReload) _calibReload.onclick = () => reloadCameras();
+// CALIBRATE tab wire-ups (07 CALIBRATE)
+const _cbBoard = $("b-cal-board-apply"); if (_cbBoard) _cbBoard.onclick = applyBoard;
+const _cbStart = $("b-cal-start"); if (_cbStart) _cbStart.onclick = startCalibrate;
+const _cbReset = $("b-cal-reset"); if (_cbReset) _cbReset.onclick = resetCalibrate;
+const _cbCapture = $("b-cal-capture"); if (_cbCapture) _cbCapture.onclick = () => captureSample(currentCalibCam());
+const _cbSolve = $("b-cal-solve"); if (_cbSolve) _cbSolve.onclick = () => solveAll($("cal-hand-eye-method").value);
+const _cbSave = $("b-cal-save"); if (_cbSave) _cbSave.onclick = saveCalibration;
+const _cbAdd = $("b-cal-add-current"); if (_cbAdd) _cbAdd.onclick = addPoseFromCurrent;
+const _cbPoseSave = $("b-cal-pose-save"); if (_cbPoseSave) _cbPoseSave.onclick = commitEditPose;
+const _cbPoseCancel = $("b-cal-pose-cancel"); if (_cbPoseCancel) _cbPoseCancel.onclick = cancelEditPose;
+const _cbEStop = $("b-cal-estop"); if (_cbEStop) _cbEStop.onclick = estop;
+const _cbSim = $("b-cal-mode-sim"); if (_cbSim) _cbSim.onclick = () => setMode("sim");
+const _cbReal = $("b-cal-mode-real"); if (_cbReal) _cbReal.onclick = () => setMode("real");
 export { setActiveTab };
 boot();
