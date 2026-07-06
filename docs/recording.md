@@ -1,0 +1,28 @@
+[← Back to README](../README.md)
+
+# 🎞️ Recording
+
+Every run — teleop capture from **COLLECT** or model rollout from **DEBUG** /
+**EVAL** — is written to the same LeRobot v2.1 dataset. The on-disk layout is:
+
+```
+<log_dir>/<task name>/
+├── data/chunk-000/episode_000000.parquet     # 1 row per step, SFT-ready
+├── videos/chunk-000/<camera>/episode_000000.mp4
+└── meta/
+    ├── info.json
+    ├── episodes.jsonl                         # per-episode length, task, quality flag
+    ├── episodes_stats.jsonl
+    ├── tasks.jsonl
+    └── stats.json                             # per-feature min/max/mean/std
+```
+
+Inference runs additionally carry a debug long-table sidecar (multiple raw
+predictions per step for overlapping async / RTC chunks), joined to the main
+table on `absolute_step`. Cameras are encoded as streaming mp4. Per-frame QC
+marks each episode `green` or `red` with a reason (`episode_too_short`,
+`non_monotonic_timestamp`, `missing_camera`, …); red episodes are still saved,
+issues recorded in `episodes.jsonl`. Eval trials save on STOP; milestone scores
+live in dataset metadata. Re-running the same eval prompt/trial overwrites that
+episode in place — teleop always appends. A sample dataset lives at
+`../examples/agilex_dataset/`.
