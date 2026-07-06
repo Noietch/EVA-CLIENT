@@ -120,8 +120,8 @@ If EVA-Client is useful for your research or product, please cite:
 
 For questions or collaboration, feel free to reach out via WeChat:
 
-<p align="center">
-  <img src="https://private-user-images.githubusercontent.com/126173594/617384392-203d7029-449d-4070-b9c4-e78863625e92.jpg?jwt=eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJnaXRodWIuY29tIiwiYXVkIjoicmF3LmdpdGh1YnVzZXJjb250ZW50LmNvbSIsImtleSI6ImtleTUiLCJleHAiOjE3ODMzMjAyMTMsIm5iZiI6MTc4MzMxOTkxMywicGF0aCI6Ii8xMjYxNzM1OTQvNjE3Mzg0MzkyLTIwM2Q3MDI5LTQ0OWQtNDA3MC1iOWM0LWU3ODg2MzYyNWU5Mi5qcGc_WC1BbXotQWxnb3JpdGhtPUFXUzQtSE1BQy1TSEEyNTYmWC1BbXotQ3JlZGVudGlhbD1BS0lBVkNPRFlMU0E1M1BRSzRaQSUyRjIwMjYwNzA2JTJGdXMtZWFzdC0xJTJGczMlMkZhd3M0X3JlcXVlc3QmWC1BbXotRGF0ZT0yMDI2MDcwNlQwNjM4MzNaJlgtQW16LUV4cGlyZXM9MzAwJlgtQW16LVNpZ25hdHVyZT04Y2MwMmEyMTE5ZTM4YmFmNjU2OGJjNjQ5NWQ4OGNiZjRkZmI3ZDdmMDA5ZTc0ODIxYzg2MTIyYjY2OGEyZjY0JlgtQW16LVNpZ25lZEhlYWRlcnM9aG9zdCZyZXNwb25zZS1jb250ZW50LXR5cGU9aW1hZ2UlMkZqcGVnIn0.lcmIaO6LKK5QOQApBvZJtWGJ_c6OdEeJdEJ6FphPMMo" alt="WeChat QR Code" width="240" />
+<p align="left">
+  <img src="https://github.com/user-attachments/assets/203d7029-449d-4070-b9c4-e78863625e92" alt="WeChat QR Code" width="240" />
 </p>
 
 ---
