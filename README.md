@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/eva-logo.svg" alt="EVA-Client Logo" width="34%">
+  <a href="https://colalab.net/projects/eva-client/"><img src="assets/eva-logo.svg" alt="EVA-Client Logo" width="34%"></a>
 </p>
 
 <h1 align="center">EVA-Client: A Unified Framework for Deployment, Evaluation, and Data Collection on Real Robots</h1>
@@ -128,7 +128,7 @@ bash examples/hardware/r1_lite/run_hardware.sh           # ROS2: Galaxea R1-Lite
 bash examples/hardware/arx/run_hardware.sh               # ZMQ:  ARX R5
 bash examples/hardware/franka/run_hardware.sh            # ZMQ:  Dual Franka
 bash examples/hardware/ur5e/run_hardware.sh              # ZMQ:  UR5e
-bash examples/hardware/agibot_g2/node.py                 # ZMQ:  AgiBot G2
+python examples/hardware/agibot_g2/node.py               # ZMQ:  AgiBot G2
 
 # No robot handy? Every folder ships a software-only fake node over ZMQ:
 bash examples/hardware/agilex_piper/run_fake_node.sh
