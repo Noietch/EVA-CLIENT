@@ -107,12 +107,14 @@ Full guides live in [`docs/`](./docs). Start here:
 If EVA-Client is useful for your research or product, please cite:
 
 ```bibtex
-@misc{evaclient2026,
-  title        = {EVA-Client: A Unified Framework for Deployment, Evaluation,
-                  and Data Collection on Real Robots},
-  author       = {EVA-Client Contributors},
-  year         = {2026},
-  howpublished = {\url{https://github.com/Noietch/EVA-CLIENT}},
+@misc{yang2026evaclient,
+      title={EVA-Client: A Unified Data Collection, Inference, and Deployment Framework for Embodied Policies on Real Robots}, 
+      author={Heqing Yang and Yang Yi and Liyao Wang and Linqing Zhong and Donglin Yang and Ruipu Wu and Zitong Bai and Fengjiao Chen and Manyuan Zhang and Linjiang Huang and Si Liu},
+      year={2026},
+      eprint={2607.02646},
+      archivePrefix={arXiv},
+      primaryClass={cs.RO},
+      url={https://arxiv.org/abs/2607.02646}, 
 }
 ```
 
