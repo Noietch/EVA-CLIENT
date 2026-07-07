@@ -21,6 +21,8 @@
 <p align="center">
   <b>Jump to:</b>&nbsp;
   <a href="#-what-you-get">What you get</a> ·
+  <a href="#-robot-zoo--compatibility">Robot zoo</a> ·
+  <a href="#-protocols--middleware">Protocols</a> ·
   <a href="#%EF%B8%8F-architecture">Architecture</a> ·
   <a href="#-documentation">Documentation</a> ·
   <a href="#%EF%B8%8F-roadmap">Roadmap</a> ·
@@ -53,6 +55,45 @@
 
 * **[2026-07] EVA-Client is open-sourced!** 
 * **[2026-07] Paper, docs, and project page are live!** Read the [Technical Report](https://colalab.net/projects/eva-client/paper/EVA_Client_Report.pdf), browse the [Documentation](https://colalab.net/projects/eva-client/docs/introduction.html) ([中文](https://colalab.net/projects/eva-client/docs/introduction.zh.html)), and visit the [Project Page](https://colalab.net/projects/eva-client/).
+
+---
+
+## 🤖 Robot zoo & compatibility
+
+✅ Supported &nbsp;·&nbsp; 🚧 In development &nbsp;·&nbsp; 📦 To be added
+
+| Robot | Form factor | Supported |
+|-------|-------------|:---------:|
+| AgileX Piper | Dual 6-DoF arm + gripper | ✅ |
+| ARX R5 | Dual 6-DoF arm + gripper | ✅ |
+| Dual Franka Panda | Dual 7-DoF arm + gripper | ✅ |
+| Galaxea R1 Lite | Dual 6-DoF arm on torso | ✅ |
+| Universal Robots UR5e | Single 6-DoF arm + gripper | ✅ |
+| AgiBot G2 | Dual-arm humanoid (24-DoF body) | ✅ |
+| AgiBot G2 (mobile base) | Humanoid on mobile chassis | 🚧 |
+| YAM | Dual-arm manipulator | 🚧 |
+| Tianji | Dual-arm manipulator | 🚧 |
+| Unitree H1 / G1 | Humanoid | 🚧 |
+| Fourier GR-1 | Humanoid | 📦 |
+| Booster T1 | Humanoid | 📦 |
+| Mobile ALOHA | Mobile dual-arm | 📦 |
+
+---
+
+## 🔌 Protocols & middleware
+
+| Layer | Name | Protocol / wire format | Supported |
+|-------|------|------------------------|:---------:|
+| Transport | ROS 1 | ROS 1 stack | ✅ |
+| Transport | ROS 2 | ROS 2 stack | ✅ |
+| Transport | ZeroMQ | ZeroMQ execution node | ✅ |
+| Transport | Offline dataset | Offline LeRobot v2.x replay | ✅ |
+| Policy backend | OpenPI | WebSocket + msgpack (OpenPI, stateless) | ✅ |
+| Policy backend | OpenPI-RTC | WebSocket + msgpack (Real-Time Chunking) | ✅ |
+| Policy backend | StarVLA | WebSocket + msgpack (typed envelope) | ✅ |
+| Policy backend | GR00T | ZeroMQ REQ/REP + msgpack-numpy (Isaac-GR00T) | ✅ |
+| Policy backend | Mock | Local (smooth random actions) | ✅ |
+| Policy backend | Replay | Local (recorded trajectory replay) | ✅ |
 
 ---
 
