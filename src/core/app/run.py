@@ -16,6 +16,8 @@ import numpy as np
 from core.app.console.server import start_console_server
 from core.app.handlers import (
     _anchor_buffer_to_current_qpos,
+    accept_rollout_intervention_segment,
+    begin_rollout_save_episode,
     clear_replay,
     collect_cancel,
     collect_start,
@@ -24,6 +26,7 @@ from core.app.handlers import (
     collect_stop,
     collect_stop_teleop,
     connect_policy,
+    discard_rollout_intervention_segment,
     disconnect_policy,
     enable_default_recording,
     end_episode,
@@ -32,12 +35,15 @@ from core.app.handlers import (
     load_replay_dataset,
     manual_home,
     manual_send,
+    mark_rollout_save_ready,
     maybe_build_episode_logger,
     publish_next_action,
     rebuild_eval_episode_logger,
+    record_rollout_intervention_step,
     reset_ik_solver,
     reset_infer_strategy,
     reset_session_progress,
+    rollback_rollout_intervention,
     run_init_done,
     run_init_move,
     run_one_chunk_on_sim,
@@ -45,6 +51,7 @@ from core.app.handlers import (
     run_reset,
     run_setup,
     run_warmup_and_start,
+    save_rollout_episode,
     select_episode,
     select_inference_strategy,
     select_mode,
@@ -55,9 +62,14 @@ from core.app.handlers import (
     set_replay_fps,
     start_episode,
     start_inference_loop,
+    start_rollout_intervention,
+    stop_rollout_intervention,
     toggle_gripper_immediate,
     update_inference_params,
-    update_manual_params,
+)
+from core.app.operator_control import (
+    maybe_start_operator_button_listener,
+    resolve_operator_event,
 )
 from core.app.state import (
     RuntimeState,
@@ -78,6 +90,7 @@ logger = logging.getLogger(__name__)
 # Halt an active run if the frontend hasn't polled /api/status within this window.
 # The poll cadence is ~250ms, so this tolerates dozens of missed polls before tripping.
 CLIENT_WATCHDOG_TIMEOUT_S = 3.0
+_HIL_CONTROL_MODES = frozenset({"absolute", "relative"})
 
 
 def _target_loop_rate_hz(
@@ -165,7 +178,7 @@ def _activate_ckpt_slot(
     Returns the adopted active config on success, or None if the policy connect failed
     (caller sets web_phase=idle). Does NOT touch web_phase otherwise.
     """
-    ckpt = eval_cfg.checkpoints[slot]
+    ckpt = eval_cfg.checkpoints[runtime.ckpt_order[slot]]
     import copy
     config = copy.deepcopy(ckpt.config)
     config.eval = eval_cfg
@@ -261,8 +274,8 @@ def _handle_web_command(
         # Blind multi-ckpt: start on slot 0 (Model A). Run the SAME full activation a
         # switch_ckpt does, so a directly-launched Model A is initialized identically to a
         # switched-to model (force-reconnect + reset session/strategy/IK + rebuild logger +
-        # arm pre-start reset).
-        if eval_cfg.checkpoints:
+        # arm pre-start reset). ckpt_order is set by the web server before bootstrap fires.
+        if eval_cfg.checkpoints and runtime.ckpt_order:
             adopted = _activate_ckpt_slot(0, eval_cfg, runtime, session)
             if adopted is None:
                 logger.error("Bootstrap: policy connect failed")
@@ -309,6 +322,8 @@ def _handle_web_command(
         if runtime.web_phase in {"starting", "running", "stopping", "resetting"}:
             logger.warning("Ignored switch_task while phase=%s", runtime.web_phase)
             return
+        stop_rollout_intervention(config, runtime, session, required=False)
+        discard_rollout_intervention_segment(runtime)
         select_task(arg, config, session, runtime)
         return
 
@@ -316,20 +331,23 @@ def _handle_web_command(
         if runtime.web_phase != "ready":
             logger.warning("Ignored start: phase=%s (must be ready)", runtime.web_phase)
             return
-        if session.selected_task is None:
-            logger.warning("Ignored start: no task selected")
-            return
-        logger.info("[START] task=%r", session.selected_task)
         # Bind this trial's task NOW (from the cell stamped by /api/eval_start), before
-        # the reset trajectory goes out. Otherwise the separate web:switch_task the
-        # frontend queued when the operator clicked the trial could still be sitting in the
-        # queue and would interrupt the in-flight reset trajectory (switch_task is a
-        # motion-interrupting verb) — cutting the init short. Selecting it here makes that
-        # queued switch_task a no-op (task unchanged) so the trajectory completes.
+        # the no-task gate and before the reset trajectory goes out. Otherwise eval_start
+        # can carry a prompt but still be rejected because no prompt was selected in the
+        # DEBUG task picker.
         cell = runtime.current_cell or {}
         cell_prompt = cell.get("prompt")
         if isinstance(cell_prompt, str) and session.selected_task != cell_prompt:
             select_task(cell_prompt, config, session, runtime)
+        if session.selected_task is None:
+            logger.warning("Ignored start: no task selected")
+            return
+        logger.info("[START] task=%r", session.selected_task)
+        # The separate web:switch_task the
+        # frontend queued when the operator clicked the trial could still be sitting in the
+        # queue and would interrupt the in-flight reset trajectory (switch_task is a
+        # motion-interrupting verb) — cutting the init short. Selecting it here makes that
+        # queued switch_task a no-op (task unchanged) so the trajectory completes.
         # run_setup() must FULLY complete its init before we run: clear any stale interrupt
         # flag (a leftover from a prior aborted motion would otherwise cut the reset
         # trajectory short), then run setup and only start if it reported success. This
@@ -442,9 +460,11 @@ def _handle_web_command(
             return
         eval_cfg = config.eval
         slot = int(arg)
-        if slot < 0 or slot >= len(eval_cfg.checkpoints):
+        if slot < 0 or slot >= len(runtime.ckpt_order):
             logger.warning("Ignored switch_ckpt: slot %d out of range", slot)
             return
+        stop_rollout_intervention(config, runtime, session, required=False)
+        discard_rollout_intervention_segment(runtime)
         if _activate_ckpt_slot(slot, eval_cfg, runtime, session) is None:
             logger.error("switch_ckpt: connect failed for slot %d", slot)
             set_phase(runtime, "idle")
@@ -454,6 +474,32 @@ def _handle_web_command(
         return
 
     # --- console verbs (eval-independent; drive the debug mainline directly) ---
+
+    if verb == "operator_action":
+        intent, _, source = arg.partition(":")
+        resolved_command = resolve_operator_event(
+            config,
+            runtime,
+            session,
+            intent=intent,
+            source=source or "ui",
+        )
+        if resolved_command is not None:
+            handle_command(resolved_command, config, runtime, session)
+        return
+
+    if verb == "operator_button":
+        button, _, source = arg.partition(":")
+        resolved_command = resolve_operator_event(
+            config,
+            runtime,
+            session,
+            button=button,
+            source=source or "cat",
+        )
+        if resolved_command is not None:
+            handle_command(resolved_command, config, runtime, session)
+        return
 
     if verb == "connect":
         connect_policy(config, runtime, session)
@@ -523,11 +569,6 @@ def _handle_web_command(
         update_inference_params(config, runtime, session, params)
         return
 
-    if verb == "update_manual_params":
-        params = json.loads(arg) if arg else {}
-        update_manual_params(config, runtime, params)
-        return
-
     if verb == "setup":
         if session.selected_task is None or session.mode is SessionMode.SELECT:
             logger.warning("console setup: select task and mode first")
@@ -544,6 +585,24 @@ def _handle_web_command(
     if verb == "run":
         runtime.collection_replay_qpos = None
         runtime.collection_replay_episode = None
+        if getattr(runtime, "rollout_intervention_active", False):
+            segment = getattr(runtime, "rollout_intervention_active_segment", None)
+            if segment is not None and segment.invalid_reason:
+                session.last_error = segment.invalid_reason
+                return
+            if not stop_rollout_intervention(config, runtime, session, required=True):
+                return
+            if not accept_rollout_intervention_segment(runtime, session):
+                return
+            runtime.rollout_save_ready = False
+            runtime.rollout_save_reason = ""
+            session.action_chunk = None
+            session.chunk_index = 0
+            if not run_warmup_and_start(config, runtime, session):
+                return
+            session.run_start_time = time.monotonic()
+            set_status(session, SessionStatus.RUNNING, reason="resume after teleop intervention")
+            return
         if (
             session.mode in (SessionMode.REAL, SessionMode.SIM)
             and session.status is SessionStatus.READY
@@ -564,6 +623,8 @@ def _handle_web_command(
                 _anchor_buffer_to_current_qpos(runtime)
                 start_inference_loop(config, runtime, session)
             session.last_error = ""
+            runtime.rollout_save_ready = False
+            runtime.rollout_save_reason = ""
             session.run_start_time = time.monotonic()
             set_status(session, SessionStatus.RUNNING, reason="continue")
             return
@@ -574,11 +635,77 @@ def _handle_web_command(
 
     if verb == "halt":
         # Stop continuous run / cancel a pending sim chunk — reuse the 'c' dispatch.
+        was_running = session.status is SessionStatus.RUNNING and session.mode in (
+            SessionMode.REAL,
+            SessionMode.SIM,
+        )
         _dispatch_halt(config, runtime, session)
+        if was_running and not is_replay(runtime):
+            mark_rollout_save_ready(runtime, "stop")
+            if session.mode is SessionMode.REAL and config.rollout.intervention.enabled:
+                start_rollout_intervention(config, runtime, session)
+        return
+
+    if verb == "rollout_intervention_abandon":
+        if not getattr(runtime, "rollout_intervention_active", False):
+            session.last_error = "No active rollout intervention to abandon"
+            return
+        if not stop_rollout_intervention(config, runtime, session, required=True):
+            return
+        if not rollback_rollout_intervention(config, runtime, session):
+            discard_rollout_intervention_segment(runtime)
+            return
+        discard_rollout_intervention_segment(runtime)
+        runtime.rollout_save_ready = False
+        runtime.rollout_save_reason = ""
+        session.action_chunk = None
+        session.chunk_index = 0
+        if not run_warmup_and_start(config, runtime, session):
+            return
+        session.run_start_time = time.monotonic()
+        set_status(session, SessionStatus.RUNNING, reason="resume after abandoned intervention")
+        return
+
+    if verb == "rollout_intervention_mode":
+        if arg not in _HIL_CONTROL_MODES:
+            allowed = ", ".join(sorted(_HIL_CONTROL_MODES))
+            session.last_error = f"Unsupported HIL control mode {arg!r}; expected: {allowed}"
+            return
+        if runtime.rollout_intervention_active:
+            session.last_error = "Stop or resume the active intervention before changing HIL mode"
+            return
+        setter = getattr(runtime.transport, "set_hil_control_mode", None)
+        if setter is None:
+            session.last_error = "Transport does not support HIL control mode"
+            return
+        setter(arg)
+        runtime.hil_control_mode = arg
+        session.last_error = ""
         return
 
     if verb == "console_reset":
+        stop_rollout_intervention(config, runtime, session, required=False)
+        discard_rollout_intervention_segment(runtime)
+        if not is_replay(runtime) and session.mode in (SessionMode.REAL, SessionMode.SIM):
+            mark_rollout_save_ready(runtime, "reset")
         run_reset(config, runtime, session)
+        return
+
+    if verb == "rollout_save":
+        if getattr(runtime, "rollout_intervention_active", False):
+            session.last_error = "Continue or abandon the active intervention before saving"
+            return
+        save_rollout_episode(runtime, session)
+        return
+
+    if verb == "rollout_stop":
+        was_running = session.status is SessionStatus.RUNNING and session.mode in (
+            SessionMode.REAL,
+            SessionMode.SIM,
+        )
+        _dispatch_halt(config, runtime, session)
+        if was_running and not is_replay(runtime):
+            mark_rollout_save_ready(runtime, "stop")
         return
 
     if verb == "tab_switch":
@@ -597,10 +724,12 @@ def _handle_web_command(
             runtime.collection_teleop_armed = False
         runtime.collection_replay_qpos = None
         runtime.collection_replay_episode = None
+        stop_rollout_intervention(config, runtime, session, required=False)
+        discard_rollout_intervention_segment(runtime)
         if session.mode is SessionMode.COLLECT and session.status is SessionStatus.RUNNING:
             collect_stop(config, runtime, session)
         if runtime.collection_teleop_active:
-            collect_stop_teleop(runtime, session)
+            collect_stop_teleop(config, runtime, session)
         _dispatch_halt(config, runtime, session)
         end_episode(runtime)
         reset_session_progress(session)
@@ -609,7 +738,7 @@ def _handle_web_command(
         session.last_error = ""
         set_status(session, SessionStatus.UNSET, reason="tab switch")
         if arg == "collect" and getattr(runtime, "collection_teleop_armed", False):
-            collect_start_teleop(runtime, session)
+            collect_start_teleop(config, runtime, session)
         elif arg == "eval" and config.eval is not None:
             # EVAL runs on the mode fixed by the config (cli_mode, normally REAL); the
             # generic SELECT reset below would force the operator to re-pick a mode that
@@ -679,7 +808,7 @@ def _handle_web_command(
     # --- data collection (teleoperation) verbs ---
 
     if verb == "collect_start":
-        collect_start(runtime, session)
+        collect_start(config, runtime, session)
         return
 
     if verb == "collect_stop":
@@ -747,6 +876,7 @@ def _dispatch_run(config: ConfigDict, runtime: RuntimeState, session: SessionSta
             return
         if not is_replay(runtime):
             start_episode(runtime, session)
+            begin_rollout_save_episode(config, runtime, session)
         session.run_start_time = time.monotonic()
         set_status(session, SessionStatus.RUNNING, reason="start")
         return
@@ -837,6 +967,13 @@ def run(
         selected_inference_strategy_key=None,
         infer_strategy=None,
     )
+    runtime.hil_control_mode = str(
+        getattr(
+            transport,
+            "hil_control_mode",
+            config.rollout.intervention.get("control_mode", "absolute"),
+        )
+    )
     _select_only_inference_strategy_if_needed(config, runtime, session)
     # Record every trial as an episode so results can be previewed (URDF/camera/chart),
     # rooting the dataset inside the eval results tree. Dataset replay has nothing to
@@ -858,6 +995,7 @@ def run(
     prompt_ready.set()
     runtime.command_queue = command_queue
     runtime.prompt_ready = prompt_ready
+    maybe_start_operator_button_listener(config, runtime)
     loop_rate = transport.create_rate(config.inference_cfg.publish_rate)
     loop_rate_hz = config.inference_cfg.publish_rate
 
@@ -915,8 +1053,11 @@ def run(
                 else:
                     publish_next_action(effective, runtime, session)
 
+            if getattr(runtime, "rollout_intervention_active", False):
+                record_rollout_intervention_step(runtime, session)
+
             if session.mode is SessionMode.COLLECT and session.status is SessionStatus.RUNNING:
-                collect_step(config, runtime)
+                collect_step(effective, runtime)
 
             # Reconcile web_phase with the real session state. A run can leave RUNNING via
             # paths that DON'T go through the eval web:stop verb — the client-liveness
@@ -932,9 +1073,15 @@ def run(
 
             loop_rate.sleep()
     finally:
+        stop_rollout_intervention(config, runtime, session, required=False)
+        discard_rollout_intervention_segment(runtime)
         end_episode(runtime)
         if runtime.episode_logger is not None:
             runtime.episode_logger.finalize()
+        if runtime.rollout_episode_logger is not None:
+            if runtime.rollout_episode_logger.has_active_episode:
+                runtime.rollout_episode_logger.cancel_episode("shutdown")
+            runtime.rollout_episode_logger.finalize()
         if runtime.infer_strategy is not None:
             runtime.infer_strategy.close()
         transport.close()

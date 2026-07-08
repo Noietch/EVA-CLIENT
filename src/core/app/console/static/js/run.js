@@ -2,11 +2,16 @@
 // config & tuning panel (config); manual sim/connection control (manual).
 import { $, LIVE, RUN_CONTROLS, S, apiPost } from "./core.js";
 import { updateScrub } from "./charts.js";
-import { collectEnabled, dotClass, renderCollect, loadAnnotation } from "./collect.js";
+import { collectEnabled, dotClass, renderCollect, renderRolloutSave, loadAnnotation } from "./collect.js";
 import { applyEvalStatus, evalCfg, evalEnabled } from "./eval.js";
 import { maybeSyncReplayPlayer } from "./replay.js";
 
 // ===== run =====
+
+function formatImageHz(hz) {
+    const value = Number(hz);
+    return Number.isFinite(value) ? `${value.toFixed(1)} hz` : "— hz";
+  }
 
 function startRunFromDebug() {
     apiPost("/api/run");
@@ -66,7 +71,8 @@ function applyRunControlStatus(ids, s) {
 
     const ready = s.is_setup_done;
     const running = s.session_status === "running";
-    const continueRun = !running && (s.step_index || 0) > 0;
+    const intervention = !!s.rollout_intervention_active;
+    const continueRun = !running && ((s.step_index || 0) > 0 || intervention);
     if (ids.run === "b-run") {
       // Single RUN/STOP toggle (mirrors the collect record toggle): one click runs,
       // the next halts. `running` lags the click by a poll, so hold the button busy
@@ -74,10 +80,17 @@ function applyRunControlStatus(ids, s) {
       if (S.runToggleBusy !== null && running === S.runToggleBusy) S.runToggleBusy = null;
       const busy = S.runToggleBusy !== null;
       const run = $(ids.run);
-      run.querySelector(".rec-label").textContent = running ? "STOP ■" : (continueRun ? "CONTINUE ▶▶" : "RUN ▶");
+      run.querySelector(".rec-label").textContent = running
+        ? "STOP ■"
+        : (intervention ? "RESUME ▶" : (continueRun ? "CONTINUE ▶▶" : "RUN ▶"));
       run.classList.toggle("recording", running);
       run.classList.toggle("primary", !running);
       run.disabled = busy || (!running && !ready);
+      const abandon = $("b-rollout-intervention-abandon");
+      if (abandon) {
+        abandon.style.display = intervention ? "" : "none";
+        abandon.disabled = !intervention;
+      }
       $(ids.step).disabled = !ready || running;
       $(ids.commit).disabled = !armed;
       $(ids.stepHalt).disabled = !armed && !running;
@@ -123,6 +136,7 @@ function applyStatus(s) {
     $("t-infer").textContent = (s.last_infer_ms || 0) + "ms";
     $("t-step").textContent = s.step_index || 0;
     $("t-elapsed").textContent = ((s.run_elapsed_ms || 0) / 1000).toFixed(1) + "s";
+    $("t-image-hz").textContent = formatImageHz(s.image_min_hz);
 
     // active selections
     mark("prompt-list", "prompt", s.selected_task);
@@ -152,6 +166,7 @@ function applyStatus(s) {
     mark("mode-list", "mode", modeMark);
     mark("replay-mode-list", "mode", modeMark);
     mark("strategy-list", "strategy", s.selected_strategy);
+    syncHilControlMode(s);
     updateGuide();
 
     // canvas readout
@@ -187,6 +202,7 @@ function applyStatus(s) {
     $("err").textContent = s.last_error || "";
     $("replay-err").textContent = s.last_error || "";
     renderCollect();
+    renderRolloutSave();
     applyEvalStatus(s);
   }
 
@@ -577,6 +593,38 @@ function renderModeButtons(listId) {
     mark(listId, "mode", modes.includes("sim") ? "sim" : modes[0]);
   }
 
+function renderHilControlMode() {
+    const host = $("hil-control-mode");
+    if (!host || !S.CFG) return;
+    host.innerHTML = "";
+    const modes = S.CFG.hil_control_modes || ["absolute", "relative"];
+    host.style.setProperty("--mode-n", modes.length);
+    modes.forEach((mode) => {
+      const b = document.createElement("button");
+      b.className = "seg";
+      b.dataset.hil = mode;
+      b.innerHTML = `<span>${mode === "relative" ? "REL" : "ABS"}</span>`;
+      b.onclick = () => {
+        if (S.STATUS && S.STATUS.rollout_intervention_active) return;
+        mark("hil-control-mode", "hil", mode);
+        S.STATUS.hil_control_mode = mode;
+        apiPost("/api/rollout_intervention_mode", { mode });
+      };
+      host.appendChild(b);
+    });
+    syncHilControlMode(S.STATUS || {});
+  }
+
+function syncHilControlMode(status) {
+    const host = $("hil-control-mode");
+    if (!host || !S.CFG) return;
+    const mode = status.hil_control_mode || S.CFG.hil_control_mode || "absolute";
+    mark("hil-control-mode", "hil", mode);
+    host.querySelectorAll("button").forEach((b) => {
+      b.disabled = !!status.rollout_intervention_active;
+    });
+  }
+
 const GRIP_STATE = {};
 
 let GRIP_FORCE = true;
@@ -660,6 +708,7 @@ function renderConfig() {
     renderCollectTaskButtons();
     renderModeButtons("mode-list");
     renderModeButtons("replay-mode-list");
+    renderHilControlMode();
     // Pick the default run mode on the backend if nothing is chosen yet. Under eval the
     // mode is dictated by the config's cli_mode (e.g. REAL for table_tennis): push that so
     // a directly-entered eval runs on the real arm, instead of the SIM fallback below
@@ -875,7 +924,7 @@ function renderManualTune() {
     if (!S.CFG) return;
     const input = $("manual-tune-publish-rate");
     if (input && document.activeElement !== input) {
-      input.value = S.CFG.manual_publish_rate != null ? S.CFG.manual_publish_rate : "";
+      input.value = S.CFG.publish_rate != null ? S.CFG.publish_rate : "";
     }
   }
 
@@ -912,9 +961,11 @@ async function applyManualTune() {
     if (Number.isNaN(publishRate) || publishRate < 1) return;
     $("manual-tune-status").textContent = "applying…";
     try {
-      const r = await apiPost("/api/update_manual_params", { publish_rate: publishRate });
+      const r = await apiPost("/api/update_infer_params", { publish_rate: publishRate });
       if (r.ok) {
-        S.CFG.manual_publish_rate = publishRate;
+        S.CFG.publish_rate = publishRate;
+        const debugInput = $("tune-publish-rate");
+        if (debugInput && document.activeElement !== debugInput) debugInput.value = String(publishRate);
       }
       $("manual-tune-status").textContent = r.ok ? "applied" : "failed: " + (r.error || "unknown");
     } catch (e) {
@@ -1030,13 +1081,19 @@ function sendManualQpos() {
 function buildManualSliders(qpos) {
     if (S._manualSlidersBuilt || !qpos || !qpos.length) return;
     _manualQpos = qpos.slice();
+    const limits = S.CFG.manual_qpos_limits;
+    if (!limits || limits.length !== qpos.length) {
+      const nLimits = limits ? limits.length : 0;
+      throw new Error(`manual_qpos_limits length mismatch: got ${nLimits}, qpos ${qpos.length}`);
+    }
     const host = $("manual-sliders-m");
     host.innerHTML = "";
     qpos.forEach((v, i) => {
+      const limit = limits[i];
       const row = document.createElement("div"); row.className = "ms-row";
       row.innerHTML =
         `<span class="ms-j">j${String(i).padStart(2, "0")}</span>` +
-        `<input type="range" min="-3.2" max="3.2" step="0.005" value="${v}" data-j="${i}">` +
+        `<input type="range" min="${limit.min}" max="${limit.max}" step="${limit.step}" value="${v}" data-j="${i}">` +
         `<span class="ms-x" id="ms-x-${i}">${v.toFixed(3)}</span>`;
       const range = row.querySelector("input");
       range.oninput = (e) => {

@@ -16,6 +16,7 @@ import numpy as np
 
 from core.config import ConfigDict
 from core.recorder.episode import EpisodeLogger
+from core.types import RolloutInterventionSegment
 from policy_client.base import PolicyClient
 from robots.base import Robot
 from strategy.base_strategy import BaseInferStrategy
@@ -24,6 +25,7 @@ from transport.base import TransportBridge
 if TYPE_CHECKING:
     from tqdm import tqdm
 
+    from core.app.collection_capture import CollectionCaptureRunner
     from transport.dataset import DatasetTransport
 
 logger = logging.getLogger(__name__)
@@ -145,6 +147,8 @@ class RuntimeState:
             local activation switch on; required before teleop can affect hardware.
         collection_teleop_active: True while a teleop collection run is active.
         last_collection_timestamp: Timestamp of the last recorded collection frame.
+        collection_capture_runner: Background raw snapshot capture loop for the
+            active collection episode.
         collection_replay_qpos: qpos sequence loaded for collection replay.
         collection_replay_episode: Episode index currently loaded for collection replay.
         collection_replay_started: Monotonic timestamp when collection replay started.
@@ -166,8 +170,9 @@ class RuntimeState:
             identity.
         needs_pre_start_reset: True after a stop/ckpt-switch that left the robot un-reset.
             The next start auto-resets.
-        active_ckpt_slot: operator-facing checkpoint slot (0->Model A, 1->Model B, ...),
-            indexing directly into config.eval.checkpoints.
+        ckpt_order: blind multi-ckpt — ckpt_order[slot] -> index into
+            config.eval.checkpoints.
+        active_ckpt_slot: operator-facing checkpoint slot (0->Model A, 1->Model B, ...).
         eval_output_dir: eval results root (work_dirs/<eval config>/). Each model records
             into a per-model lerobot dataset at <eval_output_dir>/<model_name>/episodes,
             so a model's prior eval episodes (and their embedded scores) auto-resume next
@@ -192,6 +197,16 @@ class RuntimeState:
             fps on load so playback matches data collection; the operator can override it
             live.
         replay_exec_steps: Number of action steps to execute per replay frame.
+        rollout_episode_logger: explicit rollout save. Separate from episode_logger
+            because collection configs use episode_logger for teleop datasets.
+        rollout_save_ready: True when a rollout is staged and ready to be saved.
+        rollout_save_reason: Human-readable reason/label for the pending rollout save.
+        rollout_intervention_active: True while normal rollout is paused under teleop.
+        rollout_intervention_pre_qpos: Robot qpos captured before the active intervention.
+        rollout_intervention_active_segment: Temporary segment being captured.
+        rollout_intervention_segments: Accepted segments saved with the rollout.
+        rollout_intervention_next_segment_index: Monotonic segment id inside the rollout.
+        hil_control_mode: HIL relay mode, either "absolute" or "relative".
     """
 
     robot: Robot
@@ -208,6 +223,7 @@ class RuntimeState:
     collection_teleop_armed: bool = False
     collection_teleop_active: bool = False
     last_collection_timestamp: float | None = None
+    collection_capture_runner: CollectionCaptureRunner | None = None
     collection_replay_qpos: np.ndarray | None = None
     collection_replay_episode: int | None = None
     collection_replay_started: float = 0.0
@@ -219,6 +235,7 @@ class RuntimeState:
     current_clip_id: str | None = None
     current_cell: dict[str, object] | None = None
     needs_pre_start_reset: bool = False
+    ckpt_order: list[int] = dataclasses.field(default_factory=list)
     active_ckpt_slot: int | None = None
     eval_output_dir: str = ""
     active_config: ConfigDict | None = None
@@ -233,6 +250,17 @@ class RuntimeState:
     replay_fps: int = 10
     replay_exec_steps: int = 1
     replay_pbar: tqdm | None = None
+    rollout_episode_logger: EpisodeLogger | None = None
+    rollout_save_ready: bool = False
+    rollout_save_reason: str = ""
+    rollout_intervention_active: bool = False
+    rollout_intervention_pre_qpos: np.ndarray | None = None
+    rollout_intervention_active_segment: RolloutInterventionSegment | None = None
+    rollout_intervention_segments: list[RolloutInterventionSegment] = dataclasses.field(
+        default_factory=list
+    )
+    rollout_intervention_next_segment_index: int = 0
+    hil_control_mode: str = "absolute"
     # EVAL-tab INIT panel: when init_qpos is set, the arm's reset target becomes this
     # recorded start pose instead of robot.initial_qpos (home). init_ready latches once
     # the operator clicks DONE, gating RUN until the arm is positioned + gripper set.

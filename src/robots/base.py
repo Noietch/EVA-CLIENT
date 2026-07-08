@@ -173,11 +173,28 @@ class Robot:
             offset += group.dof
         return tuple(parts)
 
-    def snap_grippers(self, action: np.ndarray, threshold: float | None) -> np.ndarray:
-        """Binarize this robot's gripper dims of an action in-place (no-op if threshold None).
+    def snap_grippers(
+        self,
+        action: np.ndarray,
+        threshold: float | None,
+        open_value: float = 1.0,
+        close_value: float = 0.0,
+    ) -> np.ndarray:
+        """Binarize this robot's gripper dimensions of an action, in-place.
 
-        Handles both a single vector [D] and a chunk [T, D] by snapping each row to
-        1.0 if >= threshold else 0.0.
+        No-op (returns ``action`` unchanged) when ``threshold`` is None or the robot
+        has no gripper dimensions. Handles both a single action vector [D] and a
+        chunk [T, D] by snapping each row.
+
+        Args:
+            action: action vector [D] or chunk [T, D]; gripper dims set to
+                open_value/close_value.
+            threshold: cutoff applied to each gripper value; None disables snapping.
+            open_value: command value for an open gripper.
+            close_value: command value for a closed gripper.
+
+        Returns:
+            The same ``action`` array with gripper dims snapped.
         """
         mask = self.gripper_mask
         if threshold is None or not any(mask):
@@ -186,5 +203,5 @@ class Robot:
         for row in rows:
             for idx, is_gripper in enumerate(mask):
                 if is_gripper and idx < len(row):
-                    row[idx] = 1.0 if row[idx] >= threshold else 0.0
+                    row[idx] = open_value if row[idx] >= threshold else close_value
         return action

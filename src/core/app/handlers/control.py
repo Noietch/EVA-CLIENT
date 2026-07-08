@@ -27,7 +27,9 @@ from core.app.handlers.recording import (
     collect_stop,
     collect_stop_teleop,
     end_episode,
+    mark_rollout_save_ready,
     record_executed_action,
+    start_rollout_intervention,
 )
 from core.app.handlers.utils import (
     _format_diag_vector,
@@ -38,6 +40,7 @@ from core.app.handlers.utils import (
     reset_run_state,
     reset_session_progress,
 )
+from core.app.operator_control import resolve_operator_event
 from core.app.state import (
     OutputTarget,
     RuntimeState,
@@ -72,12 +75,6 @@ _MOTION_INTERRUPTING_VERBS = frozenset(
 
 
 MANUAL_MAX_QPOS_STEP = 0.02
-
-
-def manual_publish_rate(config: ConfigDict) -> int:
-    """Return the configured MANUAL-mode robot publish rate in Hz."""
-    manual_cfg = config.get("manual_cfg") or {}
-    return int(manual_cfg.get("publish_rate", 15))
 
 
 def apply_gripper_control_overrides(
@@ -163,11 +160,13 @@ def apply_gripper_command(
         return False
     target_qpos = np.asarray(current_qpos, dtype=np.float32).copy()
     applied = False
+    gripper_targets: list[tuple[str, float]] = []
     for group, index, _ in iter_target_grippers(runtime.robot, side):
         if index >= len(target_qpos):
             continue
         value = decide(float(current_qpos[index]))
         target_qpos[index] = value
+        gripper_targets.append((group.name, value))
         if session is not None:
             if lock is True:
                 session.gripper_locks[group.name] = value
@@ -185,6 +184,8 @@ def apply_gripper_command(
             rate.sleep()
     else:
         publish_action(runtime, target_qpos, target=OutputTarget.REAL.value)
+    for group_name, value in gripper_targets:
+        runtime.transport.record_collection_gripper_action(group_name, value)
     return True
 
 
@@ -297,10 +298,13 @@ def _publish_manual_real_qpos(
     if start is None:
         start = target
     start = np.asarray(start, dtype=np.float32)
-    max_delta = float(np.max(np.abs(target - start))) if target.size else 0.0
+    gripper_mask = np.asarray(runtime.robot.gripper_mask, dtype=bool)
+    joint_delta = np.abs(target - start)[~gripper_mask]
+    max_delta = float(np.max(joint_delta)) if joint_delta.size else 0.0
     steps = max(1, int(np.ceil(max_delta / MANUAL_MAX_QPOS_STEP)))
-    rate = runtime.transport.create_rate(manual_publish_rate(config))
+    rate = runtime.transport.create_rate(config.inference_cfg.publish_rate)
     trajectory = build_linear_trajectory(start, target, steps + 1)[1:]
+    trajectory[:, gripper_mask] = target[gripper_mask]
     for action in trajectory:
         if poll_motion_commands(config, runtime, session):
             consume_motion_interrupt(session, session.status)
@@ -448,11 +452,57 @@ def handle_motion_command(
     # the mode/prompt/episode/checkpoint or trigger a reset must also interrupt the
     # motion, but are re-queued so the main loop applies them once it unwinds — this
     # is what lets a mode switch abort an in-progress setup instead of being dropped.
-    del config
-    verb = command.strip().lower().removeprefix("web:")
+    raw_verb = command.strip().lower().removeprefix("web:")
+    verb, _, arg = raw_verb.partition(":")
+    if verb == "operator_button":
+        button, _, source = arg.partition(":")
+        resolved_command = resolve_operator_event(
+            config,
+            runtime,
+            session,
+            button=button,
+            source=source or "cat",
+        )
+        return (
+            resolved_command is not None
+            and resolved_command != command
+            and handle_motion_command(resolved_command, config, runtime, session)
+        )
+    if verb == "operator_action":
+        intent, _, source = arg.partition(":")
+        resolved_command = resolve_operator_event(
+            config,
+            runtime,
+            session,
+            intent=intent,
+            source=source or "ui",
+        )
+        return (
+            resolved_command is not None
+            and resolved_command != command
+            and handle_motion_command(resolved_command, config, runtime, session)
+        )
+    if verb == "rollout_stop":
+        was_running = session.status is SessionStatus.RUNNING and session.mode in (
+            SessionMode.REAL,
+            SessionMode.SIM,
+        )
+        session.interrupt_requested = True
+        logger.info("Rollout stop requested; stopping current motion")
+        if was_running and not is_replay(runtime):
+            mark_rollout_save_ready(runtime, "stop")
+        return True
     if verb == "halt":
+        was_running = session.status is SessionStatus.RUNNING and session.mode in (
+            SessionMode.REAL,
+            SessionMode.SIM,
+        )
         session.interrupt_requested = True
         logger.info("Interrupt requested; stopping current motion")
+        if was_running and not is_replay(runtime):
+            mark_rollout_save_ready(runtime, "stop")
+            if session.mode is SessionMode.REAL and config.rollout.intervention.enabled:
+                start_rollout_intervention(config, runtime, session)
         return True
     if verb == "stop" and runtime.web_phase == "running":
         session.interrupt_requested = True
@@ -461,7 +511,7 @@ def handle_motion_command(
             runtime.command_queue.put(command)
         logger.info("Interrupting current motion to apply '%s'", verb)
         return True
-    if verb.partition(":")[0] in _MOTION_INTERRUPTING_VERBS:
+    if verb in _MOTION_INTERRUPTING_VERBS:
         session.interrupt_requested = True
         if runtime.command_queue is not None:
             runtime.command_queue.put(command)
@@ -548,12 +598,7 @@ def reset_with_setup(
     Raises:
         SystemExit: the transport shut down while waiting for feedback.
     """
-    publish_rate = (
-        manual_publish_rate(config)
-        if session.mode is SessionMode.MANUAL
-        else config.inference_cfg.publish_rate
-    )
-    rate = runtime.transport.create_rate(publish_rate)
+    rate = runtime.transport.create_rate(config.inference_cfg.publish_rate)
     logger.info("Resetting to initial joint position on %s target", output_target.value)
     set_setup_stage(runtime, "waiting for joint feedback")
     current_qpos = runtime.transport.get_latest_qpos()
@@ -1181,23 +1226,6 @@ def update_inference_params(
     )
 
 
-def update_manual_params(config: ConfigDict, runtime: RuntimeState, params: dict) -> None:
-    """Hot-patch MANUAL-mode robot publishing parameters onto the live runtime config.
-
-    Args:
-        params: {publish_rate?}; absent fields keep current values.
-    """
-    import copy
-
-    new_config = copy.deepcopy(config)
-    if not new_config.get("manual_cfg"):
-        new_config.manual_cfg = ConfigDict()
-    if params.get("publish_rate") is not None:
-        new_config.manual_cfg.publish_rate = int(params["publish_rate"])
-    runtime.active_config = new_config
-    logger.info("Updated manual params: publish_rate=%d", manual_publish_rate(new_config))
-
-
 def replace_inference_strategy(
     config: ConfigDict, runtime: RuntimeState, strategy_key: str
 ) -> None:
@@ -1255,7 +1283,7 @@ def select_mode(
     if mode is not SessionMode.COLLECT and runtime.collection_teleop_active:
         if session.mode is SessionMode.COLLECT and session.status is SessionStatus.RUNNING:
             collect_stop(config, runtime, session)
-        collect_stop_teleop(runtime, session)
+        collect_stop_teleop(config, runtime, session)
     session.mode = mode
     reset_session_progress(session)
     reset_infer_strategy(runtime)
@@ -1291,7 +1319,6 @@ def select_task(
 __all__ = [
     "_MOTION_INTERRUPTING_VERBS",
     "MANUAL_MAX_QPOS_STEP",
-    "manual_publish_rate",
     "apply_gripper_control_overrides",
     "iter_target_grippers",
     "apply_gripper_command",
@@ -1322,7 +1349,6 @@ __all__ = [
     "run_one_chunk_on_sim",
     "run_pending_chunk_on_real",
     "update_inference_params",
-    "update_manual_params",
     "replace_inference_strategy",
     "select_inference_strategy",
     "select_mode",

@@ -23,7 +23,18 @@ from robots.base import (
     RobotVisConfig,
     VisPart,
 )
-from robots.kinematics.pyroki import PyrokiDualArm, PyrokiSingleArm
+
+try:
+    from robots.kinematics.pyroki import PyrokiDualArm, PyrokiSingleArm
+except ImportError as exc:
+    _PYROKI_IMPORT_ERROR: ImportError | None = exc
+
+    class PyrokiDualArm:  # type: ignore[no-redef]
+        pass
+
+    PyrokiSingleArm = None  # type: ignore[assignment]
+else:
+    _PYROKI_IMPORT_ERROR = None
 
 
 class R1LiteKinematicsSolver(PyrokiDualArm):
@@ -101,7 +112,11 @@ class R1Lite(Robot):
                 ActuatorGroup("left_arm", 7, self.LEFT_JOINTS, gripper_index=6),
                 ActuatorGroup("right_arm", 7, self.RIGHT_JOINTS, gripper_index=6),
             ),
-            initial_qpos=np.zeros(14, dtype=np.float32),
+            initial_qpos=np.array(
+                [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 100.0,
+                 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 100.0],
+                dtype=np.float32,
+            ),
             observation_schema=ObservationSchema(
                 cameras=(
                     CameraSpec("head", "cam_high"),
@@ -126,6 +141,10 @@ class R1Lite(Robot):
         )
 
     def build_kinematics(self, *, reference_frame: str | None = None, **kwargs: Any) -> Any:
+        if _PYROKI_IMPORT_ERROR is not None:
+            raise ImportError("R1 Lite kinematics requires the PyRoki/JAX dependencies") from (
+                _PYROKI_IMPORT_ERROR
+            )
         frame = reference_frame or self.DEFAULT_FRAME
         if frame not in self.SUPPORTED_FRAMES:
             allowed = ", ".join(self.SUPPORTED_FRAMES)

@@ -63,6 +63,24 @@ def test_single_gripper_config_exposes_one_gripper_control(console):
     assert controls == [{"side": "l", "label": "GRIPPER", "group": "arm"}]
 
 
+@pytest.mark.parametrize(
+    "console",
+    [
+        console_config(
+            robot=dict(type="r1_lite", gripper_open=100.0, gripper_close=0.0)
+        )
+    ],
+    indirect=True,
+)
+def test_r1lite_manual_qpos_limits_expose_full_gripper_range(console):
+    limits = console.get("/api/config").json["manual_qpos_limits"]
+
+    assert len(limits) == 14
+    assert limits[0] == {"min": -3.2, "max": 3.2, "step": 0.005}
+    assert limits[6] == {"min": 0.0, "max": 100.0, "step": 0.1}
+    assert limits[13] == {"min": 0.0, "max": 100.0, "step": 0.1}
+
+
 def test_reselecting_mode_clears_completed_setup(console):
     console.do("/api/connect")
     console.do("/api/select_mode", {"mode": "sim"})
@@ -145,10 +163,12 @@ def test_tab_switch_away_from_collect_stops_armed_teleop():
         policy=None,
         ik_solver=None,
         web_phase="idle",
+        rollout_intervention_active=False,
     )
     session = SessionState(mode=SessionMode.COLLECT, status=SessionStatus.READY)
+    config = ConfigDict(collection=ConfigDict(gate=ConfigDict(enabled=False)))
 
-    app.handle_command("web:tab_switch:manual", ConfigDict(), cast(RuntimeState, runtime), session)
+    app.handle_command("web:tab_switch:manual", config, cast(RuntimeState, runtime), session)
 
     assert calls == ["stop_collection"]
     assert runtime.collection_teleop_active is False
@@ -167,6 +187,57 @@ def test_tab_switch_to_eval_restores_config_mode(console):
     console.post("/api/tab_switch", {"tab": "eval"})
     console.pump()
     assert console.session.mode is SessionMode.REAL
+
+
+@pytest.mark.parametrize(
+    "console",
+    [
+        console_config(
+            eval=ConfigDict(
+                cli_mode="sim",
+                inference_strategy="sync",
+                reset_after_each_trial=False,
+                skip_warmup_after_first=False,
+                checkpoints=(),
+                tasks=(
+                    ConfigDict(prompt_en="pick up the cup"),
+                    ConfigDict(prompt_en="pour soybean"),
+                ),
+            )
+        )
+    ],
+    indirect=True,
+)
+def test_eval_stop_can_switch_prompt_and_start_next_rollout(console):
+    first_prompt = "pick up the cup"
+    second_prompt = "pour soybean"
+    console.do("/api/connect")
+    console.do("/api/select_mode", {"mode": "sim"})
+    console.do("/api/select_task", {"task": first_prompt})
+    console.do("/api/setup")
+    console.runtime.web_phase = "ready"
+
+    console.do(
+        "/api/eval_start",
+        {"clip_id": "clip-1", "prompt": first_prompt, "trial": 1},
+    )
+    for _ in range(5):
+        handlers.publish_next_action(console.config, console.runtime, console.session)
+    console.do("/api/eval_stop")
+    assert console.session.status is SessionStatus.READY
+    assert console.session.step_index == 5
+    assert console.runtime.needs_pre_start_reset is True
+
+    console.do("/api/select_task", {"task": second_prompt})
+    console.do(
+        "/api/eval_start",
+        {"clip_id": "clip-2", "prompt": second_prompt, "trial": 1},
+    )
+
+    assert console.status()["session_status"] == "running"
+    assert console.session.selected_task == second_prompt
+    assert console.session.step_index == 0
+    assert console.runtime.needs_pre_start_reset is False
 
 
 def test_collect_loop_uses_publish_rate_without_dataset_fps():
@@ -436,12 +507,45 @@ def test_collection_replay_status_stops_playing_at_last_frame():
         assert replay["frame_index"] == 1
 
 
-def test_collect_step_yields_after_budgeted_collection_snapshots():
-    budget = 16
-    snapshots = [object() for _ in range(budget + 3)]
+def test_collect_step_collection_capture_is_background_only():
+    class _Transport:
+        def __init__(self):
+            self.acquired = 0
+
+        def acquire_collection_raw(self):
+            self.acquired += 1
+            return object()
+
+    class _Logger:
+        is_collection_enabled = True
+
+        def ingest_collection_snapshot(self, snapshot):
+            raise AssertionError("collection-enabled collect_step must not ingest")
+
+    transport = _Transport()
+    runtime = SimpleNamespace(episode_logger=_Logger(), transport=transport)
+
+    assert not handlers.collect_step(console_config(), cast(RuntimeState, runtime))
+    assert transport.acquired == 0
+
+
+def test_collect_start_runs_collection_capture_in_background():
+    snapshots = [object(), object(), object()]
     ingested = []
 
     class _Transport:
+        def supports_collection(self):
+            return True
+
+        def start_collection(self):
+            return None
+
+        def reset_hil_control(self):
+            return None
+
+        def clear_collection_backlog(self):
+            return 42.0
+
         def acquire_collection_raw(self):
             if snapshots:
                 return snapshots.pop(0)
@@ -450,14 +554,37 @@ def test_collect_step_yields_after_budgeted_collection_snapshots():
     class _Logger:
         is_collection_enabled = True
 
+        def is_queue_full(self):
+            return False
+
+        def start_episode(self, *, task, collection_min_capture_time=None):
+            return None
+
         def ingest_collection_snapshot(self, snapshot):
             ingested.append(snapshot)
 
-    runtime = SimpleNamespace(episode_logger=_Logger(), transport=_Transport())
+        def end_episode(self):
+            return True
 
-    assert handlers.collect_step(console_config(), cast(RuntimeState, runtime))
-    assert len(ingested) == budget
-    assert len(snapshots) == 3
+    runtime = SimpleNamespace(
+        episode_logger=_Logger(),
+        transport=_Transport(),
+        collection_replay_qpos=None,
+        collection_replay_episode=None,
+        collection_teleop_armed=True,
+        collection_teleop_active=False,
+        last_collection_timestamp=None,
+    )
+    session = SessionState(selected_collect_task="pick")
+    config = console_config(inference_cfg=ConfigDict(publish_rate=200))
+
+    assert handlers.collect_start(config, cast(RuntimeState, runtime), session)
+    deadline = time.monotonic() + 1.0
+    while len(ingested) < 3 and time.monotonic() < deadline:
+        time.sleep(0.005)
+    handlers.collect_stop(config, cast(RuntimeState, runtime), session)
+
+    assert len(ingested) == 3
 
 
 def test_collect_start_clears_backlog_and_passes_cutoff_to_logger():
@@ -470,9 +597,15 @@ def test_collect_start_clears_backlog_and_passes_cutoff_to_logger():
         def start_collection(self):
             calls.append("start_collection")
 
+        def reset_hil_control(self):
+            calls.append("reset_hil_control")
+
         def clear_collection_backlog(self):
             calls.append("clear_collection_backlog")
             return 42.0
+
+        def acquire_collection_raw(self):
+            return None
 
     class _Logger:
         is_collection_enabled = True
@@ -493,16 +626,22 @@ def test_collect_start_clears_backlog_and_passes_cutoff_to_logger():
         last_collection_timestamp=None,
     )
     session = SessionState(selected_collect_task="pick")
+    config = console_config(inference_cfg=ConfigDict(publish_rate=200))
 
-    assert handlers.collect_start(cast(RuntimeState, runtime), session)
-    assert calls == [
-        "start_collection",
-        "clear_collection_backlog",
-        ("start_episode", "pick", 42.0),
-    ]
-    assert session.status is SessionStatus.RUNNING
-    assert runtime.collection_replay_qpos is None
-    assert runtime.collection_replay_episode is None
+    assert handlers.collect_start(config, cast(RuntimeState, runtime), session)
+    try:
+        assert calls == [
+            "reset_hil_control",
+            "start_collection",
+            "clear_collection_backlog",
+            ("start_episode", "pick", 42.0),
+        ]
+        assert session.status is SessionStatus.RUNNING
+        assert runtime.collection_replay_qpos is None
+        assert runtime.collection_replay_episode is None
+    finally:
+        runtime.collection_capture_runner.stop()
+        runtime.collection_capture_runner = None
 
 
 def test_collect_start_requires_activation_gate():
@@ -533,8 +672,9 @@ def test_collect_start_requires_activation_gate():
         collection_teleop_active=False,
     )
     session = SessionState(selected_collect_task="pick")
+    config = ConfigDict(collection=ConfigDict(gate=ConfigDict(enabled=False)))
 
-    assert not handlers.collect_start(cast(RuntimeState, runtime), session)
+    assert not handlers.collect_start(config, cast(RuntimeState, runtime), session)
     assert calls == []
     assert session.last_error == "Collection teleop requires COLLECT activation"
 
@@ -731,7 +871,9 @@ def test_manual_halt_aborts_staged_real_publish():
             return self.rate
 
     transport = _Transport()
+    robot = SimpleNamespace(gripper_mask=(False, False))
     runtime = SimpleNamespace(
+        robot=robot,
         transport=transport,
         command_queue=command_queue,
         prompt_ready=None,
@@ -755,25 +897,14 @@ def test_manual_halt_aborts_staged_real_publish():
     assert not np.allclose(session.manual_real_qpos, session.manual_qpos)
 
 
-def test_manual_tuning_updates_manual_publish_rate_only(console):
-    inference_publish_rate = console.config.inference_cfg.publish_rate
-
-    console.do("/api/update_manual_params", {"publish_rate": 17})
-
-    config = console.runtime.active_config
-    assert config.manual_cfg.publish_rate == 17
-    assert config.inference_cfg.publish_rate == inference_publish_rate
-
-
-def test_manual_send_uses_manual_publish_rate():
+def test_manual_send_publishes_gripper_target_without_joint_step_scaling():
     class _Rate:
         def sleep(self) -> None:
             pass
 
     class _Transport:
         def __init__(self) -> None:
-            self.qpos = np.zeros(2, dtype=np.float32)
-            self.rates: list[float] = []
+            self.qpos = np.zeros(14, dtype=np.float32)
             self.published: list[tuple[str, np.ndarray]] = []
 
         def get_latest_qpos(self) -> np.ndarray:
@@ -785,88 +916,36 @@ def test_manual_send_uses_manual_publish_rate():
             if target == "real":
                 self.qpos = sent
 
-        def create_rate(self, hz: float) -> _Rate:
-            self.rates.append(hz)
+        def create_rate(self, _hz: float) -> _Rate:
             return _Rate()
 
     transport = _Transport()
+    robot = SimpleNamespace(
+        gripper_mask=tuple(i in {6, 13} for i in range(14)),
+    )
     runtime = SimpleNamespace(
+        robot=robot,
         transport=transport,
         command_queue=queue.Queue(),
         prompt_ready=None,
         web_phase="idle",
     )
+    target = np.zeros(14, dtype=np.float32)
+    target[6] = 100.0
     session = SessionState(
         mode=SessionMode.MANUAL,
         status=SessionStatus.UNSET,
-        manual_qpos=np.asarray([handlers.MANUAL_MAX_QPOS_STEP * 2, 0.0], dtype=np.float32),
-        manual_real_qpos=np.zeros(2, dtype=np.float32),
+        manual_qpos=target,
+        manual_real_qpos=np.zeros(14, dtype=np.float32),
     )
-    config = ConfigDict(
-        inference_cfg=ConfigDict(publish_rate=100),
-        manual_cfg=ConfigDict(publish_rate=7),
-    )
+    config = ConfigDict(inference_cfg=ConfigDict(publish_rate=100))
 
     app.handle_command("web:manual_send", config, cast(RuntimeState, runtime), session)
 
-    assert transport.rates == [7]
-    assert transport.published
-
-
-def test_manual_reset_uses_manual_publish_rate():
-    class _Rate:
-        def sleep(self) -> None:
-            pass
-
-    class _Transport:
-        def __init__(self) -> None:
-            self.qpos = np.asarray([1.0, 0.0], dtype=np.float32)
-            self.rates: list[float] = []
-
-        def get_latest_qpos(self) -> np.ndarray:
-            return self.qpos.copy()
-
-        def publish_action(self, action: np.ndarray, target: str = "real") -> None:
-            if target == "real":
-                self.qpos = np.asarray(action, dtype=np.float32).copy()
-
-        def create_rate(self, hz: float) -> _Rate:
-            self.rates.append(hz)
-            return _Rate()
-
-        def has_sim_publishers(self) -> bool:
-            return False
-
-        def is_shutdown(self) -> bool:
-            return False
-
-    transport = _Transport()
-    runtime = SimpleNamespace(
-        transport=transport,
-        command_queue=queue.Queue(),
-        prompt_ready=None,
-        robot=SimpleNamespace(
-            initial_qpos=np.zeros(2, dtype=np.float32),
-            gripper_indices=[],
-        ),
-        init_qpos=None,
-    )
-    session = SessionState(mode=SessionMode.MANUAL)
-    config = ConfigDict(
-        inference_cfg=ConfigDict(publish_rate=100),
-        manual_cfg=ConfigDict(publish_rate=7),
-    )
-
-    ok = handlers.reset_with_setup(
-        config,
-        cast(RuntimeState, runtime),
-        session,
-        OutputTarget.REAL,
-    )
-
-    assert ok is True
-    assert transport.rates == [7]
-    np.testing.assert_allclose(transport.qpos, np.zeros(2, dtype=np.float32))
+    assert len(transport.published) == 1
+    assert transport.published[-1][0] == "real"
+    assert transport.published[-1][1][6] == pytest.approx(100.0)
+    np.testing.assert_allclose(session.manual_real_qpos, target)
 
 
 def test_manual_send_status_returns_to_idle_after_publish(console):
@@ -1014,6 +1093,9 @@ def test_eval_start_skips_setup_when_already_warmed(monkeypatch):
         current_cell={"prompt": "pick up the cup", "trial": 1},
         current_clip_id=None,
         needs_pre_start_reset=False,
+        infer_strategy=None,
+        policy=None,
+        ik_solver=None,
     )
     session = SessionState(
         mode=SessionMode.REAL,
@@ -1029,8 +1111,8 @@ def test_eval_start_skips_setup_when_already_warmed(monkeypatch):
 
 
 def test_eval_start_runs_setup_when_not_warmed(monkeypatch):
-    """The skip is gated: a RUN with no prior SETUP (or after a stop that left the arm
-    un-reset) must still run setup so the home trajectory is sent before publishing."""
+    """The skip is gated: a RUN with no prior SETUP or an explicit deferred reset
+    must still run setup so the home trajectory is sent before publishing."""
     setup_calls = {"n": 0}
 
     def _fake_setup(config, runtime, session, fail_fast=False):
@@ -1040,9 +1122,7 @@ def test_eval_start_runs_setup_when_not_warmed(monkeypatch):
         return True
 
     monkeypatch.setattr(app, "run_setup", _fake_setup)
-    monkeypatch.setattr(
-        app, "_dispatch_run", lambda *a: setattr(a[2], "status", SessionStatus.RUNNING)
-    )
+    monkeypatch.setattr(app, "_dispatch_run", lambda *a: setattr(a[2], "status", SessionStatus.RUNNING))
 
     runtime = SimpleNamespace(
         web_phase="ready",
@@ -1050,7 +1130,7 @@ def test_eval_start_runs_setup_when_not_warmed(monkeypatch):
         episode_logger=None,
         current_cell={"prompt": "pick up the cup", "trial": 1},
         current_clip_id=None,
-        needs_pre_start_reset=True,  # a prior stop left the arm un-reset
+        needs_pre_start_reset=True,
     )
     session = SessionState(
         mode=SessionMode.REAL,
@@ -1064,7 +1144,40 @@ def test_eval_start_runs_setup_when_not_warmed(monkeypatch):
     assert setup_calls["n"] == 1
 
 
-def test_eval_stop_during_running_motion_is_requeued_and_finalized():
+def test_eval_start_binds_cell_prompt_before_task_gate(monkeypatch):
+    def _fake_setup(config, runtime, session, fail_fast=False):
+        session.is_setup_done = True
+        session.status = SessionStatus.READY
+        return True
+
+    monkeypatch.setattr(app, "run_setup", _fake_setup)
+    monkeypatch.setattr(app, "_dispatch_run", lambda *a: setattr(a[2], "status", SessionStatus.RUNNING))
+
+    runtime = SimpleNamespace(
+        web_phase="ready",
+        replay_source=None,
+        episode_logger=None,
+        current_cell={"prompt": "pick up the cup", "trial": 1},
+        current_clip_id=None,
+        needs_pre_start_reset=False,
+        infer_strategy=None,
+        policy=None,
+        ik_solver=None,
+    )
+    session = SessionState(
+        mode=SessionMode.REAL,
+        status=SessionStatus.READY,
+        is_setup_done=True,
+        selected_task=None,
+    )
+
+    app.handle_command("web:start", ConfigDict(), cast(RuntimeState, runtime), session)
+
+    assert session.selected_task == "pick up the cup"
+    assert session.status is SessionStatus.RUNNING
+
+
+def test_eval_stop_during_running_motion_is_requeued_finalized_and_left_ready():
     command_queue: queue.Queue[str] = queue.Queue()
 
     class _Logger:

@@ -10,8 +10,8 @@ from _harness import console_config
 
 import robots  # noqa: F401
 from core.app import handlers
-from core.app import run as app
 from core.app.handlers import control as control_handlers
+from core.app import run as app
 from core.app.handlers.space import build_space
 from core.app.state import RuntimeState, SessionMode, SessionState, SessionStatus
 from core.config import ConfigDict
@@ -539,3 +539,23 @@ def test_joint_replay_does_not_treat_plain_action_as_missing_gripper(monkeypatch
 
     np.testing.assert_allclose(action, np.zeros(7, dtype=np.float32))
     assert runtime.ik_solver is None
+
+
+def test_joint_replay_snaps_gripper_to_configured_open_value():
+    runtime = RuntimeState(
+        robot=ROBOT_REGISTRY.build("r1_lite"),
+        transport=_FakeTransport(),
+    )
+    runtime.replay_trajectory = np.asarray(
+        [[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 100.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 100.0]],
+        dtype=np.float32,
+    )
+    runtime.replay_action_mode = "joint"
+    config = _joint_config("r1_lite")
+    config.robot.gripper_threshold = 50.0
+    config.robot.gripper_open = 100.0
+    config.robot.gripper_close = 0.0
+
+    action = handlers._replay_action_at(config, runtime, 0)
+
+    np.testing.assert_allclose(action[[6, 13]], [100.0, 100.0], atol=1e-6)
