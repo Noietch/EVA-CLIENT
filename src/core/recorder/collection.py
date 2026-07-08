@@ -1,9 +1,9 @@
 """Teleop collection episode writer — the EpisodeLogger sub-component that turns a
 stream of raw teleop snapshots into one LeRobot v2.1 collection episode.
 
-Decode/copy work runs on a background ingest thread so the capture loop never
-blocks; ``end_episode`` drains it, validates each frame, and packs the per-frame
-columns into a SaveJob the parent EpisodeLogger flushes to disk.
+Recording only stores raw snapshots; the save worker later extracts raw samples,
+aligns the full episode, validates each frame, and packs the per-frame columns
+into a SaveJob the parent EpisodeLogger flushes to disk.
 """
 
 from __future__ import annotations
@@ -11,8 +11,8 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
-import queue
 import threading
+import time
 from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -20,7 +20,10 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import pyarrow.parquet as pq
 
-from core.app.handlers.imaging import resize_direct
+from core.recorder.collection_alignment import (
+    CollectionAlignmentReport,
+    align_collection_samples,
+)
 from core.recorder.episode import (
     _COLLECTION_VECTOR_FIELDS,
     QualityIssue,
@@ -30,7 +33,8 @@ from core.recorder.episode import (
     _to_rgb_uint8,
 )
 from core.recorder.lerobot_meta import build_info
-from core.types import Observation
+from core.types import CollectionRawBatch, Observation
+from core.utils.images import resize_direct
 
 if TYPE_CHECKING:
     from core.config import ConfigDict
@@ -54,6 +58,16 @@ _COLUMN_TO_FIELD = {
 }
 
 
+@dataclasses.dataclass
+class CollectionSavePayload:
+    """Frozen collection episode input prepared by the save worker."""
+
+    raw_snapshots: list[RawCollectionSnapshot]
+    quality_issues: list[QualityIssue]
+    min_capture_time: float | None
+    max_capture_time: float | None
+
+
 def _is_hwc3(arr: np.ndarray) -> bool:
     """True when arr is a HWC image with 3 channels (the only shape we record)."""
     return arr.ndim == 3 and arr.shape[2] == 3
@@ -62,13 +76,10 @@ def _is_hwc3(arr: np.ndarray) -> bool:
 class CollectionEpisodeWriter:
     """Builds one teleop collection episode for its parent EpisodeLogger.
 
-    Decode/copy work runs on a background ingest thread (fed via ``ingest``) so the
-    capture loop never blocks; ``end_episode`` drains it, validates every frame's
-    timestamps / images / vector dims (recording QualityIssue flags), and packs the
-    per-frame columns into a SaveJob the parent flushes to a LeRobot v2.1 parquet.
+    The capture path only stores RawCollectionSnapshot references. Raw extraction,
+    alignment, validation, image decode, and video packing all run on the save
+    worker so recording competes as little as possible with live robot/UI updates.
     """
-
-    _INGEST_HIGH_WATER = 300
 
     def __init__(self, episode_logger: EpisodeLogger, collection: ConfigDict) -> None:
         self._logger = episode_logger
@@ -76,18 +87,18 @@ class CollectionEpisodeWriter:
         self._schema = collection.schema
         self._records: list[Observation] = []
         self._quality_issues: list[QualityIssue] = []
+        self._raw_batch = CollectionRawBatch()
+        self._raw_snapshots: list[RawCollectionSnapshot] = []
+        self._alignment_report: CollectionAlignmentReport | None = None
         self._image_shapes: dict[str, tuple[int, int]] = {}
-        self._ingest_queue: queue.Queue[RawCollectionSnapshot | None] = queue.Queue()
-        self._ingest_thread: threading.Thread | None = None
-        self._ingest_error: BaseException | None = None
-        self._high_water_logged = False
+        self._state_lock = threading.Lock()
         self._received_snapshots = 0
         self._skipped_before_start = 0
-        self._skipped_no_action = 0
         self._min_capture_time: float | None = None
+        self._max_capture_time: float | None = None
 
     def start_episode(self, min_capture_time: float | None = None) -> None:
-        """Reset buffers and launch the background ingest thread for a new episode.
+        """Reset buffers for a new collection episode.
 
         Args:
             min_capture_time: Source timestamp cutoff; frames at or before it are
@@ -95,133 +106,158 @@ class CollectionEpisodeWriter:
         """
         self._records = []
         self._quality_issues = []
-        self._ingest_queue = queue.Queue()
-        self._ingest_error = None
-        self._high_water_logged = False
+        self._raw_batch = CollectionRawBatch(start_time=min_capture_time)
+        self._raw_snapshots = []
+        self._alignment_report = None
         self._received_snapshots = 0
         self._skipped_before_start = 0
-        self._skipped_no_action = 0
         self._min_capture_time = min_capture_time
-        self._ingest_thread = threading.Thread(
-            target=self._ingest_loop, name="collection-ingest", daemon=True
-        )
-        self._ingest_thread.start()
+        self._max_capture_time = None
 
     def ingest(self, snapshot: RawCollectionSnapshot) -> None:
-        """Hand one pre-decode snapshot to the ingest thread. O(1), never blocks.
+        """Store one pre-decode snapshot. O(1), never decodes raw messages.
 
-        The capture loop calls this; all decode/copy/convert work happens on the
-        ingest thread. The queue is unbounded so a busy ingest never stalls the
-        main loop or drops frames — sustained overload only grows memory, flagged
-        once via a high-water warning.
+        The capture loop calls this while recording. Raw extraction is intentionally
+        deferred to the save worker so start-record does not add image/vector decode
+        work to the live UI/control path.
         """
-        if self._ingest_error is not None:
-            raise RuntimeError("collection ingest thread failed") from self._ingest_error
         if self._is_before_episode_start(snapshot.timestamp):
-            self._skipped_before_start += 1
+            with self._state_lock:
+                self._skipped_before_start += 1
             return
-        self._ingest_queue.put(snapshot)
-        self._received_snapshots += 1
-        if not self._high_water_logged and self._ingest_queue.qsize() > self._INGEST_HIGH_WATER:
-            self._high_water_logged = True
-            logger.warning(
-                "collection ingest backlog above %d frames; processing slower than capture rate",
-                self._INGEST_HIGH_WATER,
-            )
+        with self._state_lock:
+            self._received_snapshots += 1
+            if snapshot.timestamp > 0.0:
+                self._max_capture_time = (
+                    snapshot.timestamp
+                    if self._max_capture_time is None
+                    else max(self._max_capture_time, snapshot.timestamp)
+                )
+            self._raw_snapshots.append(snapshot)
 
-    def _ingest_loop(self) -> None:
-        while True:
-            snapshot = self._ingest_queue.get()
-            try:
-                if snapshot is None:
-                    return
-                frame = snapshot.decode()
-                if self._is_before_episode_start(frame.timestamp):
-                    self._received_snapshots = max(0, self._received_snapshots - 1)
-                    self._skipped_before_start += 1
-                    continue
-                # Teleop action lags source frames at episode start (node publishes
-                # no action until calibration completes); skip those rather than
-                # record zero-action rows, matching the pre-async behavior.
-                if frame.action_qpos is None:
-                    self._skipped_no_action += 1
-                    continue
-                self.record_frame(frame, copy_images=False)
-            except BaseException as exc:  # surface to end_episode; keep buffers intact
-                self._ingest_error = exc
-                logger.exception("collection ingest failed")
-                return
-            finally:
-                self._ingest_queue.task_done()
-
-    def _drain_ingest(self) -> None:
-        """Block until the ingest thread has consumed every queued snapshot."""
-        thread = self._ingest_thread
-        if thread is None:
-            return
-        self._ingest_queue.put(None)
-        thread.join()
-        self._ingest_thread = None
-        if self._ingest_error is not None:
-            raise RuntimeError("collection ingest thread failed") from self._ingest_error
-
-    def record_frame(self, frame: Observation, *, copy_images: bool = True) -> None:
-        """Append one decoded frame and run per-frame QC checks.
+    def _append_aligned_frame(self, frame: Observation) -> None:
+        """Append one fixed-clock aligned frame and run per-frame QC checks.
 
         Args:
-            frame: Decoded collection frame with HWC camera images and vector fields.
-            copy_images: Copy image arrays before storing them. Public callers keep
-                the default; raw snapshot ingest can pass False because decode()
-                yields episode-private arrays.
+            frame: Aligned collection frame with HWC camera images and vector fields.
         """
         if frame.timestamp is None or frame.state_qpos is None:
             raise ValueError("collection frame missing timestamp or state_qpos")
-        frame_index = len(self._records)
-        images = {
-            key: np.asarray(value).copy() if copy_images else np.asarray(value)
-            for key, value in frame.images.items()
-        }
-        vectors = {
-            field: (
-                None
-                if getattr(frame, field) is None
-                else np.asarray(getattr(frame, field), dtype=np.float32).copy()
+        with self._state_lock:
+            frame_index = len(self._records)
+            images = {
+                key: np.asarray(value) for key, value in frame.images.items()
+            }
+            vectors = {
+                field: (
+                    None
+                    if getattr(frame, field) is None
+                    else np.asarray(getattr(frame, field), dtype=np.float32).copy()
+                )
+                for field in _COLLECTION_VECTOR_FIELDS
+                if field != "state_qpos"
+            }
+            record = Observation(
+                timestamp=float(frame.timestamp),
+                images=images,
+                state_qpos=np.asarray(frame.state_qpos, dtype=np.float32).copy(),
+                **vectors,
             )
-            for field in _COLLECTION_VECTOR_FIELDS
-            if field != "state_qpos"
-        }
-        record = Observation(
-            timestamp=float(frame.timestamp),
-            images=images,
-            state_qpos=np.asarray(frame.state_qpos, dtype=np.float32).copy(),
-            **vectors,
-        )
-        self._records.append(record)
-        self._check_timestamp(float(frame.timestamp), frame_index)
-        self._check_images(record, frame_index)
+            self._records.append(record)
+            self._check_timestamp(float(frame.timestamp), frame_index)
+            self._check_images(record, frame_index)
+            self._max_capture_time = (
+                record.timestamp
+                if self._max_capture_time is None
+                else max(self._max_capture_time, record.timestamp)
+            )
 
     def frame_counts(self) -> dict[str, int]:
         """Return live collection counters for UI status.
 
         received counts raw snapshots accepted by the main loop. recorded counts
-        decoded rows that will be saved. pending bridges the ingest lag between
+        aligned rows that will be saved. pending bridges the ingest lag between
         those two so the UI does not show zero while frames are queued.
         """
-        recorded = len(self._records)
-        received = max(self._received_snapshots, recorded)
-        pending = max(0, received - self._skipped_no_action - recorded)
-        return {
-            "received": received,
-            "recorded": recorded,
-            "pending": pending,
-            "skipped_before_start": self._skipped_before_start,
-            "skipped_no_action": self._skipped_no_action,
-        }
+        with self._state_lock:
+            recorded = len(self._records)
+            received = max(self._received_snapshots, recorded)
+            pending = max(0, received - recorded)
+            return {
+                "received": received,
+                "recorded": recorded,
+                "pending": pending,
+                "skipped_before_start": self._skipped_before_start,
+            }
 
     def _is_before_episode_start(self, timestamp: float | None) -> bool:
         if self._min_capture_time is None or timestamp is None or timestamp <= 0.0:
             return False
         return timestamp <= self._min_capture_time
+
+    def _merge_raw_batch(self, batch: CollectionRawBatch) -> None:
+        with self._state_lock:
+            if batch.start_time is not None:
+                self._raw_batch.start_time = (
+                    batch.start_time
+                    if self._raw_batch.start_time is None
+                    else max(self._raw_batch.start_time, batch.start_time)
+                )
+            if batch.end_time is not None:
+                self._raw_batch.end_time = (
+                    batch.end_time
+                    if self._raw_batch.end_time is None
+                    else max(self._raw_batch.end_time, batch.end_time)
+                )
+            for key, samples in batch.images.items():
+                self._raw_batch.images.setdefault(key, []).extend(samples)
+                self._track_raw_sample_times(samples)
+            for key, samples in batch.vectors.items():
+                self._raw_batch.vectors.setdefault(key, []).extend(samples)
+                self._track_raw_sample_times(samples)
+
+    def _track_raw_sample_times(self, samples: list[Any]) -> None:
+        for sample in samples:
+            self._max_capture_time = (
+                sample.timestamp
+                if self._max_capture_time is None
+                else max(self._max_capture_time, sample.timestamp)
+            )
+
+    def _has_raw_samples(self) -> bool:
+        return any(self._raw_batch.images.values()) or any(self._raw_batch.vectors.values())
+
+    def _raw_sample_count(self) -> int:
+        return sum(len(samples) for samples in self._raw_batch.images.values()) + sum(
+            len(samples) for samples in self._raw_batch.vectors.values()
+        )
+
+    def _decode_raw_snapshots(self, snapshots: Iterable[RawCollectionSnapshot]) -> None:
+        for snapshot in snapshots:
+            self._merge_raw_batch(snapshot.decode_raw())
+
+    def _image_skew_tolerance_sec(self) -> float:
+        fps = float(self._logger._fps)
+        if fps <= 1.0:
+            return 0.5 / fps
+        return 1.0 / (2.0 * (fps - 1.0))
+
+    def _align_raw_records(self) -> None:
+        self._records = []
+        fields = tuple(_COLUMN_TO_FIELD[column] for column in self._schema.columns)
+        frames, report = align_collection_samples(
+            self._raw_batch,
+            robot=self._logger._robot,
+            camera_keys=tuple(self._schema.cameras.keys()),
+            vector_fields=fields,
+            fps=float(self._logger._fps),
+            image_skew_sec=self._image_skew_tolerance_sec(),
+        )
+        self._alignment_report = report
+        for issue in report.issues:
+            self._add_issue(issue.code, issue.detail)
+        for frame in frames:
+            self._append_aligned_frame(frame)
 
     def expected_dim(self, field: str) -> int:
         """Expected vector length for a collection field (joints / eef).
@@ -235,40 +271,98 @@ class CollectionEpisodeWriter:
         raise ValueError(f"unknown collection field: {field}")
 
     def end_episode(self) -> SaveJob | None:
-        """Drain ingest, validate frames, and pack the episode into a SaveJob.
+        """Pack raw episode snapshots into a background SaveJob.
 
         Returns:
-            A SaveJob carrying the cleaned per-frame columns + episode meta row for
-            the parent logger to flush, or None when no frames were recorded.
+            A SaveJob carrying frozen raw snapshots for the parent logger's
+            save worker, or None when no samples were recorded.
         """
-        self._drain_ingest()
-        if not self._records:
+        started = time.perf_counter()
+        with self._state_lock:
+            raw_snapshots = list(self._raw_snapshots)
+            max_capture_time = self._max_capture_time
+        has_raw = bool(raw_snapshots)
+        if not has_raw:
             logger.warning(
                 "collection episode produced 0 frames; nothing saved "
-                "(teleop action never arrived — calibration likely incomplete)"
+                "(no raw collection snapshots arrived)"
             )
             return None
+
+        task = self._logger._task or ""
+        dataset_dir = self._logger._collection_dataset_dir(task)
+        episode_index = self._logger._next_collection_episode_index(dataset_dir)
+        task_index = 0
+        package_done = time.perf_counter()
+
+        job = SaveJob(
+            episode_index=episode_index,
+            task=task,
+            task_index=task_index,
+            global_index=-1,
+            steps=[],
+            episode_meta=dict(self._logger._episode_meta),
+            task_to_index={task: task_index},
+            collection_payload=CollectionSavePayload(
+                raw_snapshots=raw_snapshots,
+                quality_issues=list(self._quality_issues),
+                min_capture_time=self._min_capture_time,
+                max_capture_time=max_capture_time,
+            ),
+            video_fps=float(self._logger._fps),
+            dataset_dir=dataset_dir,
+        )
+        self._records = []
+        self._quality_issues = []
+        self._raw_batch = CollectionRawBatch()
+        self._raw_snapshots = []
+        self._alignment_report = None
+        self._max_capture_time = None
+        logger.info(
+            "collection end_episode queued raw=%s raw_snapshots=%d: package=%.1fms "
+            "total=%.1fms",
+            has_raw,
+            len(raw_snapshots),
+            (package_done - started) * 1000.0,
+            (package_done - started) * 1000.0,
+        )
+        return job
+
+    def prepare_save_job(self, job: SaveJob) -> None:
+        """Prepare a queued collection SaveJob on the save worker thread."""
+        if job.collection_payload is None:
+            return
+        payload = job.collection_payload
+        preparer = CollectionEpisodeWriter(self._logger, self._collection)
+        preparer._quality_issues = list(payload.quality_issues)
+        preparer._raw_batch = CollectionRawBatch(start_time=payload.min_capture_time)
+        preparer._min_capture_time = payload.min_capture_time
+        preparer._max_capture_time = payload.max_capture_time
+        preparer._image_shapes = dict(self._image_shapes)
+        preparer._decode_raw_snapshots(payload.raw_snapshots)
+        if preparer._raw_batch.end_time is None:
+            preparer._raw_batch.end_time = payload.max_capture_time
+        preparer._build_prepared_save_job(job)
+        self._image_shapes.update(preparer._image_shapes)
+
+    def _build_prepared_save_job(self, job: SaveJob) -> None:
+        started = time.perf_counter()
+        self._align_raw_records()
+        aligned = time.perf_counter()
+        if not self._records:
+            raise ValueError(self._alignment_failure_detail())
         if len(self._records) < self._schema.min_episode_frames:
             self._add_issue(
                 "episode_too_short",
                 f"episode has {len(self._records)} frames, expected at least "
                 f"{self._schema.min_episode_frames}",
             )
-        # measured fps stays in episodes.jsonl as a capture-jitter diagnostic only;
-        # mp4 frame rate must match the synthesized timestamp grid (target fps).
+
         collection_fps = self._episode_average_fps()
         videos = self._snapshot_videos()
-
-        task = self._logger._task or ""
-        dataset_dir = self._logger._collection_dataset_dir(task)
-        episode_index = self._logger._next_collection_episode_index(dataset_dir)
-        task_index = 0
+        video_prepared = time.perf_counter()
         n_frames = len(self._records)
-        global_index = self._logger._next_collection_global_index(dataset_dir, n_frames)
 
-        # LeRobot v2.1 requires each camera's mp4 frame count == data-table row count;
-        # a dropped/corrupt frame is skipped in _snapshot_videos but still occupies a
-        # parquet row, so the counts diverge and the episode crashes on load. Flag it.
         if self._logger._save_video:
             for video_key in self._schema.cameras.values():
                 got = len(videos.get(video_key, [])) if videos else 0
@@ -285,10 +379,11 @@ class CollectionEpisodeWriter:
                 self._clean_vector(field, getattr(record, field), frame_index).tolist()
                 for frame_index, record in enumerate(self._records)
             ]
-        # LeRobot requires timestamp[i] == i/fps (strictly equal-interval, tol 1e-4),
-        # so synthesize it from the target fps. The real hardware capture time (raw,
-        # jittery uptime seconds) is preserved out-of-band in ``capture_time``.
         fps = float(self._logger._fps)
+        dataset_dir = job.dataset_dir or self._logger._collection_dataset_dir(job.task)
+        global_index = job.global_index
+        if global_index < 0:
+            global_index = self._logger._next_collection_global_index(dataset_dir, n_frames)
         columns.update(
             {
                 "timestamp": [i / fps for i in range(n_frames)],
@@ -297,51 +392,94 @@ class CollectionEpisodeWriter:
                     for record in self._records
                 ],
                 "frame_index": list(range(n_frames)),
-                "episode_index": [episode_index] * n_frames,
+                "episode_index": [job.episode_index] * n_frames,
                 "index": list(range(global_index, global_index + n_frames)),
-                "task_index": [task_index] * n_frames,
+                "task_index": [job.task_index] * n_frames,
             }
         )
 
         row: dict[str, Any] = {
-            "episode_index": episode_index,
-            "tasks": [task],
+            "episode_index": job.episode_index,
+            "tasks": [job.task],
             "length": n_frames,
             "quality": "red" if self._quality_issues else "green",
             "quality_issues": [dataclasses.asdict(issue) for issue in self._quality_issues],
         }
         if collection_fps is not None:
             row["collection_fps"] = collection_fps
-        if self._logger._episode_meta:
-            row.update(self._logger._episode_meta)
+        if self._alignment_report is not None:
+            row.update(
+                {
+                    "alignment_fps": fps,
+                    "alignment_grid_start": self._alignment_report.grid_start,
+                    "alignment_grid_end": self._alignment_report.grid_end,
+                    "alignment_image_skew_tolerance_sec": self._image_skew_tolerance_sec(),
+                    "alignment_image_max_skew_sec": self._alignment_report.image_max_skew,
+                    "alignment_image_stream_stats": (
+                        self._alignment_report.image_stream_stats
+                    ),
+                }
+            )
+        if job.episode_meta:
+            row.update(job.episode_meta)
+        columns_packed = time.perf_counter()
 
-        job = SaveJob(
-            episode_index=episode_index,
-            task=task,
-            task_index=task_index,
-            global_index=global_index,
-            steps=[],
-            episode_meta={},
-            task_to_index={task: task_index},
-            collection_columns=columns,
-            collection_episode_row=row,
-            videos=videos,
-            video_fps=fps,
-            dataset_dir=dataset_dir,
+        job.global_index = global_index
+        job.collection_columns = columns
+        job.collection_episode_row = row
+        job.videos = videos
+        job.video_fps = fps
+        job.dataset_dir = dataset_dir
+        job.collection_payload = None
+        logger.info(
+            "collection save worker prepared %d frames: align=%.1fms video=%.1fms "
+            "columns=%.1fms total=%.1fms",
+            n_frames,
+            (aligned - started) * 1000.0,
+            (video_prepared - aligned) * 1000.0,
+            (columns_packed - video_prepared) * 1000.0,
+            (columns_packed - started) * 1000.0,
         )
-        self._records = []
-        self._quality_issues = []
-        return job
+
+    def _alignment_failure_detail(self) -> str:
+        issues = []
+        if self._alignment_report is not None:
+            issues = [
+                f"{issue.code}: {issue.detail}" for issue in self._alignment_report.issues
+            ]
+        issue_text = "; ".join(issues) if issues else "none"
+        return (
+            "collection episode produced 0 frames; "
+            f"alignment_issues={issue_text}; raw_streams={self._raw_stream_summary()}"
+        )
+
+    def _raw_stream_summary(self) -> str:
+        parts = []
+        for family, streams in (
+            ("images", self._raw_batch.images),
+            ("vectors", self._raw_batch.vectors),
+        ):
+            stream_parts = []
+            for key in sorted(streams):
+                samples = streams[key]
+                if samples:
+                    stream_parts.append(
+                        f"{key}:{len(samples)}[{samples[0].timestamp:.6f},"
+                        f"{samples[-1].timestamp:.6f}]"
+                    )
+                else:
+                    stream_parts.append(f"{key}:0")
+            parts.append(f"{family}=" + (",".join(stream_parts) if stream_parts else "none"))
+        return " ".join(parts)
 
     def cancel_episode(self) -> None:
-        """Discard the in-flight episode: drain the ingest thread and drop all buffers."""
-        try:
-            self._drain_ingest()
-        except BaseException:
-            logger.exception("Error draining ingest thread during cancel")
-            self._ingest_thread = None
+        """Discard the in-flight episode and drop all raw snapshot buffers."""
         self._records = []
         self._quality_issues = []
+        self._raw_batch = CollectionRawBatch()
+        self._raw_snapshots = []
+        self._alignment_report = None
+        self._max_capture_time = None
 
     def finalize(self, dataset_dir: Path | None = None) -> None:
         if dataset_dir is None:
@@ -396,7 +534,7 @@ class CollectionEpisodeWriter:
                 if not _is_hwc3(arr):
                     continue
                 rgb = _to_rgb_uint8(arr, self._logger._convert_bgr_to_rgb)
-                if size is not None:
+                if size is not None and rgb.shape[:2] != size:
                     rgb = resize_direct(rgb, size[0], size[1])
                 frames.append(rgb)
             if frames:
@@ -420,10 +558,9 @@ class CollectionEpisodeWriter:
                     f"frame {frame_index} camera {camera_key} has shape {list(arr.shape)}",
                 )
                 continue
-            rgb = _to_rgb_uint8(arr, self._logger._convert_bgr_to_rgb)
             if video_key not in self._image_shapes:
                 self._image_shapes[video_key] = (
-                    size if size is not None else (rgb.shape[0], rgb.shape[1])
+                    size if size is not None else (arr.shape[0], arr.shape[1])
                 )
 
     def _clean_vector(self, field: str, value: np.ndarray | None, frame_index: int) -> np.ndarray:

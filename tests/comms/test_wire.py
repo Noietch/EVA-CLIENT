@@ -26,6 +26,7 @@ from transport.zmq import (
     unpack_action,
     unpack_observation,
 )
+from transport.utils import ImageRateTracker
 
 
 def _build_zmq_transport_with_fake_readers(monkeypatch):
@@ -213,6 +214,7 @@ def test_zmq_collection_reader_preserves_backlog_order():
     reader._latest = None
     reader._disabled_cameras = set()
     reader._latest_images = {}
+    reader._image_rate = ImageRateTracker()
     reader._preserve_collection_backlog = True
     reader._collection_queue = collections.deque()
     reader._freshness = types.SimpleNamespace(mark=lambda: None)  # type: ignore[reportAttributeAccessIssue]
@@ -260,6 +262,7 @@ def test_zmq_collection_reader_defaults_to_latest_frame():
     reader._latest = None
     reader._disabled_cameras = set()
     reader._latest_images = {}
+    reader._image_rate = ImageRateTracker()
     reader._preserve_collection_backlog = False
     reader._collection_queue = collections.deque()
     reader._freshness = types.SimpleNamespace(mark=lambda: None)  # type: ignore[reportAttributeAccessIssue]
@@ -436,6 +439,7 @@ def test_zmq_reader_keeps_multi_camera_visualization_cache():
     reader._sub = _Sub()
     reader._latest = None
     reader._latest_images = {}
+    reader._image_rate = ImageRateTracker()
     reader._disabled_cameras = set()
     reader._disabled_groups = set()
     reader._freshness = types.SimpleNamespace(mark=lambda: None)  # type: ignore[reportAttributeAccessIssue]

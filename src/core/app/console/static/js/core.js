@@ -53,6 +53,8 @@ export const S = {
   collectQueueEnabled: false,
   collectArmEnabled: false,
   collectToggleBusy: null,
+  rolloutSaveQueueExpanded: false,
+  rolloutSaveEpisode: null,
   runToggleBusy: null,
   evalRunToggleBusy: null,
 };

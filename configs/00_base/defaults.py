@@ -100,6 +100,25 @@ collection = dict(
     tasks=[],
 )
 
+rollout = dict(
+    storage=dict(
+        enabled=False,
+        log_dir="",
+        fps=30,
+        save_queue_max=15,
+        async_save=False,
+    ),
+    intervention=dict(
+        enabled=False,
+        control_mode="absolute",
+    ),
+)
+
+operator_control = dict(
+    enabled=False,
+    button_topic="/eva/operator_button",
+)
+
 eval_cfg = {}  # Empty dict marks a non-eval config; eval configs fill this block.
 # Eval block template (see configs/03_evaluation/*); fill eval_cfg to turn a deploy preset
 # into an eval run:
@@ -111,6 +130,8 @@ eval_cfg = {}  # Empty dict marks a non-eval config; eval configs fill this bloc
 #       reset_after_each_trial=False,
 #       skip_warmup_after_first=True,
 #       checkpoints=[dict(name="<ckpt>", config="<deploy_preset.py>", port=9000)],
+#       shuffle_ckpts=False,
+#       shuffle_seed=42,
 #       enable_ssh_forward=False,
 #       ssh=dict(host="", user="", port=8000, remote_sync_dir=""),
 #       tasks=[dict(prompt_en="pick the apple", milestones=(("grasp", "grasp apple"),))],

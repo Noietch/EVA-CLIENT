@@ -460,12 +460,24 @@ async function pollLiveSeries() {
   }
 
 let scenePolling = false;
+let lastScenePollAt = 0;
+const COLLECT_SCENE_POLL_MS = 80;
+
+function scenePollMinIntervalMs() {
+    return S.STATUS && S.STATUS.collect && S.STATUS.collect.collecting
+      ? COLLECT_SCENE_POLL_MS
+      : 0;
+  }
 
 async function pollScene() {
     if (scenePolling) return;
     // REPLAY drives the URDF per-frame off the scrub clock (replaySetUrdfFrame); don't
     // let the live /api/scene poll fight it for the shared Scene3D canvas.
     if (LIVE.replayMode) return;
+    const now = performance.now();
+    const minInterval = scenePollMinIntervalMs();
+    if (minInterval && now - lastScenePollAt < minInterval) return;
+    lastScenePollAt = now;
     scenePolling = true;
     try {
       // MANUAL streams the live real-robot pose + target ghost only when the real

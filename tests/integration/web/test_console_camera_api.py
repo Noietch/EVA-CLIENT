@@ -23,7 +23,13 @@ import numpy as np
 import pytest
 from _harness import WebHarness, build_runtime, console_config
 
-from core.app.console.server import ConsoleContext, ConsoleRequestHandler, _serialize_frame
+from core.app.console.server import (
+    ConsoleContext,
+    ConsoleRequestHandler,
+    _camera_jpeg_payload,
+    _serialize_frame,
+    _serialize_status,
+)
 
 
 def test_frame_carries_telemetry_not_image_bytes(console: WebHarness):
@@ -35,6 +41,32 @@ def test_frame_carries_telemetry_not_image_bytes(console: WebHarness):
     assert frame["cameras"] == ["cam_high", "cam_left_wrist", "cam_right_wrist"]
     for key in frame["cameras"]:
         assert isinstance(key, str)
+
+
+def test_status_reports_image_min_hz_from_observation_reader():
+    config = console_config()
+    runtime, session = build_runtime(config)
+
+    class _Reader:
+        def seconds_since_last_recv(self):
+            return 0.0
+
+        def image_min_hz(self):
+            return 14.25
+
+    try:
+        status = _serialize_status(
+            ConsoleContext(
+                config=config,
+                runtime=runtime,
+                session=session,
+                obs_reader=_Reader(),  # type: ignore[reportArgumentType]
+            )
+        )
+    finally:
+        runtime.transport.close()
+
+    assert status["image_min_hz"] == 14.25
 
 
 def test_frame_uses_live_camera_keys_when_reader_reports_them():
@@ -172,3 +204,25 @@ def test_camera_stream_is_multipart_mjpeg(console: WebHarness):
     # At least one part boundary + a JPEG content-type arrives in the first read window.
     assert b"--evaframe" in buf
     assert b"image/jpeg" in buf
+
+
+def test_camera_jpeg_payload_prefers_reader_jpeg(monkeypatch):
+    payload = b"\xff\xd8raw-jpeg\xff\xd9"
+
+    class _Reader:
+        def get_camera_jpeg(self, key: str):
+            assert key == "cam_high"
+            return payload
+
+        def get_camera_frame(self, _key: str):
+            raise AssertionError("raw JPEG path should not decode frames")
+
+    def fail_encode(_image, _convert_bgr_to_rgb):
+        raise AssertionError("raw JPEG path should not encode frames")
+
+    monkeypatch.setattr("core.app.console.server._encode_jpeg", fail_encode)
+
+    jpeg, sig = _camera_jpeg_payload(_Reader(), "cam_high", convert_bgr_to_rgb=True)
+
+    assert jpeg == payload
+    assert sig is not None

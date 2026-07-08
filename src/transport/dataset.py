@@ -447,6 +447,11 @@ class DatasetTransport(TransportBridge):
         """
         return self._expand_robot_qpos(self.get_obs_state(index))
 
+    def _frame_timestamp(self, index: int) -> float:
+        if self._timestamps is not None:
+            return float(self._timestamps[index])
+        return float(index) / float(max(1, self._fps))
+
     def get_frame(self) -> Observation | None:
         """Decode the observation at the current frame index.
 
@@ -470,6 +475,7 @@ class DatasetTransport(TransportBridge):
                 return Observation(
                     images={k: self._frame_cache[k].copy() for k in self._camera_keys},
                     state_qpos=state,
+                    timestamp=self._frame_timestamp(idx),
                 )
 
             h = self._config.transport.image_height
@@ -485,7 +491,7 @@ class DatasetTransport(TransportBridge):
 
             self._frame_cache_idx = idx
             self._frame_cache = {k: v.copy() for k, v in images.items()}
-        return Observation(images=images, state_qpos=state)
+        return Observation(images=images, state_qpos=state, timestamp=self._frame_timestamp(idx))
 
     def get_camera_frame(self, key: str) -> np.ndarray | None:
         """Decode a single camera at the current frame index for the live MJPEG feed.

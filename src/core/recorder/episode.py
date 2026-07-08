@@ -19,6 +19,7 @@ Two tables, deliberately different shapes, joined by ``absolute_step``:
 
 from __future__ import annotations
 
+import bisect
 import dataclasses
 import datetime as _dt
 import json
@@ -35,7 +36,14 @@ import pyarrow.parquet as pq
 
 from core.config import resolve_video_key
 from core.recorder.lerobot_meta import build_info, history_row
-from core.types import Observation
+from core.types import (
+    CollectionRawBatch,
+    CollectionRawSample,
+    Observation,
+    RolloutInterventionSegment,
+)
+from core.utils.images import resize_direct
+from core.recorder.collection_alignment import align_collection_samples
 
 if TYPE_CHECKING:
     from core.config import ConfigDict
@@ -53,6 +61,12 @@ _EVAL_META_KEYS = ("score", "max_score", "milestones", "note", "scored_at", "dur
 
 # Observation vector fields (everything except timestamp/images) recorded per collection frame.
 _COLLECTION_VECTOR_FIELDS = (
+    "state_qpos",
+    "state_eef",
+    "action_qpos",
+    "action_eef",
+)
+_INTERVENTION_VECTOR_FIELDS = (
     "state_qpos",
     "state_eef",
     "action_qpos",
@@ -105,9 +119,14 @@ class SaveJob:
     task_to_index: dict[str, int]
     collection_columns: dict[str, Any] | None = None
     collection_episode_row: dict[str, Any] | None = None
+    collection_payload: Any | None = None
+    raw_episode_payload: Any | None = None
     videos: dict[str, list[np.ndarray]] | None = None
     video_fps: float | None = None
     dataset_dir: Path | None = None
+    intervention_segments: list[RolloutInterventionSegment] = dataclasses.field(
+        default_factory=list
+    )
     reason: str = ""
     # When True the episodes.jsonl row + tasks.jsonl were already written synchronously
     # (eval path: the meta row lands on STOP so the trial is immediately scorable); the
@@ -118,6 +137,23 @@ class SaveJob:
     queued_wall_time: float = 0.0
     started_wall_time: float = 0.0
     finished_wall_time: float = 0.0
+
+
+@dataclasses.dataclass(frozen=True)
+class RawEpisodeFrameLabel:
+    """Per-source-frame label copied into the fixed-clock episode rows."""
+
+    timestamp: float
+    intervention: bool
+    segment_index: int
+
+
+@dataclasses.dataclass
+class RawEpisodeSavePayload:
+    """Frozen raw eval/rollout episode input prepared at STOP time."""
+
+    raw_batch: CollectionRawBatch
+    frame_labels: list[RawEpisodeFrameLabel]
 
 
 class EpisodeLogger:
@@ -187,8 +223,10 @@ class EpisodeLogger:
         self._task: str | None = None
         self._steps: list[Observation] = []
         self._episode_meta: dict[str, Any] = {}
-        self._video_frames: dict[str, list[np.ndarray]] = {}
         self._image_shape: tuple[int, int] | None = None  # (h, w) from first frame
+        self._intervention_segments: list[RolloutInterventionSegment] = []
+        self._raw_episode_batch = CollectionRawBatch()
+        self._raw_episode_frame_labels: list[RawEpisodeFrameLabel] = []
 
         # async save queue (data-collection mode): end_episode hands a SaveJob
         # snapshot to a background worker so the main loop can start the next
@@ -226,7 +264,9 @@ class EpisodeLogger:
         self._task = task
         self._steps = []
         self._episode_meta = {}
-        self._video_frames = {}
+        self._intervention_segments = []
+        self._raw_episode_batch = CollectionRawBatch()
+        self._raw_episode_frame_labels = []
         if self._collection_writer is not None:
             self._collection_writer.start_episode(collection_min_capture_time)
             return
@@ -251,34 +291,24 @@ class EpisodeLogger:
         """
         if not self._active:
             return
-        obs.timestamp = time.time() if timestamp is None else timestamp
-        obs.state_qpos = np.asarray(obs.state_qpos, dtype=np.float32).copy()
-        if obs.state_eef is not None:
-            obs.state_eef = np.asarray(obs.state_eef, dtype=np.float32).copy()
-        obs.action_qpos = np.asarray(action, dtype=np.float32).copy()
-        self._steps.append(obs)
-        if self._save_video:
-            for cam_key in self._camera_keys:
-                frame = obs.images.get(cam_key)
-                if frame is not None:
-                    rgb = _to_rgb_uint8(frame, self._convert_bgr_to_rgb)
-                    if self._image_shape is None:
-                        self._image_shape = (rgb.shape[0], rgb.shape[1])
-                    video_key = resolve_video_key(self._keys, cam_key)
-                    if video_key is None:
-                        continue
-                    self._video_frames.setdefault(video_key, []).append(
-                        np.ascontiguousarray(rgb).copy()
-                    )
-
-    def record_collection_frame(self, frame: Observation) -> None:
-        """Record one already-decoded teleop frame into the active collection episode."""
-        if not self._active or self._collection_writer is None:
-            return
-        self._collection_writer.record_frame(frame)
+        source_timestamp = self._record_step_timestamp(obs, timestamp)
+        record = _copy_observation(obs)
+        record.timestamp = source_timestamp
+        record.action_qpos = np.asarray(action, dtype=np.float32).copy()
+        self._steps.append(record)
+        self._append_raw_episode_observation(
+            self._raw_episode_batch,
+            record,
+            RawEpisodeFrameLabel(
+                timestamp=source_timestamp,
+                intervention=False,
+                segment_index=-1,
+            ),
+            self._raw_episode_frame_labels,
+        )
 
     def ingest_collection_snapshot(self, snapshot: RawCollectionSnapshot) -> None:
-        """Hand a pre-decode snapshot to the collection ingest thread (O(1))."""
+        """Hand one pre-decode snapshot to the collection writer (O(1))."""
         if not self._active or self._collection_writer is None:
             return
         self._collection_writer.ingest(snapshot)
@@ -286,6 +316,14 @@ class EpisodeLogger:
     def set_episode_meta(self, **fields: Any) -> None:
         """Attach eval metadata (score, milestones, ...) to the current episode."""
         self._episode_meta.update(fields)
+
+    def set_rollout_intervention_segments(
+        self, segments: list[RolloutInterventionSegment]
+    ) -> None:
+        """Attach accepted rollout intervention segments to the active episode."""
+        self._intervention_segments = [
+            _copy_intervention_segment(segment) for segment in segments if segment.frames
+        ]
 
     def patch_episode_meta(self, episode_index: int, **fields: Any) -> bool:
         """Post-hoc: merge fields into an already-written episodes.jsonl row.
@@ -367,22 +405,29 @@ class EpisodeLogger:
             self._remember_finished_job(job)
             self._completed_episodes += 1
             return True
-        if not self._steps:
+        if not self._has_raw_episode_samples():
             self._active = False
             self._task = None
-            self._video_frames = {}
+            self._intervention_segments = []
+            self._raw_episode_batch = CollectionRawBatch()
+            self._raw_episode_frame_labels = []
             return False
 
         episode_index = self._episode_index
         task = self._task or ""
         task_index = self._resolve_task_index(task)
-        n_frames = len(self._steps)
-        global_index = self._global_index
-        episode_fps = self._steps_average_fps(self._steps)
         episode_meta = dict(self._episode_meta)
-        if episode_fps is not None:
-            episode_meta["episode_fps"] = episode_fps
-        videos = self._snapshot_videos()
+        intervention_segments = [
+            _copy_intervention_segment(segment)
+            for segment in self._intervention_segments
+            if segment.frames
+        ]
+        if intervention_segments:
+            episode_meta["has_intervention"] = True
+            episode_meta["intervention_segments"] = len(intervention_segments)
+            episode_meta["intervention_frames"] = sum(
+                len(segment.frames) for segment in intervention_segments
+            )
 
         # Eval re-run: if this (prompt, trial) cell already has a recorded episode, reuse
         # its index and overwrite that episode's data IN PLACE (parquet + video + meta row)
@@ -391,57 +436,50 @@ class EpisodeLogger:
         reuse_index = self._eval_existing_episode_index(episode_meta) if self._eval_mode else None
         if reuse_index is not None:
             episode_index = reuse_index
+            global_index = self._existing_episode_global_start(episode_index)
+            if global_index is None:
+                global_index = -1
         else:
-            self._global_index += n_frames
+            global_index = -1
             self._episode_index += 1
         self._active = False
+        raw_batch = self._copy_raw_episode_batch(self._raw_episode_batch)
+        frame_labels = list(self._raw_episode_frame_labels)
+        self._append_intervention_segments_to_raw_episode(
+            raw_batch,
+            frame_labels,
+            intervention_segments,
+        )
 
-        if self._async_save:
-            job = SaveJob(
-                episode_index=episode_index,
-                task=task,
-                task_index=task_index,
-                global_index=global_index,
-                steps=self._steps,
-                episode_meta=episode_meta,
-                task_to_index=dict(self._task_to_index),
-                videos=videos,
-                video_fps=float(self._fps),
-                queued_wall_time=time.time(),
-            )
-            self._steps = []
-            self._episode_meta = {}
-            self._video_frames = {}
-            self._task = None
-            self._enqueue_save_job(job)
-            return True
-
-        # Eval path: write EVERYTHING synchronously now (parquet + video + episodes.jsonl
-        # row + tasks.jsonl), so when STOP returns the trial's data is fully on disk —
-        # immediately scorable, and the RESULT popup / re-score always read fresh files.
-        # On a re-run (reuse_index set) the parquet/video/row REPLACE the prior take's data
-        # IN PLACE (same episode_index -> same file paths), and the old score is dropped so
-        # the fresh take is re-scored from scratch. No background worker, no async race.
         episode_meta = dict(episode_meta)
         episode_meta.setdefault("recorded_at", _dt.datetime.now().isoformat(timespec="seconds"))
-        # On reuse, keep the parquet `index` column starting where the original episode did
-        # so the dataset-global index stays consistent for that episode.
-        if reuse_index is not None:
-            prior_start = self._existing_episode_global_start(episode_index)
-            if prior_start is not None:
-                global_index = prior_start
-        with self._lock:
-            self._write_main_parquet_rows(episode_index, task_index, global_index, self._steps)
-            self._write_videos(episode_index, videos, float(self._fps))
-            self._upsert_episode_row_locked(episode_index, task, n_frames, episode_meta)
-            self._write_tasks_jsonl_from(self._task_to_index)
-            if self._eval_mode:
-                self._write_info_json()
+        job = SaveJob(
+            episode_index=episode_index,
+            task=task,
+            task_index=task_index,
+            global_index=global_index,
+            steps=[],
+            episode_meta=episode_meta,
+            task_to_index=dict(self._task_to_index),
+            raw_episode_payload=RawEpisodeSavePayload(raw_batch, frame_labels),
+            video_fps=float(self._fps),
+            queued_wall_time=time.time(),
+        )
         self._steps = []
         self._episode_meta = {}
-        self._video_frames = {}
+        self._intervention_segments = []
+        self._raw_episode_batch = CollectionRawBatch()
+        self._raw_episode_frame_labels = []
         self._task = None
+        if self._async_save:
+            self._enqueue_save_job(job)
+            return True
+        job.started_wall_time = job.queued_wall_time
+        self._write_raw_episode_job(job)
+        job.status = "saved"
+        job.finished_wall_time = time.time()
         self._completed_episodes += 1
+        self._remember_finished_job(job)
         return True
 
     def cancel_episode(self, reason: str = "cancelled") -> None:
@@ -454,14 +492,18 @@ class EpisodeLogger:
             self._collection_writer.cancel_episode()
             self._steps = []
             self._episode_meta = {}
-            self._video_frames = {}
+            self._intervention_segments = []
+            self._raw_episode_batch = CollectionRawBatch()
+            self._raw_episode_frame_labels = []
             self._active = False
             self._task = None
             logger.info("Cancelled episode %d (%s)", self._episode_index, reason)
             return
-        self._video_frames = {}
         self._steps = []
         self._episode_meta = {}
+        self._intervention_segments = []
+        self._raw_episode_batch = CollectionRawBatch()
+        self._raw_episode_frame_labels = []
         self._active = False
         self._task = None
         logger.info("Cancelled episode %d (%s)", self._episode_index, reason)
@@ -517,23 +559,324 @@ class EpisodeLogger:
 
     def _write_job(self, job: SaveJob) -> None:
         """Background-thread disk write from a frozen snapshot (no live buffers)."""
-        if job.collection_columns is not None:
+        if job.collection_columns is not None or job.collection_payload is not None:
             self._write_collection_job(job)
             return
-        self._write_main_parquet_rows(
-            job.episode_index, job.task_index, job.global_index, job.steps
-        )
-        self._write_videos(job.episode_index, job.videos, job.video_fps)
-        # Eval jobs already wrote the episodes.jsonl row + tasks.jsonl synchronously on
-        # STOP (meta_written); only the parquet/video above is deferred here.
-        if not job.meta_written:
-            with self._lock:
-                self._append_episode_row_locked(
-                    job.episode_index, job.task, len(job.steps), job.episode_meta
+        if job.raw_episode_payload is not None:
+            self._write_raw_episode_job(job)
+            return
+        raise ValueError("save job missing raw payload")
+
+    def _record_step_timestamp(
+        self, obs: Observation, timestamp: float | None
+    ) -> float:
+        if timestamp is not None:
+            return float(timestamp)
+        if obs.timestamp is not None:
+            return float(obs.timestamp)
+        if self._raw_episode_frame_labels:
+            return self._raw_episode_frame_labels[-1].timestamp + 1.0 / float(self._fps)
+        return 0.0
+
+    def _append_raw_episode_observation(
+        self,
+        batch: CollectionRawBatch,
+        frame: Observation,
+        label: RawEpisodeFrameLabel,
+        labels: list[RawEpisodeFrameLabel],
+    ) -> None:
+        timestamp = float(label.timestamp)
+        for key, image in frame.images.items():
+            batch.images.setdefault(key, []).append(
+                CollectionRawSample(timestamp, np.asarray(image).copy())
+            )
+        for field in _COLLECTION_VECTOR_FIELDS:
+            value = getattr(frame, field)
+            if value is None:
+                continue
+            batch.vectors.setdefault(field, []).append(
+                CollectionRawSample(
+                    timestamp,
+                    np.asarray(value, dtype=np.float32).copy(),
                 )
-                self._write_tasks_jsonl_from(job.task_to_index)
+            )
+        if batch.start_time is None or timestamp < batch.start_time:
+            batch.start_time = timestamp
+        if batch.end_time is None or timestamp > batch.end_time:
+            batch.end_time = timestamp
+        labels.append(label)
+
+    def _append_intervention_segments_to_raw_episode(
+        self,
+        batch: CollectionRawBatch,
+        labels: list[RawEpisodeFrameLabel],
+        segments: list[RolloutInterventionSegment],
+    ) -> None:
+        for segment in segments:
+            for frame in segment.frames:
+                timestamp = (
+                    float(frame.timestamp)
+                    if frame.timestamp is not None
+                    else self._next_raw_episode_timestamp(labels)
+                )
+                record = _copy_observation(frame)
+                record.timestamp = timestamp
+                self._append_raw_episode_observation(
+                    batch,
+                    record,
+                    RawEpisodeFrameLabel(
+                        timestamp=timestamp,
+                        intervention=True,
+                        segment_index=segment.segment_index,
+                    ),
+                    labels,
+                )
+
+    def _next_raw_episode_timestamp(self, labels: list[RawEpisodeFrameLabel]) -> float:
+        if labels:
+            return labels[-1].timestamp + 1.0 / float(self._fps)
+        return time.time()
+
+    def _has_raw_episode_samples(self) -> bool:
+        return any(self._raw_episode_batch.vectors.values()) or any(
+            segment.frames for segment in self._intervention_segments
+        )
+
+    def _copy_raw_episode_batch(self, batch: CollectionRawBatch) -> CollectionRawBatch:
+        return CollectionRawBatch(
+            images={
+                key: [
+                    CollectionRawSample(sample.timestamp, _copy_raw_value(sample.value))
+                    for sample in samples
+                ]
+                for key, samples in batch.images.items()
+            },
+            vectors={
+                key: [
+                    CollectionRawSample(sample.timestamp, _copy_raw_value(sample.value))
+                    for sample in samples
+                ]
+                for key, samples in batch.vectors.items()
+            },
+            start_time=batch.start_time,
+            end_time=batch.end_time,
+        )
+
+    def _raw_episode_vector_fields(self, batch: CollectionRawBatch) -> tuple[str, ...]:
+        fields = []
+        for field in _COLLECTION_VECTOR_FIELDS:
+            if field in batch.vectors or any(
+                key.startswith(f"{field}:") for key in batch.vectors
+            ):
+                fields.append(field)
+        if "state_qpos" not in fields:
+            raise ValueError("raw episode missing state_qpos samples")
+        if "action_qpos" not in fields:
+            raise ValueError("raw episode missing action_qpos samples")
+        return tuple(fields)
+
+    def _raw_episode_image_skew_tolerance_sec(self) -> float:
+        fps = float(self._fps)
+        if fps <= 1.0:
+            return 0.5 / fps
+        return 1.0 / (2.0 * (fps - 1.0))
+
+    def _write_raw_episode_job(self, job: SaveJob) -> None:
+        if job.raw_episode_payload is not None:
+            self._prepare_raw_episode_job(job)
+        columns = job.collection_columns
+        row = job.collection_episode_row
+        if columns is None or row is None:
+            raise ValueError("raw episode save job missing columns or episode row")
+        path = self._parquet_path(job.episode_index)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(pa.table(columns), str(path))
+        self._write_videos(job.episode_index, job.videos, job.video_fps)
+        with self._lock:
+            if self._eval_mode:
+                self._upsert_episode_dict_row_locked(row)
+            else:
+                self._append_episode_dict_row_locked(row)
+            self._write_tasks_jsonl_from(job.task_to_index)
+            if self._eval_mode:
+                self._write_info_json()
+
+    def _prepare_raw_episode_job(self, job: SaveJob) -> None:
+        payload = job.raw_episode_payload
+        if payload is None:
+            return
+        fields = self._raw_episode_vector_fields(payload.raw_batch)
+        camera_keys = tuple(payload.raw_batch.images.keys())
+        frames, report = align_collection_samples(
+            payload.raw_batch,
+            robot=self._robot,
+            camera_keys=camera_keys,
+            vector_fields=fields,
+            fps=float(self._fps),
+            image_skew_sec=self._raw_episode_image_skew_tolerance_sec(),
+        )
+        if not frames:
+            raise ValueError("raw episode produced 0 frames")
+        issues = [
+            QualityIssue("red", issue.code, issue.detail) for issue in report.issues
+        ]
+        labels = self._labels_for_aligned_frames(frames, payload.frame_labels)
+        n_frames = len(frames)
+        global_index = job.global_index
+        if global_index < 0:
+            global_index = self._next_episode_global_index(n_frames)
+        fps = float(self._fps)
+        columns: dict[str, Any] = {
+            self._keys.state_key: [
+                np.asarray(frame.state_qpos, dtype=np.float32).tolist()
+                for frame in frames
+            ],
+            self._keys.action_key: [
+                np.asarray(frame.action_qpos, dtype=np.float32).tolist()
+                for frame in frames
+            ],
+            "timestamp": [i / fps for i in range(n_frames)],
+            "capture_time": [
+                float(frame.timestamp if frame.timestamp is not None else 0.0)
+                for frame in frames
+            ],
+            "frame_index": list(range(n_frames)),
+            "episode_index": [job.episode_index] * n_frames,
+            "index": list(range(global_index, global_index + n_frames)),
+            "task_index": [job.task_index] * n_frames,
+        }
+        if any(frame.state_eef is not None for frame in frames):
+            columns[self._keys.eef_key] = [
+                None
+                if frame.state_eef is None
+                else np.asarray(frame.state_eef, dtype=np.float32).tolist()
+                for frame in frames
+            ]
+        if any(label.intervention for label in labels):
+            columns["intervention"] = [label.intervention for label in labels]
+            columns["intervention_segment_index"] = [
+                label.segment_index for label in labels
+            ]
+        videos = self._videos_from_records(frames, camera_keys)
+        if self._save_video and videos:
+            for video_key, video_frames in videos.items():
+                if len(video_frames) != n_frames:
+                    issues.append(
+                        QualityIssue(
+                            "red",
+                            "frame_count_mismatch",
+                            f"video {video_key} has {len(video_frames)} frames but "
+                            f"data table has {n_frames} rows",
+                        )
+                    )
+        row: dict[str, Any] = {
+            "episode_index": job.episode_index,
+            "tasks": [job.task],
+            "length": n_frames,
+            "quality": "red" if issues else "green",
+            "quality_issues": [dataclasses.asdict(issue) for issue in issues],
+            "alignment_fps": fps,
+            "alignment_grid_start": report.grid_start,
+            "alignment_grid_end": report.grid_end,
+            "alignment_image_skew_tolerance_sec": (
+                self._raw_episode_image_skew_tolerance_sec()
+            ),
+            "alignment_image_max_skew_sec": report.image_max_skew,
+            "alignment_image_stream_stats": report.image_stream_stats,
+        }
+        episode_fps = self._raw_episode_average_fps(payload.raw_batch)
+        if episode_fps is not None:
+            row["episode_fps"] = episode_fps
+        if job.episode_meta:
+            row.update(job.episode_meta)
+        job.global_index = global_index
+        job.collection_columns = columns
+        job.collection_episode_row = row
+        job.videos = videos
+        job.video_fps = fps
+        job.raw_episode_payload = None
+
+    def _labels_for_aligned_frames(
+        self,
+        frames: list[Observation],
+        source_labels: list[RawEpisodeFrameLabel],
+    ) -> list[RawEpisodeFrameLabel]:
+        if not source_labels:
+            return [
+                RawEpisodeFrameLabel(
+                    timestamp=float(frame.timestamp or 0.0),
+                    intervention=False,
+                    segment_index=-1,
+                )
+                for frame in frames
+            ]
+        labels = sorted(source_labels, key=lambda label: label.timestamp)
+        times = [label.timestamp for label in labels]
+        aligned = []
+        for frame in frames:
+            timestamp = float(frame.timestamp if frame.timestamp is not None else 0.0)
+            index = bisect.bisect_right(times, timestamp) - 1
+            if index < 0:
+                index = 0
+            label = labels[index]
+            aligned.append(
+                RawEpisodeFrameLabel(
+                    timestamp=timestamp,
+                    intervention=label.intervention,
+                    segment_index=label.segment_index,
+                )
+            )
+        return aligned
+
+    def _raw_episode_average_fps(self, batch: CollectionRawBatch) -> float | None:
+        samples = batch.vectors.get("state_qpos") or batch.vectors.get("action_qpos")
+        if samples is None or len(samples) < 2:
+            return None
+        timestamps = sorted(float(sample.timestamp) for sample in samples)
+        duration = timestamps[-1] - timestamps[0]
+        if duration <= 0.0:
+            return None
+        return (len(timestamps) - 1) / duration
+
+    def _videos_from_records(
+        self,
+        records: list[Observation],
+        camera_keys: tuple[str, ...],
+    ) -> dict[str, list[np.ndarray]] | None:
+        if not self._save_video:
+            return None
+        size = self._save_size()
+        videos: dict[str, list[np.ndarray]] = {}
+        for cam_key in camera_keys:
+            video_key = resolve_video_key(self._keys, cam_key)
+            if video_key is None:
+                continue
+            frames = []
+            for record in records:
+                image = record.images.get(cam_key)
+                if image is None:
+                    continue
+                rgb = _to_rgb_uint8(image, self._convert_bgr_to_rgb)
+                if size is not None and rgb.shape[:2] != size:
+                    rgb = resize_direct(rgb, size[0], size[1])
+                if self._image_shape is None:
+                    self._image_shape = (rgb.shape[0], rgb.shape[1])
+                frames.append(np.ascontiguousarray(rgb))
+            if frames:
+                videos[video_key] = frames
+        return videos or None
+
+    def _next_episode_global_index(self, n_frames: int) -> int:
+        with self._lock:
+            index = self._global_index
+            self._global_index += n_frames
+            return index
 
     def _write_collection_job(self, job: SaveJob) -> None:
+        if job.collection_payload is not None:
+            if self._collection_writer is None:
+                raise ValueError("collection save job has payload but no collection writer")
+            self._collection_writer.prepare_save_job(job)
         columns = job.collection_columns
         row = job.collection_episode_row
         if columns is None or row is None:
@@ -614,7 +957,6 @@ class EpisodeLogger:
         current_episode_recorded_frames = 0
         current_episode_pending_frames = 0
         current_episode_skipped_before_start = 0
-        current_episode_skipped_no_action = 0
         active_for_task = self._active and (task is None or self._task == task)
         if active_for_task:
             if self._collection_writer is not None:
@@ -623,7 +965,6 @@ class EpisodeLogger:
                 current_episode_recorded_frames = counts["recorded"]
                 current_episode_pending_frames = counts["pending"]
                 current_episode_skipped_before_start = counts["skipped_before_start"]
-                current_episode_skipped_no_action = counts["skipped_no_action"]
             else:
                 current_episode_frames = len(self._steps)
                 current_episode_recorded_frames = len(self._steps)
@@ -652,7 +993,6 @@ class EpisodeLogger:
             "current_episode_recorded_frames": current_episode_recorded_frames,
             "current_episode_pending_frames": current_episode_pending_frames,
             "current_episode_skipped_before_start": current_episode_skipped_before_start,
-            "current_episode_skipped_no_action": current_episode_skipped_no_action,
             "completed_episodes": (
                 len(history) if self._collection_writer else self._completed_episodes
             ),
@@ -797,43 +1137,6 @@ class EpisodeLogger:
         self._write_info_json()
         self._write_stats_json()
 
-    # -- parquet writers --------------------------------------------------------
-
-    def _write_main_parquet_rows(
-        self,
-        episode_index: int,
-        task_index: int,
-        global_index: int,
-        steps: list[Observation],
-    ) -> None:
-        path = self._parquet_path(episode_index)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        states = [s.state_qpos.tolist() for s in steps]
-        actions = [cast(np.ndarray, s.action_qpos).tolist() for s in steps]
-        n = len(steps)
-        fps = float(self._fps)
-        columns = {
-            self._keys.state_key: states,
-            self._keys.action_key: actions,
-            # LeRobot v2.1 requires timestamp[i] == i/fps (equal-interval, tol 1e-4);
-            # synthesize it from target fps. Raw wall-clock kept out-of-band in capture_time.
-            "timestamp": [i / fps for i in range(n)],
-            "capture_time": [float(cast(float, s.timestamp)) for s in steps],
-            "frame_index": list(range(n)),
-            "episode_index": [episode_index] * n,
-            "index": list(range(global_index, global_index + n)),
-            "task_index": [task_index] * n,
-        }
-        # Second state column: FK-derived eef alongside raw qpos. Skipped entirely only
-        # when no row carries an eef (joint-only deployment).
-        if any(s.state_eef is not None for s in steps):
-            columns[self._keys.eef_key] = [
-                None if s.state_eef is None else s.state_eef.tolist() for s in steps
-            ]
-        # Eval scores live only in meta/episodes.jsonl, never in the parquet data table.
-        table = pa.table(columns)
-        pq.write_table(table, str(path))
-
     def _steps_average_fps(self, steps: list[Observation]) -> float | None:
         if len(steps) < 2:
             return None
@@ -842,25 +1145,14 @@ class EpisodeLogger:
             return None
         return (len(steps) - 1) / duration
 
-    def _snapshot_videos(self) -> dict[str, list[np.ndarray]] | None:
-        if not self._save_video:
+    def _save_size(self) -> tuple[int, int] | None:
+        h = self._save_image_height
+        w = self._save_image_width
+        if h is None or w is None:
             return None
-        videos = {video_key: list(frames) for video_key, frames in self._video_frames.items()}
-        return videos or None
+        return int(h), int(w)
 
     # -- meta writers -----------------------------------------------------------
-
-    def _append_episode_row_locked(
-        self, episode_index: int, task: str, length: int, episode_meta: dict[str, Any]
-    ) -> None:
-        row: dict[str, Any] = {
-            "episode_index": episode_index,
-            "tasks": [task],
-            "length": length,
-        }
-        if episode_meta:
-            row.update(episode_meta)
-        self._append_episode_dict_row_locked(row)
 
     def _eval_existing_episode_index(self, episode_meta: dict[str, Any]) -> int | None:
         """Episode index of a prior recording of this (prompt, trial) cell, or None.
@@ -926,6 +1218,24 @@ class EpisodeLogger:
         with path.open("w") as f:
             for r in rows:
                 f.write(json.dumps(r, ensure_ascii=False) + "\n")
+
+    def _upsert_episode_dict_row_locked(self, row: dict[str, Any]) -> None:
+        episode_index = int(row["episode_index"])
+        path = self._meta_path("episodes.jsonl")
+        rows = _read_jsonl(path)
+        replaced = False
+        for index, existing in enumerate(rows):
+            if int(existing.get("episode_index", -1)) == episode_index:
+                rows[index] = row
+                replaced = True
+                break
+        if not replaced:
+            self._append_episode_dict_row_locked(row)
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w") as f:
+            for existing in rows:
+                f.write(json.dumps(existing, ensure_ascii=False) + "\n")
 
     def _append_episode_dict_row_locked(
         self, row: dict[str, Any], dataset_dir: Path | None = None
@@ -1218,6 +1528,39 @@ class _StatAccumulator:
             "mean": mean.tolist(),
             "std": std.tolist(),
         }
+
+
+def _copy_observation(frame: Observation) -> Observation:
+    images = {key: np.asarray(value).copy() for key, value in frame.images.items()}
+    vectors = {}
+    for field in _INTERVENTION_VECTOR_FIELDS:
+        value = getattr(frame, field)
+        vectors[field] = None if value is None else np.asarray(value, dtype=np.float32).copy()
+    return Observation(
+        timestamp=float(frame.timestamp if frame.timestamp is not None else 0.0),
+        images=images,
+        state_qpos=vectors["state_qpos"],
+        state_eef=vectors["state_eef"],
+        action_qpos=vectors["action_qpos"],
+        action_eef=vectors["action_eef"],
+    )
+
+
+def _copy_raw_value(value: Any) -> Any:
+    if isinstance(value, np.ndarray):
+        return value.copy()
+    return value
+
+
+def _copy_intervention_segment(segment: RolloutInterventionSegment) -> RolloutInterventionSegment:
+    return RolloutInterventionSegment(
+        segment_index=segment.segment_index,
+        start_policy_frame_index=segment.start_policy_frame_index,
+        pre_intervention_qpos=np.asarray(segment.pre_intervention_qpos, dtype=np.float32).copy(),
+        frames=[_copy_observation(frame) for frame in segment.frames],
+        resume_policy_frame_index=segment.resume_policy_frame_index,
+        invalid_reason=segment.invalid_reason,
+    )
 
 
 def _vector_episode_stats(values: list[list[float]]) -> dict[str, Any]:
