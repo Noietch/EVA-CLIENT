@@ -5,7 +5,8 @@ and image preprocessing (resize/pad/layout).
 from __future__ import annotations
 
 import numpy as np
-from PIL import Image
+
+from core.utils.images import resize_direct, resize_with_pad
 
 
 def normalize_action_chunk(actions: object) -> np.ndarray:
@@ -27,6 +28,31 @@ def normalize_action_chunk(actions: object) -> np.ndarray:
     return chunk
 
 
+def snap_gripper_dims(
+    action: np.ndarray,
+    gripper_mask: tuple[bool, ...],
+    threshold: float = 0.5,
+    open_value: float = 1.0,
+    close_value: float = 0.0,
+) -> np.ndarray:
+    """Binarize configured gripper dimensions of an action in place.
+
+    Args:
+        action: Action vector [D].
+        gripper_mask: Per-dimension flags marking gripper entries.
+        threshold: Cutoff applied to each gripper value.
+        open_value: Command value for an open gripper.
+        close_value: Command value for a closed gripper.
+
+    Returns:
+        The same action array with gripper dims snapped to close/open values.
+    """
+    for idx, is_gripper in enumerate(gripper_mask):
+        if is_gripper and idx < len(action):
+            action[idx] = open_value if action[idx] >= threshold else close_value
+    return action
+
+
 def build_linear_trajectory(current: np.ndarray, target: np.ndarray, steps: int) -> np.ndarray:
     """Linearly interpolate between two vectors.
 
@@ -46,59 +72,6 @@ def build_linear_trajectory(current: np.ndarray, target: np.ndarray, steps: int)
             f"current={current_vector.shape}, target={target_vector.shape}"
         )
     return np.linspace(current_vector, target_vector, num=max(2, steps), dtype=np.float32)
-
-
-# --- Image utilities ---
-
-
-def resize_with_pad(image: np.ndarray, height: int, width: int) -> np.ndarray:
-    """Resize an image to fit a target size, preserving aspect ratio with padding.
-
-    Args:
-        image: Source image, HWC array.
-        height: Target height.
-        width: Target width.
-
-    Returns:
-        Padded resized HWC uint8 array.
-    """
-    src_h, src_w = image.shape[:2]
-    scale = min(width / src_w, height / src_h)
-    new_w = max(1, int(round(src_w * scale)))
-    new_h = max(1, int(round(src_h * scale)))
-    pil_image = Image.fromarray(image)
-    resized = np.asarray(
-        pil_image.resize((new_w, new_h), resample=Image.Resampling.BILINEAR),
-    )
-    top = (height - new_h) // 2
-    bottom = height - new_h - top
-    left = (width - new_w) // 2
-    right = width - new_w - left
-    if resized.ndim == 2:
-        padded = np.zeros((height, width), dtype=resized.dtype)
-        padded[top : height - bottom, left : width - right] = resized
-        return padded
-    padded = np.zeros((height, width, resized.shape[2]), dtype=resized.dtype)
-    padded[top : height - bottom, left : width - right, :] = resized
-    return padded
-
-
-def resize_direct(image: np.ndarray, height: int, width: int) -> np.ndarray:
-    """Resize an image directly to a target size without preserving aspect ratio.
-
-    Args:
-        image: Source image, HWC array.
-        height: Target height.
-        width: Target width.
-
-    Returns:
-        Directly resized HWC uint8 array.
-    """
-    pil_image = Image.fromarray(image)
-    resized = np.asarray(
-        pil_image.resize((width, height), resample=Image.Resampling.BILINEAR),
-    )
-    return resized
 
 
 def prepare_image(

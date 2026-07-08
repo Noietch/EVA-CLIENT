@@ -302,7 +302,12 @@ def _replay_action_at(config: ConfigDict, runtime: RuntimeState, index: int) -> 
         seed_qpos = _replay_qpos_at(runtime, index) if index == 0 else None
         action_chunk = ik_solver.solve_chunk(canonical_eef_chunk, seed_qpos=seed_qpos)
     action = action_chunk[0].astype(np.float32, copy=True)
-    runtime.robot.snap_grippers(action, config.robot.gripper_threshold)
+    runtime.robot.snap_grippers(
+        action,
+        config.robot.gripper_threshold,
+        config.robot.gripper_open,
+        config.robot.gripper_close,
+    )
     return action
 
 
@@ -371,7 +376,12 @@ def fetch_action_chunk(
         action_chunk = normalize_policy_action_chunk(
             config, runtime, original_chunk, response=response
         )
-        runtime.robot.snap_grippers(action_chunk, config.robot.gripper_threshold)
+        runtime.robot.snap_grippers(
+            action_chunk,
+            config.robot.gripper_threshold,
+            config.robot.gripper_open,
+            config.robot.gripper_close,
+        )
         step_index = session.step_index if session is not None else -1
         logger.info(
             "[INFER_CHUNK] step=%d infer_ms=%.1f raw_shape=%s action_shape=%s "

@@ -3,7 +3,7 @@
 import { $, LIVE, S, apiGet, apiPost } from "./core.js";
 import { closeChartModal, drawLiveCharts, liveDimsAll, onScrubInput, openChartModal, resetLiveSeries } from "./charts.js";
 import { applyTune, applyManualTune, renderConfig, manualConnect, manualDisconnect, manualDispatchToggle, enterManualSim, applyStatus, pauseSetup, replayIsLocalMode, resumeSetup, retrySetup, startRunFromDebug, updateGuide } from "./run.js";
-import { collectConfigured, renderCollect, startCollectFromTab, toggleSelectedCollectReplay, saveAnnotation, submitEpisodeNote, submitEpisodeQc, submitQc, clearReviewPlayback, reviewActiveInCurrentTab } from "./collect.js";
+import { collectConfigured, renderCollect, renderRolloutSave, startCollectFromTab, toggleSelectedCollectReplay, saveAnnotation, submitEpisodeNote, submitEpisodeQc, submitQc, clearReviewPlayback, reviewActiveInCurrentTab } from "./collect.js";
 import { evalEnabled, evalReset, evalSetup, evalRunToggle, evalResumeOnEnter, submitEvalScore, loadEvalResults, renderEvalSelectors, loadResultsAll, tpSeek, tpToggle, trialPopClose } from "./eval.js";
 import { replayPlay, replayStop, replayToggle, seekReplay, loop, pollFrame, pollScene, refreshCameraStreams, exitReplayMode } from "./replay.js";
 
@@ -213,7 +213,7 @@ $("b-run").onclick    = () => {
     setTimeout(() => {
       if (S.runToggleBusy !== null) { S.runToggleBusy = null; applyStatus(S.STATUS); }
     }, 1500);
-    return live ? apiPost("/api/halt") : startRunFromDebug();
+    return live ? apiPost("/api/operator_action", { intent: "start" }) : startRunFromDebug();
   };
 $("b-reset").onclick  = () => apiPost("/api/reset");
 $("b-step").onclick   = () => apiPost("/api/step_infer");
@@ -257,7 +257,7 @@ $("b-collect-toggle").onclick = () => {
     setTimeout(() => {
       if (S.collectToggleBusy !== null) { S.collectToggleBusy = null; renderCollect(); }
     }, 1500);
-    return live ? apiPost("/api/collect_stop") : startCollectFromTab();
+    return live ? apiPost("/api/operator_action", { intent: "accept" }) : startCollectFromTab();
   };
 $("collect-arm-enable").onchange = () => {
     const enabled = $("collect-arm-enable").checked;
@@ -273,11 +273,15 @@ $("collect-arm-enable").onchange = () => {
 $("b-collect-cancel").onclick = () => {
     S.collectQueueEnabled = false;
     renderCollect();
-    return apiPost("/api/collect_cancel");
+    return apiPost("/api/operator_action", { intent: "cancel" });
   };
 $("b-collect-qc-pass").onclick = () => submitEpisodeQc("collect", "pass");
 $("b-goto-qc").onclick = () => submitEpisodeQc("collect", "fail");
 $("b-collect-note-save").onclick = () => submitEpisodeNote("collect");
+$("b-rollout-save").onclick = () => apiPost("/api/operator_action", { intent: "accept" });
+$("b-rollout-intervention-abandon").onclick = () => apiPost("/api/operator_action", { intent: "cancel" });
+$("b-rollout-qc-pass").onclick = () => submitEpisodeQc("rollout", "pass");
+$("b-rollout-qc-fail").onclick = () => submitEpisodeQc("rollout", "fail");
 $("b-collect-replay-toggle").onclick = () => toggleSelectedCollectReplay();
 $("replay-b-qc-pass").onclick = () => submitQc("pass");
 $("replay-b-qc-fail").onclick = () => submitQc("fail");
@@ -285,6 +289,10 @@ $("replay-b-anno-save").onclick = () => saveAnnotation();
 $("collect-queue-toggle").onclick = () => {
     S.collectQueueExpanded = !S.collectQueueExpanded;
     renderCollect();
+  };
+$("rollout-save-queue-toggle").onclick = () => {
+    S.rolloutSaveQueueExpanded = !S.rolloutSaveQueueExpanded;
+    renderRolloutSave();
   };
 document.querySelector("#panel-setup .auto-setup-row").onclick = () => {
     if ($("panel-setup").dataset.st === "error") retrySetup();

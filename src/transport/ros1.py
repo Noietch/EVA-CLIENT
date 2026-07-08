@@ -9,6 +9,7 @@ import collections
 import importlib.util
 import logging
 import os
+import threading
 from typing import Any
 from urllib import parse
 
@@ -23,7 +24,7 @@ from transport.base import (
     _RosTransportBase,
     resolve_topics,
 )
-from transport.utils import StreamFreshness
+from transport.utils import ImageRateTracker, StreamFreshness
 
 logger = logging.getLogger(__name__)
 
@@ -180,6 +181,8 @@ class Ros1Transport(_RosTransportBase):
         self._robot = robot
         self._camera_topics, self._group_topics = resolve_topics(config.transport.topics)
         self._freshness = StreamFreshness()
+        self._image_rate = ImageRateTracker()
+        self._deque_lock = threading.RLock()
 
         runtime = get_ros_runtime(config.transport.node_name)
         self._rospy = runtime.rospy
@@ -246,7 +249,7 @@ class Ros1Transport(_RosTransportBase):
             self._register_subscriber(
                 topic,
                 self._Image,
-                lambda msg, d=deque: self._append_msg(d, msg),
+                lambda msg, c=camera.name, d=deque: self._append_camera_msg(c, d, msg),
             )
 
         # Subscribe to actuator group state topics
@@ -398,7 +401,7 @@ class Ros1Transport(_RosTransportBase):
 
         state = np.concatenate(state_parts, axis=0)
 
-        return Observation(images=images, state_qpos=state)
+        return Observation(images=images, state_qpos=state, timestamp=frame_time)
 
     def _pop_synced_msg(self, deque: collections.deque, frame_time: float) -> Any:
         while deque[0].header.stamp.to_sec() < frame_time:

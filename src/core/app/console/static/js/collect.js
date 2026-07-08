@@ -1,7 +1,7 @@
 // collect.js: data-collection tab (collect) + QC/annotation review &
 // stage-video playback control (review).
 import { $, S, apiGet, apiPost } from "./core.js";
-import { collectTaskValue, setPanel, applyStatus } from "./run.js";
+import { collectTaskValue, setPanel, applyStatus, uiMode } from "./run.js";
 import { refreshCameraStreams, replayVideos } from "./replay.js";
 import { setActiveTab } from "./main.js";
 
@@ -17,7 +17,7 @@ async function startCollectFromTab() {
       S.STATUS.selected_collect_task = task;
       await apiPost("/api/select_collect_task", { task });
     }
-    await apiPost("/api/collect_start");
+    await apiPost("/api/operator_action", { intent: "start" });
   }
 
 function fmtEta(sec) {
@@ -41,6 +41,7 @@ function collectTone(item) {
     if (item.status === "failed") return "cq-fail";
     if (item.qc_verdict === "pass") return "cq-ok";
     if (item.qc_verdict === "fail") return "cq-fail";
+    if (item.quality === "red") return "cq-fail";
     return "cq-queued";
   }
 
@@ -61,8 +62,23 @@ function savedEpisodeId(item) {
 function selectCollectEpisode(item) {
     const episode = savedEpisodeId(item);
     if (episode == null) return;
+    const replay = S.STATUS.collection_replay || {};
+    const switchActiveReview = S.reviewKind === "collect" && replay.active &&
+      replay.episode_index !== episode && reviewEpisodeId !== episode;
     S.collectReplayEpisode = episode;
+    if (switchActiveReview) {
+      reviewEpisode("collect", item);
+      return;
+    }
     renderCollect();
+  }
+
+function selectRolloutSaveEpisode(item) {
+    const episode = savedEpisodeId(item);
+    if (episode == null) return;
+    S.rolloutSaveEpisode = episode;
+    reviewEpisode("rollout", item);
+    renderRolloutSave();
   }
 
 function selectCollectEpisodePointer(event, item) {
@@ -167,6 +183,111 @@ function renderCollectList(items) {
       }
       host.appendChild(row);
     });
+  }
+
+function pipeBadge(el, text) {
+    if (!el) return;
+    const state = String(text || "IDLE").toUpperCase();
+    el.textContent = state;
+    el.dataset.state = state;
+  }
+
+function renderRolloutSaveTiles(items) {
+    const host = $("rollout-save-queue-tiles");
+    if (!host) return;
+    host.innerHTML = "";
+    if (!items.length) {
+      const empty = document.createElement("span");
+      empty.className = "collect-empty";
+      empty.textContent = "no saved rollouts";
+      host.appendChild(empty);
+      return;
+    }
+    items.forEach((item) => {
+      const tile = document.createElement("button");
+      tile.type = "button";
+      tile.className = `collect-tile ${collectTone(item)}`;
+      const episode = savedEpisodeId(item);
+      if (episode != null) {
+        tile.classList.add("replayable");
+        if (episode === S.rolloutSaveEpisode) tile.classList.add("selected");
+        tile.onclick = () => selectRolloutSaveEpisode(item);
+      }
+      host.appendChild(tile);
+    });
+  }
+
+function renderRolloutSaveList(items) {
+    const host = $("rollout-save-queue-list");
+    if (!host) return;
+    host.style.display = S.rolloutSaveQueueExpanded ? "block" : "none";
+    $("rollout-save-queue-toggle").textContent = S.rolloutSaveQueueExpanded ? "COLLAPSE" : "EXPAND";
+    host.innerHTML = "";
+    if (!items.length) return;
+    items.slice().reverse().forEach((item) => {
+      const row = document.createElement("div");
+      const episode = savedEpisodeId(item);
+      row.className = `collect-row ${episode != null ? "replayable" : ""}${episode === S.rolloutSaveEpisode ? " selected" : ""}`;
+      const ep = document.createElement("span");
+      const frames = document.createElement("span");
+      const issue = document.createElement("span");
+      ep.textContent = `#${String(item.episode_index).padStart(3, "0")}`;
+      frames.textContent = `${item.length || 0}f`;
+      issue.className = "issue";
+      issue.textContent = collectIssueText(item);
+      row.appendChild(ep);
+      row.appendChild(frames);
+      row.appendChild(issue);
+      if (episode != null) row.onclick = () => selectRolloutSaveEpisode(item);
+      host.appendChild(row);
+    });
+  }
+
+function renderRolloutSave() {
+    const panel = $("rollout-save-panel");
+    if (!panel) return;
+    const hideRolloutSave = ["sim", "step"].includes(uiMode(S.STATUS.cli_mode));
+    panel.style.display = hideRolloutSave ? "none" : "";
+    if (hideRolloutSave) return;
+    const rollout = S.STATUS.rollout || {};
+    const enabled = !!rollout.enabled;
+    const saveReady = !!rollout.save_ready;
+    const saveBlocked = !!rollout.save_blocked_by_intervention;
+    const running = S.STATUS.session_status === "running";
+    const episodes = rollout.episodes || [];
+    const queue = rollout.queue || [];
+    const items = episodes.concat(queue);
+    const progress = Math.max(0, Math.min(1, Number(rollout.progress || 0)));
+    const savedComplete = enabled && !saveReady && queue.length === 0 && episodes.length > 0;
+
+    pipeBadge($("rollout-save-pipeline"), enabled ? (rollout.pipeline_state || "IDLE") : "DISABLED");
+    $("rollout-save-dir").style.display = savedComplete ? "block" : "none";
+    $("rollout-save-dir").textContent = savedComplete ? `saved to ${rollout.dataset_dir || "—"}` : "";
+    $("rollout-save-count").textContent = `${episodes.length}/${items.length}`;
+    $("rollout-save-progress-fill").style.width = `${progress * 100}%`;
+    $("rollout-save-eta").textContent = fmtEta(rollout.eta_sec);
+    const acceptedInterventions = Number(rollout.accepted_intervention_segments || 0);
+    const activeInterventionFrames = Number(rollout.active_intervention_frames || 0);
+    $("rollout-save-err").textContent = enabled
+      ? (saveBlocked
+          ? `continue or abandon intervention · active ${activeInterventionFrames}f · accepted ${acceptedInterventions}`
+          : (saveReady ? `ready after ${rollout.reason || "stop"}` : ""))
+      : "rollout saving is disabled";
+    $("b-rollout-save").disabled = !enabled || !saveReady || running || saveBlocked;
+    $("b-rollout-qc-pass").disabled = !enabled || S.rolloutSaveEpisode == null;
+    $("b-rollout-qc-fail").disabled = !enabled || S.rolloutSaveEpisode == null;
+
+    renderRolloutSaveTiles(items);
+    renderRolloutSaveList(items);
+
+    const replay = S.STATUS.collection_replay || {};
+    if (S.reviewKind === "rollout" && replay.active && replay.episode_index != null) {
+      S.rolloutSaveEpisode = replay.episode_index;
+      $("rollout-review-title").textContent = `episode ${replay.episode_index} · replay`;
+      syncReviewVideosToFrame(replay.frame_index);
+    } else if (S.rolloutSaveEpisode == null) {
+      $("rollout-review-title").textContent = "no rollout selected";
+    }
   }
 
 function renderCollect() {
@@ -281,28 +402,36 @@ let reviewVideoKeys = {};
 
 let reviewFps = 10;
 
+let reviewRequestId = 0;
+
 function reviewDatasetFor(kind) {
+    if (kind === "rollout") return (S.STATUS.rollout || {}).dataset_dir || "";
     return (S.STATUS.collect || {}).dataset_dir ||
       (S.CFG && S.CFG.collection ? (S.CFG.collection.dataset_dir || "") : "");
   }
 
 function reviewTitleFor(kind) {
+    if (kind === "rollout") return $("rollout-review-title");
     return $("collect-replay-status");
   }
 
 function reviewErrorFor(kind) {
+    if (kind === "rollout") return $("rollout-save-err");
     return $("collect-err");
   }
 
 function reviewNoteFor(kind) {
+    if (kind === "rollout") return $("rollout-qc-note");
     return $("collect-qc-note");
   }
 
 function reviewActiveInCurrentTab() {
-    return (S.reviewKind === "collect" && S.ACTIVE_TAB === "collect");
+    return (S.reviewKind === "collect" && S.ACTIVE_TAB === "collect") ||
+      (S.reviewKind === "rollout" && S.ACTIVE_TAB === "debug");
   }
 
 function clearReviewPlayback() {
+    reviewRequestId += 1;
     S.reviewKind = "";
     reviewVideoKeys = {};
     reviewDatasetDir = "";
@@ -442,7 +571,9 @@ function syncReviewVideosToFrame(frameIndex) {
 async function reviewEpisode(kind, item) {
     const episode = savedEpisodeId(item);
     if (episode == null) return;
-    S.collectReplayEpisode = episode;
+    const requestId = ++reviewRequestId;
+    if (kind === "rollout") S.rolloutSaveEpisode = episode;
+    else S.collectReplayEpisode = episode;
     S.reviewKind = kind;
     reviewDatasetDir = reviewDatasetFor(kind);
     reviewEpisodeId = episode;
@@ -455,6 +586,7 @@ async function reviewEpisode(kind, item) {
       dataset_dir: reviewDatasetDir,
       episode: String(reviewEpisodeId),
     });
+    if (requestId !== reviewRequestId) return;
     if (!r.ok) {
       if (err) err.textContent = r.error || "review failed";
       if (title) title.textContent = `episode ${episode} · unavailable`;
@@ -467,11 +599,14 @@ async function reviewEpisode(kind, item) {
     renderReviewVideos(reviewVideoKeys);
     setStageVideoLoading(true, "loading video");
     await waitForStageVideosReady("review");
+    if (requestId !== reviewRequestId) return;
     syncReviewVideosToFrame(0);
     await waitForStageVideosPainted("review");
+    if (requestId !== reviewRequestId) return;
     const start = await apiPost("/api/review_replay_start", {
       episode: String(reviewEpisodeId),
     });
+    if (requestId !== reviewRequestId) return;
     if (!start.ok) {
       if (err) err.textContent = start.error || "review start failed";
       if (title) title.textContent = `episode ${episode} · unavailable`;
@@ -483,7 +618,7 @@ async function reviewEpisode(kind, item) {
   }
 
 async function submitEpisodeQc(kind, verdict) {
-    const episode = S.collectReplayEpisode;
+    const episode = kind === "rollout" ? S.rolloutSaveEpisode : S.collectReplayEpisode;
     if (episode == null) return;
     S.reviewKind = kind;
     reviewDatasetDir = reviewDatasetFor(kind);
@@ -500,8 +635,8 @@ async function submitEpisodeQc(kind, verdict) {
   }
 
 async function submitEpisodeNote(kind) {
-    const episode = S.collectReplayEpisode;
-    const status = $("collect-qc-status");
+    const episode = kind === "rollout" ? S.rolloutSaveEpisode : S.collectReplayEpisode;
+    const status = kind === "rollout" ? $("rollout-save-err") : $("collect-qc-status");
     if (episode == null) { if (status) status.textContent = "✗ select an episode first"; return; }
     S.reviewKind = kind;
     reviewDatasetDir = reviewDatasetFor(kind);
@@ -559,7 +694,7 @@ function openBatchQc(dir, episode) {
 
 export {
   collectConfigured, collectEnabled, dotClass, renderCollect,
-  savedEpisodeId, startCollectFromTab, toggleSelectedCollectReplay,
+  renderRolloutSave, savedEpisodeId, startCollectFromTab, toggleSelectedCollectReplay,
   clearReviewPlayback, loadAnnotation, pauseStageVideos, playStageVideos,
   reviewActiveInCurrentTab, reviewEpisode, saveAnnotation, setStageVideoLoading,
   submitEpisodeNote, submitEpisodeQc, submitQc, syncReviewVideosToFrame,
