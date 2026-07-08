@@ -102,8 +102,9 @@ def test_eval_bootstrap_uses_default_ckpt_slot(monkeypatch):
         inference_strategy="sync",
         cli_mode="real",
     )
-    config = ConfigDict(eval=eval_cfg)
+    config = ConfigDict(eval=eval_cfg, eval_cfg=eval_cfg)
     runtime, session = _runtime_and_session()
+    runtime.ckpt_order = [0]
     connected_ports = []
 
     def fake_connect_policy(config, runtime, session, **kwargs):

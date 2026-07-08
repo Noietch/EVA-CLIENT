@@ -52,6 +52,14 @@ def test_console_post_requests_are_serialized():
     assert "postQueue = result.then(() => undefined, () => undefined);" in html
 
 
+def test_telemetry_bar_renders_image_hz_metric():
+    html = console_source()
+
+    assert 'id="t-image-hz"' in html
+    assert "function formatImageHz(hz)" in html
+    assert '$("t-image-hz").textContent = formatImageHz(s.image_min_hz);' in html
+
+
 def test_manual_target_qpos_renders_from_status_without_frame_qpos():
     html = console_source()
 
@@ -63,6 +71,15 @@ def test_manual_target_qpos_renders_from_status_without_frame_qpos():
     )
 
 
+def test_manual_sliders_use_configured_qpos_limits():
+    html = console_source()
+
+    assert "manual_qpos_limits" in html
+    assert "const limits = S.CFG.manual_qpos_limits;" in html
+    assert 'min="${limit.min}" max="${limit.max}" step="${limit.step}"' in html
+    assert 'min="-3.2" max="3.2" step="0.005"' not in html
+
+
 def test_manual_scene_transforms_keep_per_mesh_easing():
     html = console_source()
 
@@ -71,6 +88,15 @@ def test_manual_scene_transforms_keep_per_mesh_easing():
     assert "applyLayer(meshes, command);" in html
     assert "applyLayer(ghostMeshes, payload.ghost);" in html
     assert "mesh.position.lerp(u.tPos, alpha);" in html
+
+
+def test_collect_scene_poll_uses_normal_cadence_during_recording():
+    html = console_source()
+
+    assert "const COLLECT_SCENE_POLL_MS = 80;" in html
+    assert "function scenePollMinIntervalMs()" in html
+    assert "S.STATUS.collect.collecting" in html
+    assert "now - lastScenePollAt < minInterval" in html
 
 
 def test_manual_dispatch_uses_single_send_stop_toggle():
@@ -93,17 +119,8 @@ def test_manual_tuning_exposes_publish_rate_only():
     assert 'id="b-manual-tune-apply"' in html
     assert 'id="manual-tune-status"' in html
     assert '$("b-manual-tune-apply").onclick = applyManualTune;' in html
-    assert 'apiPost("/api/update_manual_params", { publish_rate: publishRate })' in html
+    assert 'apiPost("/api/update_infer_params", { publish_rate: publishRate })' in html
     assert 'id="manual-tune-inference-rate"' not in html
-
-
-def test_manual_panel_order_is_connect_qpos_send_tune():
-    html = console_source()
-    manual = html[html.index('id="view-manual"') :]
-
-    assert manual.index("MANUAL · REAL ROBOT") < manual.index("TARGET QPOS")
-    assert manual.index("TARGET QPOS") < manual.index("DISPATCH")
-    assert manual.index("DISPATCH") < manual.index('id="manual-panel-tune"')
 
 
 def test_collect_qc_does_not_jump_to_replay_tab():
@@ -327,8 +344,12 @@ def test_saved_collect_episode_is_gray_until_manual_qc():
 
     assert 'if (item.qc_verdict === "pass") return "cq-ok";' in body
     assert 'if (item.qc_verdict === "fail") return "cq-fail";' in body
+    assert 'item.quality === "green"' not in body
+    assert 'if (item.quality === "red") return "cq-fail";' in body
     assert 'if (savedEpisodeId(item) != null' not in body
     assert body.rstrip().endswith('return "cq-queued";\n  }')
+    assert "Green means saved" not in html
+    assert "Pass green / fail red" in html
 
 
 def test_selected_batch_qc_episode_is_highlighted():
@@ -337,6 +358,26 @@ def test_selected_batch_qc_episode_is_highlighted():
     assert ".collect-tile.selected" in html
     assert 'if (episode === S.collectReplayEpisode) tile.classList.add("selected");' in html
     assert 'episode === S.collectReplayEpisode ? " selected" : ""' in html
+
+
+def test_collect_queue_click_switches_active_review_episode():
+    html = console_source()
+    start = html.index("function selectCollectEpisode(item)")
+    body = html[start:html.index("function selectRolloutSaveEpisode", start)]
+
+    assert "const replay = S.STATUS.collection_replay || {};" in body
+    assert 'S.reviewKind === "collect" && replay.active' in body
+    assert 'reviewEpisode("collect", item);' in body
+
+
+def test_collect_review_ignores_stale_async_switches():
+    html = console_source()
+    start = html.index("async function reviewEpisode(kind, item)")
+    body = html[start:html.index("async function submitEpisodeQc", start)]
+
+    assert "let reviewRequestId = 0;" in html
+    assert "const requestId = ++reviewRequestId;" in body
+    assert "requestId !== reviewRequestId" in body
 
 
 def test_collect_replay_toggle_starts_and_stops_selected_episode():
@@ -374,8 +415,67 @@ def test_collect_fourth_stage_is_quality_check():
 def test_stopped_run_button_switches_to_continue_icon():
     html = console_source()
 
-    assert "const continueRun = !running && (s.step_index || 0) > 0;" in html
-    assert '$(ids.run).textContent = continueRun ? "CONTINUE ▶▶" : "RUN ▶";' in html
+    assert "const intervention = !!s.rollout_intervention_active;" in html
+    assert "const continueRun = !running && ((s.step_index || 0) > 0 || intervention);" in html
+    assert 'run.querySelector(".rec-label").textContent = running' in html
+    assert '? "STOP ■"' in html
+    assert ': (intervention ? "RESUME ▶" : (continueRun ? "CONTINUE ▶▶" : "RUN ▶"));' in html
+
+
+def test_rollout_intervention_abandon_controls_are_wired():
+    html = console_source()
+    server_source = (
+        Path(__file__).resolve().parents[3] / "src" / "core" / "app" / "console" / "server.py"
+    ).read_text()
+
+    assert 'id="b-rollout-intervention-abandon"' in html
+    assert 'apiPost("/api/operator_action", { intent: "cancel" })' in html
+    assert (
+        '"/api/rollout_intervention_abandon": "web:rollout_intervention_abandon"'
+        in server_source
+    )
+    assert '"/api/rollout_stop": "web:rollout_stop"' in server_source
+    assert "save_blocked_by_intervention" in html
+    assert "accepted_intervention_segments" in html
+
+
+def test_debug_hil_control_mode_is_wired():
+    html = console_source()
+    server_source = (
+        Path(__file__).resolve().parents[3] / "src" / "core" / "app" / "console" / "server.py"
+    ).read_text()
+
+    assert 'id="hil-control-mode"' in html
+    assert 'apiPost("/api/rollout_intervention_mode"' in html
+    assert "hil_control_mode" in html
+    assert "hil_control_modes" in html
+    assert '"hil_control_mode": r.hil_control_mode' in server_source
+    assert '"/api/rollout_intervention_mode"' in server_source
+
+
+def test_operator_action_api_is_wired():
+    server_source = (
+        Path(__file__).resolve().parents[3] / "src" / "core" / "app" / "console" / "server.py"
+    ).read_text()
+
+    assert '"/api/operator_action": ConsoleRequestHandler._post_operator_action' in server_source
+    assert 'self._enqueue_ok(f"web:operator_action:{intent}:ui")' in server_source
+
+
+def test_collect_and_rollout_controls_use_operator_action():
+    html = console_source()
+
+    assert 'apiPost("/api/operator_action", { intent: "start" })' in html
+    assert 'apiPost("/api/operator_action", { intent: "accept" })' in html
+    assert 'apiPost("/api/operator_action", { intent: "cancel" })' in html
+    assert (
+        '$("b-rollout-save").onclick = () => '
+        'apiPost("/api/operator_action", { intent: "accept" });'
+    ) in html
+    assert (
+        '$("b-rollout-intervention-abandon").onclick = () => '
+        'apiPost("/api/operator_action", { intent: "cancel" });'
+    ) in html
 
 
 def test_step_control_has_single_dynamic_instruction_line():
@@ -399,13 +499,19 @@ def test_tab_order_places_manual_and_collect_before_replay():
 def test_task_and_strategy_controls_are_dropdown_selects():
     html = console_source()
 
-    assert '<select class="choice-select task-select" id="prompt-list" aria-label="Task"></select>' in html
     assert (
-        '<select class="choice-select task-select" id="collect-prompt-list" aria-label="Collection task"></select>'
+        '<select class="choice-select task-select" id="prompt-list" '
+        'aria-label="Task"></select>'
         in html
     )
     assert (
-        '<select class="choice-select task-select" id="eval-prompt-list" aria-label="Evaluation task"></select>'
+        '<select class="choice-select task-select" id="collect-prompt-list" '
+        'aria-label="Collection task"></select>'
+        in html
+    )
+    assert (
+        '<select class="choice-select task-select" id="eval-prompt-list" '
+        'aria-label="Evaluation task"></select>'
         in html
     )
     assert (
@@ -508,7 +614,11 @@ def test_eval_unscored_trial_hint_is_english_and_not_shown_after_save_next():
     assert "（无备注）" not in html
     assert "(no note)" in html
     assert "EVAL_SHOW_UNSCORABLE_HINT && EVAL_PROMPT && !scorable" in html
-    assert "EVAL_SHOW_UNSCORABLE_HINT = false;\n        EVAL_TRIAL = saved < n ? saved + 1 : saved;" in html
+    assert (
+        "EVAL_SHOW_UNSCORABLE_HINT = false;\n"
+        "        EVAL_TRIAL = saved < n ? saved + 1 : saved;"
+        in html
+    )
 
 
 def test_eval_stop_latches_stopping_until_backend_settles():

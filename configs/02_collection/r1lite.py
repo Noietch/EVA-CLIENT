@@ -1,13 +1,10 @@
 """R1 Lite: teleop data collection over ROS2."""
 
-_base_ = ['../00_base/defaults.py']
+_base_ = ['../01_deploy/r1lite/_base.py']
 
 robot = dict(
     type='r1_lite',
     eef_reference_frame='torso_link3',
-    gripper_threshold=0.98,
-    gripper_open=0.0,
-    gripper_close=1.0,
 )
 
 transport = dict(
@@ -25,6 +22,8 @@ collection = dict(
         log_dir='work_dirs/collection/r1lite',
         fps=15,
         save_queue_max=15,
+        image_height=360,
+        image_width=640,
     ),
     schema=dict(
         robot_type='r1_lite',
@@ -51,20 +50,35 @@ collection = dict(
             groups=dict(
                 left_arm=dict(
                     qpos_topic='/hdas/feedback_arm_left',
+                    qpos_gripper_topic='/hdas/feedback_gripper_left',
                     eef_topic='/relaxed_ik/motion_control/pose_ee_arm_left',
+                    hil_qpos_topic='/eva/hil/input_joint_state_arm_left',
                     action_qpos_topic='/motion_target/target_joint_state_arm_left',
+                    action_qpos_gripper_source='operator',
+                    action_qpos_gripper_topic=None,
+                    action_qpos_gripper_binary=True,
                     action_eef_topic='/relaxed_ik/motion_control/pose_ee_arm_left',
                 ),
                 right_arm=dict(
                     qpos_topic='/hdas/feedback_arm_right',
+                    qpos_gripper_topic='/hdas/feedback_gripper_right',
                     eef_topic='/relaxed_ik/motion_control/pose_ee_arm_right',
+                    hil_qpos_topic='/eva/hil/input_joint_state_arm_right',
                     action_qpos_topic='/motion_target/target_joint_state_arm_right',
+                    action_qpos_gripper_source='operator',
+                    action_qpos_gripper_topic=None,
+                    action_qpos_gripper_binary=True,
                     action_eef_topic='/relaxed_ik/motion_control/pose_ee_arm_right',
                 ),
             ),
         ),
     ),
     tasks=['pick up the apple'],
+)
+
+operator_control = dict(
+    enabled=True,
+    button_topic='/eva/operator_button',
 )
 
 inference_cfg = dict(

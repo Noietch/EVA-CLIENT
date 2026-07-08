@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import abc
 import collections
+import contextlib
 import dataclasses
 import importlib.util
 import logging
@@ -16,9 +17,15 @@ from typing import Any, Protocol, cast
 import numpy as np
 
 from core.config import ConfigDict
-from core.types import Observation, RawCollectionSnapshot
+from core.types import (
+    CollectionRawBatch,
+    CollectionRawImage,
+    CollectionRawSample,
+    Observation,
+    RawCollectionSnapshot,
+)
 from robots.base import Robot
-from transport.utils import StreamFreshness, _SimpleRate
+from transport.utils import ImageRateTracker, StreamFreshness, _SimpleRate
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +48,10 @@ class ObservationSource(Protocol):
 
     def seconds_since_last_recv(self) -> float | None:
         """Return seconds since the last received message, or None if never received."""
+        ...
+
+    def image_min_hz(self) -> float | None:
+        """Return the minimum image receive rate across cameras, or None if unknown."""
         ...
 
 
@@ -115,6 +126,10 @@ class TransportBridge(abc.ABC):
         """
         return None
 
+    def image_min_hz(self) -> float | None:
+        """Minimum image receive rate across cameras, or None until enough samples."""
+        return None
+
     def supports_collection(self) -> bool:
         """True if this transport can record data-collection frames."""
         return False
@@ -146,16 +161,34 @@ class TransportBridge(abc.ABC):
 
         The capture loop calls this every tick: it must only grab source
         references (undecoded bytes / pinned messages) and stamp the source
-        capture time, deferring all decode/copy/convert work to the returned
-        snapshot's decode() closure run on the ingest thread. Returns None when
-        no new source frame is available (the source timestamp has not strictly
-        advanced), which also serves as dedup. Non-collection transports keep
-        the default and stay on the synchronous get_collection_frame() path.
+        capture time. The returned snapshot yields timestamped raw stream samples
+        for episode-level fixed-clock alignment at save time. Returns None when
+        no new source frame is available.
         """
         return None
 
+    def collection_diagnostics(self) -> str:
+        """Human-readable reason collection frames are not currently available."""
+        return ""
+
     def stop_collection(self) -> None:
         """Signal the source to stop emitting collection frames (no-op default)."""
+        return None
+
+    def reset_hil_control(self) -> None:
+        """Reset backend HIL relay state before a new intervention/collection."""
+        return None
+
+    def set_hil_control_mode(self, mode: str) -> None:
+        """Set backend HIL relay mode when supported."""
+        _ = mode
+        return None
+
+    def record_collection_gripper_action(
+        self, group_name: str, value: float, stamp: Any | None = None
+    ) -> None:
+        """Record a collection-only gripper action target when supported."""
+        _ = group_name, value, stamp
         return None
 
     def create_observation_reader(self) -> ObservationSource:
@@ -313,6 +346,7 @@ class _RosTransportBase(TransportBridge):
     _robot: Robot
     _bridge: Any
     _freshness: StreamFreshness
+    _image_rate: ImageRateTracker
     _camera_deques: dict[str, collections.deque]
     _collection_qpos_deques: dict[str, collections.deque]
     _collection_eef_deques: dict[str, collections.deque]
@@ -341,11 +375,29 @@ class _RosTransportBase(TransportBridge):
         """The backend's ``config.collection.transport.ros{1,2}`` section."""
         ...
 
+    def _deque_guard(self) -> Any:
+        return getattr(self, "_deque_lock", contextlib.nullcontext())
+
     def _append_msg(self, deque: collections.deque, msg: Any) -> None:
-        if len(deque) >= _COLLECTION_DEQUE_MAX:
-            deque.popleft()
-        deque.append(msg)
+        with self._deque_guard():
+            if len(deque) >= _COLLECTION_DEQUE_MAX:
+                deque.popleft()
+            deque.append(msg)
         self._freshness.mark()
+
+    def _append_camera_msg(
+        self,
+        camera_name: str,
+        deque: collections.deque,
+        msg: Any,
+        timestamp: float | None = None,
+    ) -> None:
+        self._image_rate.mark(camera_name, timestamp)
+        self._append_msg(deque, msg)
+
+    def image_min_hz(self) -> float | None:
+        """Minimum camera topic receive rate across subscribed cameras."""
+        return self._image_rate.min_hz(self._camera_deques.keys())
 
     def seconds_since_last_recv(self) -> float | None:
         """Seconds since the last message landed on any subscription (link health)."""
@@ -360,6 +412,7 @@ class _RosTransportBase(TransportBridge):
         frame_time = self._collection_frame_time()
         if frame_time is not None:
             self._last_acquire_stamp = frame_time
+        self._reset_collection_raw_cursors()
         return frame_time
 
     def _latest_before_or_at(self, deque: collections.deque, frame_time: float) -> Any | None:
@@ -460,9 +513,9 @@ class _RosTransportBase(TransportBridge):
             required.append(deque)
 
         columns = self._config.collection.schema.columns
-        if "state_qpos" in columns:
+        if "qpos" in columns:
             required.extend(self._collection_qpos_deques.values())
-        if "state_eef" in columns:
+        if "eef" in columns:
             required.extend(self._collection_eef_deques.values())
         if "action_qpos" in columns:
             required.extend(self._collection_action_qpos_deques.values())
@@ -485,11 +538,11 @@ class _RosTransportBase(TransportBridge):
         """
         columns = self._config.collection.schema.columns
         state_qpos = state_eef = action_qpos = action_eef = None
-        if "state_qpos" in columns:
+        if "qpos" in columns:
             state_qpos = self._collection_joint_vector(self._collection_qpos_deques, frame_time)
             if state_qpos is None:
                 return None
-        if "state_eef" in columns:
+        if "eef" in columns:
             state_eef = self._collection_eef_vector(self._collection_eef_deques, frame_time)
             if state_eef is None:
                 return None
@@ -538,56 +591,213 @@ class _RosTransportBase(TransportBridge):
             timestamp=frame_time,
         )
 
-    def acquire_collection_raw(self) -> RawCollectionSnapshot | None:
-        """O(1) capture: pin image msgs + compute cheap value vectors; defer the
-        expensive per-image decode to the snapshot's decode() closure.
+    def _collection_raw_cursors(self) -> dict[str, float]:
+        cursors = getattr(self, "_collection_raw_cursor_state", None)
+        if cursors is None:
+            cursors = {}
+            self._collection_raw_cursor_state = cursors
+        return cursors
 
-        Dedup is the strict-monotonic frame_time gate: when the camera header
-        stamp has not advanced, returns None instead of re-recording the msg the
-        ingest thread already holds.
-        """
-        if not self._config.collection.schema.columns:
-            return None
-        frame_time = self._collection_frame_time()
-        if frame_time is None:
-            return None
-        if self._last_acquire_stamp is not None and frame_time <= self._last_acquire_stamp:
-            return None
-
-        gathered = self._gather_collection_columns(frame_time)
-        if gathered is None:
-            return None
-        state_qpos, state_eef, action_qpos, action_eef = gathered
-
-        # Pin the still-encoded image msgs without decoding; missing any camera
-        # invalidates the whole frame, matching get_collection_frame semantics.
-        image_msgs: dict[str, tuple[str, Any]] = {}
+    def _collection_raw_streams(self) -> list[tuple[str, str, str, Any, collections.deque]]:
+        streams: list[tuple[str, str, str, Any, collections.deque]] = []
         for camera in self._collection_camera_specs():
             deque = self._camera_deques.get(camera.name)
-            if deque is None:
+            if deque is not None:
+                streams.append(("image", camera.observation_key, camera.name, camera, deque))
+
+        columns = self._config.collection.schema.columns
+        if "qpos" in columns:
+            for group in self._robot.actuator_groups:
+                deque = self._collection_qpos_deques.get(group.name)
+                if deque is not None:
+                    streams.append(("vector", "state_qpos", group.name, group, deque))
+        if "eef" in columns:
+            for group in self._robot.actuator_groups:
+                deque = self._collection_eef_deques.get(group.name)
+                if deque is not None:
+                    streams.append(("vector", "state_eef", group.name, group, deque))
+        if "action_qpos" in columns:
+            for group in self._robot.actuator_groups:
+                deque = self._collection_action_qpos_deques.get(group.name)
+                if deque is not None:
+                    streams.append(("vector", "action_qpos", group.name, group, deque))
+        if "action_eef" in columns:
+            for group in self._robot.actuator_groups:
+                deque = self._collection_action_eef_deques.get(group.name)
+                if deque is not None:
+                    streams.append(("vector", "action_eef", group.name, group, deque))
+        return streams
+
+    def _collection_raw_context_streams(self) -> list[tuple[str, collections.deque]]:
+        return []
+
+    def _reset_collection_raw_cursors(self) -> None:
+        cursors = self._collection_raw_cursors()
+        cursors.clear()
+        for kind, field, source_name, _source, deque in self._collection_raw_streams():
+            if len(deque) > 0:
+                cursors[f"{kind}:{field}:{source_name}"] = self._stamp_to_sec(deque[-1])
+
+    def _collection_raw_joint_value(
+        self,
+        field: str,
+        group: Any,
+        msg: Any,
+        timestamp: float,
+        pinned_streams: dict[str, list[Any]],
+    ) -> np.ndarray:
+        _ = field, group, timestamp, pinned_streams
+        return np.asarray(msg.position, dtype=np.float32)
+
+    def _collection_raw_eef_value(
+        self,
+        field: str,
+        group: Any,
+        msg: Any,
+        timestamp: float,
+        pinned_streams: dict[str, list[Any]],
+    ) -> np.ndarray:
+        _ = field, pinned_streams
+        return self._eef_from_msg(group, msg, timestamp)
+
+    def _collection_raw_batch_from_msgs(
+        self,
+        new_messages: dict[str, list[Any]],
+        pinned_streams: dict[str, list[Any]],
+    ) -> CollectionRawBatch:
+        batch = CollectionRawBatch()
+        for kind, field, source_name, source, _deque in self._collection_raw_streams():
+            key = f"{kind}:{field}:{source_name}"
+            messages = new_messages.get(key, [])
+            if kind == "image":
+                for msg in messages:
+                    batch.images.setdefault(field, []).append(
+                        CollectionRawSample(
+                            timestamp=self._stamp_to_sec(msg),
+                            value=CollectionRawImage(
+                                lambda camera_name=source.name, raw_msg=msg: (
+                                    self._decode_image_msg(camera_name, raw_msg)
+                                )
+                            ),
+                        )
+                    )
+                continue
+
+            sample_key = f"{field}:{source_name}"
+            for msg in messages:
+                timestamp = self._stamp_to_sec(msg)
+                if field in {"state_qpos", "action_qpos"}:
+                    value = self._collection_raw_joint_value(
+                        field, source, msg, timestamp, pinned_streams
+                    )
+                else:
+                    value = self._collection_raw_eef_value(
+                        field, source, msg, timestamp, pinned_streams
+                    )
+                batch.vectors.setdefault(sample_key, []).append(
+                    CollectionRawSample(timestamp=timestamp, value=value.astype(np.float32))
+                )
+        return batch
+
+    def _collection_fresh_messages(
+        self,
+        source_deque: collections.deque,
+        last_stamp: float | None,
+    ) -> tuple[list[Any], float | None, float | None]:
+        if not source_deque:
+            return [], None, None
+        if last_stamp is None:
+            messages = list(source_deque)
+            first_stamp = self._stamp_to_sec(messages[0])
+            latest_stamp = self._stamp_to_sec(messages[-1])
+            return messages, first_stamp, latest_stamp
+
+        fresh_reversed: list[Any] = []
+        first_stamp = None
+        latest_stamp = None
+        for msg in reversed(source_deque):
+            stamp = self._stamp_to_sec(msg)
+            if stamp <= last_stamp:
+                break
+            first_stamp = stamp
+            if latest_stamp is None:
+                latest_stamp = stamp
+            fresh_reversed.append(msg)
+        if latest_stamp is None:
+            return [], None, None
+        fresh_reversed.reverse()
+        return fresh_reversed, first_stamp, latest_stamp
+
+    def _collection_context_messages(
+        self,
+        source_deque: collections.deque,
+        start_time: float,
+        end_time: float,
+    ) -> list[Any]:
+        selected_reversed: list[Any] = []
+        latest_before_start = None
+        for msg in reversed(source_deque):
+            stamp = self._stamp_to_sec(msg)
+            if stamp > end_time:
+                continue
+            if stamp < start_time:
+                latest_before_start = msg
+                break
+            selected_reversed.append(msg)
+        selected_reversed.reverse()
+        if latest_before_start is None:
+            return selected_reversed
+        return [latest_before_start, *selected_reversed]
+
+    def acquire_collection_raw(self) -> RawCollectionSnapshot | None:
+        """O(1) capture of raw collection stream messages since the previous tick."""
+        if not self._config.collection.schema.columns:
+            return None
+        streams = self._collection_raw_streams()
+        if not streams:
+            return None
+
+        cursors = self._collection_raw_cursors()
+        new_messages: dict[str, list[Any]] = {}
+        pinned_streams: dict[str, list[Any]] = {}
+        snapshot_timestamp: float | None = None
+        first_fresh_timestamp: float | None = None
+        with self._deque_guard():
+            for kind, field, source_name, _source, deque in streams:
+                key = f"{kind}:{field}:{source_name}"
+                last_stamp = cursors.get(key)
+                fresh, first_stamp, latest = self._collection_fresh_messages(
+                    deque, last_stamp
+                )
+                if not fresh:
+                    continue
+                new_messages[key] = fresh
+                assert first_stamp is not None and latest is not None
+                cursors[key] = latest
+                first_fresh_timestamp = (
+                    first_stamp
+                    if first_fresh_timestamp is None
+                    else min(first_fresh_timestamp, first_stamp)
+                )
+                snapshot_timestamp = (
+                    latest if snapshot_timestamp is None else max(snapshot_timestamp, latest)
+                )
+
+            if snapshot_timestamp is None:
                 return None
-            msg = self._collection_latest_msg(deque, frame_time)
-            if msg is None:
-                return None
-            image_msgs[camera.observation_key] = (camera.name, msg)
+            assert first_fresh_timestamp is not None
 
-        self._last_acquire_stamp = frame_time
+            for key, deque in self._collection_raw_context_streams():
+                pinned_streams[key] = self._collection_context_messages(
+                    deque,
+                    first_fresh_timestamp,
+                    snapshot_timestamp,
+                )
 
-        def decode() -> Observation:
-            """Decode the pinned image msgs and assemble the full Observation."""
-            images: dict[str, np.ndarray] = {}
-            for obs_key, (camera_name, msg) in image_msgs.items():
-                image = self._decode_image_msg(camera_name, msg)
-                if image is None:
-                    raise ValueError(f"image decode failed for {camera_name}")
-                images[obs_key] = np.ascontiguousarray(image).copy()
-            return Observation(
-                images=images,
-                state_qpos=cast(np.ndarray, state_qpos),
-                state_eef=state_eef,
-                action_qpos=action_qpos,
-                action_eef=action_eef,
-                timestamp=frame_time,
-            )
+        def decode_raw() -> CollectionRawBatch:
+            return self._collection_raw_batch_from_msgs(new_messages, pinned_streams)
 
-        return RawCollectionSnapshot(timestamp=frame_time, decode=decode)
+        return RawCollectionSnapshot(
+            timestamp=snapshot_timestamp,
+            decode_raw=decode_raw,
+        )

@@ -28,10 +28,10 @@ from openpi_client import msgpack_numpy
 
 from core.config import ConfigDict
 from core.registry import TRANSPORT_REGISTRY
-from core.types import Observation, RawCollectionSnapshot
+from core.types import CollectionRawBatch, CollectionRawSample, Observation, RawCollectionSnapshot
 from robots.base import Robot
 from transport.base import TransportBridge
-from transport.utils import StreamFreshness
+from transport.utils import ImageRateTracker, StreamFreshness
 
 logger = logging.getLogger(__name__)
 
@@ -184,6 +184,7 @@ class _ObservationReader:
         self._collection_queue: collections.deque[WireObservation] = collections.deque()
         self._raw_collection_queue: collections.deque[bytes] = collections.deque()
         self._freshness = StreamFreshness()
+        self._image_rate = ImageRateTracker()
         self._lock = threading.Lock()
         self._closed = False
 
@@ -217,6 +218,7 @@ class _ObservationReader:
                     break
                 got_message = True
                 obs = unpack_observation(payload)
+                self._image_rate.mark_many(obs.images.keys(), obs.t)
                 self._cache_images_locked(obs)
                 if newest is None or obs.t >= newest.t:
                     newest = obs
@@ -235,6 +237,7 @@ class _ObservationReader:
                     break
                 got_message = True
                 obs = unpack_observation(payload)
+                self._image_rate.mark_many(obs.images.keys(), obs.t)
                 self._cache_images_locked(obs)
                 self._collection_queue.append(obs)
                 if self._latest is None or obs.t >= self._latest.t:
@@ -248,6 +251,15 @@ class _ObservationReader:
     def seconds_since_last_recv(self) -> float | None:
         """Seconds since this reader's socket last received a message, or None."""
         return self._freshness.seconds_since()
+
+    def image_min_hz(self) -> float | None:
+        """Minimum image receive rate across enabled cameras."""
+        keys = (
+            camera.observation_key
+            for camera in self._robot.observation_schema.cameras
+            if camera.observation_key not in self._disabled_cameras
+        )
+        return self._image_rate.min_hz(keys)
 
     def clear_collection_backlog(self) -> float | None:
         """Drain the socket and drop queued collection frames captured pre-recording."""
@@ -318,8 +330,9 @@ class _ObservationReader:
                 images=images,
                 state_qpos=state,
                 action_qpos=np.asarray(wire_obs.action, dtype=np.float32),
+                timestamp=wire_obs.t,
             )
-        return Observation(images=images, state_qpos=state)
+        return Observation(images=images, state_qpos=state, timestamp=wire_obs.t)
 
     def get_camera_frame(self, key: str) -> np.ndarray | None:
         """Single camera's image [H, W, 3] uint8 from the freshest snapshot, or None.
@@ -429,7 +442,7 @@ class _ObservationReader:
 
         The main thread does zero msgpack work here: it only moves bytes off the
         socket into a backlog and hands back one payload. Decoding happens later
-        in the snapshot's decode() closure on the ingest thread.
+        through the snapshot's raw-batch closure on the ingest thread.
         """
         with self._lock:
             got_message = False
@@ -447,24 +460,53 @@ class _ObservationReader:
             return self._raw_collection_queue.popleft()
 
     def acquire_collection_raw(self) -> RawCollectionSnapshot | None:
-        """O(1) capture: pop one raw payload off the backlog, defer unpack to decode().
+        """Capture one raw collection payload and expose it as timestamped streams.
 
-        The main thread does no msgpack work — it only moves bytes off the socket
-        and returns a snapshot whose decode() closure unpacks into an Observation
-        on the ingest thread. Returns None when the backlog is empty.
+        Returns None when the backlog is empty.
         """
         payload = self._drain_raw_collection()
         if payload is None:
             return None
+        wire_obs = unpack_observation(payload)
 
-        def decode(payload: bytes = payload) -> Observation:
-            """Unpack the pinned payload into an Observation (ingest-thread work)."""
-            return self._wire_to_observation(unpack_observation(payload))
+        def decode_raw(wire_obs: WireObservation = wire_obs) -> CollectionRawBatch:
+            batch = CollectionRawBatch()
+            for key, image in wire_obs.images.items():
+                batch.images.setdefault(key, []).append(
+                    CollectionRawSample(timestamp=wire_obs.t, value=np.asarray(image))
+                )
+            for group_name, state in wire_obs.state.items():
+                batch.vectors.setdefault(f"state_qpos:{group_name}", []).append(
+                    CollectionRawSample(
+                        timestamp=wire_obs.t,
+                        value=np.asarray(state, dtype=np.float32),
+                    )
+                )
+            if wire_obs.action is not None:
+                batch.vectors.setdefault("action_qpos", []).append(
+                    CollectionRawSample(
+                        timestamp=wire_obs.t,
+                        value=np.asarray(wire_obs.action, dtype=np.float32),
+                    )
+                )
+            if wire_obs.eef is not None:
+                for group_name, eef in wire_obs.eef.items():
+                    batch.vectors.setdefault(f"state_eef:{group_name}", []).append(
+                        CollectionRawSample(
+                            timestamp=wire_obs.t,
+                            value=np.asarray(eef, dtype=np.float32),
+                        )
+                    )
+            if wire_obs.action_eef is not None:
+                batch.vectors.setdefault("action_eef", []).append(
+                    CollectionRawSample(
+                        timestamp=wire_obs.t,
+                        value=np.asarray(wire_obs.action_eef, dtype=np.float32),
+                    )
+                )
+            return batch
 
-        # The wire timestamp lives inside the still-packed payload; the backlog
-        # only ever holds genuinely published frames, so a non-empty pop is the
-        # dedup signal. decode() fills the real capture time into the frame.
-        return RawCollectionSnapshot(timestamp=0.0, decode=decode)
+        return RawCollectionSnapshot(timestamp=wire_obs.t, decode_raw=decode_raw)
 
     def close(self) -> None:
         """Close this reader's SUB socket (idempotent)."""
@@ -545,6 +587,20 @@ class ZmqTransport(TransportBridge):
             )
         ]
         known = [age for age in ages if age is not None]
+        return min(known) if known else None
+
+    def image_min_hz(self) -> float | None:
+        """Minimum known image receive rate across all active readers."""
+        rates = [
+            reader.image_min_hz()
+            for reader in (
+                self._reader,
+                self._collection_reader,
+                self._qpos_reader,
+                *self._extra_readers,
+            )
+        ]
+        known = [rate for rate in rates if rate is not None]
         return min(known) if known else None
 
     def publish_action(self, action: np.ndarray, target: str = "real") -> None:

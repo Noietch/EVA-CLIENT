@@ -18,6 +18,7 @@
     <span class="tele-metric"><span class="lbl">infer</span> <span class="val tnum" id="t-infer">0ms</span></span>
     <span class="tele-metric"><span class="lbl">step</span> <span class="val tnum" id="t-step">0</span></span>
     <span class="tele-metric"><span class="lbl">t+</span> <span class="val tnum" id="t-elapsed">0.0s</span></span>
+    <span class="tele-metric"><span class="lbl">image</span> <span class="val tnum" id="t-image-hz">— hz</span></span>
   </div>
 
   <!-- ============ tab strip ============ -->
@@ -95,6 +96,27 @@
               <button class="btn primary full" id="b-run"><span class="rec-dot"></span><span class="rec-label">RUN ▶</span></button>
               <button class="btn full" id="b-reset">RESET ⟲</button>
             </div>
+            <button class="btn danger full" id="b-rollout-intervention-abandon" style="display:none;margin-top:8px">ABANDON</button>
+            <div id="rollout-save-panel" style="margin-top:8px">
+              <button class="btn primary full" id="b-rollout-save">SAVE ROLLOUT</button>
+              <div class="kv"><span class="k">pipeline</span><span class="v sig" id="rollout-save-pipeline">IDLE</span></div>
+              <div class="collect-progress"><i id="rollout-save-progress-fill"></i></div>
+              <div class="collect-queue-head">
+                <span><span id="rollout-save-count">0/0</span> saved</span>
+                <button class="btn" id="rollout-save-queue-toggle">EXPAND</button>
+              </div>
+              <div class="kv"><span class="k">eta</span><span class="v tnum" id="rollout-save-eta">—</span></div>
+              <div class="collect-tiles" id="rollout-save-queue-tiles"></div>
+              <div class="collect-list" id="rollout-save-queue-list" style="display:none"></div>
+              <div class="step-state" id="rollout-review-title">no rollout selected</div>
+              <div class="review-actions">
+                <button class="btn" id="b-rollout-qc-pass">PASS ✓</button>
+                <button class="btn danger" id="b-rollout-qc-fail">FAIL ✗</button>
+              </div>
+              <textarea class="review-note" id="rollout-qc-note" rows="3" placeholder="QC note (optional)"></textarea>
+              <div class="rollout-save-note" id="rollout-save-dir"></div>
+              <div class="errline" id="rollout-save-err"></div>
+            </div>
             <!-- breakpoint controls: shown for STEP (sim_real) mode -->
             <div id="control-step" style="display:none">
               <div class="step-state" id="step-state">IDLE</div>
@@ -119,6 +141,8 @@
         <div class="panel" id="panel-tune">
           <div class="panel-h">TUNING</div>
           <div class="card">
+            <div class="sub-h">HIL CONTROL</div>
+            <div class="row-2" id="hil-control-mode"></div>
             <div class="tune-row"><span>inference rate Hz</span><input type="number" id="tune-inference-rate" min="0.1" step="0.1" /></div>
             <div class="tune-row"><span>publish rate Hz</span><input type="number" id="tune-publish-rate" min="1" step="1" /></div>
             <div class="sub-h" id="tune-strategy-h">STRATEGY · <span id="tune-strategy-key">—</span></div>
@@ -164,7 +188,7 @@
             <div class="collect-progress"><i id="collect-progress-fill"></i></div>
             <div class="kv"><span class="k">eta</span><span class="v tnum" id="collect-eta">—</span></div>
             <div class="collect-tiles" id="collect-queue-tiles"></div>
-            <div class="collect-tiles-hint" id="collect-tiles-hint" style="display:none">Green means saved</div>
+            <div class="collect-tiles-hint" id="collect-tiles-hint" style="display:none">Pass green / fail red</div>
             <div class="collect-list" id="collect-queue-list" style="display:none"></div>
           </div>
         </div>
@@ -346,13 +370,6 @@
         </div>
 
         <div class="panel">
-          <div class="panel-h">TARGET QPOS</div>
-          <div class="card">
-            <div class="manual-sliders" id="manual-sliders-m"></div>
-          </div>
-        </div>
-
-        <div class="panel">
           <div class="panel-h">DISPATCH</div>
           <div class="card">
             <div class="btn-grid">
@@ -370,6 +387,13 @@
             <div class="tune-row"><span>publish rate Hz</span><input type="number" id="manual-tune-publish-rate" min="1" step="1" /></div>
             <button class="btn primary full" id="b-manual-tune-apply" style="margin-top:6px">APPLY ⤓</button>
             <div class="tune-status" id="manual-tune-status"></div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-h">TARGET QPOS</div>
+          <div class="card">
+            <div class="manual-sliders" id="manual-sliders-m"></div>
           </div>
         </div>
       </div>

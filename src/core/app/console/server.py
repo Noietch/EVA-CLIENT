@@ -15,6 +15,7 @@ import gzip
 import json
 import logging
 import os
+import random
 import re
 import threading
 import time
@@ -31,7 +32,7 @@ from core.app.handlers import (
     _resolve_runtime_path,
     eval_episode_dir,
     eval_model_name,
-    manual_publish_rate,
+    rollout_save_status,
 )
 from core.app.state import (
     RuntimeState,
@@ -96,6 +97,16 @@ def _infer_replay_video_key(dataset_dir: Path, cam: str) -> str:
     return match or image.get("default") or ""
 
 
+def _ensure_ckpt_order(config: ConfigDict, runtime: RuntimeState) -> None:
+    eval_cfg = config.eval
+    if eval_cfg is None or not eval_cfg.checkpoints or runtime.ckpt_order:
+        return
+    runtime.ckpt_order = list(range(len(eval_cfg.checkpoints)))
+    if eval_cfg.shuffle_ckpts:
+        rng = random.Random(eval_cfg.shuffle_seed)
+        rng.shuffle(runtime.ckpt_order)
+
+
 @dataclasses.dataclass
 class ConsoleContext:
     """Shared state for the console request handler."""
@@ -140,6 +151,7 @@ def _serialize_eval(ctx: ConsoleContext) -> dict:
     eval_cfg = ctx.config.eval
     if eval_cfg is None:
         return {}
+    order = ctx.runtime.ckpt_order or list(range(len(eval_cfg.checkpoints)))
     # The INIT panel is always available under eval: when no init_pose is configured
     # the start pose falls back to the robot's initial_qpos (home).
     init_pose_enabled = True
@@ -163,9 +175,9 @@ def _serialize_eval(ctx: ConsoleContext) -> dict:
             {
                 "slot": slot,
                 "label": ctx.ckpt_label(slot),
-                "name": ckpt.name,
+                "name": eval_cfg.checkpoints[order[slot]].name,
             }
-            for slot, ckpt in enumerate(eval_cfg.checkpoints)
+            for slot in range(len(order))
         ],
     }
 
@@ -180,6 +192,24 @@ def _serialize_gripper_controls(ctx: ConsoleContext) -> list[dict[str, str]]:
         {"side": "l", "label": "LEFT", "group": gripper_groups[0].name},
         {"side": "r", "label": "RIGHT", "group": gripper_groups[1].name},
     ]
+
+
+def _serialize_manual_qpos_limits(ctx: ConsoleContext) -> list[dict[str, float]]:
+    config = ctx.runtime.active_config or ctx.config
+    limits = [
+        {"min": -3.2, "max": 3.2, "step": 0.005}
+        for _ in range(ctx.runtime.robot.total_action_dim)
+    ]
+    gripper_min = float(min(config.robot.gripper_open, config.robot.gripper_close))
+    gripper_max = float(max(config.robot.gripper_open, config.robot.gripper_close))
+    gripper_step = float((gripper_max - gripper_min) / 1000.0)
+    offset = 0
+    for group in ctx.runtime.robot.actuator_groups:
+        if group.gripper_index is not None:
+            index = offset + group.gripper_index
+            limits[index] = {"min": gripper_min, "max": gripper_max, "step": gripper_step}
+        offset += group.dof
+    return limits
 
 
 def _resolve_dataset_dir(dataset_dir: str) -> str:
@@ -228,12 +258,14 @@ def _serialize_config(ctx: ConsoleContext) -> dict:
         ],
         "strategies": strategies,
         "gripper_controls": _serialize_gripper_controls(ctx),
+        "manual_qpos_limits": _serialize_manual_qpos_limits(ctx),
         "obs_mode": config.inference_cfg.obs_space.type,
         "policy_action_mode": config.inference_cfg.action_space.type,
         "publish_mode": "joint",
         "publish_rate": config.inference_cfg.publish_rate,
-        "manual_publish_rate": manual_publish_rate(config),
         "inference_rate": config.inference_cfg.inference_rate,
+        "hil_control_modes": ["absolute", "relative"],
+        "hil_control_mode": ctx.runtime.hil_control_mode,
         "collection": {
             "enabled": bool(config.collection.schema.columns),
             "fps": None,
@@ -289,10 +321,12 @@ def _serialize_status(ctx: ConsoleContext) -> dict:
         transport_connected = False
     else:
         transport_connected = bool(config.transport.type)
+    image_min_hz = reader.image_min_hz()
     return {
         "robot_type": config.robot.type,
         "transport_type": config.transport.type,
         "transport_connected": transport_connected,
+        "image_min_hz": image_min_hz,
         "policy_connected": r.policy is not None,
         "policy_error": r.last_policy_error,
         "cli_mode": s.mode.value,
@@ -340,6 +374,15 @@ def _serialize_status(ctx: ConsoleContext) -> dict:
         },
         "collection_teleop_armed": r.collection_teleop_armed,
         "collection_teleop_active": r.collection_teleop_active,
+        "rollout_intervention_active": r.rollout_intervention_active,
+        "rollout_intervention_active_frames": (
+            0
+            if r.rollout_intervention_active_segment is None
+            else len(r.rollout_intervention_active_segment.frames)
+        ),
+        "rollout_intervention_segments": len(r.rollout_intervention_segments),
+        "hil_control_mode": r.hil_control_mode,
+        "rollout": rollout_save_status(config, r),
         "collect": (
             r.episode_logger.status_snapshot(format_task_label(s.selected_collect_task))
             if r.episode_logger is not None
@@ -367,6 +410,28 @@ def _encode_jpeg(image: np.ndarray, convert_bgr_to_rgb: bool, quality: int = 60)
     if not ok:
         return None
     return buf.tobytes()
+
+
+def _camera_jpeg_payload(
+    reader: ObservationSource, key: str, convert_bgr_to_rgb: bool
+) -> tuple[bytes | None, tuple[Any, ...] | None]:
+    get_jpeg = getattr(reader, "get_camera_jpeg", None)
+    if get_jpeg is not None:
+        jpeg = get_jpeg(key)
+        if jpeg is not None:
+            return jpeg, ("jpeg", len(jpeg), jpeg[:64], jpeg[-64:])
+
+    get_one = getattr(reader, "get_camera_frame", None)
+    if get_one is not None:
+        image = get_one(key)
+    else:
+        frame = reader.get_frame()
+        image = None if frame is None else frame.images.get(key)
+    if image is None:
+        return None, None
+    arr = np.asarray(image)
+    sig = ("array", arr.shape, int(arr[::32, ::32].sum(dtype=np.int64)))
+    return _encode_jpeg(image, convert_bgr_to_rgb), sig
 
 
 def _list_camera_keys(ctx: ConsoleContext) -> list[str]:
@@ -897,22 +962,14 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                 # Re-resolve per tick so mounting/clearing a replay source mid-stream
                 # swaps the feed without the client reopening the <img> connection.
                 reader = _observation_reader(ctx)
-                get_one = getattr(reader, "get_camera_frame", None)
-                if get_one is not None:
-                    image = get_one(key)
-                else:
-                    frame = reader.get_frame()
-                    image = None if frame is None else frame.images.get(key)
                 jpeg = None
-                if image is not None:
-                    arr = np.asarray(image)
-                    sig = (arr.shape, int(arr[::32, ::32].sum(dtype=np.int64)))
-                    if sig != last_sig:
-                        jpeg = _encode_jpeg(image, convert)
-                        last_sig = sig
-                        last_jpeg = jpeg
-                    elif last_jpeg is not None and tick - last_sent >= heartbeat:
-                        jpeg = last_jpeg
+                payload, sig = _camera_jpeg_payload(reader, key, convert)
+                if payload is not None and sig != last_sig:
+                    jpeg = payload
+                    last_sig = sig
+                    last_jpeg = jpeg
+                elif last_jpeg is not None and tick - last_sent >= heartbeat:
+                    jpeg = last_jpeg
                 if jpeg is not None:
                     part = (
                         b"--"
@@ -1322,8 +1379,15 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
     def _post_update_infer_params(self, body: dict) -> None:
         self._enqueue_ok("web:update_infer_params:" + json.dumps(body))
 
-    def _post_update_manual_params(self, body: dict) -> None:
-        self._enqueue_ok("web:update_manual_params:" + json.dumps(body))
+    def _post_rollout_intervention_mode(self, body: dict) -> None:
+        self._enqueue_ok(f"web:rollout_intervention_mode:{body.get('mode', '')}")
+
+    def _post_operator_action(self, body: dict) -> None:
+        intent = str(body.get("intent", "")).strip().lower()
+        if intent not in {"start", "accept", "cancel"}:
+            self._send_json(400, {"ok": False, "error": f"unsupported operator intent: {intent}"})
+            return
+        self._enqueue_ok(f"web:operator_action:{intent}:ui")
 
     def _post_manual_qpos(self, body: dict) -> None:
         qpos = body.get("qpos", [])
@@ -1454,6 +1518,9 @@ _POST_COMMANDS = {
     "/api/manual_home": "web:manual_home",
     "/api/collect_stop": "web:collect_stop",
     "/api/collect_cancel": "web:collect_cancel",
+    "/api/rollout_stop": "web:rollout_stop",
+    "/api/rollout_save": "web:rollout_save",
+    "/api/rollout_intervention_abandon": "web:rollout_intervention_abandon",
     "/api/warmup": "web:warmup",
     "/api/eval_stop": "web:stop",
     "/api/eval_reset": "web:reset",
@@ -1481,7 +1548,8 @@ _POST_ROUTES = {
     "/api/select_mode": ConsoleRequestHandler._post_select_mode,
     "/api/select_strategy": ConsoleRequestHandler._post_select_strategy,
     "/api/update_infer_params": ConsoleRequestHandler._post_update_infer_params,
-    "/api/update_manual_params": ConsoleRequestHandler._post_update_manual_params,
+    "/api/rollout_intervention_mode": ConsoleRequestHandler._post_rollout_intervention_mode,
+    "/api/operator_action": ConsoleRequestHandler._post_operator_action,
     "/api/manual_qpos": ConsoleRequestHandler._post_manual_qpos,
     "/api/manual_send": ConsoleRequestHandler._post_manual_send,
     "/api/manual_dispatch": ConsoleRequestHandler._post_manual_dispatch,
@@ -1515,6 +1583,7 @@ def start_console_server(
         )
     except Exception as exc:
         logger.warning("UrdfScene unavailable; 3D canvas disabled: %s", exc)
+    _ensure_ckpt_order(config, runtime)
     ctx = ConsoleContext(
         config=config,
         runtime=runtime,
