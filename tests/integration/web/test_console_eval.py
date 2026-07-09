@@ -124,3 +124,39 @@ def test_results_dedup_latest_episode_per_clip(tmp_path):
         assert len(recs) == 1  # one row per clip
         assert recs[0]["episode_index"] == 3  # latest episode wins
         assert recs[0]["score"] == 4
+
+
+def test_score_does_not_wait_for_async_save(tmp_path):
+    class _Logger:
+        def __init__(self) -> None:
+            self.patches = []
+
+        def wait_for_saves(self) -> bool:
+            raise AssertionError("score endpoint must not wait for background save")
+
+        def patch_episode_meta_by_clip(self, clip_id: str, **fields):
+            self.patches.append((clip_id, fields))
+            return 4
+
+    with _serve_eval_console(_eval_config(), str(tmp_path)) as h:
+        logger = _Logger()
+        h.runtime.episode_logger = logger
+
+        resp = h.post(
+            "/api/score",
+            {
+                "clip_id": "c1",
+                "prompt": "pick up the block",
+                "trial": 1,
+                "score": 2,
+                "max_score": 4,
+                "milestones": {"grasp": True},
+                "note": "ok",
+                "duration_ms": 123,
+            },
+        )
+
+        assert resp.status == 200
+        assert resp.json["episode_index"] == 4
+        assert logger.patches[0][0] == "c1"
+        assert logger.patches[0][1]["score"] == 2

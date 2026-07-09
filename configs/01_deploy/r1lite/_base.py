@@ -97,7 +97,7 @@ rollout = dict(
         log_dir='work_dirs/rollout/r1lite',
         fps=15,
         save_queue_max=15,
-        async_save=False,
+        async_save=True,
         image_height=360,
         image_width=640,
     ),

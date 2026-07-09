@@ -905,18 +905,13 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         if not clip_id:
             self._send_json(400, {"ok": False, "error": "clip_id required"})
             return
-        self._sync_preview_to_active_model()
-        ep = None
-        if self.ctx.preview is not None:
-            ep = self.ctx.preview.episode_index_by_clip().get(clip_id)
-        if ep is None or runtime.episode_logger is None:
+        if runtime.episode_logger is None:
             self._send_json(
                 409,
                 {"ok": False, "error": "no recorded episode for this trial yet — run it first"},
             )
             return
-        runtime.episode_logger.patch_episode_meta(
-            int(ep),
+        fields = dict(
             prompt=body.get("prompt"),
             trial=body.get("trial"),
             score=body.get("score"),
@@ -926,6 +921,21 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             scored_at=_dt.datetime.now().isoformat(timespec="seconds"),
             duration_ms=body.get("duration_ms", 0),
         )
+        ep = runtime.episode_logger.patch_episode_meta_by_clip(
+            str(clip_id),
+            **fields,
+        )
+        if ep is None:
+            self._sync_preview_to_active_model()
+            if self.ctx.preview is not None:
+                ep = self.ctx.preview.episode_index_by_clip().get(clip_id)
+            if ep is None:
+                self._send_json(
+                    409,
+                    {"ok": False, "error": "no recorded episode for this trial yet — run it first"},
+                )
+                return
+            runtime.episode_logger.patch_episode_meta(int(ep), **fields)
         self._send_json(200, {"ok": True, "episode_index": ep})
 
     def _stream_camera(self, key: str) -> None:

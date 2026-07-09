@@ -106,6 +106,24 @@ def test_raw_collection_snapshot_exposes_raw_stream_batch():
     np.testing.assert_allclose(batch.vectors["state_qpos:arm"][1].value, [2.0, 3.0])
 
 
+def test_raw_episode_snapshot_uses_live_streams_without_collection_schema():
+    image = np.zeros((4, 4, 3), dtype=np.uint8)
+    transport = _FakeRosCollectionTransport(image)
+    transport._config.collection.schema.columns = {}
+    transport._config.collection.schema.cameras = {}
+    transport._group_state_deques = {"arm": deque([transport._msg(1.0, [1.0, 2.0])])}
+    transport._camera_deques["front"].append(transport._msg(1.1))
+    transport._group_state_deques["arm"].append(transport._msg(1.1, [2.0, 3.0]))
+
+    snapshot = transport.acquire_collection_raw()
+    assert snapshot is not None
+    batch = snapshot.decode_raw()
+
+    assert [sample.timestamp for sample in batch.images["cam_high"]] == [1.0, 1.1]
+    assert [sample.timestamp for sample in batch.vectors["state_qpos:arm"]] == [1.0, 1.1]
+    np.testing.assert_allclose(batch.vectors["state_qpos:arm"][1].value, [2.0, 3.0])
+
+
 def test_raw_collection_snapshot_defers_image_decode_until_alignment():
     image = np.zeros((4, 4, 3), dtype=np.uint8)
     transport = _FakeRosCollectionTransport(image)
