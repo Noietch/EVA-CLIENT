@@ -19,7 +19,13 @@ from core.app.state import (
     resolve_inference_strategy_label,
 )
 from core.config import ConfigDict
-from core.types import Observation, RolloutInterventionSegment
+from core.types import (
+    CollectionRawBatch,
+    CollectionRawSample,
+    Observation,
+    RawCollectionSnapshot,
+    RolloutInterventionSegment,
+)
 from robots.base import ActuatorGroup, CameraSpec, ObservationSchema, Robot
 
 
@@ -90,6 +96,7 @@ class _CollectionTransport:
         self.cleared = 0
         self.latest_qpos = np.array([0.1, 0.2], dtype=np.float32)
         self.collection_frames: list[Observation] = []
+        self.raw_snapshots: list[RawCollectionSnapshot] = []
         self.diagnostics = ""
         self.hil_resets = 0
         self.hil_modes: list[str] = []
@@ -116,8 +123,13 @@ class _CollectionTransport:
             return None
         return self.collection_frames.pop(0)
 
+    def get_frame(self) -> Observation | None:
+        raise AssertionError("recording must not decode a frame before raw save")
+
     def acquire_collection_raw(self):
-        return None
+        if not self.raw_snapshots:
+            return None
+        return self.raw_snapshots.pop(0)
 
     def collection_diagnostics(self) -> str:
         return self.diagnostics
@@ -157,6 +169,28 @@ class _ActiveRolloutLogger:
 
     def cancel_episode(self, _reason: str) -> None:
         raise AssertionError("active rollout should not be cancelled")
+
+
+class _RawEpisodeLogger:
+    def __init__(self) -> None:
+        self.snapshots: list[RawCollectionSnapshot] = []
+        self.actions: list[np.ndarray] = []
+        self.states: list[np.ndarray | None] = []
+
+    def ingest_raw_episode_snapshot(
+        self,
+        snapshot: RawCollectionSnapshot,
+        action: np.ndarray,
+        state_qpos: np.ndarray | None = None,
+    ) -> None:
+        self.snapshots.append(snapshot)
+        self.actions.append(np.asarray(action, dtype=np.float32).copy())
+        self.states.append(
+            None if state_qpos is None else np.asarray(state_qpos, dtype=np.float32).copy()
+        )
+
+    def record_step(self, _frame: Observation, _action: np.ndarray) -> None:
+        raise AssertionError("recording must use raw snapshots")
 
 
 class _ResettableStrategy:
@@ -215,6 +249,82 @@ def _config(*, intervention_enabled: bool = False) -> ConfigDict:
         ),
         inference_cfg=ConfigDict(publish_rate=1000),
     )
+
+
+def _recording_config(tmp_path) -> ConfigDict:
+    return ConfigDict(
+        eval=ConfigDict(
+            storage=ConfigDict(fps=10, save_queue_max=2),
+            checkpoints=[],
+        ),
+        rollout=ConfigDict(
+            storage=ConfigDict(
+                enabled=True,
+                log_dir=str(tmp_path / "rollout"),
+                fps=10,
+                save_queue_max=2,
+                async_save=False,
+            ),
+        ),
+        transport=ConfigDict(
+            dataset_keys=ConfigDict(
+                state_key="observations.state.qpos",
+                eef_key="observations.state.eef",
+                action_key="action",
+                video_keys={},
+            ),
+            convert_bgr_to_rgb=True,
+        ),
+        robot=ConfigDict(type="fake_arm"),
+    )
+
+
+def test_eval_episode_logger_uses_async_save(tmp_path):
+    runtime, _session = _runtime_and_session()
+    runtime.eval_output_dir = str(tmp_path)
+
+    recording.rebuild_eval_episode_logger(_recording_config(tmp_path), runtime)
+
+    assert runtime.episode_logger is not None
+    assert runtime.episode_logger._async_save is True
+
+
+def test_rollout_episode_logger_uses_async_save(tmp_path):
+    runtime, _session = _runtime_and_session()
+
+    recording.maybe_build_rollout_episode_logger(_recording_config(tmp_path), runtime)
+
+    assert runtime.rollout_episode_logger is not None
+    assert runtime.rollout_episode_logger._async_save is True
+
+
+def test_record_executed_action_ingests_raw_snapshot_for_active_loggers():
+    runtime, session = _runtime_and_session()
+    eval_logger = _RawEpisodeLogger()
+    rollout_logger = _RawEpisodeLogger()
+    runtime.episode_logger = eval_logger
+    runtime.rollout_episode_logger = rollout_logger
+    snapshot = RawCollectionSnapshot(
+        timestamp=3.0,
+        decode_raw=lambda: CollectionRawBatch(
+            vectors={
+                "state_qpos": [
+                    CollectionRawSample(3.0, np.array([0.1, 0.2], dtype=np.float32)),
+                ],
+            }
+        ),
+    )
+    runtime.transport.raw_snapshots.append(snapshot)
+    action = np.array([0.7, 0.8], dtype=np.float32)
+
+    recording.record_executed_action(_config(), session, action, runtime)
+
+    assert eval_logger.snapshots == [snapshot]
+    assert rollout_logger.snapshots == [snapshot]
+    np.testing.assert_allclose(eval_logger.actions[0], action)
+    np.testing.assert_allclose(rollout_logger.actions[0], action)
+    np.testing.assert_allclose(eval_logger.states[0], runtime.transport.latest_qpos)
+    np.testing.assert_allclose(rollout_logger.states[0], runtime.transport.latest_qpos)
 
 
 def _observation(timestamp: float = 1.0) -> Observation:

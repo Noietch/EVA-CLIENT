@@ -106,7 +106,7 @@ rollout = dict(
         log_dir="",
         fps=30,
         save_queue_max=15,
-        async_save=False,
+        async_save=True,
     ),
     intervention=dict(
         enabled=False,
