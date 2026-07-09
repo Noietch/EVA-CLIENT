@@ -3,32 +3,13 @@ set -euo pipefail
 
 cd "$(dirname "$0")/../../.."
 
-source_ros_setup() {
-  local setup_path="$1"
-  local restore_nounset=0
-
-  if [[ $- == *u* ]]; then
-    restore_nounset=1
-    set +u
-  fi
-
-  # ROS setup scripts read optional environment variables before defining them.
-  source "${setup_path}"
-
-  if [[ "${restore_nounset}" == "1" ]]; then
-    set -u
-  fi
-}
-
-ROS_SETUP_BASH="${ROS_SETUP_BASH:-/opt/ros/humble/setup.bash}"
-if [[ -f "${ROS_SETUP_BASH}" ]]; then
-  source_ros_setup "${ROS_SETUP_BASH}"
+if [[ -f /opt/ros/humble/setup.bash ]]; then
+  source /opt/ros/humble/setup.bash
 fi
 source .venv/bin/activate
 export PYTHONPATH="$PWD:${PYTHONPATH:-}:$PWD/src"
 
-export FASTRTPS_DEFAULT_PROFILES_FILE="${FASTRTPS_DEFAULT_PROFILES_FILE:-$PWD/examples/hardware/r1_lite/fastdds_r1lite_super_client.xml}"
-export FASTRTPS_DEFAULT_PROFILES_FILE
+export FASTRTPS_DEFAULT_PROFILES_FILE="${FASTRTPS_DEFAULT_PROFILES_FILE:-$HOME/.ros/fastdds_r1lite_super_client.xml}"
 export RMW_IMPLEMENTATION="${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}"
 
 if [[ ! -f "${FASTRTPS_DEFAULT_PROFILES_FILE}" ]]; then
