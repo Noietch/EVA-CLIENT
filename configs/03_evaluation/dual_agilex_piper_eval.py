@@ -22,12 +22,12 @@ eval_cfg = dict(
     enable_ssh_forward=False,
     # To forward each checkpoint port to a remote inference server, fill in your
     # own endpoint below and set enable_ssh_forward=True.
-    # ssh=dict(
-    #     host='<remote-host>',
-    #     user='<remote-user>',
-    #     port=8000,
-    #     remote_sync_dir='<remote-sync-dir>',
-    # ),
+    ssh=dict(
+        host='<remote-host>',
+        user='<remote-user>',
+        port=8000,
+        remote_sync_dir='<remote-sync-dir>',
+    ),
     tasks=[
         dict(
             prompt_en='pick the apple',
