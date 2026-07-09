@@ -33,7 +33,7 @@ from core.app.console.server import (
 from core.app.state import RuntimeState, SessionState
 from core.config import ConfigDict, load_config
 from core.registry import ROBOT_REGISTRY, TRANSPORT_REGISTRY
-from core.types import Observation
+from core.types import CollectionRawBatch, CollectionRawSample, Observation, RawCollectionSnapshot
 from robots.base import Robot
 from transport.base import TransportBridge, build_transport
 
@@ -53,6 +53,7 @@ class _DebugTransport(TransportBridge):
         self._shutdown = threading.Event()
         self._qpos = np.asarray(robot.initial_qpos, dtype=np.float32).copy()
         self._camera_names = [cam.observation_key for cam in robot.observation_schema.cameras]
+        self._raw_index = 0
 
     def get_frame(self) -> Observation | None:
         if self._shutdown.is_set():
@@ -64,6 +65,32 @@ class _DebugTransport(TransportBridge):
             for name in self._camera_names
         }
         return Observation(images=images, state_qpos=self._qpos.copy())
+
+    def acquire_collection_raw(self) -> RawCollectionSnapshot | None:
+        if self._shutdown.is_set():
+            return None
+        h = self._config.transport.image_height
+        w = self._config.transport.image_width
+        timestamp = float(self._raw_index)
+        self._raw_index += 1
+        images = {
+            name: np.random.randint(0, 256, (h, w, 3), dtype=np.uint8)
+            for name in self._camera_names
+        }
+        state = self._qpos.copy()
+
+        def decode_raw() -> CollectionRawBatch:
+            return CollectionRawBatch(
+                images={
+                    name: [CollectionRawSample(timestamp, image.copy())]
+                    for name, image in images.items()
+                },
+                vectors={
+                    "state_qpos": [CollectionRawSample(timestamp, state.copy())],
+                },
+            )
+
+        return RawCollectionSnapshot(timestamp=timestamp, decode_raw=decode_raw)
 
     def publish_action(self, action: np.ndarray, target: str = "real") -> None:
         self._qpos = np.asarray(action, dtype=np.float32).copy()

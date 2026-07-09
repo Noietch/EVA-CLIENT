@@ -199,7 +199,7 @@ def maybe_build_rollout_episode_logger(config: ConfigDict, runtime: RuntimeState
         dataset_keys=config.transport.dataset_keys,
         convert_bgr_to_rgb=config.transport.convert_bgr_to_rgb,
         collection=None,
-        async_save=storage.async_save,
+        async_save=True,
         save_queue_max=storage.save_queue_max,
         save_image_height=storage.get("image_height"),
         save_image_width=storage.get("image_width"),
@@ -420,9 +420,11 @@ def rebuild_eval_episode_logger(config: ConfigDict, runtime: RuntimeState) -> No
         dataset_keys=config.transport.dataset_keys,
         convert_bgr_to_rgb=config.transport.convert_bgr_to_rgb,
         collection=None,
-        async_save=False,  # eval patches scores post-flush; needs synchronous writes
+        async_save=True,
         save_queue_max=storage.save_queue_max,
         eval_mode=True,
+        save_image_height=storage.get("image_height"),
+        save_image_width=storage.get("image_width"),
     )
 
 
@@ -759,19 +761,19 @@ def record_executed_action(
     action: np.ndarray,
     runtime: RuntimeState | None = None,
 ) -> None:
-    """Main table: pair the freshly-captured obs[t] with the executed action[t]."""
+    """Capture one raw eval/rollout sample paired with the executed action."""
+    _ = config, session
     if runtime is None:
         return
     loggers = _active_loggers(runtime)
     if not loggers:
         return
-    frame = runtime.transport.get_frame()
-    if frame is None:
+    snapshot = runtime.transport.acquire_collection_raw()
+    if snapshot is None:
         return
-    _fill_record_eef(config, runtime, frame, action)
+    state_qpos = runtime.transport.get_latest_qpos()
     for logger_obj in loggers:
-        logger_obj.record_step(frame, action)
-    _ = session
+        logger_obj.ingest_raw_episode_snapshot(snapshot, action, state_qpos)
 
 
 __all__ = [

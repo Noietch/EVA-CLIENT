@@ -16,7 +16,13 @@ from core.config import ConfigDict
 from core.recorder import collection as collection_module
 from core.recorder import episode as episode_module
 from core.recorder.episode import EpisodeLogger, sanitize_path_component
-from core.types import CollectionRawBatch, CollectionRawSample, Observation, RawCollectionSnapshot
+from core.types import (
+    CollectionRawBatch,
+    CollectionRawImage,
+    CollectionRawSample,
+    Observation,
+    RawCollectionSnapshot,
+)
 from core.utils.lerobot import LeRobotDatasetIO
 from robots.base import (
     ActuatorGroup,
@@ -41,7 +47,13 @@ def _robot() -> Robot:
     )
 
 
-def _logger(log_dir, *, save_video: bool = False, fps: int = 30) -> EpisodeLogger:
+def _logger(
+    log_dir,
+    *,
+    save_video: bool = False,
+    fps: int = 30,
+    async_save: bool = False,
+) -> EpisodeLogger:
     return EpisodeLogger(
         log_dir,
         _robot(),
@@ -52,7 +64,7 @@ def _logger(log_dir, *, save_video: bool = False, fps: int = 30) -> EpisodeLogge
             action_key="action",
             video_keys={},
         ),
-        async_save=False,
+        async_save=async_save,
     )
 
 
@@ -485,6 +497,125 @@ def test_record_step_uses_observation_timestamp_when_present(tmp_path):
 
     table = pq.read_table(tmp_path / "data" / "chunk-000" / "episode_000000.parquet")
     np.testing.assert_allclose(table.column("capture_time").to_pylist(), [5.0, 5.1, 5.2])
+
+
+def test_raw_episode_snapshots_decode_on_async_save_worker(tmp_path):
+    logger = _logger(tmp_path, fps=10, async_save=True)
+    raw_decodes = 0
+    image_decodes = 0
+
+    def snapshot(timestamp: float, state: np.ndarray) -> RawCollectionSnapshot:
+        def decode_raw() -> CollectionRawBatch:
+            nonlocal raw_decodes
+            raw_decodes += 1
+
+            def decode_image() -> np.ndarray:
+                nonlocal image_decodes
+                image_decodes += 1
+                return np.zeros((2, 2, 3), dtype=np.uint8)
+
+            return CollectionRawBatch(
+                images={
+                    "cam_high": [
+                        CollectionRawSample(
+                            timestamp,
+                            CollectionRawImage(decode_image),
+                        ),
+                    ],
+                },
+                vectors={
+                    "state_qpos": [CollectionRawSample(timestamp, state.copy())],
+                },
+                start_time=timestamp,
+                end_time=timestamp,
+            )
+
+        return RawCollectionSnapshot(timestamp=timestamp, decode_raw=decode_raw)
+
+    logger.start_episode("t")
+    logger.ingest_raw_episode_snapshot(
+        snapshot(1.0, np.zeros(_DIM, dtype=np.float32)),
+        np.full(_DIM, 10.0, dtype=np.float32),
+    )
+    logger.ingest_raw_episode_snapshot(
+        snapshot(1.2, np.full(_DIM, 2.0, dtype=np.float32)),
+        np.full(_DIM, 12.0, dtype=np.float32),
+    )
+    logger._start_save_worker = lambda: None
+
+    assert logger.end_episode()
+    assert raw_decodes == 0
+    assert image_decodes == 0
+
+    logger._save_queue_worker()
+
+    assert raw_decodes == 2
+    assert image_decodes == 2
+    table = pq.read_table(tmp_path / "data" / "chunk-000" / "episode_000000.parquet")
+    np.testing.assert_allclose(table.column("timestamp").to_pylist(), [0.0, 0.1, 0.2])
+    np.testing.assert_allclose(table.column("capture_time").to_pylist(), [1.0, 1.1, 1.2])
+    np.testing.assert_allclose(
+        table.column("action").to_pylist(),
+        [
+            [10.0] * _DIM,
+            [11.0] * _DIM,
+            [12.0] * _DIM,
+        ],
+    )
+
+
+def test_pending_score_patch_applies_to_async_save_job(tmp_path):
+    logger = _logger(tmp_path, fps=10, async_save=True)
+
+    def snapshot(timestamp: float, state: np.ndarray) -> RawCollectionSnapshot:
+        def decode_raw() -> CollectionRawBatch:
+            return CollectionRawBatch(
+                images={
+                    "cam_high": [
+                        CollectionRawSample(
+                            timestamp,
+                            np.zeros((2, 2, 3), dtype=np.uint8),
+                        ),
+                    ],
+                },
+                vectors={
+                    "state_qpos": [CollectionRawSample(timestamp, state.copy())],
+                },
+            )
+
+        return RawCollectionSnapshot(timestamp=timestamp, decode_raw=decode_raw)
+
+    logger.start_episode("t")
+    logger.set_episode_meta(clip_id="c1", prompt="p", trial=1)
+    logger.ingest_raw_episode_snapshot(
+        snapshot(1.0, np.zeros(_DIM, dtype=np.float32)),
+        np.full(_DIM, 10.0, dtype=np.float32),
+    )
+    logger.ingest_raw_episode_snapshot(
+        snapshot(1.2, np.full(_DIM, 2.0, dtype=np.float32)),
+        np.full(_DIM, 12.0, dtype=np.float32),
+    )
+    logger._start_save_worker = lambda: None
+
+    assert logger.end_episode()
+    episode_index = logger.patch_episode_meta_by_clip(
+        "c1",
+        score=2,
+        max_score=4,
+        milestones={"grasp": True},
+        note="ok",
+    )
+
+    assert episode_index == 0
+
+    logger._save_queue_worker()
+
+    row = _read_jsonl(tmp_path / "meta" / "episodes.jsonl")[0]
+    assert row["clip_id"] == "c1"
+    assert row["score"] == 2
+    assert row["max_score"] == 4
+    assert row["milestones"] == {"grasp": True}
+    assert row["note"] == "ok"
 
 
 def test_collection_raw_batches_report_image_skew_qc(tmp_path):
