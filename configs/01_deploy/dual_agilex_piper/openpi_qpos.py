@@ -3,7 +3,7 @@
 _base_ = ['_base.py']
 
 policy = dict(
-    type='openpi_rtc',
+    type='openpi',
     backend_options=dict(latency_k=4),
 )
 
