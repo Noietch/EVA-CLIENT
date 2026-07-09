@@ -220,6 +220,13 @@ def _should_start_eval_ssh(eval_cfg: ConfigDict | None) -> bool:
     return bool(ssh.get("host") and ssh.get("user") and ssh.get("port", 0) > 0)
 
 
+def _should_start_deploy_ssh(config: ConfigDict) -> bool:
+    if config.eval:
+        return False
+    ssh = config.transport.get("ssh") or {}
+    return bool(ssh.get("host") and ssh.get("user") and ssh.get("port", 0) > 0)
+
+
 def _format_inference_strategy_choices(config: ConfigDict) -> str:
     return "  ".join(f"{i + 1}.{k}" for i, k in enumerate(config.inference_strategies))
 
@@ -1012,6 +1019,10 @@ def run(
         if eval_cfg.ssh.get("remote_sync_dir"):
             local_root = resolve_output_dir(config, config_path).parent
             result_syncer = FUNCTIONS.build("result_sync", eval_cfg.ssh, local_root)
+    elif _should_start_deploy_ssh(config):
+        # Deploy (non-eval): forward the policy port to the remote inference server.
+        free_local_ports([web_port, config.policy.port])
+        ssh_proc = FUNCTIONS.build("ssh_forward", config.transport.ssh, [config.policy.port])
     else:
         free_local_ports([web_port])
 
