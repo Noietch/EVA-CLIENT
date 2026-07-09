@@ -600,12 +600,15 @@ class _RosTransportBase(TransportBridge):
 
     def _collection_raw_streams(self) -> list[tuple[str, str, str, Any, collections.deque]]:
         streams: list[tuple[str, str, str, Any, collections.deque]] = []
+        columns = self._config.collection.schema.columns
+        if not columns:
+            return self._raw_episode_streams()
+
         for camera in self._collection_camera_specs():
             deque = self._camera_deques.get(camera.name)
             if deque is not None:
                 streams.append(("image", camera.observation_key, camera.name, camera, deque))
 
-        columns = self._config.collection.schema.columns
         if "qpos" in columns:
             for group in self._robot.actuator_groups:
                 deque = self._collection_qpos_deques.get(group.name)
@@ -626,6 +629,23 @@ class _RosTransportBase(TransportBridge):
                 deque = self._collection_action_eef_deques.get(group.name)
                 if deque is not None:
                     streams.append(("vector", "action_eef", group.name, group, deque))
+        return streams
+
+    def _raw_episode_streams(self) -> list[tuple[str, str, str, Any, collections.deque]]:
+        streams: list[tuple[str, str, str, Any, collections.deque]] = []
+        for camera in self._robot.observation_schema.cameras:
+            deque = self._camera_deques.get(camera.name)
+            if deque is not None:
+                streams.append(("image", camera.observation_key, camera.name, camera, deque))
+        group_state_deques = getattr(self, "_group_state_deques", {})
+        for group_name in self._robot.observation_schema.state_composition:
+            deque = group_state_deques.get(group_name)
+            if deque is None:
+                continue
+            group = next(
+                group for group in self._robot.actuator_groups if group.name == group_name
+            )
+            streams.append(("vector", "state_qpos", group.name, group, deque))
         return streams
 
     def _collection_raw_context_streams(self) -> list[tuple[str, collections.deque]]:
@@ -751,8 +771,6 @@ class _RosTransportBase(TransportBridge):
 
     def acquire_collection_raw(self) -> RawCollectionSnapshot | None:
         """O(1) capture of raw collection stream messages since the previous tick."""
-        if not self._config.collection.schema.columns:
-            return None
         streams = self._collection_raw_streams()
         if not streams:
             return None
