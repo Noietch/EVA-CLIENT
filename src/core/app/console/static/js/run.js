@@ -4,7 +4,7 @@ import { $, LIVE, RUN_CONTROLS, S, apiPost } from "./core.js";
 import { updateScrub } from "./charts.js";
 import { collectEnabled, dotClass, renderCollect, renderRolloutSave, loadAnnotation } from "./collect.js";
 import { applyEvalStatus, evalCfg, evalEnabled } from "./eval.js";
-import { maybeSyncReplayPlayer } from "./replay.js";
+import { maybeSyncReplayPlayer, loadMountedReplaySeries } from "./replay.js";
 
 // ===== run =====
 
@@ -107,6 +107,21 @@ function applyRunControlStatus(ids, s) {
     $(ids.stepReset).disabled = false;
   }
 
+function syncHilInterventionEnabled(status) {
+    const toggle = $("hil-intervention-enable");
+    const label = $("hil-intervention-label");
+    if (!toggle || !label) return;
+    const enabled = !!status.rollout_intervention_enabled;
+    toggle.checked = enabled;
+    toggle.disabled = !!status.rollout_intervention_active;
+    label.textContent = enabled ? "HIL ON" : "HIL OFF";
+    const gate = toggle.closest(".collect-arm-gate");
+    if (gate) {
+      gate.classList.toggle("on", enabled);
+      gate.classList.toggle("disabled", toggle.disabled);
+    }
+  }
+
 function applyStatus(s) {
     S.STATUS = s;
     // RUN follows the live tail; any other state unlocks the scrub bar for history
@@ -166,7 +181,7 @@ function applyStatus(s) {
     mark("mode-list", "mode", modeMark);
     mark("replay-mode-list", "mode", modeMark);
     mark("strategy-list", "strategy", s.selected_strategy);
-    syncHilControlMode(s);
+    syncHilInterventionEnabled(s);
     updateGuide();
 
     // canvas readout
@@ -475,6 +490,8 @@ let replayDefaultKeys = {};
 
 let replayActionCandidates = [];
 
+let replayInspectedDir = "";
+
 function renderPromptButtons(listId) {
     const host = $(listId);
     if (!host) return;
@@ -593,38 +610,6 @@ function renderModeButtons(listId) {
     mark(listId, "mode", modes.includes("sim") ? "sim" : modes[0]);
   }
 
-function renderHilControlMode() {
-    const host = $("hil-control-mode");
-    if (!host || !S.CFG) return;
-    host.innerHTML = "";
-    const modes = S.CFG.hil_control_modes || ["absolute", "relative"];
-    host.style.setProperty("--mode-n", modes.length);
-    modes.forEach((mode) => {
-      const b = document.createElement("button");
-      b.className = "seg";
-      b.dataset.hil = mode;
-      b.innerHTML = `<span>${mode === "relative" ? "REL" : "ABS"}</span>`;
-      b.onclick = () => {
-        if (S.STATUS && S.STATUS.rollout_intervention_active) return;
-        mark("hil-control-mode", "hil", mode);
-        S.STATUS.hil_control_mode = mode;
-        apiPost("/api/rollout_intervention_mode", { mode });
-      };
-      host.appendChild(b);
-    });
-    syncHilControlMode(S.STATUS || {});
-  }
-
-function syncHilControlMode(status) {
-    const host = $("hil-control-mode");
-    if (!host || !S.CFG) return;
-    const mode = status.hil_control_mode || S.CFG.hil_control_mode || "absolute";
-    mark("hil-control-mode", "hil", mode);
-    host.querySelectorAll("button").forEach((b) => {
-      b.disabled = !!status.rollout_intervention_active;
-    });
-  }
-
 const GRIP_STATE = {};
 
 let GRIP_FORCE = true;
@@ -708,7 +693,6 @@ function renderConfig() {
     renderCollectTaskButtons();
     renderModeButtons("mode-list");
     renderModeButtons("replay-mode-list");
-    renderHilControlMode();
     // Pick the default run mode on the backend if nothing is chosen yet. Under eval the
     // mode is dictated by the config's cli_mode (e.g. REAL for table_tennis): push that so
     // a directly-entered eval runs on the real arm, instead of the SIM fallback below
@@ -813,6 +797,7 @@ function renderReplayConfig() {
         state: r.keys.state.default || "observation.state",
       };
       S.replayVideoKeys = inferReplayVideoKeys(r.keys.image.candidates, r.keys.image.default);
+      replayInspectedDir = dir;
       S.STATUS.replay_n_episodes = r.n_episodes;
       $("replay-episode-n").textContent = r.n_episodes;
       return true;
@@ -835,9 +820,8 @@ function renderReplayConfig() {
         return;
       }
       if (!dir) { $("replay-episode-task").textContent = "✗ fill the dataset dir first"; return; }
-      // One-click load: inspect the dataset (keys + episode count) then load the episode.
-      if (!(await inspectDataset(dir))) return;
-      const total = S.STATUS.replay_n_episodes || 0;
+      const hasInspectedDir = replayInspectedDir === dir;
+      const total = hasInspectedDir ? (S.STATUS.replay_n_episodes || 0) : 0;
       if (total > 0 && id >= total) {
         $("replay-episode-task").textContent = `✗ episode id must be in 0..${total - 1}`;
         return;
@@ -848,14 +832,32 @@ function renderReplayConfig() {
       $("replay-qc-status").textContent = `QC episode ${id}: mark pass / fail`;
       if (S.qcMode) loadAnnotation(dir, id);
       const actionMode = $("replay-key-action-mode").value || "joint";
+      const loadKeys = hasInspectedDir
+        ? { ...replayDefaultKeys, action: replayActionKeyForMode(actionMode) }
+        : {};
+      const loadVideoKeys = hasInspectedDir ? S.replayVideoKeys : {};
       S.replaySeriesKey = null;
-      apiPost("/api/load_replay_dataset", {
-        dataset_dir: dir,
-        episode: id,
-        keys: { ...replayDefaultKeys, action: replayActionKeyForMode(actionMode) },
-        video_keys: S.replayVideoKeys,
-        action_mode: actionMode,
-      });
+      S.replayLoadPending = true;
+      try {
+        const load = await apiPost("/api/load_replay_dataset", {
+          dataset_dir: dir,
+          episode: id,
+          keys: loadKeys,
+          video_keys: loadVideoKeys,
+          action_mode: actionMode,
+        });
+        if (!load.ok) {
+          $("replay-episode-task").textContent = `✗ ${load.error || "cannot load episode"}`;
+          return;
+        }
+        if (load.n_episodes != null) {
+          S.STATUS.replay_n_episodes = load.n_episodes;
+          $("replay-episode-n").textContent = load.n_episodes;
+        }
+        await loadMountedReplaySeries(load);
+      } finally {
+        S.replayLoadPending = false;
+      }
       updateGuide();
     };
 

@@ -232,6 +232,58 @@ def test_ros2_hil_relay_subscriptions_use_depth_one_qos(monkeypatch):
     }
 
 
+def test_ros2_hil_relay_is_disabled_until_enabled(monkeypatch):
+    node = _FakeNode()
+    runtime = types.SimpleNamespace(
+        node=node,
+        cv_bridge=object(),
+        image_type=object,
+        compressed_image_type=object,
+        joint_state_type=_FakeJointState,
+        pose_stamped_type=object,
+    )
+    monkeypatch.setattr(ros2, "get_ros2_runtime", lambda node_name: runtime)
+    monkeypatch.setattr(ros2, "_make_live_qos", lambda depth=10: object())
+
+    config = load_config(_R1LITE_COLLECTION)
+    robot = ROBOT_REGISTRY.build(config.robot.type)
+    transport = ros2.Ros2Transport(config, robot)
+    transport._group_state_deques["left_arm"].append(_stamped_msg(1, [10, 20, 30, 40, 50, 60]))
+    callback = _subscription_callback(node, "/eva/hil/input_joint_state_arm_left")
+
+    callback(_stamped_msg(2, [1, 2, 3, 4, 5, 6]))
+
+    published = node.publishers_by_topic["/motion_target/target_joint_state_arm_left"].messages
+    assert published == []
+
+
+def test_ros2_hil_relay_publishes_after_enable(monkeypatch):
+    node = _FakeNode()
+    runtime = types.SimpleNamespace(
+        node=node,
+        cv_bridge=object(),
+        image_type=object,
+        compressed_image_type=object,
+        joint_state_type=_FakeJointState,
+        pose_stamped_type=object,
+    )
+    monkeypatch.setattr(ros2, "get_ros2_runtime", lambda node_name: runtime)
+    monkeypatch.setattr(ros2, "_make_live_qos", lambda depth=10: object())
+
+    config = load_config(_R1LITE_COLLECTION)
+    robot = ROBOT_REGISTRY.build(config.robot.type)
+    transport = ros2.Ros2Transport(config, robot)
+    transport.set_hil_control_mode("absolute")
+    transport.set_hil_relay_enabled(True)
+    transport._group_state_deques["left_arm"].append(_stamped_msg(1, [10, 20, 30, 40, 50, 60]))
+    callback = _subscription_callback(node, "/eva/hil/input_joint_state_arm_left")
+
+    callback(_stamped_msg(2, [1, 2, 3, 4, 5, 6]))
+
+    published = node.publishers_by_topic["/motion_target/target_joint_state_arm_left"].messages
+    np.testing.assert_allclose(published[0].position, [1, 2, 3, 4, 5, 6])
+
+
 def test_ros2_hil_relative_relay_anchors_slave_to_first_cat_frame(monkeypatch):
     node = _FakeNode()
     runtime = types.SimpleNamespace(
@@ -248,6 +300,7 @@ def test_ros2_hil_relative_relay_anchors_slave_to_first_cat_frame(monkeypatch):
     config = load_config(_R1LITE_COLLECTION)
     robot = ROBOT_REGISTRY.build(config.robot.type)
     transport = ros2.Ros2Transport(config, robot)
+    transport.set_hil_relay_enabled(True)
     transport.set_hil_control_mode("relative")
     transport._group_state_deques["left_arm"].append(_stamped_msg(1, [10, 20, 30, 40, 50, 60]))
     callback = _subscription_callback(node, "/eva/hil/input_joint_state_arm_left")
@@ -276,6 +329,7 @@ def test_ros2_hil_relay_does_not_write_collection_action_qpos(monkeypatch):
     config = load_config(_R1LITE_COLLECTION)
     robot = ROBOT_REGISTRY.build(config.robot.type)
     transport = ros2.Ros2Transport(config, robot)
+    transport.set_hil_relay_enabled(True)
     transport.set_hil_control_mode("relative")
     transport._group_state_deques["left_arm"].append(_stamped_msg(1, [10, 20, 30, 40, 50, 60]))
     callback = _subscription_callback(node, "/eva/hil/input_joint_state_arm_left")
@@ -305,6 +359,7 @@ def test_ros2_hil_relay_restamps_commands_with_local_clock(monkeypatch):
     config = load_config(_R1LITE_COLLECTION)
     robot = ROBOT_REGISTRY.build(config.robot.type)
     transport = ros2.Ros2Transport(config, robot)
+    transport.set_hil_relay_enabled(True)
     transport.set_hil_control_mode("relative")
     transport._group_state_deques["left_arm"].append(
         _stamped_msg(100, [10, 20, 30, 40, 50, 60])
@@ -352,7 +407,7 @@ def test_ros2_collection_action_qpos_subscribes_motion_target_when_hil_enabled(m
     np.testing.assert_allclose(samples[0].position, [1, 2, 3, 4, 5, 6])
 
 
-def test_ros2_does_not_subscribe_hil_when_intervention_disabled(monkeypatch):
+def test_ros2_subscribes_hil_topic_when_configured(monkeypatch):
     node = _FakeNode()
     runtime = types.SimpleNamespace(
         node=node,
@@ -366,13 +421,12 @@ def test_ros2_does_not_subscribe_hil_when_intervention_disabled(monkeypatch):
     monkeypatch.setattr(ros2, "_make_live_qos", lambda depth=10: object())
 
     config = load_config(_R1LITE_COLLECTION)
-    config.rollout.intervention.enabled = False
     robot = ROBOT_REGISTRY.build(config.robot.type)
     ros2.Ros2Transport(config, robot)
 
     subscribed_topics = {topic for _msg_type, topic, _callback, _qos in node.subscriptions}
-    assert "/eva/hil/input_joint_state_arm_left" not in subscribed_topics
-    assert "/eva/hil/input_joint_state_arm_right" not in subscribed_topics
+    assert "/eva/hil/input_joint_state_arm_left" in subscribed_topics
+    assert "/eva/hil/input_joint_state_arm_right" in subscribed_topics
     assert "/motion_target/target_joint_state_arm_left" in subscribed_topics
     assert "/motion_target/target_joint_state_arm_right" in subscribed_topics
 
@@ -393,6 +447,7 @@ def test_ros2_hil_relative_relay_anchors_to_last_command_target(monkeypatch):
     config = load_config(_R1LITE_COLLECTION)
     robot = ROBOT_REGISTRY.build(config.robot.type)
     transport = ros2.Ros2Transport(config, robot)
+    transport.set_hil_relay_enabled(True)
     transport.set_hil_control_mode("relative")
     transport.publish_action(
         np.array(
@@ -440,6 +495,7 @@ def test_ros2_hil_relay_does_not_publish_gripper_target(monkeypatch):
     config = load_config(_R1LITE_COLLECTION)
     robot = ROBOT_REGISTRY.build(config.robot.type)
     transport = ros2.Ros2Transport(config, robot)
+    transport.set_hil_relay_enabled(True)
     transport._group_state_deques["left_arm"].append(_stamped_msg(1, [10, 20, 30, 40, 50, 60]))
     transport._group_gripper_deques["left_arm"].append(_stamped_msg(1, [77]))
     callback = _subscription_callback(node, "/eva/hil/input_joint_state_arm_left")

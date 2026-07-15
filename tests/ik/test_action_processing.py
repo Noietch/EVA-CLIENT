@@ -10,6 +10,7 @@ from core.app.handlers.imaging import (
     normalize_action_chunk,
     prepare_image,
     resize_with_pad,
+    snap_gripper_dims,
 )
 from core.app.handlers.space import EEFPose
 
@@ -41,6 +42,18 @@ def test_normalize_returns_writable_copy_of_readonly_input():
     chunk[0, 0] = 1.0  # would raise "assignment destination is read-only" if a view
     assert chunk[0, 0] == 1.0
     assert source[0, 0] == 0.0
+
+
+def test_snap_gripper_dims_uses_configured_open_close_values():
+    action = np.array([25.0, 75.0], dtype=np.float32)
+    out = snap_gripper_dims(
+        action.copy(),
+        (True, True),
+        threshold=50.0,
+        open_value=100.0,
+        close_value=0.0,
+    )
+    np.testing.assert_allclose(out, [0.0, 100.0], atol=1e-6)
 
 
 # --- build_linear_trajectory ---

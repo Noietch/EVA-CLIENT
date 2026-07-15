@@ -29,6 +29,7 @@ transport = dict(
     node_name="eva_client",
     dataset_dir="",
     episode_id=0,
+    convert_bgr_to_rgb=True,
     image_height=224,
     image_width=224,
     resize_pad=True,
@@ -44,7 +45,6 @@ transport = dict(
         video_keys={},  # empty -> fallback to "observation.images.{cam}" pattern
     ),
     topics={},  # ros1/ros2 topic mapping; set per-robot in deploy configs ({} for deep-merge)
-    ssh=dict(host="", user="", port=0),
 )
 
 policy = dict(
@@ -109,7 +109,6 @@ rollout = dict(
         async_save=True,
     ),
     intervention=dict(
-        enabled=False,
         control_mode="absolute",
     ),
 )
@@ -151,10 +150,6 @@ inference_cfg = dict(
     publish_rate=30,
     setup_warmup_chunks=2,
     debug_tasks=["pour soybean", "put cup"],
-)
-
-manual_cfg = dict(
-    publish_rate=15,
 )
 
 # Multi-preset strategy dict, switchable from the frontend. Each entry =

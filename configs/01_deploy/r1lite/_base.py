@@ -101,7 +101,7 @@ rollout = dict(
         image_height=360,
         image_width=640,
     ),
-    intervention=dict(enabled=True, control_mode='relative'),
+    intervention=dict(control_mode='relative'),
 )
 
 operator_control = dict(

@@ -151,10 +151,7 @@ class FakeRobotNode:
         return parts
 
     def _zero_eef_by_group(self) -> dict[str, np.ndarray]:
-        return {
-            group.name: np.zeros(_EEF_DOF, dtype=np.float32)
-            for group in self._robot.arm_groups
-        }
+        return {group.name: np.zeros(_EEF_DOF, dtype=np.float32) for group in self._robot.arm_groups}
 
     def _read_images(self) -> dict[str, np.ndarray]:
         images: dict[str, np.ndarray] = {}

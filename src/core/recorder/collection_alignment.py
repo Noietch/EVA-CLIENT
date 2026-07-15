@@ -43,6 +43,20 @@ class _VectorComponent:
     default_gripper: float | None = None
 
 
+def image_skew_tolerance_sec(fps: float) -> float:
+    """Return the QC tolerance for nearest-neighbor image alignment.
+
+    Args:
+        fps: Target aligned episode rate in Hz.
+
+    Returns:
+        Maximum allowed image timestamp skew in seconds.
+    """
+    if fps <= 1.0:
+        return 0.5 / fps
+    return 1.0 / (2.0 * (fps - 1.0))
+
+
 def align_collection_samples(
     batch: CollectionRawBatch,
     *,

@@ -161,6 +161,7 @@ class Ros2Transport(_RosTransportBase):
         self._collection_action_eef_deques: dict[str, collections.deque] = {}
         self._group_cmd_publishers: dict[str, Any] = {}
         self._group_gripper_publishers: dict[str, Any] = {}
+        self._hil_relay_enabled = False
         self._hil_control_mode = "absolute"
         self._hil_cat_anchors: dict[str, np.ndarray] = {}
         self._hil_robot_anchors: dict[str, np.ndarray] = {}
@@ -179,11 +180,6 @@ class Ros2Transport(_RosTransportBase):
         intervention = rollout.get("intervention") or {}
         return str(intervention.get("control_mode", "absolute"))
 
-    def _hil_intervention_enabled(self) -> bool:
-        rollout = self._config.get("rollout") or {}
-        intervention = rollout.get("intervention") or {}
-        return bool(intervention.get("enabled", False))
-
     @property
     def hil_control_mode(self) -> str:
         return self._hil_control_mode
@@ -198,6 +194,12 @@ class Ros2Transport(_RosTransportBase):
     def reset_hil_control(self) -> None:
         self._hil_cat_anchors.clear()
         self._hil_robot_anchors.clear()
+
+    def set_hil_relay_enabled(self, enabled: bool) -> None:
+        if self._hil_relay_enabled == enabled:
+            return
+        self._hil_relay_enabled = enabled
+        self.reset_hil_control()
 
     def _init_ros(self) -> None:
         schema = self._robot.observation_schema
@@ -321,7 +323,7 @@ class Ros2Transport(_RosTransportBase):
                         topics.action_eef_topic,
                         live_qos,
                     )
-                if self._hil_intervention_enabled() and topics.get("hil_qpos_topic"):
+                if topics.get("hil_qpos_topic"):
                     self._node.create_subscription(
                         self._JointState,
                         topics.hil_qpos_topic,
@@ -886,6 +888,8 @@ class Ros2Transport(_RosTransportBase):
         return command.astype(np.float32)
 
     def _handle_hil_joint_msg(self, group: Any, msg: Any) -> None:
+        if not self._hil_relay_enabled:
+            return
         robot_qpos = self._latest_group_qpos(group)
         if robot_qpos is None:
             logger.error("HIL relay cannot publish %s without joint feedback", group.name)

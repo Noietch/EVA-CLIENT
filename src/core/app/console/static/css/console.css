@@ -219,6 +219,9 @@
   .cam-strip .cam-cell .cam {
     flex: 1 1 auto; min-height: 0; width: 100%; height: auto; object-fit: contain;
   }
+  .cam-strip .cam-cell .cam-video { display: none; }
+  .cam-strip .cam-cell.video-ready .cam-poster { display: none; }
+  .cam-strip .cam-cell.video-ready .cam-video { display: block; }
   .cam-loading {
     display: none; position: absolute; inset: 22px 0 0; align-items: center; justify-content: center;
     gap: 7px; background: rgba(253, 252, 248, 0.82); color: var(--ink-dim);

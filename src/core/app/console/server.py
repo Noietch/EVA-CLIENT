@@ -12,11 +12,13 @@ from __future__ import annotations
 import dataclasses
 import datetime as _dt
 import gzip
+import hashlib
 import json
 import logging
 import os
 import random
 import re
+import subprocess
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -25,6 +27,7 @@ from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 import cv2
+import imageio_ffmpeg
 import numpy as np
 from tqdm import tqdm
 
@@ -34,6 +37,7 @@ from core.app.handlers import (
     eval_model_name,
     rollout_save_status,
 )
+from core.app.handlers.io import load_replay_dataset
 from core.app.state import (
     RuntimeState,
     SessionMode,
@@ -58,6 +62,124 @@ _TRANSPORT_ONLINE_WINDOW_SECONDS = 2.0
 # Transports that talk to a real arm: they track receipt freshness, so "no message
 # yet" means offline (not merely "configured"). debug/dataset are not in this set.
 _LIVE_TRANSPORT_TYPES = {"zmq", "ros1", "ros2"}
+_VIDEO_CACHE_CONTROL = "public, max-age=3600"
+_VIDEO_FASTSTART_CACHE_ENV = "EVA_VIDEO_CACHE_DIR"
+_VIDEO_FASTSTART_LOCK = threading.Lock()
+_VIDEO_POSTER_LOCK = threading.Lock()
+
+
+def _mp4_atom_offsets(path: Path) -> dict[bytes, int]:
+    offsets: dict[bytes, int] = {}
+    size = path.stat().st_size
+    with path.open("rb") as f:
+        offset = 0
+        while offset + 8 <= size:
+            f.seek(offset)
+            header = f.read(8)
+            if len(header) != 8:
+                break
+            atom_size = int.from_bytes(header[:4], "big")
+            atom_type = header[4:8]
+            header_size = 8
+            if atom_size == 1:
+                large = f.read(8)
+                if len(large) != 8:
+                    break
+                atom_size = int.from_bytes(large, "big")
+                header_size = 16
+            elif atom_size == 0:
+                atom_size = size - offset
+            if atom_size < header_size:
+                break
+            offsets.setdefault(atom_type, offset)
+            offset += atom_size
+    return offsets
+
+
+def _mp4_needs_faststart(path: Path) -> bool:
+    if path.suffix.lower() != ".mp4":
+        return False
+    offsets = _mp4_atom_offsets(path)
+    moov = offsets.get(b"moov")
+    mdat = offsets.get(b"mdat")
+    return moov is not None and mdat is not None and moov > mdat
+
+
+def _video_faststart_cache_path(path: Path) -> Path:
+    stat = path.stat()
+    digest = hashlib.sha256(
+        f"{path.resolve()}\0{stat.st_size}\0{stat.st_mtime_ns}".encode()
+    ).hexdigest()[:24]
+    cache_root_env = os.environ.get(_VIDEO_FASTSTART_CACHE_ENV)
+    cache_root = Path(cache_root_env) if cache_root_env else _resolve_runtime_path(
+        "work_dirs/.video_faststart"
+    )
+    return cache_root / f"{path.stem}-{digest}.mp4"
+
+
+def _video_poster_cache_path(path: Path) -> Path:
+    stat = path.stat()
+    digest = hashlib.sha256(
+        f"{path.resolve()}\0{stat.st_size}\0{stat.st_mtime_ns}".encode()
+    ).hexdigest()[:24]
+    cache_root_env = os.environ.get(_VIDEO_FASTSTART_CACHE_ENV)
+    cache_root = Path(cache_root_env) if cache_root_env else _resolve_runtime_path(
+        "work_dirs/.video_faststart"
+    )
+    return cache_root / f"{path.stem}-{digest}.jpg"
+
+
+def _ensure_faststart_video(path: Path) -> Path:
+    if not _mp4_needs_faststart(path):
+        return path
+    out = _video_faststart_cache_path(path)
+    with _VIDEO_FASTSTART_LOCK:
+        if out.exists() and out.stat().st_size > 0 and not _mp4_needs_faststart(out):
+            return out
+        out.parent.mkdir(parents=True, exist_ok=True)
+        tmp = out.with_suffix(".tmp.mp4")
+        cmd = [
+            imageio_ffmpeg.get_ffmpeg_exe(),
+            "-y",
+            "-i",
+            str(path),
+            "-c",
+            "copy",
+            "-movflags",
+            "+faststart",
+            str(tmp),
+        ]
+        try:
+            subprocess.run(cmd, check=True, capture_output=True)
+        except subprocess.CalledProcessError as exc:
+            stderr = exc.stderr.decode("utf-8", errors="replace") if exc.stderr else str(exc)
+            raise RuntimeError(f"faststart remux failed for {path}: {stderr}") from exc
+        tmp.replace(out)
+        if _mp4_needs_faststart(out):
+            raise RuntimeError(f"faststart remux did not move moov atom for {path}")
+        return out
+
+
+def _ensure_video_poster(path: Path) -> Path:
+    out = _video_poster_cache_path(path)
+    with _VIDEO_POSTER_LOCK:
+        if out.exists() and out.stat().st_size > 0:
+            return out
+        out.parent.mkdir(parents=True, exist_ok=True)
+        cap = cv2.VideoCapture(str(path))
+        try:
+            ok, frame = cap.read()
+        finally:
+            cap.release()
+        if not ok or frame is None:
+            raise RuntimeError(f"could not read first video frame for {path}")
+        ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 82])
+        if not ok:
+            raise RuntimeError(f"could not encode first video frame for {path}")
+        tmp = out.with_suffix(".tmp.jpg")
+        tmp.write_bytes(buf.tobytes())
+        tmp.replace(out)
+        return out
 
 
 def _pick_video(videos: dict[str, Path], cam: str) -> Path | None:
@@ -264,8 +386,6 @@ def _serialize_config(ctx: ConsoleContext) -> dict:
         "publish_mode": "joint",
         "publish_rate": config.inference_cfg.publish_rate,
         "inference_rate": config.inference_cfg.inference_rate,
-        "hil_control_modes": ["absolute", "relative"],
-        "hil_control_mode": ctx.runtime.hil_control_mode,
         "collection": {
             "enabled": bool(config.collection.schema.columns),
             "fps": None,
@@ -375,13 +495,13 @@ def _serialize_status(ctx: ConsoleContext) -> dict:
         "collection_teleop_armed": r.collection_teleop_armed,
         "collection_teleop_active": r.collection_teleop_active,
         "rollout_intervention_active": r.rollout_intervention_active,
+        "rollout_intervention_enabled": r.rollout_intervention_enabled,
         "rollout_intervention_active_frames": (
             0
             if r.rollout_intervention_active_segment is None
             else len(r.rollout_intervention_active_segment.frames)
         ),
         "rollout_intervention_segments": len(r.rollout_intervention_segments),
-        "hil_control_mode": r.hil_control_mode,
         "rollout": rollout_save_status(config, r),
         "collect": (
             r.episode_logger.status_snapshot(format_task_label(s.selected_collect_task))
@@ -1242,6 +1362,33 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             return
         self._send_video(video)
 
+    def _get_replay_poster(self) -> None:
+        cam = self._query_str("cam")
+        dataset_dir = self._query_str("dataset_dir")
+        episode = self._query_int("episode", -1)
+        video_key = self._query_str("video_key")
+        if dataset_dir and episode >= 0:
+            root = _resolve_runtime_path(dataset_dir)
+            if not video_key:
+                video_key = _infer_replay_video_key(root, cam)
+            videos = LeRobotDatasetIO(root).episode_video_paths(
+                episode, {cam or video_key: video_key}
+            )
+            video = _pick_video(videos, cam)
+            if video is None:
+                self._send_empty(404)
+                return
+            self._send_video_poster(video)
+            return
+
+        replay = self.ctx.runtime.replay_source
+        videos = replay.video_paths() if (replay and hasattr(replay, "video_paths")) else {}  # type: ignore[attr-defined]
+        video = _pick_video(videos, cam)
+        if video is None:
+            self._send_empty(404)
+            return
+        self._send_video_poster(video)
+
     def _get_replay_frame(self) -> None:
         self._point_preview_for_request()
         ep = self._query_int("episode_index", -1)
@@ -1291,6 +1438,12 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
     def _send_video(self, path: Path) -> None:
         # Stream an mp4 honoring HTTP Range so <video> can seek; whole-file otherwise.
         try:
+            try:
+                path = _ensure_faststart_video(path)
+            except RuntimeError as exc:
+                logger.error("%s", exc)
+                self._send_json(500, {"error": str(exc)})
+                return
             size = path.stat().st_size
             rng = self.headers.get("Range", "")
             start, end = 0, size - 1
@@ -1299,8 +1452,14 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                 s, e = m.group(1), m.group(2)
                 if s:
                     start = int(s)
-                if e:
-                    end = min(int(e), size - 1)
+                    if e:
+                        end = min(int(e), size - 1)
+                elif e:
+                    suffix_len = int(e)
+                    start = max(size - suffix_len, 0)
+                    end = size - 1
+                else:
+                    start = size
                 if start > end or start >= size:
                     self.send_response(416)
                     self.send_header("Content-Range", f"bytes */{size}")
@@ -1313,7 +1472,8 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(length))
             if m:
                 self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
-            self.send_header("Cache-Control", "no-store")
+            self.send_header("Cache-Control", _VIDEO_CACHE_CONTROL)
+            self.send_header("ETag", f'"{path.stat().st_mtime_ns:x}-{size:x}"')
             self.end_headers()
             with path.open("rb") as f:
                 f.seek(start)
@@ -1324,6 +1484,25 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                         break
                     self.wfile.write(chunk)
                     remaining -= len(chunk)
+        except (BrokenPipeError, ConnectionResetError):
+            return
+
+    def _send_video_poster(self, path: Path) -> None:
+        try:
+            try:
+                poster = _ensure_video_poster(path)
+            except RuntimeError as exc:
+                logger.error("%s", exc)
+                self._send_json(500, {"error": str(exc)})
+                return
+            body = poster.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", _VIDEO_CACHE_CONTROL)
+            self.send_header("ETag", f'"{poster.stat().st_mtime_ns:x}-{len(body):x}"')
+            self.end_headers()
+            self.wfile.write(body)
         except (BrokenPipeError, ConnectionResetError):
             return
 
@@ -1372,7 +1551,43 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
 
     def _post_load_replay_dataset(self, body: dict) -> None:
         self._clear_collection_replay()
-        self._enqueue_ok("web:load_replay_dataset:" + json.dumps(body))
+        runtime = self.ctx.runtime
+        session = self.ctx.session
+        keys = body.get("keys") or {}
+        dataset_dir = str(body.get("dataset_dir", "")).strip()
+        episode = int(body.get("episode", 0))
+        load_replay_dataset(
+            dataset_dir,
+            episode,
+            runtime.active_config or self.ctx.config,
+            session,
+            runtime,
+            state_key=str(keys.get("state", "")),
+            action_key=str(keys.get("action", "")),
+            video_keys=body.get("video_keys") or {},
+            action_mode=str(body.get("action_mode", "")),
+        )
+        if session.last_error or runtime.replay_source is None:
+            error = session.last_error or "replay dataset was not mounted"
+            self._send_json(400, {"ok": False, "error": error})
+            return
+        replay_keys = runtime.replay_source._config.transport.dataset_keys  # type: ignore[attr-defined]
+        self._send_json(
+            200,
+            {
+                "ok": True,
+                "dataset_dir": runtime.replay_dataset_dir,
+                "episode": runtime.replay_episode_id,
+                "n_episodes": runtime.replay_n_episodes,
+                "frames": int(getattr(runtime.replay_source, "n_steps", 0) or 0),
+                "fps": runtime.replay_fps,
+                "task": runtime.replay_task,
+                "state_key": str(replay_keys.state_key),
+                "action_key": runtime.replay_action_key,
+                "action_mode": runtime.replay_action_mode,
+                "video_keys": dict(replay_keys.video_keys),
+            },
+        )
 
     def _post_set_replay_fps(self, body: dict) -> None:
         self._enqueue_ok(f"web:set_replay_fps:{int(body.get('fps', 10))}")
@@ -1389,8 +1604,9 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
     def _post_update_infer_params(self, body: dict) -> None:
         self._enqueue_ok("web:update_infer_params:" + json.dumps(body))
 
-    def _post_rollout_intervention_mode(self, body: dict) -> None:
-        self._enqueue_ok(f"web:rollout_intervention_mode:{body.get('mode', '')}")
+    def _post_rollout_intervention_enabled(self, body: dict) -> None:
+        enabled = 1 if bool(body.get("enabled", False)) else 0
+        self._enqueue_ok(f"web:rollout_intervention_enabled:{enabled}")
 
     def _post_operator_action(self, body: dict) -> None:
         intent = str(body.get("intent", "")).strip().lower()
@@ -1506,6 +1722,7 @@ _GET_ROUTES = {
     "/api/replay_scene_frame": ConsoleRequestHandler._get_replay_scene_frame,
     "/api/replay_transforms": ConsoleRequestHandler._get_replay_transforms,
     "/api/replay_video": ConsoleRequestHandler._get_replay_video,
+    "/api/replay_poster": ConsoleRequestHandler._get_replay_poster,
     "/api/live_series": ConsoleRequestHandler._get_live_series,
     "/api/replay_frame": ConsoleRequestHandler._get_replay_frame,
     "/api/episode_transforms": ConsoleRequestHandler._get_episode_transforms,
@@ -1558,7 +1775,7 @@ _POST_ROUTES = {
     "/api/select_mode": ConsoleRequestHandler._post_select_mode,
     "/api/select_strategy": ConsoleRequestHandler._post_select_strategy,
     "/api/update_infer_params": ConsoleRequestHandler._post_update_infer_params,
-    "/api/rollout_intervention_mode": ConsoleRequestHandler._post_rollout_intervention_mode,
+    "/api/rollout_intervention_enabled": ConsoleRequestHandler._post_rollout_intervention_enabled,
     "/api/operator_action": ConsoleRequestHandler._post_operator_action,
     "/api/manual_qpos": ConsoleRequestHandler._post_manual_qpos,
     "/api/manual_send": ConsoleRequestHandler._post_manual_send,

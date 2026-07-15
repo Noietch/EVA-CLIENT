@@ -446,7 +446,8 @@ def start_rollout_intervention(
     """Enable teleop takeover for a paused normal rollout."""
     if runtime.rollout_intervention_active:
         return True
-    if not config.rollout.intervention.enabled:
+    if not runtime.rollout_intervention_enabled:
+        session.last_error = "Rollout HIL is off"
         return False
     if not runtime.transport.supports_collection():
         session.last_error = "Rollout teleop intervention recording is not available"
@@ -468,6 +469,7 @@ def start_rollout_intervention(
     )
     runtime.rollout_intervention_next_segment_index += 1
     runtime.rollout_intervention_active = True
+    runtime.transport.set_hil_relay_enabled(True)
     session.last_error = ""
     logger.info("Rollout teleop intervention started")
     return True
@@ -483,6 +485,7 @@ def stop_rollout_intervention(
     """Disable rollout teleop takeover before policy resume or cleanup."""
     if not runtime.rollout_intervention_active:
         return True
+    runtime.transport.set_hil_relay_enabled(False)
     runtime.transport.stop_collection()
     runtime.rollout_intervention_active = False
     logger.info("Rollout teleop intervention stopped")
@@ -626,6 +629,7 @@ def collect_start_teleop(
         session.last_error = "Transport does not support collection frames"
         return False
     runtime.transport.reset_hil_control()
+    runtime.transport.set_hil_relay_enabled(True)
     runtime.transport.start_collection()
     runtime.collection_teleop_active = True
     runtime.last_collection_timestamp = None
@@ -640,6 +644,7 @@ def collect_start_teleop(
 def collect_stop_teleop(config: ConfigDict, runtime: RuntimeState, session: SessionState) -> None:
     """Leave collect teleoperation; callers close any active recording episode first."""
     stop_collection_capture(runtime)
+    runtime.transport.set_hil_relay_enabled(False)
     runtime.transport.stop_collection()
     runtime.collection_teleop_active = False
     runtime.last_collection_timestamp = None
@@ -771,9 +776,16 @@ def record_executed_action(
     snapshot = runtime.transport.acquire_collection_raw()
     if snapshot is None:
         return
-    state_qpos = runtime.transport.get_latest_qpos()
+    state_qpos = (
+        runtime.transport.get_latest_qpos()
+        if hasattr(runtime.transport, "get_latest_qpos")
+        else None
+    )
     for logger_obj in loggers:
-        logger_obj.ingest_raw_episode_snapshot(snapshot, action, state_qpos)
+        if state_qpos is None:
+            logger_obj.ingest_raw_episode_snapshot(snapshot, action)
+        else:
+            logger_obj.ingest_raw_episode_snapshot(snapshot, action, state_qpos)
 
 
 __all__ = [

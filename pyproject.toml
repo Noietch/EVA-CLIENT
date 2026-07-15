@@ -1,9 +1,9 @@
 [project]
 name = "eva-client"
 version = "0.1.0"
-description = "A unified framework for deployment, evaluation, and data collection on real robots."
+description = "Unified robot debugging client for VLA inference serving."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.12"
 dependencies = [
     "addict>=2.4.0",
     "av>=17.1.0",
@@ -129,9 +129,6 @@ ignore = ["UP042"]
 [tool.ruff.lint.per-file-ignores]
 "tests/manual/*.py" = ["E402"]
 "tests/ik/test_solver.py" = ["E402"]
-# Asserts exact HTML/JS substrings from the console template; wrapping them would
-# break the literal match, so long lines are unavoidable here.
-"tests/integration/web/test_console_static.py" = ["E501"]
 
 [tool.pyright]
 include = ["src", "tests"]

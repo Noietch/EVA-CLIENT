@@ -173,6 +173,50 @@ def test_dataset_transport_uses_recorded_timestamps_for_series_and_fps(tmp_path)
     np.testing.assert_allclose(series["timestamp"], timestamps)
 
 
+def test_dataset_transport_defers_video_decoder_until_frame_read(tmp_path, monkeypatch):
+    robot = _franka_like_robot()
+    n, dim = 3, 16
+    states = (np.arange(n * dim, dtype=np.float32) * 0.1).reshape(n, dim)
+    actions = (np.arange(n * dim, dtype=np.float32) * 0.2).reshape(n, dim)
+    _write_lerobot_episode(tmp_path, states, actions)
+    video_path = (
+        tmp_path
+        / "videos"
+        / "chunk-000"
+        / "observation.images.cam_high"
+        / "episode_000000.mp4"
+    )
+    video_path.parent.mkdir(parents=True)
+    video_path.write_bytes(b"not decoded during mount")
+    config = _dataset_config()
+    config.transport.dataset_keys.video_keys = {
+        "cam_high": "observation.images.cam_high",
+    }
+    opened = []
+
+    class FakeFrameSource:
+        def __init__(self, path):
+            opened.append(path)
+
+        def read_at(self, idx):
+            return np.full((4, 5, 3), idx, dtype=np.uint8)
+
+        def release(self):
+            pass
+
+    monkeypatch.setattr("transport.dataset._FrameSource", FakeFrameSource)
+
+    transport = DatasetTransport(config, robot, tmp_path)
+
+    assert opened == []
+    assert transport.available_camera_keys() == ("cam_high",)
+    frame = transport.get_camera_frame("cam_high")
+    assert len(opened) == 1
+    assert opened[0] == video_path
+    assert frame is not None
+    assert frame.shape == (4, 5, 3)
+
+
 def test_dataset_transport_publish_records_and_clamps(tmp_path):
     robot = _franka_like_robot()
     n, dim = 4, 16

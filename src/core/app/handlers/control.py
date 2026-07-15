@@ -501,7 +501,10 @@ def handle_motion_command(
         logger.info("Interrupt requested; stopping current motion")
         if was_running and not is_replay(runtime):
             mark_rollout_save_ready(runtime, "stop")
-            if session.mode is SessionMode.REAL and config.rollout.intervention.enabled:
+            if (
+                session.mode is SessionMode.REAL
+                and runtime.rollout_intervention_enabled
+            ):
                 start_rollout_intervention(config, runtime, session)
         return True
     if verb == "stop" and runtime.web_phase == "running":

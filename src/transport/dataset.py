@@ -276,7 +276,6 @@ class DatasetTransport(TransportBridge):
             if video_path is None:
                 logger.warning("Video not found for camera %s", cam_key)
                 continue
-            self._caps[cam_key] = _FrameSource(video_path)
             self._video_paths[cam_key] = video_path
 
         self._episode_id = episode_id
@@ -294,7 +293,7 @@ class DatasetTransport(TransportBridge):
             self._dataset_dir,
             episode_id,
             self._n_steps,
-            list(self._caps.keys()),
+            list(self._video_paths.keys()),
         )
 
     def reload_episode(self, episode_id: int) -> None:
@@ -329,7 +328,18 @@ class DatasetTransport(TransportBridge):
 
     def available_camera_keys(self) -> tuple[str, ...]:
         """Camera observation keys that actually have a video stream this episode."""
-        return tuple(cam_key for cam_key in self._camera_keys if cam_key in self._caps)
+        return tuple(cam_key for cam_key in self._camera_keys if cam_key in self._video_paths)
+
+    def _frame_source(self, cam_key: str) -> _FrameSource | None:
+        cap = self._caps.get(cam_key)
+        if cap is not None:
+            return cap
+        video_path = self._video_paths.get(cam_key)
+        if video_path is None:
+            return None
+        cap = _FrameSource(video_path)
+        self._caps[cam_key] = cap
+        return cap
 
     def get_action_trajectory(self) -> np.ndarray:
         """Full recorded action sequence [n_steps, action_dim] float32 for replay."""
@@ -482,7 +492,7 @@ class DatasetTransport(TransportBridge):
             w = self._config.transport.image_width
             images: dict[str, np.ndarray] = {}
             for cam_key in self._camera_keys:
-                cap = self._caps.get(cam_key)
+                cap = self._frame_source(cam_key)
                 frame = cap.read_at(idx) if cap is not None else None
                 if frame is not None:
                     images[cam_key] = frame
@@ -520,7 +530,7 @@ class DatasetTransport(TransportBridge):
             cached = self._frame_cache.get(key)
             if cached is not None:
                 return cached
-            cap = self._caps.get(key)
+            cap = self._frame_source(key)
             frame = cap.read_at(idx) if cap is not None else None
             if frame is None:
                 h = self._config.transport.image_height

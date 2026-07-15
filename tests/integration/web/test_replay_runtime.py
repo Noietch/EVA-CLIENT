@@ -421,6 +421,80 @@ def test_replay_load_resolves_relative_collection_qpos_dataset(tmp_path, monkeyp
     np.testing.assert_allclose(runtime.replay_source.get_scene_qpos(1), state[1])
 
 
+def test_replay_load_reuses_transport_trajectory_without_second_parquet_read(
+    tmp_path, monkeypatch
+):
+    dataset_dir = tmp_path / "dataset"
+    meta_dir = dataset_dir / "meta"
+    data_dir = dataset_dir / "data" / "chunk-000"
+    meta_dir.mkdir(parents=True)
+    data_dir.mkdir(parents=True)
+    info = {
+        "total_episodes": 1,
+        "chunks_size": 1000,
+        "data_path": "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet",
+        "features": {
+            "observation.qpos": {"dtype": "float32", "shape": [14]},
+            "action": {"dtype": "float32", "shape": [14]},
+            "timestamp": {"dtype": "float32", "shape": [1]},
+            "frame_index": {"dtype": "int64", "shape": [1]},
+            "episode_index": {"dtype": "int64", "shape": [1]},
+            "index": {"dtype": "int64", "shape": [1]},
+            "task_index": {"dtype": "int64", "shape": [1]},
+        },
+    }
+    (meta_dir / "info.json").write_text(json.dumps(info), encoding="utf-8")
+    (meta_dir / "tasks.jsonl").write_text(
+        json.dumps({"task_index": 0, "task": "single read replay"}) + "\n",
+        encoding="utf-8",
+    )
+    state = np.asarray([[0.0] * 14, [0.5] * 14], dtype=np.float32)
+    action = np.asarray([[1.0] * 14, [2.0] * 14], dtype=np.float32)
+    pq.write_table(
+        pa.table(
+            {
+                "observation.qpos": pa.array(state.tolist(), type=pa.list_(pa.float32())),
+                "action": pa.array(action.tolist(), type=pa.list_(pa.float32())),
+                "timestamp": pa.array([0.0, 0.1], type=pa.float32()),
+                "frame_index": pa.array([0, 1], type=pa.int64()),
+                "episode_index": pa.array([0, 0], type=pa.int64()),
+                "index": pa.array([0, 1], type=pa.int64()),
+                "task_index": pa.array([0, 0], type=pa.int64()),
+            }
+        ),
+        data_dir / "episode_000000.parquet",
+    )
+    runtime = RuntimeState(
+        robot=ROBOT_REGISTRY.build("ur5e"),
+        transport=_FakeTransport(),
+    )
+    session = SessionState()
+
+    def fail_load_trajectory(*_args, **_kwargs):
+        raise AssertionError("load_trajectory should not be called")
+
+    monkeypatch.setattr(
+        "core.app.handlers.io.LeRobotDatasetIO.load_trajectory",
+        fail_load_trajectory,
+    )
+
+    handlers.load_replay_dataset(
+        str(dataset_dir),
+        0,
+        _joint_config("ur5e"),
+        session,
+        runtime,
+        state_key="observation.qpos",
+        action_key="action",
+        action_mode="joint",
+    )
+
+    assert session.last_error == ""
+    assert runtime.replay_source is not None
+    assert runtime.replay_task == "single read replay"
+    np.testing.assert_allclose(runtime.replay_trajectory, action)
+
+
 def test_eef_replay_fills_missing_action_gripper_when_mode_is_eef(monkeypatch):
     class _FakeUr5eSolver:
         def __init__(self, initial_qpos_groups, dt: float) -> None:
