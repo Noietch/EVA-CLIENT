@@ -11,16 +11,28 @@ from core.config import ConfigDict
 from robots.base import ActuatorGroup, CameraSpec, ObservationSchema, Robot
 
 
+class _FakeJointState:
+    def __init__(self) -> None:
+        self.header = types.SimpleNamespace(stamp=None)
+        self.name = []
+        self.position = []
+
+
 class _FakeRospy:
     def __init__(self) -> None:
         self.subscribers = []
+        self.publishers = {}
+        self.Time = types.SimpleNamespace(now=lambda: 1.0)
 
     def Subscriber(self, topic, msg_type, callback, queue_size, tcp_nodelay):
         self.subscribers.append((topic, msg_type, callback, queue_size, tcp_nodelay))
         return object()
 
     def Publisher(self, topic, msg_type, queue_size):
-        return object()
+        publisher = types.SimpleNamespace(messages=[])
+        publisher.publish = publisher.messages.append
+        self.publishers[topic] = publisher
+        return publisher
 
     def Rate(self, hz):
         return types.SimpleNamespace(hz=hz)
@@ -42,7 +54,7 @@ def test_ros1_camera_subscriptions_report_minimum_image_hz(monkeypatch):
         rospy=fake_rospy,
         cv_bridge=object(),
         image_type=object,
-        joint_state_type=object,
+        joint_state_type=_FakeJointState,
         pose_stamped_type=object,
     )
     monkeypatch.setattr(ros1, "get_ros_runtime", lambda node_name: runtime)
@@ -87,3 +99,55 @@ def test_ros1_camera_subscriptions_report_minimum_image_hz(monkeypatch):
     _subscription_callback(fake_rospy, "/cam/left")(object())
 
     assert transport.image_min_hz() == pytest.approx(10.0)
+
+
+def test_ros1_hil_relative_relay_reorders_named_input(monkeypatch):
+    fake_rospy = _FakeRospy()
+    runtime = types.SimpleNamespace(
+        rospy=fake_rospy,
+        cv_bridge=object(),
+        image_type=object,
+        joint_state_type=_FakeJointState,
+        pose_stamped_type=object,
+    )
+    monkeypatch.setattr(ros1, "get_ros_runtime", lambda node_name: runtime)
+    config = ConfigDict(
+        transport=ConfigDict(
+            node_name="test_ros1_hil",
+            topics=ConfigDict(
+                camera_topics={},
+                group_topics={
+                    "arm": {
+                        "state_topic": "/joint_states",
+                        "command_topic": "/joint_cmd",
+                        "hil_input_topic": "/hil_input",
+                    }
+                },
+            ),
+        ),
+        inference_cfg=ConfigDict(obs_space=types.SimpleNamespace(is_eef=lambda: False)),
+        collection=ConfigDict(
+            schema=ConfigDict(columns={}),
+            transport=ConfigDict(ros1=ConfigDict(groups={})),
+        ),
+    )
+    robot = Robot(
+        name="fake",
+        actuator_groups=(ActuatorGroup("arm", 2, ("j0", "j1")),),
+        initial_qpos=np.zeros(2, dtype=np.float32),
+        observation_schema=ObservationSchema(cameras=(), state_composition=("arm",)),
+    )
+    transport = ros1.Ros1Transport(config, robot)
+    transport._group_state_deques["arm"].append(
+        types.SimpleNamespace(position=[10.0, 20.0])
+    )
+    assert transport.start_hil_control("relative").active is True
+    callback = _subscription_callback(fake_rospy, "/hil_input")
+
+    callback(types.SimpleNamespace(name=["j1", "j0"], position=[2.0, 1.0]))
+    callback(types.SimpleNamespace(name=["j1", "j0"], position=[3.0, 1.5]))
+
+    messages = fake_rospy.publishers["/joint_cmd"].messages
+    np.testing.assert_allclose(messages[0].position, [10.0, 20.0])
+    np.testing.assert_allclose(messages[1].position, [10.5, 21.0])
+    assert transport.stop_hil_control().active is False

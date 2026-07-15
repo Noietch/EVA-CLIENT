@@ -129,6 +129,9 @@ ignore = ["UP042"]
 [tool.ruff.lint.per-file-ignores]
 "tests/manual/*.py" = ["E402"]
 "tests/ik/test_solver.py" = ["E402"]
+# Asserts exact HTML/JS substrings from the console template; wrapping them would
+# break the literal match, so long lines are unavoidable here.
+"tests/integration/web/test_console_static.py" = ["E501"]
 
 [tool.pyright]
 include = ["src", "tests"]

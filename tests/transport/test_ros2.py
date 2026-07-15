@@ -506,6 +506,38 @@ def test_ros2_hil_relay_does_not_publish_gripper_target(monkeypatch):
     assert published == []
 
 
+def test_ros2_hil_reorders_named_full_group_and_publishes_split_gripper(monkeypatch):
+    node = _FakeNode()
+    runtime = types.SimpleNamespace(
+        node=node,
+        cv_bridge=object(),
+        image_type=object,
+        compressed_image_type=object,
+        joint_state_type=_FakeJointState,
+        pose_stamped_type=object,
+    )
+    monkeypatch.setattr(ros2, "get_ros2_runtime", lambda node_name: runtime)
+    monkeypatch.setattr(ros2, "_make_live_qos", lambda depth=10: object())
+
+    config = load_config(_R1LITE_COLLECTION)
+    robot = ROBOT_REGISTRY.build(config.robot.type)
+    transport = ros2.Ros2Transport(config, robot)
+    transport.set_hil_control_mode("absolute")
+    transport.set_hil_relay_enabled(True)
+    transport._group_state_deques["left_arm"].append(_stamped_msg(1, [0, 0, 0, 0, 0, 0]))
+    transport._group_gripper_deques["left_arm"].append(_stamped_msg(1, [100]))
+    callback = _subscription_callback(node, "/eva/hil/input_joint_state_arm_left")
+    message = _stamped_msg(2, [7, 6, 5, 4, 3, 2, 1])
+    message.name = list(reversed(robot.actuator_groups[0].joint_names))
+
+    callback(message)
+
+    arm = node.publishers_by_topic["/motion_target/target_joint_state_arm_left"].messages
+    gripper = node.publishers_by_topic["/motion_target/target_position_gripper_left"].messages
+    np.testing.assert_allclose(arm[-1].position, [1, 2, 3, 4, 5, 6])
+    np.testing.assert_allclose(gripper[-1].position, [7])
+
+
 def test_ros2_hil_relative_relay_keeps_gripper_absolute(monkeypatch):
     node = _FakeNode()
     runtime = types.SimpleNamespace(

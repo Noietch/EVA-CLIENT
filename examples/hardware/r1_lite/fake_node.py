@@ -471,7 +471,9 @@ class R1LiteRos2Fake:
                 for group, topics in ARM_TOPICS.items()
             }
             self._gripper_publishers = {
-                group: node.create_publisher(message_types.joint_state, topics.gripper_feedback, qos)
+                group: node.create_publisher(
+                    message_types.joint_state, topics.gripper_feedback, qos
+                )
                 for group, topics in ARM_TOPICS.items()
             }
             self._eef_publishers = {
@@ -484,7 +486,9 @@ class R1LiteRos2Fake:
                 10,
             )
             self._hil_publishers = {
-                group: self._control_node.create_publisher(message_types.joint_state, topics.hil, qos)
+                group: self._control_node.create_publisher(
+                    message_types.joint_state, topics.hil, qos
+                )
                 for group, topics in ARM_TOPICS.items()
             }
             self._command_publishers = {
@@ -1037,9 +1041,9 @@ def main() -> None:
     args = build_arg_parser().parse_args()
 
     import rclpy
+    from geometry_msgs.msg import PoseStamped
     from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
     from rclpy.executors import MultiThreadedExecutor
-    from geometry_msgs.msg import PoseStamped
     from rclpy.node import Node
     from sensor_msgs.msg import CompressedImage, JointState
     from std_msgs.msg import String

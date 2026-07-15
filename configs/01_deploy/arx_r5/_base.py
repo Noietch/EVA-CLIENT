@@ -15,6 +15,17 @@ transport = dict(
 
 policy = dict(type='openpi')
 
+rollout = dict(
+    storage=dict(
+        enabled=True,
+        log_dir='work_dirs/rollout/arx_r5',
+        fps=30,
+        save_queue_max=15,
+        async_save=True,
+    ),
+    intervention=dict(control_mode='relative'),
+)
+
 inference_strategies = {
     'sync': dict(
         args=dict(

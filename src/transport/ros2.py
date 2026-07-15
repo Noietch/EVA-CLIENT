@@ -23,6 +23,7 @@ from core.registry import TRANSPORT_REGISTRY
 from core.types import Observation
 from robots.base import Robot
 from transport.base import (
+    HilStatus,
     _RosTransportBase,
     resolve_topics,
 )
@@ -165,6 +166,7 @@ class Ros2Transport(_RosTransportBase):
         self._hil_control_mode = "absolute"
         self._hil_cat_anchors: dict[str, np.ndarray] = {}
         self._hil_robot_anchors: dict[str, np.ndarray] = {}
+        self._hil_supported_groups: set[str] = set()
         self._last_group_joint_commands: dict[str, np.ndarray] = {}
         self._last_group_gripper_commands: dict[str, float] = {}
         self._group_joint_names: dict[str, list[str]] = {
@@ -200,6 +202,54 @@ class Ros2Transport(_RosTransportBase):
             return
         self._hil_relay_enabled = enabled
         self.reset_hil_control()
+
+    def hil_status(self) -> HilStatus:
+        supported = bool(self._hil_supported_groups)
+        return HilStatus(
+            supported=supported,
+            active=supported and self._hil_relay_enabled,
+            error="" if supported else "ROS2 HIL input topics are not configured",
+        )
+
+    def start_hil_control(self, mode: str) -> HilStatus:
+        status = self.hil_status()
+        if not status.supported:
+            return status
+        self.set_hil_control_mode(mode)
+        self.set_hil_relay_enabled(True)
+        self.start_collection()
+        return self.hil_status()
+
+    def stop_hil_control(self) -> HilStatus:
+        self.set_hil_relay_enabled(False)
+        self.stop_collection()
+        return self.hil_status()
+
+    def get_hil_frame(self) -> Observation | None:
+        frame = self.get_collection_frame()
+        if frame is not None:
+            return frame
+        frame = self.get_frame()
+        if frame is None:
+            return None
+        action_parts: list[np.ndarray] = []
+        for group in self._robot.actuator_groups:
+            command = self._last_group_joint_commands.get(group.name)
+            state = self._latest_group_qpos(group)
+            if command is None or state is None:
+                return None
+            if command.shape[0] == group.dof:
+                action_parts.append(command.copy())
+                continue
+            if group.gripper_index is None or command.shape[0] != group.dof - 1:
+                return None
+            action_parts.append(
+                np.insert(command, group.gripper_index, state[group.gripper_index]).astype(
+                    np.float32
+                )
+            )
+        frame.action_qpos = np.concatenate(action_parts)
+        return frame
 
     def _init_ros(self) -> None:
         schema = self._robot.observation_schema
@@ -260,6 +310,14 @@ class Ros2Transport(_RosTransportBase):
                 self._group_gripper_publishers[group.name] = self._node.create_publisher(
                     self._JointState, group_cfg.gripper_command_topic, live_qos
                 )
+            if group_cfg.hil_input_topic is not None:
+                self._node.create_subscription(
+                    self._JointState,
+                    group_cfg.hil_input_topic,
+                    lambda msg, g=group: self._handle_hil_joint_msg(g, msg),
+                    hil_qos,
+                )
+                self._hil_supported_groups.add(group.name)
 
         if self._config.collection.schema.columns:
             ros2_cfg = self._config.collection.transport.ros2
@@ -323,13 +381,14 @@ class Ros2Transport(_RosTransportBase):
                         topics.action_eef_topic,
                         live_qos,
                     )
-                if topics.get("hil_qpos_topic"):
+                if topics.get("hil_qpos_topic") and group.name not in self._hil_supported_groups:
                     self._node.create_subscription(
                         self._JointState,
                         topics.hil_qpos_topic,
                         lambda msg, g=group: self._handle_hil_joint_msg(g, msg),
                         hil_qos,
                     )
+                    self._hil_supported_groups.add(group.name)
 
     def _subscribe_into(
         self,
@@ -887,6 +946,26 @@ class Ros2Transport(_RosTransportBase):
             command[group.gripper_index] = cat[group.gripper_index]
         return command.astype(np.float32)
 
+    def _ordered_hil_position(self, group: Any, msg: Any) -> np.ndarray:
+        position = np.asarray(msg.position, dtype=np.float32)
+        expected_names = list(group.joint_names)
+        if position.shape == (group.dof - 1,) and group.gripper_index is not None:
+            expected_names.pop(group.gripper_index)
+        elif position.shape != (group.dof,):
+            raise ValueError(
+                f"HIL relay shape mismatch for {group.name}: "
+                f"input={position.shape[0]} expected={group.dof}"
+            )
+        names = list(getattr(msg, "name", ()))
+        if names:
+            if len(names) != len(position) or set(names) != set(expected_names):
+                raise ValueError(f"HIL joint names do not match {group.name}")
+            by_name = dict(zip(names, position, strict=True))
+            position = np.asarray([by_name[name] for name in expected_names], dtype=np.float32)
+        if not np.all(np.isfinite(position)):
+            raise ValueError(f"HIL relay rejected non-finite input for {group.name}")
+        return position
+
     def _handle_hil_joint_msg(self, group: Any, msg: Any) -> None:
         if not self._hil_relay_enabled:
             return
@@ -897,7 +976,7 @@ class Ros2Transport(_RosTransportBase):
         try:
             command = self._resolve_hil_joint_command(
                 group,
-                np.asarray(msg.position, dtype=np.float32),
+                self._ordered_hil_position(group, msg),
                 robot_qpos,
             )
         except ValueError as exc:
@@ -908,8 +987,26 @@ class Ros2Transport(_RosTransportBase):
             logger.error("HIL relay has no command publisher for %s", group.name)
             return
         stamp = self._node.get_clock().now().to_msg()
-        publisher.publish(self._make_joint_state(group.name, command, stamp))
-        self._last_group_joint_commands[group.name] = command.copy()
+        joints = command
+        gripper_publisher = self._group_gripper_publishers.get(group.name)
+        if (
+            gripper_publisher is not None
+            and group.gripper_index is not None
+            and command.shape == (group.dof,)
+        ):
+            gripper = float(command[group.gripper_index])
+            joints = np.delete(command, group.gripper_index)
+            gripper_publisher.publish(
+                self._make_joint_state(
+                    group.name,
+                    np.asarray([gripper], dtype=np.float32),
+                    stamp,
+                    gripper_only=True,
+                )
+            )
+            self._last_group_gripper_commands[group.name] = gripper
+        publisher.publish(self._make_joint_state(group.name, joints, stamp))
+        self._last_group_joint_commands[group.name] = joints.copy()
 
     def _eef_msg_to_state(self, group_name: str, msg: Any, frame_time: float) -> np.ndarray:
         pose = msg.pose

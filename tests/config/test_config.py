@@ -79,10 +79,21 @@ def test_load_collection_config_exposes_schema():
     assert cfg.collection.storage.log_dir
 
 
-def test_rollout_defaults_keep_intervention_config_only():
-    cfg = load_config(_CONFIGS_DIR / "01_deploy" / "dual_agilex_piper" / "openpi_qpos.py")
-    assert cfg.rollout.storage.enabled is False
+@pytest.mark.parametrize(
+    "robot_name",
+    ["r1lite", "ur5e", "arx_r5", "dual_agilex_piper"],
+)
+def test_deploy_configs_enable_relative_hil_rollout(robot_name: str):
+    cfg = load_config(_CONFIGS_DIR / "01_deploy" / robot_name / "openpi_qpos.py")
+    assert cfg.rollout.storage.enabled is True
     assert "enabled" not in cfg.rollout.intervention
+    assert cfg.rollout.intervention.control_mode == "relative"
+
+
+@pytest.mark.parametrize("robot_name", ["dual_franka", "agibot_g2"])
+def test_deploy_configs_without_leader_keep_hil_disabled(robot_name: str):
+    cfg = load_config(_CONFIGS_DIR / "01_deploy" / robot_name / "openpi_qpos.py")
+    assert cfg.rollout.storage.enabled is False
     assert cfg.rollout.intervention.control_mode == "absolute"
 
 

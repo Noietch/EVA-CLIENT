@@ -95,8 +95,14 @@ def test_run_hardware_starts_r1lite_and_cat_through_eva_hil_bootstrap():
     assert 'R1LITE_START_CMD="${R1LITE_START_CMD:-${R1LITE_BODY_BOOTSTRAP_REMOTE}}"' in script
     assert "write_r1lite_body_bootstrap_script" in script
     assert "install_r1lite_body_bootstrap_script" in script
-    assert 'cp "${R1LITE_BODY_SESSION_SOURCE}/${yaml}" "${R1LITE_BODY_SESSION_REMOTE}/${yaml}"' in script
-    assert 'for yaml in hdas.yaml mobiman.yaml ros2_discovery.yaml system.yaml tools.yaml; do' in script
+    assert (
+        'cp "${R1LITE_BODY_SESSION_SOURCE}/${yaml}" '
+        '"${R1LITE_BODY_SESSION_REMOTE}/${yaml}"' in script
+    )
+    expected_loop = (
+        'for yaml in hdas.yaml mobiman.yaml ros2_discovery.yaml system.yaml tools.yaml; do'
+    )
+    assert expected_loop in script
     assert 'tmuxp load "${R1LITE_BODY_SESSION_REMOTE}/${yaml}" -d' in script
     assert (
         "R1LITE_BODY_SESSION_SOURCE='${R1LITE_BODY_SESSION_SOURCE}' "
@@ -112,8 +118,14 @@ def test_run_hardware_starts_r1lite_and_cat_through_eva_hil_bootstrap():
     assert "cd ~/workspace/robot && bash start_robot.sh" not in script
     assert "R1LITEBodyTakeover.d" not in script
     assert "start_r1lite_tabletop_gello_teleop.sh" not in script
-    assert 'CAT_HIL_TELEOP_REMOTE="${CAT_HIL_TELEOP_REMOTE:-/tmp/eva_cat_hil_teleop_bootstrap}"' in script
-    assert 'CAT_FASTRTPS_PROFILE="${CAT_FASTRTPS_PROFILE:-/tmp/eva_cat_fastdds_super_client.xml}"' in script
+    assert (
+        'CAT_HIL_TELEOP_REMOTE="${CAT_HIL_TELEOP_REMOTE:'
+        '-/tmp/eva_cat_hil_teleop_bootstrap}"' in script
+    )
+    assert (
+        'CAT_FASTRTPS_PROFILE="${CAT_FASTRTPS_PROFILE:'
+        '-/tmp/eva_cat_fastdds_super_client.xml}"' in script
+    )
     assert 'CAT_ROS2_LOCAL_IP="${CAT_ROS2_LOCAL_IP:-192.168.12.13}"' in script
     assert 'R1LITE_DISCOVERY_SERVER_IP="${R1LITE_DISCOVERY_SERVER_IP:-192.168.12.12}"' in script
     assert "write_cat_fastdds_profile" in script
