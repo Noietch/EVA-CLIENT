@@ -12,11 +12,12 @@ import numpy as np
 import pytest
 
 import robots  # noqa: F401  (registers piper)
+import transport.utils as transport_utils
 import transport.zmq as zmq_transport
 from core.config import ConfigDict
 from core.registry import ROBOT_REGISTRY
 from robots.base import Robot
-import transport.utils as transport_utils
+from transport.utils import ImageRateTracker
 from transport.zmq import (
     COLLECTION_CONTROL_REPEATS,
     WireAction,
@@ -28,7 +29,6 @@ from transport.zmq import (
     unpack_action,
     unpack_observation,
 )
-from transport.utils import ImageRateTracker
 
 
 def _build_zmq_transport_with_fake_readers(monkeypatch):
@@ -578,3 +578,28 @@ def test_zmq_transport_sends_collection_control_actions(monkeypatch):
         + ["collect_stop"] * COLLECTION_CONTROL_REPEATS
     )
     np.testing.assert_allclose(unpack_action(transport._pub.payloads[0]).action, np.zeros(7))
+
+
+def test_wire_hil_status_and_control_mode_round_trip():
+    observation = WireObservation(
+        t=1.0,
+        images={},
+        state={"arm": np.zeros(2, dtype=np.float32)},
+        hil_supported=True,
+        hil_active=True,
+        hil_error="leader stale",
+    )
+    restored = unpack_observation(pack_observation(observation))
+    assert restored.hil_supported is True
+    assert restored.hil_active is True
+    assert restored.hil_error == "leader stale"
+
+    action = WireAction(
+        t=2.0,
+        action=np.zeros(2, dtype=np.float32),
+        target="hil_start",
+        mode="relative",
+    )
+    restored_action = unpack_action(pack_action(action))
+    assert restored_action.target == "hil_start"
+    assert restored_action.mode == "relative"

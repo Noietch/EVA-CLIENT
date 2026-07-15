@@ -27,14 +27,26 @@ transport = dict(
                 command_topic='/puppet/master_joint_left',
                 eef_state_topic='/puppet/end_pose_left',
                 sim_command_topic='/sim_joint_left',
+                hil_input_topic='/eva/hil/input_joint_state_arm_left',
             ),
             right_arm=dict(
                 state_topic='/puppet/joint_right',
                 command_topic='/puppet/master_joint_right',
                 eef_state_topic='/puppet/end_pose_right',
                 sim_command_topic='/sim_joint_right',
+                hil_input_topic='/eva/hil/input_joint_state_arm_right',
             ),
         ),
     ),
 )
 
+rollout = dict(
+    storage=dict(
+        enabled=True,
+        log_dir='work_dirs/rollout/dual_agilex_piper',
+        fps=30,
+        save_queue_max=15,
+        async_save=True,
+    ),
+    intervention=dict(control_mode='relative'),
+)

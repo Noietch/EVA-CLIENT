@@ -648,6 +648,9 @@ def test_rollout_hil_enable_toggle_is_wired():
     assert 'apiPost("/api/rollout_intervention_enabled"' in html
     assert "rollout_intervention_enabled" in html
     assert '"rollout_intervention_enabled": r.rollout_intervention_enabled' in server_source
+    assert '"hil_supported": hil_status.supported' in server_source
+    assert '"hil_error": hil_status.error' in server_source
+    assert '"HIL N/A"' in html
     assert "rollout_intervention_config_enabled" not in server_source
     assert '"/api/rollout_intervention_enabled"' in server_source
 

@@ -152,6 +152,12 @@ not an EVA process: the operator moves the master arms and EVA's `ros1` collecti
 transport records both the puppet state and the master command directly from the
 ROS topics. There is nothing extra to launch here beyond `run_agilex_ros.sh`.
 
+For rollout HIL, direct master-to-follower publication must be disabled. Route the
+raw master streams to `/eva/hil/input_joint_state_arm_left` and
+`/eva/hil/input_joint_state_arm_right`; EVA relays them to the follower command
+topics only while takeover is active. Collection-only operation may continue using
+the original upstream master/puppet path.
+
 `configs/02_collection/dual_agilex_piper.py` maps the topics per arm:
 
 ```text

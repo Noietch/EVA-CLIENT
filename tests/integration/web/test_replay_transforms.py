@@ -59,5 +59,7 @@ def test_arx_r5_dual_arm_scene_keeps_shared_urdf_parts_separate():
     arms = scene.transforms(None)
     assert set(arms) == {"left_arm", "right_arm"}
     assert set(arms["left_arm"]) == set(arms["right_arm"])
-    np.testing.assert_allclose(np.asarray(arms["left_arm"]["base_link.STL"])[:3, 3], [-0.25, 0.0, 0.0])
-    np.testing.assert_allclose(np.asarray(arms["right_arm"]["base_link.STL"])[:3, 3], [0.25, 0.0, 0.0])
+    left_base = np.asarray(arms["left_arm"]["base_link.STL"])[:3, 3]
+    right_base = np.asarray(arms["right_arm"]["base_link.STL"])[:3, 3]
+    np.testing.assert_allclose(left_base, [-0.25, 0.0, 0.0])
+    np.testing.assert_allclose(right_base, [0.25, 0.0, 0.0])

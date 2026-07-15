@@ -53,5 +53,5 @@ rollout = dict(
         save_queue_max=15,
         async_save=True,
     ),
-    intervention=dict(control_mode='absolute'),
+    intervention=dict(control_mode='relative'),
 )

@@ -32,6 +32,15 @@ logger = logging.getLogger(__name__)
 _COLLECTION_DEQUE_MAX = 2000
 
 
+@dataclasses.dataclass(frozen=True)
+class HilStatus:
+    """Current hardware-in-the-loop takeover capability and state."""
+
+    supported: bool
+    active: bool = False
+    error: str = ""
+
+
 class ObservationSource(Protocol):
     """Read-only observation access used by auxiliary consumers (e.g. the console
     visualization). A transport may hand out a dedicated source so those consumers
@@ -189,6 +198,23 @@ class TransportBridge(abc.ABC):
         _ = enabled
         return None
 
+    def hil_status(self) -> HilStatus:
+        """Return the backend's current HIL capability and activation state."""
+        return HilStatus(supported=False, error="Transport does not support HIL")
+
+    def start_hil_control(self, mode: str) -> HilStatus:
+        """Request HIL takeover and return the confirmed backend state."""
+        _ = mode
+        return self.hil_status()
+
+    def stop_hil_control(self) -> HilStatus:
+        """Stop HIL takeover and return the confirmed backend state."""
+        return self.hil_status()
+
+    def get_hil_frame(self) -> Observation | None:
+        """Return the next state/action frame produced during HIL takeover."""
+        return None
+
     def record_collection_gripper_action(
         self, group_name: str, value: float, stamp: Any | None = None
     ) -> None:
@@ -224,7 +250,8 @@ class GroupTopics:
     remaining fields are backend-specific and stay None where unused:
     ``sim_command_topic`` (ros1 sim visualizer), ``eef_state_topic`` (PoseStamped
     EEF feedback, both backends), ``gripper_state_topic`` / ``gripper_command_topic``
-    (ros2 split-gripper topics).
+    (ros2 split-gripper topics), and ``hil_input_topic`` (operator joint input
+    relayed only while HIL takeover is active).
     """
 
     state_topic: str
@@ -233,6 +260,7 @@ class GroupTopics:
     eef_state_topic: str | None = None
     gripper_state_topic: str | None = None
     gripper_command_topic: str | None = None
+    hil_input_topic: str | None = None
 
 
 def resolve_topics(topics_cfg: Any) -> tuple[dict[str, str], dict[str, GroupTopics]]:

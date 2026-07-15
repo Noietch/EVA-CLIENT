@@ -19,6 +19,8 @@ from examples.hardware.ur5e.teleop import Ur5eTeleopSource
 from transport.zmq import (
     COLLECTION_START_TARGET,
     COLLECTION_STOP_TARGET,
+    HIL_START_TARGET,
+    HIL_STOP_TARGET,
     WireObservation,
     pack_observation,
     unpack_action,
@@ -75,6 +77,8 @@ class Ur5eZmqNode:
         )
         self._captures = open_cameras(config.cameras)
         self._collection_active = False
+        self._hil_active = False
+        self._hil_error = ""
         self._applied_action_count = 0
         self._last_obs_log_time = 0.0
         self._teleop_source = (
@@ -114,6 +118,26 @@ class Ur5eZmqNode:
         if self._teleop_source is not None:
             self._teleop_source.disconnect()
 
+    def start_hil(self, mode: str) -> None:
+        if self._teleop_source is None:
+            self._hil_error = "UR5e HIL requires a configured teleop source"
+            return
+        if mode not in {"absolute", "relative"}:
+            self._hil_error = f"Unsupported HIL control mode: {mode}"
+            return
+        try:
+            self.start_collection()
+        except Exception as exc:
+            self._hil_error = str(exc)
+            return
+        self._hil_error = ""
+        self._hil_active = True
+
+    def stop_hil(self) -> None:
+        self.stop_collection()
+        self._hil_active = False
+        self._hil_error = ""
+
     def _drain_actions(self) -> None:
         while True:
             try:
@@ -126,6 +150,12 @@ class Ur5eZmqNode:
                 continue
             if action.target == COLLECTION_STOP_TARGET:
                 self.stop_collection()
+                continue
+            if action.target == HIL_START_TARGET:
+                self.start_hil(action.mode or "relative")
+                continue
+            if action.target == HIL_STOP_TARGET:
+                self.stop_hil()
                 continue
             if action.target == "sim":
                 continue
@@ -175,6 +205,9 @@ class Ur5eZmqNode:
             eef={"arm": eef},
             action=action_qpos,
             action_eef=action_eef,
+            hil_supported=self._teleop_source is not None,
+            hil_active=self._hil_active,
+            hil_error=self._hil_error,
         )
         self._obs_pub.send(pack_observation(obs))
 

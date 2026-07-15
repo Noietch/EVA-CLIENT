@@ -47,7 +47,7 @@ from core.app.state import (
 )
 from core.config import ConfigDict
 from core.utils.lerobot import LeRobotDatasetIO
-from transport.base import ObservationSource
+from transport.base import HilStatus, ObservationSource
 from transport.dataset import DatasetTransport
 
 logger = logging.getLogger(__name__)
@@ -404,6 +404,11 @@ def _serialize_status(ctx: ConsoleContext) -> dict:
     s = ctx.session
     r = ctx.runtime
     config = r.active_config or ctx.config
+    hil_status = (
+        r.transport.hil_status()
+        if hasattr(r.transport, "hil_status")
+        else HilStatus(supported=False, error="Transport does not support HIL")
+    )
     elapsed_ms = 0
     if s.status.value == "running" and s.run_start_time > 0:
         elapsed_ms = int((time.monotonic() - s.run_start_time) * 1000)
@@ -496,6 +501,9 @@ def _serialize_status(ctx: ConsoleContext) -> dict:
         "collection_teleop_active": r.collection_teleop_active,
         "rollout_intervention_active": r.rollout_intervention_active,
         "rollout_intervention_enabled": r.rollout_intervention_enabled,
+        "hil_supported": hil_status.supported,
+        "hil_active": hil_status.active,
+        "hil_error": hil_status.error,
         "rollout_intervention_active_frames": (
             0
             if r.rollout_intervention_active_segment is None

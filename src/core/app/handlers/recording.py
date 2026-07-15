@@ -449,18 +449,21 @@ def start_rollout_intervention(
     if not runtime.rollout_intervention_enabled:
         session.last_error = "Rollout HIL is off"
         return False
-    if not runtime.transport.supports_collection():
-        session.last_error = "Rollout teleop intervention recording is not available"
+    hil_status = runtime.transport.hil_status()
+    if not hil_status.supported:
+        session.last_error = hil_status.error or "Transport does not support HIL"
         return False
     pre_qpos = runtime.transport.get_latest_qpos()
     if pre_qpos is None:
         session.last_error = "Cannot start rollout intervention without joint feedback"
         return False
-    runtime.transport.reset_hil_control()
-    runtime.transport.start_collection()
     runtime.transport.clear_collection_backlog()
     if runtime.infer_strategy is not None:
         runtime.infer_strategy.reset()
+    started = runtime.transport.start_hil_control(runtime.hil_control_mode)
+    if not started.supported or not started.active or started.error:
+        session.last_error = started.error or "HIL takeover did not activate"
+        return False
     runtime.rollout_intervention_pre_qpos = np.asarray(pre_qpos, dtype=np.float32).copy()
     runtime.rollout_intervention_active_segment = RolloutInterventionSegment(
         segment_index=runtime.rollout_intervention_next_segment_index,
@@ -469,7 +472,6 @@ def start_rollout_intervention(
     )
     runtime.rollout_intervention_next_segment_index += 1
     runtime.rollout_intervention_active = True
-    runtime.transport.set_hil_relay_enabled(True)
     session.last_error = ""
     logger.info("Rollout teleop intervention started")
     return True
@@ -485,8 +487,10 @@ def stop_rollout_intervention(
     """Disable rollout teleop takeover before policy resume or cleanup."""
     if not runtime.rollout_intervention_active:
         return True
-    runtime.transport.set_hil_relay_enabled(False)
-    runtime.transport.stop_collection()
+    stopped = runtime.transport.stop_hil_control()
+    if required and (stopped.active or stopped.error):
+        session.last_error = stopped.error or "HIL takeover did not stop"
+        return False
     runtime.rollout_intervention_active = False
     logger.info("Rollout teleop intervention stopped")
     _ = config, required
@@ -537,7 +541,7 @@ def record_rollout_intervention_step(runtime: RuntimeState, session: SessionStat
     segment = runtime.rollout_intervention_active_segment
     if segment is None or segment.invalid_reason:
         return False
-    frame = runtime.transport.get_collection_frame()
+    frame = runtime.transport.get_hil_frame()
     if frame is None:
         return False
     return _record_rollout_intervention_frame(runtime, session, frame)

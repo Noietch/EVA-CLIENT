@@ -58,6 +58,8 @@ from examples.hardware.arx.teleop import (  # noqa: E402
 from transport.zmq import (  # noqa: E402
     COLLECTION_START_TARGET,
     COLLECTION_STOP_TARGET,
+    HIL_START_TARGET,
+    HIL_STOP_TARGET,
     WireAction,
     WireObservation,
     pack_observation,
@@ -289,6 +291,8 @@ class ArxZmqNode:
         self._cameras = self._build_camera_cache(config)
         self._teleop_source = ArxTeleopSource(config)
         self._collection_active = False
+        self._hil_active = False
+        self._hil_error = ""
         self._fk_solver: Any = None
         self._received_actions = 0
         self._published_observations = 0
@@ -340,6 +344,26 @@ class ArxZmqNode:
         self._collection_active = False
         self._teleop_source.disconnect()
 
+    def start_hil(self, mode: str) -> None:
+        if self._config.passive_collection:
+            self._hil_error = "ARX passive collection mode cannot control HIL"
+            return
+        if mode not in {"absolute", "relative"}:
+            self._hil_error = f"Unsupported HIL control mode: {mode}"
+            return
+        try:
+            self.start_collection()
+        except Exception as exc:
+            self._hil_error = str(exc)
+            return
+        self._hil_error = ""
+        self._hil_active = True
+
+    def stop_hil(self) -> None:
+        self.stop_collection()
+        self._hil_active = False
+        self._hil_error = ""
+
     def _drain_actions(self) -> None:
         while True:
             try:
@@ -362,6 +386,12 @@ class ArxZmqNode:
                 continue
             if action.target == COLLECTION_STOP_TARGET:
                 self.stop_collection()
+                continue
+            if action.target == HIL_START_TARGET:
+                self.start_hil(action.mode or "relative")
+                continue
+            if action.target == HIL_STOP_TARGET:
+                self.stop_hil()
                 continue
             if action.target == "sim":
                 continue
@@ -404,6 +434,9 @@ class ArxZmqNode:
             eef=eef,
             action=action_qpos,
             action_eef=action_eef,
+            hil_supported=not self._config.passive_collection,
+            hil_active=self._hil_active,
+            hil_error=self._hil_error,
         )
         self._obs_pub.send(pack_observation(obs))
         self._published_observations += 1

@@ -257,23 +257,23 @@ Start EVA against the fake in another shell with the same local ROS2 discovery
 environment:
 
 ```bash
-cd /home/ps/VLA-RL/EVA-CLIENT
+cd /path/to/EVA-CLIENT
 source /opt/ros/humble/setup.bash
 source .venv/bin/activate
 unset FASTRTPS_DEFAULT_PROFILES_FILE ROS_DISCOVERY_SERVER RMW_IMPLEMENTATION
 export ROS_LOCALHOST_ONLY=1
-eva --config /home/ps/VLA-RL/EVA-CLIENT/configs/02_collection/r1lite.py --web-port 8080
+eva --config configs/02_collection/r1lite.py --web-port 8080
 ```
 
 For policy rollout:
 
 ```bash
-cd /home/ps/VLA-RL/EVA-CLIENT
+cd /path/to/EVA-CLIENT
 source /opt/ros/humble/setup.bash
 source .venv/bin/activate
 unset FASTRTPS_DEFAULT_PROFILES_FILE ROS_DISCOVERY_SERVER RMW_IMPLEMENTATION
 export ROS_LOCALHOST_ONLY=1
-eva --config /home/ps/VLA-RL/EVA-CLIENT/configs/01_deploy/r1lite/openpi_qpos.py --web-port 8080
+eva --config configs/01_deploy/r1lite/openpi_qpos.py --web-port 8080
 ```
 
 UI, image, and rate overrides:

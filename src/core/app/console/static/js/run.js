@@ -112,9 +112,11 @@ function syncHilInterventionEnabled(status) {
     const label = $("hil-intervention-label");
     if (!toggle || !label) return;
     const enabled = !!status.rollout_intervention_enabled;
+    const supported = !!status.hil_supported;
     toggle.checked = enabled;
-    toggle.disabled = !!status.rollout_intervention_active;
-    label.textContent = enabled ? "HIL ON" : "HIL OFF";
+    toggle.disabled = !supported || !!status.rollout_intervention_active;
+    label.textContent = supported ? (enabled ? "HIL ON" : "HIL OFF") : "HIL N/A";
+    toggle.title = status.hil_error || "Enable rollout HIL intervention";
     const gate = toggle.closest(".collect-arm-gate");
     if (gate) {
       gate.classList.toggle("on", enabled);

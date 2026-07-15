@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from pathlib import Path
 import inspect
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -375,7 +375,10 @@ def test_ros2_fake_can_disable_robot_topics_for_camera_process():
     assert "/hdas/camera_head/right_raw/image_raw_color/compressed" in node.publishers
     assert "/hdas/feedback_arm_left" not in node.publishers
     assert "/motion_target/target_joint_state_arm_left" not in node.subscriptions
-    assert len(node.publishers["/hdas/camera_head/right_raw/image_raw_color/compressed"].messages) == 1
+    camera_messages = node.publishers[
+        "/hdas/camera_head/right_raw/image_raw_color/compressed"
+    ].messages
+    assert len(camera_messages) == 1
 
 
 def test_fake_node_main_uses_multithreaded_executor_for_ros_callbacks():
@@ -419,7 +422,8 @@ def test_ros2_fake_does_not_publish_idle_hil_that_overrides_policy_commands():
     assert left_messages == []
     assert right_messages == []
 
-    bridge.publish_hil("left_arm", np.asarray(state.snapshot()["hil"]["left_arm"], dtype=np.float32))
+    hil_position = np.asarray(state.snapshot()["hil"]["left_arm"], dtype=np.float32)
+    bridge.publish_hil("left_arm", hil_position)
     assert len(left_messages) == 1
     np.testing.assert_allclose(left_messages[0].position, [0.0, 0.0, 0.25, 0.0, 0.0, 0.0])
 

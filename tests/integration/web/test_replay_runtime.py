@@ -10,8 +10,8 @@ from _harness import console_config
 
 import robots  # noqa: F401
 from core.app import handlers
-from core.app.handlers import control as control_handlers
 from core.app import run as app
+from core.app.handlers import control as control_handlers
 from core.app.handlers.space import build_space
 from core.app.state import RuntimeState, SessionMode, SessionState, SessionStatus
 from core.config import ConfigDict

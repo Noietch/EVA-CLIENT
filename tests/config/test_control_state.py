@@ -26,6 +26,7 @@ from core.types import (
     RolloutInterventionSegment,
 )
 from robots.base import ActuatorGroup, CameraSpec, ObservationSchema, Robot
+from transport.base import HilStatus
 
 
 def test_format_task_label_none():
@@ -99,6 +100,8 @@ class _CollectionTransport:
         self.hil_resets = 0
         self.hil_modes: list[str] = []
         self.hil_relay_enabled: list[bool] = []
+        self.hil_supported = True
+        self.hil_start_error = ""
         self.published: list[tuple[str, np.ndarray]] = []
         self.sleep_count = 0
 
@@ -136,6 +139,27 @@ class _CollectionTransport:
 
     def set_hil_relay_enabled(self, enabled: bool) -> None:
         self.hil_relay_enabled.append(enabled)
+
+    def hil_status(self) -> HilStatus:
+        active = bool(self.hil_relay_enabled and self.hil_relay_enabled[-1])
+        return HilStatus(supported=self.hil_supported, active=active)
+
+    def start_hil_control(self, mode: str) -> HilStatus:
+        if self.hil_start_error:
+            return HilStatus(supported=True, error=self.hil_start_error)
+        self.reset_hil_control()
+        self.set_hil_control_mode(mode)
+        self.start_collection()
+        self.set_hil_relay_enabled(True)
+        return HilStatus(supported=True, active=True)
+
+    def stop_hil_control(self) -> HilStatus:
+        self.set_hil_relay_enabled(False)
+        self.stop_collection()
+        return HilStatus(supported=True, active=False)
+
+    def get_hil_frame(self) -> Observation | None:
+        return self.get_collection_frame()
 
     def has_sim_publishers(self) -> bool:
         return False
@@ -384,6 +408,27 @@ def test_start_rollout_intervention_refuses_when_hil_off():
     assert runtime.transport.started == 0
     assert runtime.transport.hil_relay_enabled == []
     assert session.last_error == "Rollout HIL is off"
+
+
+def test_start_rollout_intervention_refuses_unsupported_transport():
+    runtime, session = _runtime_and_session()
+    runtime.rollout_intervention_enabled = True
+    runtime.transport.hil_supported = False
+
+    assert recording.start_rollout_intervention(_config(), runtime, session) is False
+    assert runtime.rollout_intervention_active is False
+    assert session.last_error == "Transport does not support HIL"
+
+
+def test_start_rollout_intervention_does_not_allocate_segment_before_ack():
+    runtime, session = _runtime_and_session()
+    runtime.rollout_intervention_enabled = True
+    runtime.transport.hil_start_error = "leader unavailable"
+
+    assert recording.start_rollout_intervention(_config(), runtime, session) is False
+    assert runtime.rollout_intervention_active_segment is None
+    assert runtime.rollout_intervention_next_segment_index == 0
+    assert session.last_error == "leader unavailable"
 
 
 def test_start_rollout_intervention_resets_policy_strategy():
