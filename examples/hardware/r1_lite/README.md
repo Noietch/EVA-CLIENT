@@ -1,145 +1,286 @@
 # R1 Lite Hardware
 
-This directory contains the launch helpers for the dual-arm R1 Lite, used by the
-deploy configs (`configs/01_deploy/r1lite/*.py`) and the collection config
-(`configs/02_collection/r1lite.py`).
-
-Unlike the ZMQ robots (ARX / Franka / AgiBot / UR5e), R1 Lite runs over
-**ROS 2 (Humble)**: EVA's `ros2` transport subscribes to the `/hdas/...` feedback
-topics and publishes to the `/motion_target/...` command topics declared in
-`configs/01_deploy/r1lite/_base.py`, so there is no `node.py` in this directory.
-`run_hardware.sh` starts the robot's own bringup remotely over SSH and then
-launches EVA locally; a ZMQ fake node is provided for no-hardware dev.
+This directory keeps the R1 Lite hardware entrypoints that are specific to this
+robot. EVA core owns the generic ROS2 transport, HIL, collection recording, and
+fixed-clock dataset save logic; robot startup details stay here.
 
 ## Files
 
-- `run_hardware.sh`: starts the on-robot bringup in a remote tmux session over
-  SSH, sets up the local ROS 2 / FastDDS environment, and `exec`s `eva` with the
-  R1 Lite config.
-- `kill_hardware.sh`: kills the remote tmux sessions started by `run_hardware.sh`.
-- `fake_node.py` / `run_fake_node.sh`: software-only fake node over ZMQ
-  (built on `examples/hardware/fake_common.py`); needs no ROS and no real robot.
+- `run_hardware.sh`: starts the remote R1 Lite robot stack and CAT teleop stack.
+- `kill_hardware.sh`: runs the remote cleanup commands on the R1 Lite and CAT hosts.
+- `run_fake_node.sh`: starts the local ROS2 fake camera and robot processes.
+- `fake_node.py`: ROS2-only R1 Lite fake publishers/subscribers and control UI.
+- `cat_operator_button.py`: CAT-side ROS2 bridge from Joy-Con buttons to
+  `/eva/operator_button`.
+- `reset_torso.py`: publishes the fixed R1 Lite torso pose.
 
-## Requirements
+## Real Hardware
 
-`run_hardware.sh` against the real robot assumes:
+The scripts assume passwordless SSH from the EVA machine to:
 
-- ROS 2 Humble at `/opt/ros/humble/setup.bash` (sourced if present).
-- A FastDDS super-client profile at `~/.ros/fastdds_r1lite_super_client.xml`
-  (overridable via `FASTRTPS_DEFAULT_PROFILES_FILE`). The script **errors out**
-  if this file is missing.
-- Passwordless SSH access to the robot host (`r1lite` by default) where
-  `~/r1lite/robot/start_robot.sh` brings up the robot, with `tmux` installed
-  there.
+```text
+r1lite@192.168.12.12
+cat@192.168.12.13
+```
 
-The fake node only needs the EVA base package in the virtual environment:
+Start the robot and CAT teleop stacks from the repo root:
 
 ```bash
 source .venv/bin/activate
-```
-
-## Run the Fake Node (no hardware)
-
-For development without the robot or ROS 2, the fake node speaks ZMQ. Point EVA
-at a `transport.type='zmq'` config (the openloop config
-`configs/00_openloop/r1lite_openloop.py` is ROS-free):
-
-```bash
-bash examples/hardware/r1_lite/run_fake_node.sh
-# then, in another shell, with a zmq-transport config:
-eva --config configs/00_openloop/r1lite_openloop.py --web-port 8080
-```
-
-Endpoint / rate overrides:
-
-```bash
-OBS_ENDPOINT=tcp://127.0.0.1:5555 \
-ACTION_ENDPOINT=tcp://127.0.0.1:5556 \
-PUBLISH_RATE=30 \
-  bash examples/hardware/r1_lite/run_fake_node.sh
-```
-
-Extra arguments are forwarded to `fake_node.py` (e.g. `--image-height`,
-`--image-width`). The fake node builds the `r1_lite` robot from its zoo config,
-so its state/camera layout matches the real one.
-
-## Run on Real Hardware
-
-```bash
 bash examples/hardware/r1_lite/run_hardware.sh
 ```
 
-This starts the remote robot bringup in tmux session `eva_r1lite_robot` on host
-`r1lite` (idempotent — it skips if the session already exists), then launches
-EVA. By default it uses `configs/02_collection/r1lite.py`. To use a different
-config, pass `--config`; it is forwarded to `eva` verbatim along with any other
-arguments:
-
-```bash
-bash examples/hardware/r1_lite/run_hardware.sh \
-  --config configs/01_deploy/r1lite/openpi_qpos.py --web-port 8080
-```
-
-Environment overrides:
+By default this starts:
 
 ```text
-R1LITE_HOST                       Robot SSH host                     (default: r1lite)
-R1LITE_SESSION                    Remote tmux session for the robot  (default: eva_r1lite_robot)
-CAT_HOST / CAT_SESSION            Teleop host / session (teleop line is commented out by default)
-EVA_CONFIG                        Default config when no --config is passed (default: configs/02_collection/r1lite.py)
-FASTRTPS_DEFAULT_PROFILES_FILE    FastDDS profile path
-RMW_IMPLEMENTATION                RMW backend (default: rmw_fastrtps_cpp)
+R1 Lite host: tmux session eva_r1lite_robot
+  /tmp/eva_r1lite_body_no_teleop_bootstrap
+  copy R1LITEBody.d hdas/mobiman/ros2_discovery/system/tools yaml to
+    /tmp/eva_r1lite_body_no_teleop.d
+  tmuxp load those yaml files without R1LITEBody.d/teleop.yaml
+
+CAT host: tmux session eva_r1lite_teleop
+  source /opt/ros/humble/setup.bash
+  source /home/cat/galaxea/install/setup.bash
+  python3 /home/cat/galaxea/install/mobiman/lib/DynamixelTeleop/GelloTeleop/gello_teleop.py
+    /tabletop/hdas/feedback_arm_left:=/eva/hil/input_joint_state_arm_left
+    /tabletop/hdas/feedback_arm_right:=/eva/hil/input_joint_state_arm_right
+  ros2 launch joycon_evdev_publisher joy_evdev_launch.py
+  python3 /tmp/eva_cat_operator_button.py --topic /eva/operator_button
 ```
 
-The teleop bringup line (host `cat`, session `eva_r1lite_teleop`) is commented
-out in `run_hardware.sh`; uncomment it if you also need the leader/teleop stack.
+`run_hardware.sh` writes `/tmp/eva_r1lite_body_no_teleop_bootstrap` on the R1
+Lite host. That bootstrap copies the vendor body session yaml files into
+`/tmp/eva_r1lite_body_no_teleop.d` and starts only `hdas`, `mobiman`,
+`ros_discovery`, `system`, and `tools`; it does not start vendor
+`R1LITEBody.d/teleop.yaml`, so robot-side CAT teleop cannot publish directly to
+the real motion target topics.
 
-### Stop the Robot
+The script also copies `cat_operator_button.py` to
+`/tmp/eva_cat_operator_button.py` on the CAT host, writes
+`/tmp/eva_cat_fastdds_super_client.xml` and
+`/tmp/eva_cat_hil_teleop_bootstrap`, and then starts the CAT tmux session. It
+does not patch vendor files. The generated CAT FastDDS profile uses
+`SUPER_CLIENT` discovery through `192.168.12.12:11811`, matching the EVA and
+R1 Lite ROS2 graph. CAT arm motion is published only to EVA HIL input topics;
+EVA forwards HIL to `/motion_target/target_joint_state_arm_left` and
+`/motion_target/target_joint_state_arm_right` only while COLLECT ARM is on or
+while rollout intervention is active with HIL ON.
+
+Useful overrides:
+
+```bash
+START_R1LITE=0 bash examples/hardware/r1_lite/run_hardware.sh
+START_CAT=0 bash examples/hardware/r1_lite/run_hardware.sh
+R1LITE_HOST=r1lite@192.168.12.12 CAT_HOST=cat@192.168.12.13 \
+  bash examples/hardware/r1_lite/run_hardware.sh
+CAT_OPERATOR_BUTTON=0 bash examples/hardware/r1_lite/run_hardware.sh
+```
+
+Command overrides:
+
+```bash
+R1LITE_BODY_SESSION_REMOTE='/tmp/eva_r1lite_body_no_teleop.d' \
+CAT_SETUP_CMD='source /opt/ros/humble/setup.bash && source /home/cat/galaxea/install/setup.bash' \
+CAT_FASTRTPS_PROFILE='/tmp/eva_cat_fastdds_super_client.xml' \
+CAT_HIL_TELEOP_REMOTE='/tmp/eva_cat_hil_teleop_bootstrap' \
+  bash examples/hardware/r1_lite/run_hardware.sh
+```
+
+### EVA FastDDS Profile
+
+The repository provides a sanitized workstation profile template at
+`examples/hardware/r1_lite/fastdds/fastdds_super_client.example.xml`. Copy it to
+the local ROS configuration directory:
+
+```bash
+mkdir -p "$HOME/.ros"
+cp examples/hardware/r1_lite/fastdds/fastdds_super_client.example.xml \
+  "$HOME/.ros/fastdds_r1lite_super_client.xml"
+```
+
+Replace every placeholder with values from the R1 Lite ROS2 network:
+
+```text
+__EVA_LOCAL_IP__                  EVA workstation address on the robot LAN
+__DISCOVERY_SERVER_GUID_PREFIX__  FastDDS discovery server GUID prefix
+__DISCOVERY_SERVER_IP__           FastDDS discovery server address
+__DISCOVERY_SERVER_PORT__         FastDDS discovery server port
+```
+
+The GUID prefix must match the running discovery server; it is not derived from
+the server IP. Verify that no placeholders remain:
+
+```bash
+profile="$HOME/.ros/fastdds_r1lite_super_client.xml"
+if rg -n '__[A-Z0-9_]+__' "$profile"; then
+  echo "FastDDS profile still contains placeholders" >&2
+  exit 1
+fi
+export FASTRTPS_DEFAULT_PROFILES_FILE="$profile"
+```
+
+After hardware is up, start EVA locally in another shell:
+
+```bash
+source .venv/bin/activate
+export FASTRTPS_DEFAULT_PROFILES_FILE="$HOME/.ros/fastdds_r1lite_super_client.xml"
+eva --config configs/02_collection/r1lite.py --web-port 8080
+```
+
+### FastDDS Camera Receive Buffer
+
+Three 60 Hz compressed camera topics can overflow Linux's default 212,992-byte
+UDP receive buffer. A dropped UDP fragment discards the complete best-effort ROS2
+image sample and appears later as `image_skew_exceeded`, even when the short live
+rate display has returned to 60 Hz.
+
+Configure the EVA workstation's persistent receive-buffer limit in
+`/etc/sysctl.d/90-eva-fastdds-image-buffer.conf`:
+
+```text
+net.core.rmem_default=16777216
+net.core.rmem_max=16777216
+```
+
+Apply it before starting EVA:
+
+```bash
+sudo sysctl -p /etc/sysctl.d/90-eva-fastdds-image-buffer.conf
+```
+
+The UDPv4 `transport_descriptor` in the EVA workstation profile selected by
+`FASTRTPS_DEFAULT_PROFILES_FILE` must also request that buffer:
+
+```xml
+<transport_descriptor>
+  <transport_id>udp_transport</transport_id>
+  <type>UDPv4</type>
+  <receiveBufferSize>16777216</receiveBufferSize>
+  <!-- Keep the site-specific interfaceWhiteList and discovery settings. -->
+</transport_descriptor>
+```
+
+Both settings are required. Restart EVA after changing them, then inspect its
+FastDDS user-data UDP socket:
+
+```bash
+ss -u -a -m -p | grep -A1 eva
+```
+
+The socket `rb` value must be larger than `212992`, and its `d` drop counter must
+not increase during collection. Do not compensate for an increasing counter by
+widening the collection image-skew tolerance.
+
+For policy rollout:
+
+```bash
+source .venv/bin/activate
+eva --config configs/01_deploy/r1lite/openpi_qpos.py --web-port 8080
+```
+
+## Operator Buttons
+
+`cat_operator_button.py` subscribes to CAT Joy topics and publishes string events
+to `/eva/operator_button`:
+
+```text
+right Joy button 2 -> x
+right Joy button 3 -> y
+left Joy button 4  -> left_gripper_open
+left Joy button 5  -> left_gripper_close
+right Joy button 4 -> right_gripper_open
+right Joy button 5 -> right_gripper_close
+```
+
+EVA maps `x` / `y` according to the current state: collect start/stop/cancel,
+rollout intervention continue/abandon, or rollout save. Gripper labels route to
+the normal EVA gripper commands. During rollout, HIL is off by default; turn HIL
+ON before pressing CAT X to enter intervention.
+
+## Cleanup
+
+Stop both remote stacks:
 
 ```bash
 bash examples/hardware/r1_lite/kill_hardware.sh
 ```
 
-This kills both the robot and teleop tmux sessions on their respective hosts.
-Honors the same `R1LITE_HOST` / `R1LITE_SESSION` / `CAT_HOST` / `CAT_SESSION`
-overrides.
-
-## Action / State Layout
-
-Dual arm on a fixed torso, 14D total:
+Defaults:
 
 ```text
-[left_arm  7D: left_arm_joint1..6 + left_gripper_joint,
- right_arm 7D: right_arm_joint1..6 + right_gripper_joint]
+R1 Lite host: bash ~/workspace/robot/kill_robot.sh
+CAT host:     bash ~/kill_tele.sh
 ```
 
-The gripper open position is `100.0`, and EEF poses default to `base_link`,
-switchable to `torso_link3`.
+Useful overrides:
 
-## Cameras
+```bash
+START_R1LITE=0 bash examples/hardware/r1_lite/kill_hardware.sh
+START_CAT=0 bash examples/hardware/r1_lite/kill_hardware.sh
+R1LITE_KILL_CMD='bash ~/workspace/robot/kill_robot.sh' \
+CAT_KILL_CMD='bash ~/kill_tele.sh' \
+  bash examples/hardware/r1_lite/kill_hardware.sh
+```
 
-Cameras `cam_high` / `cam_left_wrist` / `cam_right_wrist` map to the R1 Lite
-head/wrist camera topics declared in `configs/01_deploy/r1lite/_base.py`.
+## ROS2 Fake Node
 
-## Teleop Collection
+For local development without physical R1 Lite/CAT hardware, start the local ROS2
+fake node with its embedded control UI:
 
-Teleop runs on the robot's own ROS 2 stack, not as an EVA process: a leader/teleop
-bringup drives the arms and EVA's `ros2` collection transport records both the
-feedback state and the motion-target command directly from the ROS topics.
+```bash
+source /opt/ros/humble/setup.bash
+source .venv/bin/activate
+bash examples/hardware/r1_lite/run_fake_node.sh
+```
 
-`run_hardware.sh` already starts the robot bringup; the teleop bringup is the
-second `start_remote_tmux` line (host `cat`, session `eva_r1lite_teleop`,
-`/home/cat/start_tele.sh`), commented out by default — uncomment it to also start
-the leader stack. `run_hardware.sh` defaults to `configs/02_collection/r1lite.py`,
-which maps the topics per arm:
+`run_fake_node.sh` forces local ROS2 discovery by setting `ROS_LOCALHOST_ONLY=1`
+and unsetting `FASTRTPS_DEFAULT_PROFILES_FILE`, `ROS_DISCOVERY_SERVER`, and
+`RMW_IMPLEMENTATION`. This is intentional for fake/EVA local testing. Do not use
+that local discovery setup for real R1 Lite hardware; real hardware runs should
+keep the r1lite FastDDS SUPER_CLIENT profile that discovers
+`192.168.12.12:11811`.
+
+By default `run_fake_node.sh` starts two `fake_node.py` subprocesses:
 
 ```text
-left_arm   qpos        /hdas/feedback_arm_left                      (feedback state)
-           action_qpos /motion_target/target_joint_state_arm_left  (commanded)
-           eef         /relaxed_ik/motion_control/pose_ee_arm_left
-right_arm  qpos        /hdas/feedback_arm_right
-           action_qpos /motion_target/target_joint_state_arm_right
-           eef         /relaxed_ik/motion_control/pose_ee_arm_right
+--role cameras: publishes the three compressed camera topics
+--role robot:   publishes robot feedback, subscribes to EVA motion targets,
+                serves the local UI, and publishes operator/HIL events
 ```
 
-`kill_hardware.sh` stops both the robot and teleop sessions.
+Splitting camera and robot roles keeps image publishing from starving control
+callbacks during recording. The fake uses the same ROS2 topics as the R1 Lite
+configs and exposes a local UI for X/Y, gripper, and HIL joint controls.
+
+Start EVA against the fake in another shell with the same local ROS2 discovery
+environment:
+
+```bash
+cd /home/ps/VLA-RL/EVA-CLIENT
+source /opt/ros/humble/setup.bash
+source .venv/bin/activate
+unset FASTRTPS_DEFAULT_PROFILES_FILE ROS_DISCOVERY_SERVER RMW_IMPLEMENTATION
+export ROS_LOCALHOST_ONLY=1
+eva --config /home/ps/VLA-RL/EVA-CLIENT/configs/02_collection/r1lite.py --web-port 8080
+```
+
+For policy rollout:
+
+```bash
+cd /home/ps/VLA-RL/EVA-CLIENT
+source /opt/ros/humble/setup.bash
+source .venv/bin/activate
+unset FASTRTPS_DEFAULT_PROFILES_FILE ROS_DISCOVERY_SERVER RMW_IMPLEMENTATION
+export ROS_LOCALHOST_ONLY=1
+eva --config /home/ps/VLA-RL/EVA-CLIENT/configs/01_deploy/r1lite/openpi_qpos.py --web-port 8080
+```
+
+UI, image, and rate overrides:
+
+```bash
+PUBLISH_RATE=30 UI_HOST=127.0.0.1 UI_PORT=8765 IMAGE_HEIGHT=360 IMAGE_WIDTH=640 \
+  bash examples/hardware/r1_lite/run_fake_node.sh --no-open-ui
+```
+
+Extra arguments are forwarded to the `--role robot` `fake_node.py` process.

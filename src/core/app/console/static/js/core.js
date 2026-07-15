@@ -2,6 +2,17 @@
 
 export const $ = (id) => document.getElementById(id);
 
+function replaceCamStripContent(html) {
+  const strip = $("cam-strip");
+  if (!strip) return;
+  strip.querySelectorAll("video.cam").forEach((v) => {
+    v.pause();
+    v.removeAttribute("src");
+    try { v.load(); } catch (e) {}
+  });
+  strip.innerHTML = html;
+}
+
 export const RUN_CONTROLS = {
   debug: {
     runGroup: "control-run", stepGroup: "control-step", stepState: "step-state",
@@ -45,6 +56,7 @@ export const S = {
   _setupFired: false,
   _replayModePushed: false,
   _setupPaused: false,
+  replayLoadPending: false,
   replaySeriesKey: null,
   chartModalWhich: null,
   EVAL_MODEL_NAME: "",
@@ -75,4 +87,4 @@ async function apiPost(path, body) {
   postQueue = result.then(() => undefined, () => undefined);
   return result;
 }
-export { apiGet, apiPost };
+export { apiGet, apiPost, replaceCamStripContent };

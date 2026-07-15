@@ -20,7 +20,14 @@ from robots.base import (
     RobotVisConfig,
     VisPart,
 )
-from robots.kinematics.pyroki import pyroki_arms
+
+try:
+    from robots.kinematics.pyroki import pyroki_arms
+except ImportError as exc:
+    _PYROKI_IMPORT_ERROR: ImportError | None = exc
+    pyroki_arms = None
+else:
+    _PYROKI_IMPORT_ERROR = None
 
 
 @ROBOT_REGISTRY.register("agilex_piper")
@@ -72,6 +79,10 @@ class AgilexPiper(Robot):
         )
 
     def build_kinematics(self, **kwargs: Any) -> Any:
+        if _PYROKI_IMPORT_ERROR is not None:
+            raise ImportError(
+                "Agilex Piper kinematics requires the PyRoki/JAX dependencies"
+            ) from _PYROKI_IMPORT_ERROR
         return pyroki_arms(
             self.URDF, [{"joints": self.ARM_JOINTS, "eef_link": "gripper_base"}] * 2, **kwargs
         )

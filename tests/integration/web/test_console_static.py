@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 STATIC_DIR = Path(__file__).resolve().parents[3] / "src" / "core" / "app" / "console" / "static"
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 def console_source() -> str:
@@ -18,6 +19,69 @@ def console_source() -> str:
     parts += [p.read_text() for p in sorted(STATIC_DIR.glob("js/*.js"))]
     parts += [p.read_text() for p in sorted(STATIC_DIR.glob("css/*.css"))]
     return "\n".join(parts)
+
+
+def test_replay_perf_probe_measures_from_user_click_to_visible_videos():
+    source = (REPO_ROOT / "tests" / "manual" / "replay_perf_probe.py").read_text()
+
+    assert "Input.dispatchMouseEvent" in source
+    assert "Page.captureScreenshot" in source
+    assert "--headless=new" not in source
+    assert "ignoredVideos = new WeakSet" in source
+    assert "state.start = performance.now();" in source
+    assert "el.click();" not in source
+    assert "visible" in source
+    assert "VIDEOS_VISIBLE_READY_EXPR" in source
+    assert "start_probe(cdp)" not in source
+
+
+def test_replay_perf_probe_repeats_all_user_visible_review_paths():
+    source = (REPO_ROOT / "tests" / "manual" / "replay_perf_probe.py").read_text()
+
+    assert "--replay-next-count" in source
+    assert "--collect-count" in source
+    assert "--debug-count" in source
+    assert "--max-visible-ms" in source
+    assert "select_clickable_tile" in source
+    assert 'human_click_target_and_start_probe(cdp, target, f"collect-tile-{i}")' in source
+    assert 'human_click_and_start_probe(cdp, "#b-collect-replay-toggle")' not in source
+    assert "summarize_resources" in source
+    assert "replay-next-" in source
+    assert "collect-" in source
+    assert "debug-" in source
+
+
+def test_replay_and_review_abort_obsolete_video_downloads_before_replacing_strip():
+    html = console_source()
+
+    assert "function replaceCamStripContent(html)" in html
+    assert 'v.removeAttribute("src");' in html
+    assert "try { v.load(); } catch (e) {}" in html
+    assert "replaceCamStripContent(cams.map((k) => {" in html
+    assert "replaceCamStripContent(keys.map((k) => {" in html
+    assert "replaceCamStripContent('<div class=\"cam-empty\">awaiting frame…</div>');" in html
+
+
+def test_replay_and_review_cells_show_real_video_poster_before_video_canplay():
+    html = console_source()
+
+    assert "/api/replay_poster?${params.toString()}" in html
+    assert 'class="cam cam-poster"' in html
+    assert 'class="cam cam-video"' in html
+    assert "onload=\"this.closest('.cam-cell').classList.remove('loading')\"" in html
+    assert ".cam-cell.video-ready .cam-poster" in html
+    assert ".cam-cell.video-ready .cam-video" in html
+
+
+def test_video_loading_overlay_does_not_cover_loaded_poster():
+    html = console_source()
+    start = html.index("function setVideosLoading(videos, on, text)")
+    body = html[start:html.index("function setStageVideoLoading", start)]
+
+    assert "const poster = cell.querySelector(\".cam-poster\");" in body
+    assert "const posterReady =" in body
+    assert "const videoPainted =" in body
+    assert 'cell.classList.toggle("loading", on && !posterReady && !videoPainted);' in body
 
 
 def test_scene3d_initialization_errors_are_rendered_in_overlay():
@@ -133,26 +197,45 @@ def test_collect_qc_does_not_jump_to_replay_tab():
     assert '"b-goto-qc").onclick = () => openBatchQc(' not in html
 
 
+def test_collect_tile_click_starts_review_immediately():
+    html = console_source()
+    start = html.index("function selectCollectEpisode(item)")
+    body = html[start:html.index("function selectRolloutSaveEpisode", start)]
+
+    assert 'reviewEpisode("collect", item);' in body
+    assert "switchActiveReview" not in body
+
+
 def test_review_episode_uses_selected_dataset_episode_and_video_query():
     html = console_source()
 
     assert "reviewDatasetDir" in html
     assert "reviewEpisodeId" in html
-    assert 'function renderReviewVideos(videoKeys) {\n    const strip = $("cam-strip");' in html
+    assert 'function renderReviewVideos(videoKeys) {' in html
+    assert "replaceCamStripContent(keys.map((k) => {" in html
     assert "dataset_dir: reviewDatasetDir," in html
     assert "episode: String(reviewEpisodeId)," in html
-    assert 'src="/api/replay_video?${params.toString()}"' in html
+    assert 'data-src="/api/replay_video?${params.toString()}"' in html
     assert 'id="collect-review-videos"' not in html
     assert 'id="rollout-review-videos"' not in html
     assert "collectReplayEpisode" in html
     assert "latestEpisodeIndex" not in html
 
 
-def test_review_episode_videos_follow_collection_replay_frame():
+def test_review_episode_videos_are_not_seeked_by_status_poll_during_playback():
     html = console_source()
 
+    render_collect_start = html.index("function renderCollect()")
+    render_collect_end = html.index("function dotClass", render_collect_start)
+    render_collect = html[render_collect_start:render_collect_end]
+    render_rollout_start = html.index("function renderRolloutSave()")
+    render_rollout_end = html.index("function renderCollect()", render_rollout_start)
+    render_rollout = html[render_rollout_start:render_rollout_end]
+
     assert "function syncReviewVideosToFrame(frameIndex)" in html
-    assert "syncReviewVideosToFrame(replay.frame_index);" in html
+    assert "syncReviewVideosToFrame(0);" in html
+    assert "syncReviewVideosToFrame(replay.frame_index);" not in render_collect
+    assert "syncReviewVideosToFrame(replay.frame_index);" not in render_rollout
     assert 'reviewKind === "collect" && replay.active' in html
 
 
@@ -174,11 +257,15 @@ def test_review_episode_waits_for_video_before_starting_motion():
 
 def test_video_paint_wait_uses_browser_rendered_frame_before_motion():
     html = console_source()
+    start = html.index("async function waitForVideoPainted(v)")
+    body = html[start:html.index("async function waitForStageVideosReady", start)]
 
     assert "function waitForVideoPainted(v)" in html
     assert "requestVideoFrameCallback" in html
     assert "requestAnimationFrame" in html
     assert "await waitForStageVideosPainted" in html
+    assert "setTimeout(finish, 500)" not in body
+    assert "!v.paused && typeof v.requestVideoFrameCallback" in body
 
 
 def test_replay_waits_for_canplay_instead_of_loadeddata():
@@ -201,11 +288,24 @@ def test_replay_playback_buffers_until_video_has_future_data():
 
 def test_replay_local_play_clock_drives_smooth_playback():
     html = console_source()
+    load_start = html.index("async function loadReplaySeries()")
+    load_body = html[load_start:html.index("async function loadReplayTransforms", load_start)]
+    xf_start = html.index("async function loadReplayTransforms(loadSeq)")
+    xf_body = html[xf_start:html.index("function replayApplyTransformFrame", xf_start)]
+    set_frame_start = html.index("function replaySetUrdfFrame(frame)")
+    set_frame_body = html[set_frame_start:html.index("function exitReplayMode", set_frame_start)]
 
     # The whole-episode transforms blob is fetched once and decoded locally.
-    assert 'await fetch("/api/replay_transforms")' in html
+    assert 'fetch("/api/replay_transforms")' in html
     assert 'magic !== "EVAXFRM1"' in html
     assert "function replayApplyTransformFrame(frame)" in html
+    assert "REPLAY_XF_LOADING" in html
+    assert "if (REPLAY_XF_LOADING) return;" not in set_frame_body
+    assert "let replayUrdfInFlight = false;" in html
+    assert "let replayUrdfPendingFrame = null;" in html
+    assert "if (replayUrdfInFlight) {" in set_frame_body
+    assert "replayUrdfPendingFrame = i;" in set_frame_body
+    assert "resetReplayUrdfRequests();" in xf_body
     # Local play clock + scrub play button, no per-frame network in the fast path.
     assert "function replayPlay()" in html
     assert "function replayStop()" in html
@@ -219,13 +319,16 @@ def test_replay_local_play_clock_drives_smooth_playback():
     assert "function drawReplayCharts(force = false)" in html
     assert "now - _lastReplayChartDraw < 100" in html
     assert "LIVE.replayLoading = true;" in html
-    assert 'await waitForStageVideosReady("replay");' in html
-    assert "seekReplay(0);" in html
-    assert 'await waitForStageVideosPainted("replay");' in html
-    assert html.index("seekReplay(0);") < html.index('await waitForStageVideosPainted("replay");')
-    assert html.index('await waitForStageVideosPainted("replay");') < html.index(
-        "LIVE.replayLoading = false;"
+    assert load_body.index("mountReplayVideos();") < load_body.index(
+        'apiGet("/api/replay_series")'
     )
+    assert "seekReplay(0);" in load_body
+    assert 'await waitForStageVideosReady("replay");' not in load_body
+    assert 'await waitForStageVideosPainted("replay");' not in load_body
+    assert "await transformsReady" not in load_body
+    assert load_body.index("seekReplay(0);") < load_body.rindex("LIVE.replayLoading = false;")
+    assert "loadReplayTransforms(loadSeq)" not in load_body
+    assert "transformsReady.then" not in load_body
     assert "if (LIVE.replayLoading) return;" in html
     assert "const master = replayMasterVideo();" in html
     assert "targetTime = master.currentTime || 0;" in html
@@ -236,6 +339,79 @@ def test_replay_local_play_clock_drives_smooth_playback():
     assert "REAL_REPLAY_MAX_EXTRAPOLATE_S" in html
     assert "setReplayCursorFrame(frame, false);" in html
     assert "syncReplayVideos(frame);" in html
+
+
+def test_replay_load_does_not_prebuffer_video_before_user_playback():
+    html = console_source()
+    load_start = html.index("async function loadReplaySeries()")
+    load_body = html[load_start:html.index("async function loadReplayTransforms", load_start)]
+    play_start = html.index("function replayPlay()")
+    play_body = html[play_start:html.index("function replayStop", play_start)]
+
+    assert 'await waitForStageVideosReady("replay");' not in load_body
+    assert 'await waitForStageVideosPainted("replay");' not in load_body
+    assert "playStageVideos();" in play_body
+
+
+def test_replay_load_does_not_compute_full_transforms_before_user_playback():
+    html = console_source()
+    load_start = html.index("async function loadReplaySeries()")
+    load_body = html[load_start:html.index("async function loadReplayTransforms", load_start)]
+    play_start = html.index("function replayPlay()")
+    play_body = html[play_start:html.index("function replayStop", play_start)]
+
+    assert "loadReplayTransforms(loadSeq)" not in load_body
+    assert "loadReplayTransforms(replayLoadSeq)" in play_body
+
+
+def test_replay_load_mounts_videos_from_load_response_without_status_poll():
+    html = console_source()
+    confirm_start = html.index("const confirm = async () => {")
+    confirm_body = html[confirm_start:html.index("// QC deep-link", confirm_start)]
+
+    assert 'import { maybeSyncReplayPlayer, loadMountedReplaySeries } from "./replay.js";' in html
+    assert "const hasInspectedDir = replayInspectedDir === dir;" in confirm_body
+    assert "const loadKeys = hasInspectedDir" in confirm_body
+    assert "const loadVideoKeys = hasInspectedDir ? S.replayVideoKeys : {};" in confirm_body
+    assert "inspectDataset(dir)" not in confirm_body
+    assert 'const load = await apiPost("/api/load_replay_dataset"' in html
+    assert 'if (!load.ok) {' in html
+    assert "await loadMountedReplaySeries(load);" in html
+    assert "function loadMountedReplaySeries(info)" in html
+    assert "replayLoadedDatasetDir = info.dataset_dir || \"\";" in html
+    assert "replayLoadedEpisodeId = Number(info.episode || 0);" in html
+    assert "replayLoadedVideoKeys = { ...(info.video_keys || {}) };" in html
+    assert "return loadReplaySeries();" in html
+
+
+def test_replay_status_poll_does_not_remount_during_explicit_load():
+    html = console_source()
+    confirm_start = html.index("const confirm = async () => {")
+    confirm_body = html[confirm_start:html.index("// QC deep-link", confirm_start)]
+    maybe_start = html.index("function maybeSyncReplayPlayer(s)")
+    maybe_body = html[maybe_start:html.index("function loadMountedReplaySeries", maybe_start)]
+
+    assert "replayLoadPending: false" in html
+    assert "S.replayLoadPending = true;" in confirm_body
+    assert "S.replayLoadPending = false;" in confirm_body
+    assert "if (S.replayLoadPending) return;" in maybe_body
+
+
+def test_replay_tab_skips_live_frame_and_scene_polling_until_videos_load():
+    html = console_source()
+    frame_start = html.index("async function pollFrame()")
+    frame_body = html[frame_start:html.index("let liveSeriesPolling", frame_start)]
+    scene_start = html.index("async function pollScene()")
+    scene_body = html[scene_start:html.index("function loop", scene_start)]
+
+    assert 'if (S.ACTIVE_TAB === "replay") return;' in frame_body
+    assert frame_body.index('if (S.ACTIVE_TAB === "replay") return;') < frame_body.index(
+        "framePolling = true;"
+    )
+    assert 'if (S.ACTIVE_TAB === "replay" || LIVE.replayMode) return;' in scene_body
+    assert scene_body.index('if (S.ACTIVE_TAB === "replay" || LIVE.replayMode) return;') < (
+        scene_body.index("const now = performance.now();")
+    )
 
 
 def test_replay_page_uses_qc_style_frame_playback_not_chunks():
@@ -360,14 +536,24 @@ def test_selected_batch_qc_episode_is_highlighted():
     assert 'episode === S.collectReplayEpisode ? " selected" : ""' in html
 
 
-def test_collect_queue_click_switches_active_review_episode():
+def test_collect_queue_click_reviews_selected_episode_immediately():
     html = console_source()
     start = html.index("function selectCollectEpisode(item)")
     body = html[start:html.index("function selectRolloutSaveEpisode", start)]
 
-    assert "const replay = S.STATUS.collection_replay || {};" in body
-    assert 'S.reviewKind === "collect" && replay.active' in body
+    assert "S.collectReplayEpisode = episode;" in body
     assert 'reviewEpisode("collect", item);' in body
+    assert "switchActiveReview" not in body
+
+
+def test_rollout_saved_episode_list_stays_visible_for_debug_review_in_sim():
+    html = console_source()
+    start = html.index("function renderRolloutSave()")
+    body = html[start:html.index("function renderCollect()", start)]
+
+    assert "const hideRolloutSave =" in body
+    assert 'items.length === 0 && S.reviewKind !== "rollout"' in body
+    assert 'panel.style.display = hideRolloutSave ? "none" : "";' in body
 
 
 def test_collect_review_ignores_stale_async_switches():
@@ -439,18 +625,31 @@ def test_rollout_intervention_abandon_controls_are_wired():
     assert "accepted_intervention_segments" in html
 
 
-def test_debug_hil_control_mode_is_wired():
+def test_hil_control_mode_is_config_only_not_wired():
     html = console_source()
     server_source = (
         Path(__file__).resolve().parents[3] / "src" / "core" / "app" / "console" / "server.py"
     ).read_text()
 
-    assert 'id="hil-control-mode"' in html
-    assert 'apiPost("/api/rollout_intervention_mode"' in html
-    assert "hil_control_mode" in html
-    assert "hil_control_modes" in html
-    assert '"hil_control_mode": r.hil_control_mode' in server_source
-    assert '"/api/rollout_intervention_mode"' in server_source
+    assert 'id="hil-control-mode"' not in html
+    assert 'apiPost("/api/rollout_intervention_mode"' not in html
+    assert "hil_control_modes" not in html
+    assert '"/api/rollout_intervention_mode"' not in server_source
+
+
+def test_rollout_hil_enable_toggle_is_wired():
+    html = console_source()
+    server_source = (
+        Path(__file__).resolve().parents[3] / "src" / "core" / "app" / "console" / "server.py"
+    ).read_text()
+
+    assert 'id="hil-intervention-enable"' in html
+    assert 'class="collect-arm-gate" title="Enable rollout HIL intervention"' in html
+    assert 'apiPost("/api/rollout_intervention_enabled"' in html
+    assert "rollout_intervention_enabled" in html
+    assert '"rollout_intervention_enabled": r.rollout_intervention_enabled' in server_source
+    assert "rollout_intervention_config_enabled" not in server_source
+    assert '"/api/rollout_intervention_enabled"' in server_source
 
 
 def test_operator_action_api_is_wired():
@@ -462,7 +661,7 @@ def test_operator_action_api_is_wired():
     assert 'self._enqueue_ok(f"web:operator_action:{intent}:ui")' in server_source
 
 
-def test_collect_and_rollout_controls_use_operator_action():
+def test_collect_uses_operator_action_and_rollout_save_uses_rollout_save_route():
     html = console_source()
 
     assert 'apiPost("/api/operator_action", { intent: "start" })' in html
@@ -470,7 +669,7 @@ def test_collect_and_rollout_controls_use_operator_action():
     assert 'apiPost("/api/operator_action", { intent: "cancel" })' in html
     assert (
         '$("b-rollout-save").onclick = () => '
-        'apiPost("/api/operator_action", { intent: "accept" });'
+        'apiPost("/api/rollout_save");'
     ) in html
     assert (
         '$("b-rollout-intervention-abandon").onclick = () => '
@@ -675,5 +874,24 @@ def test_replay_video_src_uses_loaded_dataset_episode_and_video_key():
     assert "dataset_dir: replayLoadedDatasetDir," in html
     assert "episode: String(replayLoadedEpisodeId)," in html
     assert 'if (videoKey) params.set("video_key", videoKey);' in html
-    assert 'src="/api/replay_video?${params.toString()}"' in html
+    assert 'data-src="/api/replay_video?${params.toString()}"' in html
     assert 'src="/api/replay_video?cam=${encodeURIComponent(k)}"' not in html
+
+
+def test_replay_and_review_defer_video_network_until_playback_needs_it():
+    html = console_source()
+    replay_start = html.index("function mountReplayVideos()")
+    replay_body = html[replay_start:html.index("function replayVideos", replay_start)]
+    review_start = html.index("function renderReviewVideos(videoKeys)")
+    review_body = html[review_start:html.index("function syncReviewVideosToFrame", review_start)]
+    ready_start = html.index("function waitForVideoReady(v)")
+    ready_body = html[ready_start:html.index("function waitForBrowserPaint", ready_start)]
+
+    assert 'src="/api/replay_poster?${params.toString()}"' in replay_body
+    assert 'src="/api/replay_poster?${params.toString()}"' in review_body
+    assert '`src="/api/replay_video?${params.toString()}"' not in replay_body
+    assert '`src="/api/replay_video?${params.toString()}"' not in review_body
+    assert 'data-src="/api/replay_video?${params.toString()}"' in replay_body
+    assert 'data-src="/api/replay_video?${params.toString()}"' in review_body
+    assert "function ensureVideoSource(v)" in html
+    assert "ensureVideoSource(v);" in ready_body

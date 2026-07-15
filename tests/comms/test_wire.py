@@ -9,12 +9,14 @@ import types
 from typing import cast
 
 import numpy as np
+import pytest
 
 import robots  # noqa: F401  (registers piper)
 import transport.zmq as zmq_transport
 from core.config import ConfigDict
 from core.registry import ROBOT_REGISTRY
 from robots.base import Robot
+import transport.utils as transport_utils
 from transport.zmq import (
     COLLECTION_CONTROL_REPEATS,
     WireAction,
@@ -218,6 +220,7 @@ def test_zmq_collection_reader_preserves_backlog_order():
     reader._preserve_collection_backlog = True
     reader._collection_queue = collections.deque()
     reader._freshness = types.SimpleNamespace(mark=lambda: None)  # type: ignore[reportAttributeAccessIssue]
+    reader._image_rate = transport_utils.ImageRateTracker()
     reader._lock = threading.Lock()
 
     frames = [reader.get_collection_frame() for _ in range(3)]
@@ -266,6 +269,7 @@ def test_zmq_collection_reader_defaults_to_latest_frame():
     reader._preserve_collection_backlog = False
     reader._collection_queue = collections.deque()
     reader._freshness = types.SimpleNamespace(mark=lambda: None)  # type: ignore[reportAttributeAccessIssue]
+    reader._image_rate = transport_utils.ImageRateTracker()
     reader._lock = threading.Lock()
 
     frame = reader.get_collection_frame()
@@ -443,6 +447,7 @@ def test_zmq_reader_keeps_multi_camera_visualization_cache():
     reader._disabled_cameras = set()
     reader._disabled_groups = set()
     reader._freshness = types.SimpleNamespace(mark=lambda: None)  # type: ignore[reportAttributeAccessIssue]
+    reader._image_rate = transport_utils.ImageRateTracker()
     reader._lock = threading.Lock()
 
     assert reader.get_camera_keys() == ["cam_high", "cam_left_wrist", "cam_right_wrist"]
@@ -453,6 +458,52 @@ def test_zmq_reader_keeps_multi_camera_visualization_cache():
     np.testing.assert_array_equal(cam_high_frame, cam_high)
     np.testing.assert_array_equal(cam_left_frame, cam_left)
     assert reader.get_camera_frame("cam_right_wrist") is None
+
+
+def test_zmq_reader_reports_minimum_image_hz_from_received_images():
+    robot = ROBOT_REGISTRY.build("agilex_piper")
+    image = np.zeros((4, 4, 3), dtype=np.uint8)
+    state = {group.name: np.zeros(group.dof, dtype=np.float32) for group in robot.actuator_groups}
+    payloads = collections.deque(
+        [
+            pack_observation(
+                WireObservation(
+                    t=0.0,
+                    images={"cam_high": image, "cam_left_wrist": image},
+                    state=state,
+                )
+            ),
+            pack_observation(WireObservation(t=0.05, images={"cam_high": image}, state=state)),
+            pack_observation(
+                WireObservation(t=0.10, images={"cam_left_wrist": image}, state=state)
+            ),
+        ]
+    )
+
+    class _Again(Exception):
+        pass
+
+    class _Sub:
+        def recv(self, _flags):
+            if not payloads:
+                raise _Again
+            return payloads.popleft()
+
+    reader = object.__new__(_ObservationReader)
+    reader._robot = robot
+    reader._zmq = types.SimpleNamespace(NOBLOCK=object(), Again=_Again)
+    reader._sub = _Sub()
+    reader._latest = None
+    reader._latest_images = {}
+    reader._disabled_cameras = {"cam_right_wrist"}
+    reader._disabled_groups = set()
+    reader._freshness = types.SimpleNamespace(mark=lambda: None)  # type: ignore[reportAttributeAccessIssue]
+    reader._image_rate = transport_utils.ImageRateTracker()
+    reader._lock = threading.Lock()
+
+    reader.get_camera_keys()
+
+    assert reader.image_min_hz() == pytest.approx(10.0)
 
 
 def test_action_roundtrip_preserves_vector_target_and_timestamp():

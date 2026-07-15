@@ -26,6 +26,7 @@ from _harness import MULTI_STRATEGY, console_config, serve_console
 import robots  # noqa: F401  (registers ROBOT_REGISTRY incl. ur5e for single-arm UI tests)
 from core.app import handlers
 from core.app import run as app
+from core.app.console import server as console_server
 from core.app.console.server import ConsoleContext, _serialize_manual_scene, _serialize_scene
 from core.app.handlers import utils as handlers_utils
 from core.app.state import (
@@ -149,6 +150,9 @@ def test_tab_switch_away_from_collect_stops_armed_teleop():
     calls = []
 
     class _Transport:
+        def set_hil_relay_enabled(self, enabled):
+            calls.append(f"set_hil_relay_enabled:{enabled}")
+
         def stop_collection(self):
             calls.append("stop_collection")
 
@@ -170,7 +174,7 @@ def test_tab_switch_away_from_collect_stops_armed_teleop():
 
     app.handle_command("web:tab_switch:manual", config, cast(RuntimeState, runtime), session)
 
-    assert calls == ["stop_collection"]
+    assert calls == ["set_hil_relay_enabled:False", "stop_collection"]
     assert runtime.collection_teleop_active is False
     assert session.mode is SessionMode.SELECT
 
@@ -339,6 +343,80 @@ def test_inspect_dataset_resolves_relative_dataset_dir(tmp_path, monkeypatch):
     assert resp.json["keys"]["state"]["default"] == "observation.qpos"
 
 
+def test_load_replay_dataset_mounts_episode_before_response(tmp_path, monkeypatch):
+    repo_root = tmp_path / "repo"
+    dataset_dir = repo_root / "work_dirs" / "replay"
+    data_dir = dataset_dir / "data" / "chunk-000"
+    meta_dir = dataset_dir / "meta"
+    data_dir.mkdir(parents=True)
+    meta_dir.mkdir(parents=True)
+    monkeypatch.setattr(handlers_utils, "_REPO_ROOT", repo_root)
+
+    with serve_console(console_config(robot_type="ur5e")) as h:
+        dim = h.runtime.robot.total_action_dim
+        (meta_dir / "info.json").write_text(
+            json.dumps(
+                {
+                    "total_episodes": 1,
+                    "fps": 10,
+                    "features": {
+                        "observation.state": {"dtype": "float32", "shape": [dim]},
+                        "action": {"dtype": "float32", "shape": [dim]},
+                        "observation.images.cam_high": {
+                            "dtype": "video",
+                            "shape": [480, 640, 3],
+                        },
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        (meta_dir / "episodes.jsonl").write_text(
+            json.dumps({"episode_index": 0, "length": 2, "tasks": ["replay"]}) + "\n",
+            encoding="utf-8",
+        )
+        pq.write_table(
+            pa.table(
+                {
+                    "observation.state": [
+                        np.zeros(dim, dtype=np.float32).tolist(),
+                        np.ones(dim, dtype=np.float32).tolist(),
+                    ],
+                    "action": [
+                        np.zeros(dim, dtype=np.float32).tolist(),
+                        np.ones(dim, dtype=np.float32).tolist(),
+                    ],
+                    "timestamp": [0.0, 0.1],
+                    "frame_index": [0, 1],
+                    "episode_index": [0, 0],
+                    "index": [0, 1],
+                    "task_index": [0, 0],
+                }
+            ),
+            data_dir / "episode_000000.parquet",
+        )
+
+        resp = h.post(
+            "/api/load_replay_dataset",
+            {
+                "dataset_dir": "work_dirs/replay",
+                "episode": 0,
+                "keys": {"state": "observation.state", "action": "action"},
+                "video_keys": {"cam_high": "observation.images.cam_high"},
+                "action_mode": "joint",
+            },
+        )
+
+        assert resp.status == 200
+        assert resp.json["ok"] is True
+        assert resp.json["episode"] == 0
+        assert resp.json["frames"] == 2
+        assert resp.json["dataset_dir"] == str(dataset_dir)
+        assert resp.json["video_keys"] == {"cam_high": "observation.images.cam_high"}
+        assert h.runtime.replay_source is not None
+        assert h.runtime.command_queue.empty()
+
+
 def test_replay_video_resolves_relative_dataset_episode_video(tmp_path, monkeypatch):
     repo_root = tmp_path / "repo"
     dataset_dir = repo_root / "work_dirs" / "collection" / "ur5e"
@@ -363,14 +441,73 @@ def test_replay_video_resolves_relative_dataset_episode_video(tmp_path, monkeypa
     (video_dir / "prompt_a_ep_000007.mp4").write_bytes(payload)
     monkeypatch.setattr(handlers_utils, "_REPO_ROOT", repo_root)
 
+    path = "/api/replay_video?dataset_dir=work_dirs/collection/ur5e&episode=7&cam=cam_high"
     with serve_console(console_config()) as h:
-        resp = h.get(
-            "/api/replay_video?dataset_dir=work_dirs/collection/ur5e&episode=7&cam=cam_high"
-        )
+        resp = h.get(path)
+        suffix = h.get(path, headers={"Range": "bytes=-5"})
 
     assert resp.status == 200
     assert resp.headers["content-type"] == "video/mp4"
+    assert resp.headers["accept-ranges"] == "bytes"
+    assert resp.headers["cache-control"] == "public, max-age=3600"
     assert resp.raw == payload
+    assert suffix.status == 206
+    assert suffix.headers["content-range"] == (
+        f"bytes {len(payload) - 5}-{len(payload) - 1}/{len(payload)}"
+    )
+    assert suffix.raw == payload[-5:]
+
+
+def test_replay_poster_resolves_relative_dataset_episode_video(tmp_path, monkeypatch):
+    repo_root = tmp_path / "repo"
+    dataset_dir = repo_root / "work_dirs" / "collection" / "ur5e"
+    meta_dir = dataset_dir / "meta"
+    video_dir = dataset_dir / "videos" / "chunk-000" / "observation.images.cam_high"
+    meta_dir.mkdir(parents=True)
+    video_dir.mkdir(parents=True)
+    info = {
+        "total_episodes": 8,
+        "chunks_size": 1000,
+        "video_path": "videos/chunk-{episode_chunk:03d}/{video_key}/{episode_file}.mp4",
+        "features": {
+            "observation.images.cam_high": {"dtype": "video", "shape": [480, 640, 3]},
+        },
+    }
+    (meta_dir / "info.json").write_text(json.dumps(info), encoding="utf-8")
+    (meta_dir / "episodes.jsonl").write_text(
+        json.dumps({"episode_index": 7, "file_stem": "prompt_a_ep_000007"}) + "\n",
+        encoding="utf-8",
+    )
+    video_path = video_dir / "prompt_a_ep_000007.mp4"
+    video_path.write_bytes(b"episode-7-video")
+    monkeypatch.setattr(handlers_utils, "_REPO_ROOT", repo_root)
+
+    class FakeCapture:
+        def __init__(self, path: str) -> None:
+            self.path = path
+
+        def read(self):
+            assert self.path == str(video_path)
+            return True, np.zeros((2, 3, 3), dtype=np.uint8)
+
+        def release(self) -> None:
+            pass
+
+    monkeypatch.setattr(console_server.cv2, "VideoCapture", FakeCapture)
+    monkeypatch.setattr(
+        console_server.cv2,
+        "imencode",
+        lambda ext, frame, args: (True, np.frombuffer(b"jpeg-frame", dtype=np.uint8)),
+    )
+
+    path = "/api/replay_poster?dataset_dir=work_dirs/collection/ur5e&episode=7&cam=cam_high"
+    with serve_console(console_config()) as h:
+        resp = h.get(path)
+
+    assert resp.status == 200
+    assert resp.headers["content-type"] == "image/jpeg"
+    assert resp.headers["cache-control"] == "public, max-age=3600"
+    assert resp.raw == b"jpeg-frame"
 
 
 def test_review_episode_loads_selected_dataset_without_replay_source(tmp_path, monkeypatch):
@@ -543,6 +680,9 @@ def test_collect_start_runs_collection_capture_in_background():
         def reset_hil_control(self):
             return None
 
+        def set_hil_relay_enabled(self, enabled):
+            return None
+
         def clear_collection_backlog(self):
             return 42.0
 
@@ -600,6 +740,9 @@ def test_collect_start_clears_backlog_and_passes_cutoff_to_logger():
         def reset_hil_control(self):
             calls.append("reset_hil_control")
 
+        def set_hil_relay_enabled(self, enabled):
+            calls.append(("set_hil_relay_enabled", enabled))
+
         def clear_collection_backlog(self):
             calls.append("clear_collection_backlog")
             return 42.0
@@ -632,6 +775,7 @@ def test_collect_start_clears_backlog_and_passes_cutoff_to_logger():
     try:
         assert calls == [
             "reset_hil_control",
+            ("set_hil_relay_enabled", True),
             "start_collection",
             "clear_collection_backlog",
             ("start_episode", "pick", 42.0),
@@ -1122,7 +1266,9 @@ def test_eval_start_runs_setup_when_not_warmed(monkeypatch):
         return True
 
     monkeypatch.setattr(app, "run_setup", _fake_setup)
-    monkeypatch.setattr(app, "_dispatch_run", lambda *a: setattr(a[2], "status", SessionStatus.RUNNING))
+    monkeypatch.setattr(
+        app, "_dispatch_run", lambda *a: setattr(a[2], "status", SessionStatus.RUNNING)
+    )
 
     runtime = SimpleNamespace(
         web_phase="ready",
@@ -1151,7 +1297,9 @@ def test_eval_start_binds_cell_prompt_before_task_gate(monkeypatch):
         return True
 
     monkeypatch.setattr(app, "run_setup", _fake_setup)
-    monkeypatch.setattr(app, "_dispatch_run", lambda *a: setattr(a[2], "status", SessionStatus.RUNNING))
+    monkeypatch.setattr(
+        app, "_dispatch_run", lambda *a: setattr(a[2], "status", SessionStatus.RUNNING)
+    )
 
     runtime = SimpleNamespace(
         web_phase="ready",

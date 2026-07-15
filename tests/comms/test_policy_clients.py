@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from openpi_client import msgpack_numpy
 
 from policy_client.base import DatasetReplayPolicyClient, RandomPolicyClient
+from policy_client.openpi import RtcOpenPiPolicyClient
 
 
 @pytest.fixture(autouse=True)
@@ -101,3 +103,46 @@ def test_replay_metadata_reports_steps():
     assert md["n_steps"] == 12
     assert md["action_dim"] == 7
     assert md["chunk_size"] == 5
+
+
+# --- RtcOpenPiPolicyClient ---
+
+
+class _RtcFakeConnection:
+    def __init__(self, responses: list[dict]) -> None:
+        self._responses = list(responses)
+        self.sent: list[dict] = []
+
+    def send(self, payload: bytes) -> None:
+        self.sent.append(msgpack_numpy.unpackb(payload))
+
+    def recv(self) -> bytes:
+        return msgpack_numpy.packb(self._responses.pop(0))
+
+
+def test_rtc_client_feeds_back_origin_actions_when_available():
+    robot_actions = np.zeros((50, 14), dtype=np.float32)
+    origin_actions = np.arange(50 * 32, dtype=np.float32).reshape(50, 32)
+    connection = _RtcFakeConnection(
+        [
+            {"actions": robot_actions, "origin_actions": origin_actions},
+            {"actions": robot_actions + 1, "origin_actions": origin_actions + 1},
+        ]
+    )
+    client = RtcOpenPiPolicyClient(
+        "127.0.0.1",
+        9000,
+        latency_k=4,
+        retry_until_connected=False,
+        client=(connection, {"ready": True}),
+    )
+
+    client.infer({"state": np.zeros(14, dtype=np.float32)})
+    client.infer({"state": np.ones(14, dtype=np.float32)})
+
+    sent_prev_action = connection.sent[1]["prev_action"]
+    expected = origin_actions.copy()
+    expected[:46] = origin_actions[4:]
+    expected[46:] = origin_actions[-1]
+    assert sent_prev_action.shape == (50, 32)
+    np.testing.assert_allclose(sent_prev_action, expected, atol=1e-6)

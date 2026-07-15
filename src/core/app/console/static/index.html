@@ -93,6 +93,11 @@
           <div class="card">
             <!-- continuous controls: shown for REAL / SIM modes -->
             <div class="btn-grid" id="control-run">
+              <label class="collect-arm-gate" title="Enable rollout HIL intervention">
+                <span class="collect-arm-text" id="hil-intervention-label">HIL OFF</span>
+                <input type="checkbox" id="hil-intervention-enable" aria-label="Enable rollout HIL intervention">
+                <span class="ios-sw"></span>
+              </label>
               <button class="btn primary full" id="b-run"><span class="rec-dot"></span><span class="rec-label">RUN ▶</span></button>
               <button class="btn full" id="b-reset">RESET ⟲</button>
             </div>
@@ -142,7 +147,6 @@
           <div class="panel-h">TUNING</div>
           <div class="card">
             <div class="sub-h">HIL CONTROL</div>
-            <div class="row-2" id="hil-control-mode"></div>
             <div class="tune-row"><span>inference rate Hz</span><input type="number" id="tune-inference-rate" min="0.1" step="0.1" /></div>
             <div class="tune-row"><span>publish rate Hz</span><input type="number" id="tune-publish-rate" min="1" step="1" /></div>
             <div class="sub-h" id="tune-strategy-h">STRATEGY · <span id="tune-strategy-key">—</span></div>

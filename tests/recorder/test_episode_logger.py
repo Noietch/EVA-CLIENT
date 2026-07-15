@@ -268,6 +268,36 @@ def test_rollout_resizes_saved_frames_when_size_set(tmp_path, monkeypatch):
     assert frame_shapes == [(120, 160, 3)] * 3
 
 
+def test_episode_logger_writes_faststart_mp4s(tmp_path, monkeypatch):
+    writer_kwargs = []
+
+    class _Writer:
+        def append_data(self, _frame: np.ndarray) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    def fake_get_writer(*_args, **kwargs):
+        writer_kwargs.append(kwargs)
+        return _Writer()
+
+    monkeypatch.setattr(episode_module.imageio, "get_writer", fake_get_writer)
+    logger = _rollout_logger(tmp_path)
+    state = np.zeros(_DIM, dtype=np.float32)
+    logger.start_episode("t")
+    logger.record_step(_obs(state, np.zeros((8, 8, 3), dtype=np.uint8)), state)
+
+    assert logger.end_episode() is True
+    assert writer_kwargs
+    assert writer_kwargs[0]["ffmpeg_params"] == [
+        "-preset",
+        "ultrafast",
+        "-movflags",
+        "+faststart",
+    ]
+
+
 def test_episode_logger_sync_save_writes_n_rows(tmp_path):
     keys = ConfigDict(
         state_key="observations.state.qpos",
@@ -485,20 +515,6 @@ def test_record_step_batches_align_to_fixed_grid_before_save(tmp_path):
     assert episode["alignment_fps"] == 10.0
 
 
-def test_record_step_uses_observation_timestamp_when_present(tmp_path):
-    logger = _logger(tmp_path, fps=10)
-    state0 = np.zeros(_DIM, dtype=np.float32)
-    state1 = np.full(_DIM, 2.0, dtype=np.float32)
-
-    logger.start_episode("t")
-    logger.record_step(Observation(images={}, state_qpos=state0, timestamp=5.0), state0)
-    logger.record_step(Observation(images={}, state_qpos=state1, timestamp=5.2), state1)
-    assert logger.end_episode()
-
-    table = pq.read_table(tmp_path / "data" / "chunk-000" / "episode_000000.parquet")
-    np.testing.assert_allclose(table.column("capture_time").to_pylist(), [5.0, 5.1, 5.2])
-
-
 def test_raw_episode_snapshots_decode_on_async_save_worker(tmp_path):
     logger = _logger(tmp_path, fps=10, async_save=True)
     raw_decodes = 0
@@ -517,17 +533,12 @@ def test_raw_episode_snapshots_decode_on_async_save_worker(tmp_path):
             return CollectionRawBatch(
                 images={
                     "cam_high": [
-                        CollectionRawSample(
-                            timestamp,
-                            CollectionRawImage(decode_image),
-                        ),
+                        CollectionRawSample(timestamp, CollectionRawImage(decode_image)),
                     ],
                 },
                 vectors={
                     "state_qpos": [CollectionRawSample(timestamp, state.copy())],
                 },
-                start_time=timestamp,
-                end_time=timestamp,
             )
 
         return RawCollectionSnapshot(timestamp=timestamp, decode_raw=decode_raw)
@@ -555,13 +566,11 @@ def test_raw_episode_snapshots_decode_on_async_save_worker(tmp_path):
     np.testing.assert_allclose(table.column("timestamp").to_pylist(), [0.0, 0.1, 0.2])
     np.testing.assert_allclose(table.column("capture_time").to_pylist(), [1.0, 1.1, 1.2])
     np.testing.assert_allclose(
-        table.column("action").to_pylist(),
-        [
-            [10.0] * _DIM,
-            [11.0] * _DIM,
-            [12.0] * _DIM,
-        ],
+        table.column("observations.state.qpos").to_pylist()[1], [1.0] * _DIM
     )
+    np.testing.assert_allclose(table.column("action").to_pylist()[1], [11.0] * _DIM)
+    episode = _read_jsonl(tmp_path / "meta" / "episodes.jsonl")[0]
+    assert episode["alignment_image_skew_tolerance_sec"] == 1.0 / 18.0
 
 
 def test_pending_score_patch_applies_to_async_save_job(tmp_path):
@@ -616,6 +625,20 @@ def test_pending_score_patch_applies_to_async_save_job(tmp_path):
     assert row["max_score"] == 4
     assert row["milestones"] == {"grasp": True}
     assert row["note"] == "ok"
+
+
+def test_record_step_uses_observation_timestamp_when_present(tmp_path):
+    logger = _logger(tmp_path, fps=10)
+    state0 = np.zeros(_DIM, dtype=np.float32)
+    state1 = np.full(_DIM, 2.0, dtype=np.float32)
+
+    logger.start_episode("t")
+    logger.record_step(Observation(images={}, state_qpos=state0, timestamp=5.0), state0)
+    logger.record_step(Observation(images={}, state_qpos=state1, timestamp=5.2), state1)
+    assert logger.end_episode()
+
+    table = pq.read_table(tmp_path / "data" / "chunk-000" / "episode_000000.parquet")
+    np.testing.assert_allclose(table.column("capture_time").to_pylist(), [5.0, 5.1, 5.2])
 
 
 def test_collection_raw_batches_report_image_skew_qc(tmp_path):

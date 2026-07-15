@@ -104,6 +104,8 @@ def main() -> int:
     h = WebHarness(cfg, runtime, session, port)
     ok = True
     try:
+        # Set ckpt order (start_console_server normally does this) then bootstrap.
+        runtime.ckpt_order = [0]
         h.runtime.command_queue.put("web:bootstrap")
         h.pump()
         model = eval_model_name(cfg, runtime)

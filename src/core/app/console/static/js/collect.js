@@ -1,6 +1,6 @@
 // collect.js: data-collection tab (collect) + QC/annotation review &
 // stage-video playback control (review).
-import { $, S, apiGet, apiPost } from "./core.js";
+import { $, S, apiGet, apiPost, replaceCamStripContent } from "./core.js";
 import { collectTaskValue, setPanel, applyStatus, uiMode } from "./run.js";
 import { refreshCameraStreams, replayVideos } from "./replay.js";
 import { setActiveTab } from "./main.js";
@@ -62,14 +62,8 @@ function savedEpisodeId(item) {
 function selectCollectEpisode(item) {
     const episode = savedEpisodeId(item);
     if (episode == null) return;
-    const replay = S.STATUS.collection_replay || {};
-    const switchActiveReview = S.reviewKind === "collect" && replay.active &&
-      replay.episode_index !== episode && reviewEpisodeId !== episode;
     S.collectReplayEpisode = episode;
-    if (switchActiveReview) {
-      reviewEpisode("collect", item);
-      return;
-    }
+    reviewEpisode("collect", item);
     renderCollect();
   }
 
@@ -246,17 +240,18 @@ function renderRolloutSaveList(items) {
 function renderRolloutSave() {
     const panel = $("rollout-save-panel");
     if (!panel) return;
-    const hideRolloutSave = ["sim", "step"].includes(uiMode(S.STATUS.cli_mode));
+    const rollout = S.STATUS.rollout || {};
+    const episodes = rollout.episodes || [];
+    const queue = rollout.queue || [];
+    const items = episodes.concat(queue);
+    const hideRolloutSave = ["sim", "step"].includes(uiMode(S.STATUS.cli_mode)) &&
+      items.length === 0 && S.reviewKind !== "rollout";
     panel.style.display = hideRolloutSave ? "none" : "";
     if (hideRolloutSave) return;
-    const rollout = S.STATUS.rollout || {};
     const enabled = !!rollout.enabled;
     const saveReady = !!rollout.save_ready;
     const saveBlocked = !!rollout.save_blocked_by_intervention;
     const running = S.STATUS.session_status === "running";
-    const episodes = rollout.episodes || [];
-    const queue = rollout.queue || [];
-    const items = episodes.concat(queue);
     const progress = Math.max(0, Math.min(1, Number(rollout.progress || 0)));
     const savedComplete = enabled && !saveReady && queue.length === 0 && episodes.length > 0;
 
@@ -284,7 +279,6 @@ function renderRolloutSave() {
     if (S.reviewKind === "rollout" && replay.active && replay.episode_index != null) {
       S.rolloutSaveEpisode = replay.episode_index;
       $("rollout-review-title").textContent = `episode ${replay.episode_index} · replay`;
-      syncReviewVideosToFrame(replay.frame_index);
     } else if (S.rolloutSaveEpisode == null) {
       $("rollout-review-title").textContent = "no rollout selected";
     }
@@ -371,7 +365,6 @@ function renderCollect() {
       S.collectReplayEpisode = replay.episode_index;
       replayStatus.textContent = `episode ${replay.episode_index} · replay`;
       replayStatus.style.display = S.ACTIVE_TAB === "collect" ? "" : "none";
-      syncReviewVideosToFrame(replay.frame_index);
       const total = Number(replay.total_frames || 0);
       const frame = Number(replay.frame_index || 0);
       const pct = total > 0 ? Math.max(0, Math.min(1, frame / (total - 1 || 1))) : 0;
@@ -443,7 +436,10 @@ function setVideosLoading(videos, on, text) {
     videos.forEach((v) => {
       const cell = v.closest(".cam-cell");
       if (!cell) return;
-      cell.classList.toggle("loading", on);
+      const poster = cell.querySelector(".cam-poster");
+      const posterReady = poster && poster.complete && poster.naturalWidth > 0;
+      const videoPainted = v.readyState >= 2 && cell.classList.contains("video-ready");
+      cell.classList.toggle("loading", on && !posterReady && !videoPainted);
       const label = cell.querySelector(".cam-loading span:last-child");
       if (label && text) label.textContent = text;
     });
@@ -455,6 +451,14 @@ function setStageVideoLoading(on, text) {
 
 function videoReady(v) {
     return v.error || v.readyState >= 3;
+  }
+
+function ensureVideoSource(v) {
+    const src = v.dataset.src || "";
+    if (!src || v.getAttribute("src") === src) return;
+    const poster = v.dataset.poster || "";
+    if (poster) v.setAttribute("poster", poster);
+    v.setAttribute("src", src);
   }
 
 function waitForVideoReady(v) {
@@ -475,6 +479,7 @@ function waitForVideoReady(v) {
       v.addEventListener("canplaythrough", finish);
       v.addEventListener("error", finish);
       timer = setTimeout(finish, 8000);
+      ensureVideoSource(v);
       try { v.load(); } catch (e) { finish(); }
       if (videoReady(v)) finish();
     });
@@ -491,19 +496,14 @@ async function waitForVideoPainted(v) {
     await waitForVideoReady(v);
     await new Promise((resolve) => {
       let done = false;
-      let timer = null;
       const finish = () => {
         if (done) return;
         done = true;
-        if (timer !== null) clearTimeout(timer);
         requestAnimationFrame(resolve);
       };
-      timer = setTimeout(finish, 500);
-      if (typeof v.requestVideoFrameCallback === "function") {
-        try {
-          v.requestVideoFrameCallback(finish);
-          return;
-        } catch (e) {}
+      if (!v.paused && typeof v.requestVideoFrameCallback === "function") {
+        v.requestVideoFrameCallback(finish);
+        return;
       }
       requestAnimationFrame(() => requestAnimationFrame(finish));
     });
@@ -527,6 +527,7 @@ async function waitForStageVideosPainted(kind) {
 
 function playStageVideos() {
     replayVideos().forEach((v) => {
+      ensureVideoSource(v);
       if (!v.error) v.play().catch(() => {});
     });
   }
@@ -536,11 +537,9 @@ function pauseStageVideos() {
   }
 
 function renderReviewVideos(videoKeys) {
-    const strip = $("cam-strip");
-    if (!strip) return;
     const configured = (S.CFG && S.CFG.camera_keys) || [];
     const keys = configured.length ? configured : Object.keys(videoKeys || {});
-    strip.innerHTML = keys.map((k) => {
+    replaceCamStripContent(keys.map((k) => {
       const params = new URLSearchParams({
         dataset_dir: reviewDatasetDir,
         episode: String(reviewEpisodeId),
@@ -548,12 +547,18 @@ function renderReviewVideos(videoKeys) {
       });
       const videoKey = (videoKeys || {})[k];
       if (videoKey) params.set("video_key", videoKey);
-      return `<div class="cam-cell"><div class="cam-lbl">${k}</div>` +
-        `<video class="cam" data-key="${k}" muted playsinline preload="auto" ` +
-        `src="/api/replay_video?${params.toString()}" ` +
+      return `<div class="cam-cell loading"><div class="cam-lbl">${k}</div>` +
+        `<img class="cam cam-poster" data-key="${k}" ` +
+        `src="/api/replay_poster?${params.toString()}" ` +
+        `onload="this.closest('.cam-cell').classList.remove('loading')" ` +
+        `onerror="this.closest('.cam-cell').style.display='none'">` +
+        `<video class="cam cam-video" data-key="${k}" muted playsinline preload="none" ` +
+        `data-poster="/api/replay_poster?${params.toString()}" ` +
+        `data-src="/api/replay_video?${params.toString()}" ` +
+        `oncanplay="this.closest('.cam-cell').classList.add('video-ready')" ` +
         `onerror="this.closest('.cam-cell').style.display='none'"></video>` +
         `<div class="cam-loading"><span class="spinner"></span><span>loading video</span></div></div>`;
-    }).join("") || '<div class="cam-empty">no camera video</div>';
+    }).join("") || '<div class="cam-empty">no camera video</div>');
   }
 
 function syncReviewVideosToFrame(frameIndex) {

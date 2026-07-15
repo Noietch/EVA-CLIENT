@@ -19,7 +19,14 @@ from robots.base import (
     RobotVisConfig,
     VisPart,
 )
-from robots.kinematics.pyroki import pyroki_arms
+
+try:
+    from robots.kinematics.pyroki import pyroki_arms
+except ImportError as exc:
+    _PYROKI_IMPORT_ERROR: ImportError | None = exc
+    pyroki_arms = None
+else:
+    _PYROKI_IMPORT_ERROR = None
 
 
 @ROBOT_REGISTRY.register("ur5e")
@@ -70,6 +77,10 @@ class UR5e(Robot):
         )
 
     def build_kinematics(self, **kwargs: Any) -> Any:
+        if _PYROKI_IMPORT_ERROR is not None:
+            raise ImportError("UR5e kinematics requires the PyRoki/JAX dependencies") from (
+                _PYROKI_IMPORT_ERROR
+            )
         return pyroki_arms(
             self.URDF,
             [{"joints": self.ARM_JOINTS, "eef_link": "grasp_link", "reference_frame": "base_link"}],

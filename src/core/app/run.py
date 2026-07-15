@@ -90,7 +90,6 @@ logger = logging.getLogger(__name__)
 # Halt an active run if the frontend hasn't polled /api/status within this window.
 # The poll cadence is ~250ms, so this tolerates dozens of missed polls before tripping.
 CLIENT_WATCHDOG_TIMEOUT_S = 3.0
-_HIL_CONTROL_MODES = frozenset({"absolute", "relative"})
 
 
 def _target_loop_rate_hz(
@@ -217,13 +216,6 @@ def _should_start_eval_ssh(eval_cfg: ConfigDict | None) -> bool:
     if not eval_cfg or not eval_cfg.get("checkpoints") or not eval_cfg.get("enable_ssh_forward"):
         return False
     ssh = eval_cfg.get("ssh") or {}
-    return bool(ssh.get("host") and ssh.get("user") and ssh.get("port", 0) > 0)
-
-
-def _should_start_deploy_ssh(config: ConfigDict) -> bool:
-    if config.eval:
-        return False
-    ssh = config.transport.get("ssh") or {}
     return bool(ssh.get("host") and ssh.get("user") and ssh.get("port", 0) > 0)
 
 
@@ -649,7 +641,10 @@ def _handle_web_command(
         _dispatch_halt(config, runtime, session)
         if was_running and not is_replay(runtime):
             mark_rollout_save_ready(runtime, "stop")
-            if session.mode is SessionMode.REAL and config.rollout.intervention.enabled:
+            if (
+                session.mode is SessionMode.REAL
+                and runtime.rollout_intervention_enabled
+            ):
                 start_rollout_intervention(config, runtime, session)
         return
 
@@ -673,20 +668,12 @@ def _handle_web_command(
         set_status(session, SessionStatus.RUNNING, reason="resume after abandoned intervention")
         return
 
-    if verb == "rollout_intervention_mode":
-        if arg not in _HIL_CONTROL_MODES:
-            allowed = ", ".join(sorted(_HIL_CONTROL_MODES))
-            session.last_error = f"Unsupported HIL control mode {arg!r}; expected: {allowed}"
-            return
+    if verb == "rollout_intervention_enabled":
+        enabled = arg not in {"", "0", "false", "off"}
         if runtime.rollout_intervention_active:
-            session.last_error = "Stop or resume the active intervention before changing HIL mode"
+            session.last_error = "Stop or resume the active intervention before changing HIL"
             return
-        setter = getattr(runtime.transport, "set_hil_control_mode", None)
-        if setter is None:
-            session.last_error = "Transport does not support HIL control mode"
-            return
-        setter(arg)
-        runtime.hil_control_mode = arg
+        runtime.rollout_intervention_enabled = enabled
         session.last_error = ""
         return
 
@@ -1019,10 +1006,6 @@ def run(
         if eval_cfg.ssh.get("remote_sync_dir"):
             local_root = resolve_output_dir(config, config_path).parent
             result_syncer = FUNCTIONS.build("result_sync", eval_cfg.ssh, local_root)
-    elif _should_start_deploy_ssh(config):
-        # Deploy (non-eval): forward the policy port to the remote inference server.
-        free_local_ports([web_port, config.policy.port])
-        ssh_proc = FUNCTIONS.build("ssh_forward", config.transport.ssh, [config.policy.port])
     else:
         free_local_ports([web_port])
 

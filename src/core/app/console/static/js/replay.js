@@ -1,8 +1,8 @@
 // replay.js: replay playback engine + stage-video sync (replay);
 // polling loop for frame/scene/camera refresh (poll).
-import { $, LIVE, RUN_CONTROLS, S, apiGet } from "./core.js";
+import { $, LIVE, RUN_CONTROLS, S, apiGet, replaceCamStripContent } from "./core.js";
 import { buildLiveDims, drawLiveCharts, resetLiveSeries, updateScrub } from "./charts.js";
-import { pauseStageVideos, playStageVideos, setStageVideoLoading, waitForStageVideosPainted, waitForStageVideosReady, reviewActiveInCurrentTab } from "./collect.js";
+import { pauseStageVideos, playStageVideos, setStageVideoLoading, reviewActiveInCurrentTab } from "./collect.js";
 import { applyRunControlStatus, renderManualTarget, uiMode } from "./run.js";
 
 // ===== replay =====
@@ -21,6 +21,8 @@ let REPLAY_XF_GEOMS = null;
 
 let REPLAY_XF_NG = 0;
 
+let REPLAY_XF_LOADING = false;
+
 let _lastReplayChartDraw = 0;
 
 const REPLAY_DEFAULT_FPS = 10;
@@ -34,6 +36,8 @@ let realReplayAnchorFrame = 0;
 let realReplayAnchorWall = 0;
 
 let realReplayLastVideoSync = 0;
+
+let replayLoadSeq = 0;
 
 function replayFallbackDt() {
     const fps = Number(S.STATUS && S.STATUS.replay_fps) || REPLAY_DEFAULT_FPS;
@@ -90,6 +94,7 @@ function replayFrameAtTime(timeSec) {
   }
 
 function maybeSyncReplayPlayer(s) {
+    if (S.replayLoadPending) return;
     const onReplayTab = S.ACTIVE_TAB === "replay" || S.ACTIVE_TAB === "eval";
     const loaded = s.replay_loaded && s.replay_total_frames > 0;
     if (!onReplayTab || !loaded) {
@@ -121,11 +126,34 @@ function maybeSyncReplayPlayer(s) {
     }
   }
 
+function loadMountedReplaySeries(info) {
+    S.replaySeriesKey = [
+      info.dataset_dir || "",
+      Number(info.episode || 0),
+      info.action_mode || "",
+      info.action_key || "",
+    ].join("|");
+    replayLoadedDatasetDir = info.dataset_dir || "";
+    replayLoadedEpisodeId = Number(info.episode || 0);
+    replayLoadedVideoKeys = { ...(info.video_keys || {}) };
+    return loadReplaySeries();
+  }
+
 async function loadReplaySeries() {
-    let r;
-    try { r = await apiGet("/api/replay_series"); } catch (e) { return false; }
-    if (!r || !r.state || !r.state.length) return false;
+    const loadSeq = ++replayLoadSeq;
     LIVE.replayLoading = true;
+    LIVE.replayMode = true; LIVE.following = false; LIVE.cursor = 0; LIVE.cursorFrac = null;
+    mountReplayVideos();
+    let r;
+    try { r = await apiGet("/api/replay_series"); } catch (e) {
+      if (loadSeq === replayLoadSeq) LIVE.replayLoading = false;
+      return false;
+    }
+    if (loadSeq !== replayLoadSeq) return false;
+    if (!r || !r.state || !r.state.length) {
+      LIVE.replayLoading = false;
+      return false;
+    }
     LIVE.timestamp = r.timestamp || [];
     LIVE.action = r.action || [];
     LIVE.state = r.state || [];
@@ -136,20 +164,20 @@ async function loadReplaySeries() {
     LIVE.dimsOnA = {}; LIVE.dimsOnS = {}; LIVE.dimsBuilt = false;
     LIVE.replayMode = true; LIVE.following = false; LIVE.cursor = 0; LIVE.cursorFrac = null;
     buildLiveDims();
-    mountReplayVideos();
-    const transformsReady = loadReplayTransforms();
-    await waitForStageVideosReady("replay");
-    await transformsReady;
+    REPLAY_XF = null; REPLAY_XF_PARTS = null; REPLAY_XF_GEOMS = null; REPLAY_XF_NG = 0;
+    REPLAY_XF_LOADING = false;
+    resetReplayUrdfRequests();
     seekReplay(0);
-    await waitForStageVideosPainted("replay");
+    if (loadSeq !== replayLoadSeq) return false;
     LIVE.replayLoading = false;
     updateScrub();
     syncReplayRunButtons();
     return true;
   }
 
-async function loadReplayTransforms() {
+async function loadReplayTransforms(loadSeq) {
     REPLAY_XF = null; REPLAY_XF_PARTS = null; REPLAY_XF_GEOMS = null; REPLAY_XF_NG = 0;
+    REPLAY_XF_LOADING = true;
     try {
       const resp = await fetch("/api/replay_transforms");
       const ctype = resp.headers.get("Content-Type") || "";
@@ -171,12 +199,17 @@ async function loadReplayTransforms() {
         parts.push(key.slice(0, slash));
         geoms.push(key.slice(slash + 1));
       });
+      if (loadSeq !== replayLoadSeq) return false;
       REPLAY_XF = floats;
       REPLAY_XF_PARTS = parts;
       REPLAY_XF_GEOMS = geoms;
       REPLAY_XF_NG = nGeoms;
+      resetReplayUrdfRequests();
       return true;
     } catch (e) { return false; }
+    finally {
+      if (loadSeq === replayLoadSeq) REPLAY_XF_LOADING = false;
+    }
   }
 
 function replayApplyTransformFrame(frame) {
@@ -226,10 +259,8 @@ function stopRealReplayVisual(frame) {
   }
 
 function mountReplayVideos() {
-    const strip = $("cam-strip");
-    if (!strip) return;
     const cams = (S.CFG && S.CFG.camera_keys) || [];
-    strip.innerHTML = cams.map((k) => {
+    replaceCamStripContent(cams.map((k) => {
       const params = new URLSearchParams({
         cam: k,
         dataset_dir: replayLoadedDatasetDir,
@@ -237,12 +268,18 @@ function mountReplayVideos() {
       });
       const videoKey = replayLoadedVideoKeys[k];
       if (videoKey) params.set("video_key", videoKey);
-      return `<div class="cam-cell"><div class="cam-lbl">${k}</div>` +
-        `<video class="cam" data-key="${k}" muted playsinline preload="auto" ` +
-        `src="/api/replay_video?${params.toString()}" ` +
+      return `<div class="cam-cell loading"><div class="cam-lbl">${k}</div>` +
+        `<img class="cam cam-poster" data-key="${k}" ` +
+        `src="/api/replay_poster?${params.toString()}" ` +
+        `onload="this.closest('.cam-cell').classList.remove('loading')" ` +
+        `onerror="this.closest('.cam-cell').style.display='none'">` +
+        `<video class="cam cam-video" data-key="${k}" muted playsinline preload="none" ` +
+        `data-poster="/api/replay_poster?${params.toString()}" ` +
+        `data-src="/api/replay_video?${params.toString()}" ` +
+        `oncanplay="this.closest('.cam-cell').classList.add('video-ready')" ` +
         `onerror="this.closest('.cam-cell').style.display='none'"></video>` +
         `<div class="cam-loading"><span class="spinner"></span><span>loading video</span></div></div>`;
-    }).join("") || '<div class="cam-empty">no camera video</div>';
+    }).join("") || '<div class="cam-empty">no camera video</div>');
   }
 
 function replayVideos() {
@@ -268,20 +305,56 @@ function syncReplayVideos(frame) {
 
 let _replayUrdfSeq = 0;
 
-async function replaySetUrdfFrame(frame) {
+let replayUrdfInFlight = false;
+
+let replayUrdfPendingFrame = null;
+
+let replayUrdfAppliedFrame = null;
+
+function resetReplayUrdfRequests() {
+    _replayUrdfSeq += 1;
+    replayUrdfInFlight = false;
+    replayUrdfPendingFrame = null;
+    replayUrdfAppliedFrame = null;
+  }
+
+function replaySetUrdfFrame(frame) {
     if (replayApplyTransformFrame(frame)) {
       return;
     }
     const i = Math.max(0, Math.min(Math.round(Number(frame) || 0), LIVE.n - 1));
-    const seq = ++_replayUrdfSeq;
+    if (i === replayUrdfAppliedFrame && !replayUrdfInFlight) return;
+    if (replayUrdfInFlight) {
+      replayUrdfPendingFrame = i;
+      return;
+    }
+    requestReplayUrdfFrame(i);
+  }
+
+async function requestReplayUrdfFrame(i) {
+    replayUrdfInFlight = true;
+    const seq = _replayUrdfSeq;
     try {
       const r = await apiGet("/api/replay_scene_frame?frame=" + i);
       if (seq !== _replayUrdfSeq) return;
-      if (r.available && window.Scene3D) Scene3D.applyTransforms({ arms: r.arms });
+      if (r.available && window.Scene3D) {
+        Scene3D.applyTransforms({ arms: r.arms });
+        replayUrdfAppliedFrame = i;
+      }
     } catch (e) { /* transient */ }
+    finally {
+      if (seq !== _replayUrdfSeq) return;
+      replayUrdfInFlight = false;
+      const pending = replayUrdfPendingFrame;
+      replayUrdfPendingFrame = null;
+      if (pending !== null && pending !== replayUrdfAppliedFrame && LIVE.replayMode) {
+        replaySetUrdfFrame(pending);
+      }
+    }
   }
 
 function exitReplayMode() {
+    replayLoadSeq += 1;
     replayStop();
     stopRealReplayVisual();
     LIVE.replayMode = false;
@@ -291,11 +364,12 @@ function exitReplayMode() {
     replayLoadedEpisodeId = 0;
     replayLoadedVideoKeys = {};
     REPLAY_XF = null; REPLAY_XF_NG = 0;
+    REPLAY_XF_LOADING = false;
     REPLAY_XF_PARTS = null; REPLAY_XF_GEOMS = null; _lastReplayChartDraw = 0;
+    resetReplayUrdfRequests();
     LIVE.playTime = [];
     // Drop the replay <video> elements so the live MJPEG strip rebuilds cleanly.
-    const strip = $("cam-strip");
-    if (strip) strip.innerHTML = '<div class="cam-empty">awaiting frame…</div>';
+    replaceCamStripContent('<div class="cam-empty">awaiting frame…</div>');
     resetLiveSeries();
   }
 
@@ -331,6 +405,12 @@ function replayPlay() {
     const btn = $("scrub-play"); if (btn) btn.textContent = "⏸";
     syncReplayRunButtons();
     playStageVideos();
+    if (!REPLAY_XF && !REPLAY_XF_LOADING) {
+      loadReplayTransforms(replayLoadSeq).then(() => {
+        if (!LIVE.replayMode || !LIVE.playing) return;
+        replaySetUrdfFrame(LIVE.cursorFrac != null ? LIVE.cursorFrac : LIVE.cursor);
+      });
+    }
     const playT0 = replayTimeAtFrame(LIVE.cursor);
     const wall0 = performance.now();
     const frame = () => {
@@ -388,13 +468,12 @@ function refreshCameraStreams() {
     // the previous tab's source, painting a stale replay frame. Dropping the elements
     // makes that frame vanish immediately; pollFrame rebuilds fresh streams on the next
     // tick, by which time the backend's active_tab has settled to the new tab.
-    const strip = $("cam-strip");
-    if (!strip) return;
-    strip.innerHTML = '<div class="cam-empty">awaiting frame…</div>';
+    replaceCamStripContent('<div class="cam-empty">awaiting frame…</div>');
   }
 
 async function pollFrame() {
     if (framePolling) return;
+    if (S.ACTIVE_TAB === "replay") return;
     framePolling = true;
     try {
       const f = await apiGet("/api/frame");
@@ -407,14 +486,14 @@ async function pollFrame() {
         if (!keys.length) {
           // No live cameras (e.g. SIM DEBUG): drop any leftover replay <img> streams
           // so a previous tab's last frame can't stay frozen on screen.
-          if (existing.length) strip.innerHTML = '<div class="cam-empty">awaiting frame…</div>';
+          if (existing.length) replaceCamStripContent('<div class="cam-empty">awaiting frame…</div>');
         } else {
           const sameSet = existing.length === keys.length &&
             keys.every((k, i) => existing[i].dataset.key === k);
           if (!sameSet) {
-            strip.innerHTML = keys.map((k) =>
+            replaceCamStripContent(keys.map((k) =>
               `<div class="cam-cell"><div class="cam-lbl">${k}</div><img class="cam" data-key="${k}" src="/api/camera/${encodeURIComponent(k)}"></div>`
-            ).join("");
+            ).join(""));
           }
         }
       }
@@ -473,7 +552,7 @@ async function pollScene() {
     if (scenePolling) return;
     // REPLAY drives the URDF per-frame off the scrub clock (replaySetUrdfFrame); don't
     // let the live /api/scene poll fight it for the shared Scene3D canvas.
-    if (LIVE.replayMode) return;
+    if (S.ACTIVE_TAB === "replay" || LIVE.replayMode) return;
     const now = performance.now();
     const minInterval = scenePollMinIntervalMs();
     if (minInterval && now - lastScenePollAt < minInterval) return;
@@ -497,7 +576,7 @@ function loop(fn, delay) {
   }
 
 export {
-  exitReplayMode, maybeSyncReplayPlayer, replayPlay, replayStop, replayToggle,
+  exitReplayMode, loadMountedReplaySeries, maybeSyncReplayPlayer, replayPlay, replayStop, replayToggle,
   replayVideos, seekReplay,
   loop, pollFrame, pollScene, refreshCameraStreams,
 };

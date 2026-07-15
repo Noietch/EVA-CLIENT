@@ -270,6 +270,14 @@ $("collect-arm-enable").onchange = () => {
       collect_teleop_armed: S.ACTIVE_TAB === "collect" && S.collectArmEnabled,
     });
   };
+$("hil-intervention-enable").onchange = () => {
+    const enabled = $("hil-intervention-enable").checked;
+    if (S.STATUS) {
+      S.STATUS.rollout_intervention_enabled = enabled;
+      applyStatus(S.STATUS);
+    }
+    apiPost("/api/rollout_intervention_enabled", { enabled });
+  };
 $("b-collect-cancel").onclick = () => {
     S.collectQueueEnabled = false;
     renderCollect();
@@ -278,7 +286,7 @@ $("b-collect-cancel").onclick = () => {
 $("b-collect-qc-pass").onclick = () => submitEpisodeQc("collect", "pass");
 $("b-goto-qc").onclick = () => submitEpisodeQc("collect", "fail");
 $("b-collect-note-save").onclick = () => submitEpisodeNote("collect");
-$("b-rollout-save").onclick = () => apiPost("/api/operator_action", { intent: "accept" });
+$("b-rollout-save").onclick = () => apiPost("/api/rollout_save");
 $("b-rollout-intervention-abandon").onclick = () => apiPost("/api/operator_action", { intent: "cancel" });
 $("b-rollout-qc-pass").onclick = () => submitEpisodeQc("rollout", "pass");
 $("b-rollout-qc-fail").onclick = () => submitEpisodeQc("rollout", "fail");

@@ -35,6 +35,10 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from core.config import resolve_video_key
+from core.recorder.collection_alignment import (
+    align_collection_samples,
+    image_skew_tolerance_sec,
+)
 from core.recorder.lerobot_meta import build_info, history_row
 from core.types import (
     CollectionRawBatch,
@@ -43,7 +47,6 @@ from core.types import (
     RolloutInterventionSegment,
 )
 from core.utils.images import resize_direct
-from core.recorder.collection_alignment import align_collection_samples
 
 if TYPE_CHECKING:
     from core.config import ConfigDict
@@ -128,8 +131,8 @@ class SaveJob:
         default_factory=list
     )
     reason: str = ""
-    # When True the episodes.jsonl row + tasks.jsonl were already written before the
-    # background worker reaches this job; the worker then only writes parquet/video.
+    # When True the episodes.jsonl row + tasks.jsonl were already written before this
+    # job's parquet/video flush; the worker must not append the row again.
     meta_written: bool = False
     status: str = "queued"  # queued -> saving -> saved | failed
     error: BaseException | None = None
@@ -207,8 +210,8 @@ class EpisodeLogger:
         self._save_image_height = save_image_height
         self._save_image_width = save_image_width
         # Eval datasets carry per-episode scoring (score/milestones/note/...) entered by
-        # the operator. Those fields live in episodes.jsonl only and may be patched while
-        # the episode save job is still queued.
+        # the operator. Those fields live in episodes.jsonl only; scoring waits for any
+        # queued save to finish before patching the row.
         self._eval_mode = eval_mode
         from core.recorder.collection import CollectionEpisodeWriter  # local: break import cycle
 
@@ -432,7 +435,7 @@ class EpisodeLogger:
         if self._collection_writer is not None:
             return self._collection_writer.frame_counts()["received"]
         return max(
-            len(self._live_steps),
+            len(self._steps),
             len(self._raw_episode_frame_labels),
             len(self._raw_episode_snapshots),
         )
@@ -441,9 +444,9 @@ class EpisodeLogger:
         """Finish the current episode.
 
         When async_save is on, the recorded buffers are snapshotted into a SaveJob
-        and parquet/video/meta writing happens on a background worker so the
-        caller can immediately start the next episode. Otherwise the same payload
-        is written inline before returning.
+        and alignment/parquet/video/meta writing happens on a background worker so
+        the caller can immediately start the next episode. Otherwise the job is
+        written synchronously.
 
         Returns:
             True when the episode was saved/queued, False when it held no frames
@@ -696,7 +699,7 @@ class EpisodeLogger:
             target.start_time = (
                 batch.start_time
                 if target.start_time is None
-                else min(target.start_time, batch.start_time)
+                else max(target.start_time, batch.start_time)
             )
         if batch.end_time is not None:
             target.end_time = (
@@ -819,10 +822,7 @@ class EpisodeLogger:
         return tuple(fields)
 
     def _raw_episode_image_skew_tolerance_sec(self) -> float:
-        fps = float(self._fps)
-        if fps <= 1.0:
-            return 0.5 / fps
-        return 1.0 / (2.0 * (fps - 1.0))
+        return image_skew_tolerance_sec(float(self._fps))
 
     def _write_raw_episode_job(self, job: SaveJob) -> None:
         if job.raw_episode_payload is not None:
@@ -1099,7 +1099,7 @@ class EpisodeLogger:
                 fps=video_fps,
                 codec="libx264",
                 macro_block_size=1,
-                ffmpeg_params=["-preset", "ultrafast"],
+                ffmpeg_params=["-preset", "ultrafast", "-movflags", "+faststart"],
             )
             try:
                 for frame in frames:
@@ -1254,9 +1254,9 @@ class EpisodeLogger:
         """In-memory per-frame state/action of the in-flight episode for live charts.
 
         Mirrors load_episode_series' shape so the frontend reuses one chart path,
-        but reads the live in-memory buffer instead of disk. RUN feeds this
-        continuously, so the console can plot and scrub the current run before it
-        is ever saved.
+        but reads the live ``self._steps`` buffer instead of disk — RUN feeds this
+        continuously (record_step), so the console can plot and scrub the current
+        run before it is ever saved.
 
         Args:
             since: Return only frames with index >= since for incremental polling.

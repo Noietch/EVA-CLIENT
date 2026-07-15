@@ -206,6 +206,7 @@ class RuntimeState:
         rollout_intervention_active_segment: Temporary segment being captured.
         rollout_intervention_segments: Accepted segments saved with the rollout.
         rollout_intervention_next_segment_index: Monotonic segment id inside the rollout.
+        rollout_intervention_enabled: Runtime HIL ON/OFF gate for rollout halt.
         hil_control_mode: HIL relay mode, either "absolute" or "relative".
     """
 
@@ -260,6 +261,7 @@ class RuntimeState:
         default_factory=list
     )
     rollout_intervention_next_segment_index: int = 0
+    rollout_intervention_enabled: bool = False
     hil_control_mode: str = "absolute"
     # EVAL-tab INIT panel: when init_qpos is set, the arm's reset target becomes this
     # recorded start pose instead of robot.initial_qpos (home). init_ready latches once

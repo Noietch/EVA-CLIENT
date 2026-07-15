@@ -11,7 +11,7 @@ robot = dict(
 
 transport = dict(
     type='dataset',
-    dataset_dir='datasets/sft/real_robot/galaxea_r1_lite/r1lite_pack_phone_new_eva_vla_abs_gripper_open',
+    dataset_dir='datasets/r1_lite',
     resize_pad=False,
     image_layout='hwc',
     dataset_keys=dict(
@@ -31,7 +31,5 @@ policy = dict(
 inference_cfg = dict(
     publish_rate=15,
     setup_warmup_chunks=0,
-    debug_tasks=[
-        'first scoop up the black foam and place it in the box, then scoop up the phone and place it in the box, and finally pick up the lid, put it on the box, and press it down firmly',  # noqa: E501
-    ],
+    debug_tasks=['placeholder task — replace with the real task prompt'],
 )

@@ -905,11 +905,12 @@ def load_replay_dataset(
         logger.warning("load_replay_dataset: %s", session.last_error)
         return
     try:
-        actions, task = LeRobotDatasetIO(dataset_dir).load_trajectory(episode_id, action_key)
         replay_config = _build_replay_dataset_config(
             config, dataset_dir, episode_id, state_key, action_key, series_state_key, video_keys
         )
         source = DatasetTransport(replay_config, runtime.robot, dataset_dir, episode_id)
+        actions = source.get_action_trajectory()
+        task = source.current_task
     except Exception as error:
         session.last_error = f"Cannot load episode {episode_id}: {error}"
         logger.warning("load_replay_dataset: %s", session.last_error)
