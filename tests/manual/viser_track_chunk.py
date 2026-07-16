@@ -33,6 +33,7 @@ import importlib
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -149,7 +150,7 @@ def main() -> None:
         base_node = f"/robot/arm{i}"
         server.scene.add_frame(
             base_node,
-            position=tuple(float(v) for v in arm_offsets[i]),
+            position=(float(arm_offsets[i][0]), float(arm_offsets[i][1]), float(arm_offsets[i][2])),
             wxyz=(1.0, 0.0, 0.0, 0.0),
             show_axes=False,
         )
@@ -197,7 +198,7 @@ def main() -> None:
 
     # Recorded targets: per frame, flat [8*n_arms] in each arm's reference frame.
     recorded: list[np.ndarray] = []
-    replay: dict[str, object] = {"traj": None, "frame": 0}
+    replay: dict[str, Any] = {"traj": None, "frame": 0}
 
     def _current_targets() -> np.ndarray:
         """Sample the current control poses as one flat EEF frame [8*n_arms]."""

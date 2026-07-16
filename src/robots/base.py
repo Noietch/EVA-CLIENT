@@ -37,6 +37,21 @@ class ActuatorGroup:
 
 
 @dataclasses.dataclass(frozen=True)
+class CameraCalibration:
+    """Per-camera intrinsics + extrinsics materialized from the top-level ``calibration``
+    config block. K/dist are np.ndarray after ``_coerce_calibration``; ``attach_link``
+    is the URDF link the camera is rigidly attached to (empty = world frame).
+    """
+
+    name: str
+    K: np.ndarray
+    dist: np.ndarray
+    attach_link: str = ""
+    T_cam_link: np.ndarray | None = None
+    image_size: tuple[int, int] | None = None
+
+
+@dataclasses.dataclass(frozen=True)
 class CameraSpec:
     """Maps a logical camera name (e.g. "front") to its policy-input observation_key.
 
@@ -46,6 +61,7 @@ class CameraSpec:
 
     name: str
     observation_key: str
+    calibration: CameraCalibration | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -99,6 +115,16 @@ class Robot:
             ``close``, or None when the robot has no kinematics.
         """
         return None
+
+    def default_calibration_poses(self) -> list[np.ndarray]:
+        """Preset calibration poses (each a full-DOF qpos vector).
+
+        The CALIBRATE tab seeds its editable pose list with these on first open.
+        Override on concrete robots to ship a curated set that covers a wide range
+        of board orientations. Default is empty — the operator can still ADD FROM
+        CURRENT to build the list from scratch.
+        """
+        return []
 
     @property
     def total_action_dim(self) -> int:

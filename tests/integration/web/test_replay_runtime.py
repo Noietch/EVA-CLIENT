@@ -12,6 +12,7 @@ import robots  # noqa: F401
 from core.app import handlers
 from core.app import run as app
 from core.app.handlers import control as control_handlers
+from core.app.handlers import utils as handler_utils
 from core.app.handlers.space import build_space
 from core.app.state import RuntimeState, SessionMode, SessionState, SessionStatus
 from core.config import ConfigDict
@@ -407,7 +408,7 @@ def test_replay_load_resolves_relative_collection_qpos_dataset(tmp_path, monkeyp
     session = SessionState()
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
-    monkeypatch.setattr(handlers.utils, "_REPO_ROOT", repo_root)
+    monkeypatch.setattr(handler_utils, "_REPO_ROOT", repo_root)
     monkeypatch.chdir(elsewhere)
 
     handlers.load_replay_dataset(

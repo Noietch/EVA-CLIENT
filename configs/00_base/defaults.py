@@ -9,7 +9,7 @@ configs/02_collection/* and configs/03_evaluation/* should start with:
 merge (via Config.fromfile / _merge_a_into_b) means partial overrides on
 nested dicts work without re-stating the whole section.
 
-The 9 top-level items below are the single source of truth for "what happens
+The 10 top-level items below are the single source of truth for "what happens
 when a field is omitted from a preset". load_config() (src/core/config.py)
 does NOT apply fallback defaults — it relies on this base file being merged
 in via _base_.
@@ -119,6 +119,17 @@ operator_control = dict(
 )
 
 eval_cfg = {}  # Empty dict marks a non-eval config; eval configs fill this block.
+
+# Camera calibration (optional). ``results_path`` points at a raiden-schema
+# calibration_results.json; ``cameras[name]`` overlays that (or stands alone) with
+# a dict of {K, dist, attach_link?, T_cam_link?, image_size?}. Empty -> no calibration.
+calibration = dict(cameras={}, results_path=None)
+
+# Preset calibration poses for the CALIBRATE tab. An empty list means "use the
+# robot's built-in default_calibration_poses()". Provide a list of qpos vectors
+# (each length = total_action_dim) to override.
+calibration_poses = []
+
 # Eval block template (see configs/03_evaluation/*); fill eval_cfg to turn a deploy preset
 # into an eval run:
 #   eval_cfg = dict(
