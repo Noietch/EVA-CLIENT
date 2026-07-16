@@ -15,7 +15,8 @@ import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
+from urllib.parse import urlencode
 
 import numpy as np
 import pyarrow as pa
@@ -66,11 +67,7 @@ def test_single_gripper_config_exposes_one_gripper_control(console):
 
 @pytest.mark.parametrize(
     "console",
-    [
-        console_config(
-            robot=dict(type="r1_lite", gripper_open=100.0, gripper_close=0.0)
-        )
-    ],
+    [console_config(robot=dict(type="r1_lite", gripper_open=100.0, gripper_close=0.0))],
     indirect=True,
 )
 def test_r1lite_manual_qpos_limits_expose_full_gripper_range(console):
@@ -253,9 +250,7 @@ def test_collect_loop_uses_publish_rate_without_dataset_fps():
         ),
     )
     assert (
-        app._target_loop_rate_hz(
-            config, cast(RuntimeState, SimpleNamespace(replay_source=None))
-        )
+        app._target_loop_rate_hz(config, cast(RuntimeState, SimpleNamespace(replay_source=None)))
         == 10
     )
 
@@ -308,6 +303,118 @@ def test_collect_status_follows_selected_collect_task():
     assert logger.tasks[-1] == "pick up cup"
     assert collect["dataset_dir"] == "/datasets/pick_up_cup"
     assert collect["episodes"] == [{"episode_index": 0, "status": "saved"}]
+
+
+@pytest.mark.parametrize("verdict", ["pass", "fail", ""])
+def test_collect_qc_mark_routes_to_active_collection_logger(verdict):
+    calls = []
+
+    class _Logger:
+        def mark_collection_qc(self, task, episode, qc_verdict, note):
+            calls.append((task, episode, qc_verdict, note))
+            return True
+
+    with serve_console(console_config()) as h:
+        h.runtime.episode_logger = cast(Any, _Logger())
+        h.session.selected_collect_task = "pick up cup"
+
+        resp = h.post(
+            "/api/collect_qc_mark",
+            {
+                "task": "pick up cup",
+                "episode": 3,
+                "verdict": verdict,
+                "note": "checked",
+            },
+        )
+
+    assert resp.status == 200
+    assert resp.json == {"ok": True, "episode": 3, "verdict": verdict}
+    assert calls == [("pick up cup", 3, verdict, "checked")]
+
+
+def test_collect_qc_mark_rejects_unsupported_verdict():
+    with serve_console(console_config()) as h:
+        resp = h.post(
+            "/api/collect_qc_mark",
+            {"episode": 0, "verdict": "approve", "note": ""},
+        )
+
+    assert resp.status == 400
+    assert resp.json == {"ok": False, "error": "unsupported QC verdict: approve"}
+
+
+@pytest.mark.parametrize("episode", [None, -1, 1.5, "1.5", "²", {}])
+def test_collect_qc_mark_rejects_invalid_episode(episode):
+    with serve_console(console_config()) as h:
+        resp = h.post(
+            "/api/collect_qc_mark",
+            {"task": "unset", "episode": episode, "verdict": "pass", "note": ""},
+        )
+
+    assert resp.status == 400
+    assert resp.json == {"ok": False, "error": "collection episode must be a non-negative integer"}
+
+
+def test_collect_qc_mark_rejects_when_collection_logger_is_unavailable():
+    with serve_console(console_config()) as h:
+        resp = h.post(
+            "/api/collect_qc_mark",
+            {"task": "pick up cup", "episode": 0, "verdict": "pass", "note": ""},
+        )
+
+    assert resp.status == 409
+    assert resp.json == {"ok": False, "error": "collection recording is unavailable"}
+
+
+def test_collect_qc_mark_rejects_episode_that_is_not_saved():
+    class _Logger:
+        def mark_collection_qc(self, task, episode, verdict, note):
+            return False
+
+    with serve_console(console_config()) as h:
+        h.runtime.episode_logger = cast(Any, _Logger())
+        h.session.selected_collect_task = "pick up cup"
+
+        resp = h.post(
+            "/api/collect_qc_mark",
+            {
+                "task": "pick up cup",
+                "episode": 4,
+                "verdict": "fail",
+                "note": "pending",
+            },
+        )
+
+    assert resp.status == 409
+    assert resp.json == {"ok": False, "error": "collection episode is not saved"}
+
+
+def test_collect_qc_mark_rejects_review_from_previous_collection_task():
+    calls = []
+
+    class _Logger:
+        def mark_collection_qc(self, task, episode, verdict, note):
+            calls.append((task, episode, verdict, note))
+            return True
+
+    with serve_console(console_config()) as h:
+        h.runtime.episode_logger = cast(Any, _Logger())
+        h.session.selected_collect_task = "place cup"
+
+        resp = h.post(
+            "/api/collect_qc_mark",
+            {
+                "task": "pick up cup",
+                "episode": 0,
+                "verdict": "pass",
+                "note": "reviewed before task switch",
+            },
+        )
+
+    assert resp.status == 409
+    assert resp.json == {"ok": False, "error": "collection review task is no longer active"}
+    assert calls == []
 
 
 def test_status_exposes_replay_action_key_for_series_cache():
@@ -510,7 +617,7 @@ def test_replay_poster_resolves_relative_dataset_episode_video(tmp_path, monkeyp
     assert resp.raw == b"jpeg-frame"
 
 
-def test_review_episode_loads_selected_dataset_without_replay_source(tmp_path, monkeypatch):
+def test_review_episode_returns_series_without_mutating_runtime(tmp_path, monkeypatch):
     repo_root = tmp_path / "repo"
     dataset_dir = repo_root / "work_dirs" / "review"
     data_dir = dataset_dir / "data" / "chunk-000"
@@ -556,15 +663,184 @@ def test_review_episode_loads_selected_dataset_without_replay_source(tmp_path, m
             data_dir / "episode_000000.parquet",
         )
 
+        sentinel_qpos = np.full((1, dim), 7.0, dtype=np.float32)
+        h.runtime.collection_replay_qpos = sentinel_qpos
+        h.runtime.collection_replay_episode = 9
+        h.runtime.collection_replay_started = 123.0
+
         resp = h.post("/api/review_episode", {"dataset_dir": "work_dirs/review", "episode": 0})
 
         assert resp.status == 200
         assert resp.json["ok"] is True
         assert resp.json["frames"] == 2
-        assert h.runtime.collection_replay_episode == 0
-        assert h.runtime.collection_replay_qpos is not None
-        assert h.runtime.collection_replay_qpos.shape[0] == 2
-        assert h.runtime.collection_replay_started == 0.0
+        assert resp.json["timestamp"] == pytest.approx([0.0, 0.1])
+        assert len(resp.json["state"]) == 2
+        assert len(resp.json["action"]) == 2
+        assert h.runtime.collection_replay_qpos is sentinel_qpos
+        assert h.runtime.collection_replay_episode == 9
+        assert h.runtime.collection_replay_started == 123.0
+        assert h.runtime.replay_source is None
+
+
+def test_client_trace_is_logged_without_enqueuing_command(console, caplog):
+    with caplog.at_level("INFO", logger="core.app.console.server"):
+        resp = console.post(
+            "/api/client_trace",
+            {
+                "client_id": "browser-a",
+                "seq": 7,
+                "event": "review.video.error",
+                "details": {"episode": 3, "camera": "cam_high"},
+            },
+        )
+
+    assert resp.status == 200
+    assert resp.json == {"ok": True}
+    assert console.runtime.command_queue.empty()
+    assert "[UI_TRACE]" in caplog.text
+    assert "client=browser-a" in caplog.text
+    assert "seq=7" in caplog.text
+    assert "event=review.video.error" in caplog.text
+    assert '"episode":3' in caplog.text
+
+
+def test_scene_poll_returns_cached_frame_while_batch_transforms_are_loading(console):
+    cached = {"available": True, "arms": {"cached": {}}}
+    ctx = console_server.ConsoleRequestHandler.ctx
+    ctx.scene_cache = cached
+    ctx.scene_batch_loading = threading.Event()
+    ctx.scene_batch_loading.set()
+
+    class ExplodingScene:
+        def transforms(self, _qpos):
+            raise AssertionError("live scene must not contend with batch transforms")
+
+    ctx.scene = ExplodingScene()
+
+    resp = console.get("/api/scene")
+
+    assert resp.status == 200
+    assert resp.json == cached
+
+
+def test_native_transform_batch_uses_isolated_worker(monkeypatch):
+    qpos = np.zeros((3, 14), dtype=np.float32)
+    calls = []
+
+    class Future:
+        def result(self, timeout):
+            assert timeout == 120
+            return b"worker-transform-blob"
+
+    class Executor:
+        def submit(self, fn, *args):
+            calls.append((fn, args))
+            return Future()
+
+    class NativeScene:
+        def all_transforms_blob(self, _qpos):
+            raise AssertionError("native scene must not compute the batch in the web process")
+
+    monkeypatch.setattr(console_server, "_get_transform_executor", lambda: Executor())
+    monkeypatch.setattr(console_server, "_is_native_urdf_scene", lambda _scene: True)
+
+    raw = console_server._compute_transform_blob(NativeScene(), qpos, "r1_lite", 100.0, 0.0)
+
+    assert raw == b"worker-transform-blob"
+    assert len(calls) == 1
+    assert calls[0][1][0:3] == ("r1_lite", 100.0, 0.0)
+    np.testing.assert_array_equal(calls[0][1][3], qpos)
+
+
+def test_transform_worker_prewarm_is_non_blocking(monkeypatch):
+    submitted = []
+
+    class Future:
+        def add_done_callback(self, callback):
+            submitted.append(callback)
+
+    class Executor:
+        def submit(self, fn, *args):
+            submitted.append((fn, args))
+            return Future()
+
+    monkeypatch.setattr(console_server, "_get_transform_executor", lambda: Executor())
+    config = SimpleNamespace(
+        robot=SimpleNamespace(type="r1_lite", gripper_open=100.0, gripper_close=0.0)
+    )
+    runtime = SimpleNamespace(robot=SimpleNamespace(total_action_dim=14))
+
+    console_server._prewarm_transform_worker(config, runtime)
+
+    assert len(submitted) == 2
+    assert submitted[0][1][0:3] == ("r1_lite", 100.0, 0.0)
+    assert submitted[0][1][3].shape == (0, 14)
+
+
+def test_review_transforms_are_addressed_by_episode_without_runtime_mount(tmp_path, monkeypatch):
+    repo_root = tmp_path / "repo"
+    dataset_dir = repo_root / "work_dirs" / "review"
+    data_dir = dataset_dir / "data" / "chunk-000"
+    meta_dir = dataset_dir / "meta"
+    data_dir.mkdir(parents=True)
+    meta_dir.mkdir(parents=True)
+    monkeypatch.setattr(handlers_utils, "_REPO_ROOT", repo_root)
+
+    class _Scene:
+        def all_transforms_blob(self, qpos: np.ndarray) -> bytes:
+            assert qpos.shape[0] == 2
+            return b"EVAXFRM1" + qpos.astype(np.float32).tobytes()
+
+    with serve_console(console_config(robot_type="ur5e")) as h:
+        dim = h.runtime.robot.total_action_dim
+        (meta_dir / "info.json").write_text(
+            json.dumps(
+                {
+                    "total_episodes": 1,
+                    "fps": 10,
+                    "features": {
+                        "observation.state": {"dtype": "float32", "shape": [dim]},
+                        "action": {"dtype": "float32", "shape": [dim]},
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        (meta_dir / "episodes.jsonl").write_text(
+            json.dumps({"episode_index": 0, "length": 2, "tasks": ["review"]}) + "\n",
+            encoding="utf-8",
+        )
+        pq.write_table(
+            pa.table(
+                {
+                    "observation.state": [
+                        np.zeros(dim, dtype=np.float32).tolist(),
+                        np.ones(dim, dtype=np.float32).tolist(),
+                    ],
+                    "action": [
+                        np.zeros(dim, dtype=np.float32).tolist(),
+                        np.ones(dim, dtype=np.float32).tolist(),
+                    ],
+                    "timestamp": [0.0, 0.1],
+                    "frame_index": [0, 1],
+                    "episode_index": [0, 0],
+                    "index": [0, 1],
+                    "task_index": [0, 0],
+                }
+            ),
+            data_dir / "episode_000000.parquet",
+        )
+        sentinel_qpos = np.ones((1, dim), dtype=np.float32)
+        h.runtime.collection_replay_qpos = sentinel_qpos
+        console_server.ConsoleRequestHandler.ctx.scene = _Scene()
+
+        query = urlencode({"dataset_dir": "work_dirs/review", "episode": 0})
+        resp = h.get(f"/api/review_transforms?{query}")
+
+        assert resp.status == 200
+        assert resp.headers["content-type"] == "application/octet-stream"
+        assert resp.raw[:8] == b"EVAXFRM1"
+        assert h.runtime.collection_replay_qpos is sentinel_qpos
         assert h.runtime.replay_source is None
 
 
@@ -617,7 +893,10 @@ def test_review_replay_start_releases_paused_review(tmp_path, monkeypatch):
             data_dir / "episode_000000.parquet",
         )
 
-        h.post("/api/review_episode", {"dataset_dir": "work_dirs/review", "episode": 0})
+        h.post(
+            "/api/rollout_review_episode",
+            {"dataset_dir": "work_dirs/review", "episode": 0},
+        )
         resp = h.post("/api/review_replay_start", {"episode": 0})
 
         assert resp.status == 200

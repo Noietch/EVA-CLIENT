@@ -358,8 +358,7 @@ function updateGuide() {
     const epTask = $("replay-episode-task");
     if (epTask) epTask.style.display = S.ACTIVE_TAB === "replay" ? "" : "none";
     const collectStatus = $("collect-replay-status");
-    const collectReplay = s.collection_replay || {};
-    const collectReplayActive = S.reviewKind === "collect" || collectReplay.active;
+    const collectReplayActive = S.reviewKind === "collect" && LIVE.replayOwner === "collect";
     const showCollectStatus = S.ACTIVE_TAB === "collect" &&
       (S.collectReplayEpisode != null || collectReplayActive);
     if (collectStatus) collectStatus.style.display = showCollectStatus ? "" : "none";

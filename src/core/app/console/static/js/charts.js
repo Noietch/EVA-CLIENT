@@ -94,6 +94,10 @@ function updateScrubText() {
 function updateScrub() {
     const range = $("scrub-range"), stateEl = $("scrub-state"), bar = $("stage-scrub");
     if (!range) return;
+    const stage = $("stage");
+    if (stage && S.ACTIVE_TAB === "collect") {
+      stage.classList.toggle("no-series", LIVE.replayOwner !== "collect");
+    }
     range.max = String(Math.max(LIVE.n - 1, 0));
     range.step = "0.01";   // fine step so the thumb can glide between frames
     // The local play button only makes sense in REPLAY mode; a REAL run owns the cursor
@@ -101,12 +105,21 @@ function updateScrub() {
     const playBtn = $("scrub-play");
     if (playBtn) {
       const realRun = S.STATUS && S.STATUS.session_status === "running" && S.STATUS.cli_mode === "real";
-      playBtn.style.display = (LIVE.replayMode && !LIVE.replayLoading && !realRun) ? "" : "none";
+      const hardwareOwnsCursor = LIVE.replayOwner === "replay" && realRun;
+      playBtn.style.display = (LIVE.replayMode && !LIVE.replayLoading && !hardwareOwnsCursor)
+        ? ""
+        : "none";
+    }
+    const returnLive = $("review-return-live");
+    if (returnLive) {
+      returnLive.style.display = LIVE.replayOwner === "collect" ? "" : "none";
     }
     if (LIVE.replayMode) {
       bar.classList.remove("live");
-      stateEl.textContent = "REPLAY";
-      range.disabled = LIVE.n === 0;
+      stateEl.textContent = LIVE.replayOwner === "collect"
+        ? `REVIEW · EPISODE ${S.collectReplayEpisode}`
+        : "REPLAY";
+      range.disabled = LIVE.replayLoading || LIVE.n === 0;
       setScrubValue(LIVE.cursorFrac != null ? LIVE.cursorFrac : LIVE.cursor);
     } else if (LIVE.following) {
       bar.classList.add("live");

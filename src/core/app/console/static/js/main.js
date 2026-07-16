@@ -3,7 +3,7 @@
 import { $, LIVE, S, apiGet, apiPost } from "./core.js";
 import { closeChartModal, drawLiveCharts, liveDimsAll, onScrubInput, openChartModal, resetLiveSeries } from "./charts.js";
 import { applyTune, applyManualTune, renderConfig, manualConnect, manualDisconnect, manualDispatchToggle, enterManualSim, applyStatus, pauseSetup, replayIsLocalMode, resumeSetup, retrySetup, startRunFromDebug, updateGuide } from "./run.js";
-import { collectConfigured, renderCollect, renderRolloutSave, startCollectFromTab, toggleSelectedCollectReplay, saveAnnotation, submitEpisodeNote, submitEpisodeQc, submitQc, clearReviewPlayback, reviewActiveInCurrentTab } from "./collect.js";
+import { collectConfigured, renderCollect, renderRolloutSave, returnReviewToLive, startCollectFromTab, saveAnnotation, submitEpisodeNote, submitEpisodeQc, submitQc, clearReviewPlayback, reviewActiveInCurrentTab } from "./collect.js";
 import { evalEnabled, evalReset, evalSetup, evalRunToggle, evalResumeOnEnter, submitEvalScore, loadEvalResults, renderEvalSelectors, loadResultsAll, tpSeek, tpToggle, trialPopClose } from "./eval.js";
 import { replayPlay, replayStop, replayToggle, seekReplay, loop, pollFrame, pollScene, refreshCameraStreams, exitReplayMode } from "./replay.js";
 import { refreshCameras, reloadCameras, renderCalibratePanels, applyBoard, startCalibrate, resetCalibrate, setMode, captureSample, currentCalibCam, solveAll, saveCalibration, moveToPose, addPoseFromCurrent, commitEditPose, cancelEditPose, estop } from "./calibrate.js";
@@ -29,7 +29,8 @@ function relocateCanvas(tab) {
     else if (tab === "eval") host = $("eval-replay-col");
     else host = $("view-" + tab);
     if (host && stage.parentElement !== host) host.appendChild(stage);
-    const showSeries = S.ACTIVE_TAB === "replay";
+    const showSeries = tab === "replay" ||
+      (tab === "collect" && LIVE.replayOwner === "collect");
     stage.classList.toggle("no-series", !showSeries);
     if (window.Scene3D && Scene3D.resize) requestAnimationFrame(() => Scene3D.resize());
     if (typeof drawLiveCharts === "function") requestAnimationFrame(() => drawLiveCharts());
@@ -81,10 +82,13 @@ function relocateTrialPop(tab) {
 
 function setActiveTab(tab) {
     if (tab !== "collect") disarmCollectArm();
+    const leavingCollectReview = S.ACTIVE_TAB === "collect" && tab !== "collect" &&
+      LIVE.replayOwner === "collect";
     S.ACTIVE_TAB = tab;
     if (S.reviewKind && !reviewActiveInCurrentTab()) {
       clearReviewPlayback();
     }
+    if (leavingCollectReview) exitReplayMode();
     // Leaving REPLAY: drop the one-shot replay series + scrub clock so DEBUG/MANUAL/
     // EVAL start from a clean live buffer instead of replaying the loaded episode. The
     // backend tab_switch also unmounts replay_source whenever the destination isn't
@@ -293,7 +297,7 @@ $("b-rollout-save").onclick = () => apiPost("/api/rollout_save");
 $("b-rollout-intervention-abandon").onclick = () => apiPost("/api/operator_action", { intent: "cancel" });
 $("b-rollout-qc-pass").onclick = () => submitEpisodeQc("rollout", "pass");
 $("b-rollout-qc-fail").onclick = () => submitEpisodeQc("rollout", "fail");
-$("b-collect-replay-toggle").onclick = () => toggleSelectedCollectReplay();
+$("review-return-live").onclick = returnReviewToLive;
 $("replay-b-qc-pass").onclick = () => submitQc("pass");
 $("replay-b-qc-fail").onclick = () => submitQc("fail");
 $("replay-b-anno-save").onclick = () => saveAnnotation();

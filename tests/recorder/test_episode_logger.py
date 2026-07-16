@@ -24,7 +24,6 @@ from core.types import (
     Observation,
     RawCollectionSnapshot,
 )
-from core.utils.lerobot import LeRobotDatasetIO
 from robots.base import (
     ActuatorGroup,
     CameraSpec,
@@ -156,9 +155,7 @@ def _collection_raw_snapshot(
     batch: CollectionRawBatch | None = None,
 ) -> RawCollectionSnapshot:
     if batch is None:
-        image_value = (
-            np.zeros((8, 8, 3), dtype=np.uint8) if image is None else np.asarray(image)
-        )
+        image_value = np.zeros((8, 8, 3), dtype=np.uint8) if image is None else np.asarray(image)
         state_value = (
             np.zeros(_DIM, dtype=np.float32)
             if state is None
@@ -248,6 +245,30 @@ def test_live_series_streams_in_flight_buffer(tmp_path):
     # after the episode ends the buffer is no longer active.
     logger.end_episode()
     assert logger.live_series()["active"] is False
+
+
+def test_raw_snapshot_updates_live_series_without_decoding(tmp_path):
+    logger = _logger(tmp_path)
+    state = np.arange(_DIM, dtype=np.float32)
+    action = state + 100.0
+
+    def reject_decode() -> CollectionRawBatch:
+        raise AssertionError("live series must not decode the raw snapshot")
+
+    logger.start_episode("t")
+    logger.ingest_raw_episode_snapshot(
+        RawCollectionSnapshot(timestamp=1.25, decode_raw=reject_decode),
+        action,
+        state,
+    )
+
+    assert logger.live_series() == {
+        "active": True,
+        "n": 1,
+        "timestamp": [1.25],
+        "state": [state.tolist()],
+        "action": [action.tolist()],
+    }
 
 
 def test_rollout_resizes_saved_frames_when_size_set(tmp_path, monkeypatch):
@@ -508,9 +529,7 @@ def test_record_step_batches_align_to_fixed_grid_before_save(tmp_path):
     table = pq.read_table(tmp_path / "data" / "chunk-000" / "episode_000000.parquet")
     np.testing.assert_allclose(table.column("timestamp").to_pylist(), [0.0, 0.1, 0.2])
     np.testing.assert_allclose(table.column("capture_time").to_pylist(), [1.0, 1.1, 1.2])
-    np.testing.assert_allclose(
-        table.column("observations.state.qpos").to_pylist()[1], [1.0] * _DIM
-    )
+    np.testing.assert_allclose(table.column("observations.state.qpos").to_pylist()[1], [1.0] * _DIM)
     np.testing.assert_allclose(table.column("action").to_pylist()[1], [11.0] * _DIM)
 
     episode = _read_jsonl(tmp_path / "meta" / "episodes.jsonl")[0]
@@ -568,9 +587,7 @@ def test_raw_episode_snapshots_decode_on_async_save_worker(tmp_path):
     table = pq.read_table(tmp_path / "data" / "chunk-000" / "episode_000000.parquet")
     np.testing.assert_allclose(table.column("timestamp").to_pylist(), [0.0, 0.1, 0.2])
     np.testing.assert_allclose(table.column("capture_time").to_pylist(), [1.0, 1.1, 1.2])
-    np.testing.assert_allclose(
-        table.column("observations.state.qpos").to_pylist()[1], [1.0] * _DIM
-    )
+    np.testing.assert_allclose(table.column("observations.state.qpos").to_pylist()[1], [1.0] * _DIM)
     np.testing.assert_allclose(table.column("action").to_pylist()[1], [11.0] * _DIM)
     episode = _read_jsonl(tmp_path / "meta" / "episodes.jsonl")[0]
     assert episode["alignment_image_skew_tolerance_sec"] == 1.0 / 18.0
@@ -678,14 +695,10 @@ def test_collection_raw_batches_report_image_skew_qc(tmp_path):
     episode = _read_jsonl(task_dir / "meta" / "episodes.jsonl")[0]
     assert episode["quality"] == "red"
     assert episode["alignment_image_max_skew_sec"]["cam_high"] == 0.1
-    assert "image_skew_exceeded" in {
-        issue["code"] for issue in episode["quality_issues"]
-    }
+    assert "image_skew_exceeded" in {issue["code"] for issue in episode["quality_issues"]}
 
 
-def test_collection_raw_end_episode_defers_alignment_and_video_preprocess(
-    tmp_path, monkeypatch
-):
+def test_collection_raw_end_episode_defers_alignment_and_video_preprocess(tmp_path, monkeypatch):
     logger = _collection_logger(
         tmp_path,
         save_video=True,
@@ -878,9 +891,7 @@ def test_collection_prepares_video_frames_during_save(tmp_path, monkeypatch):
         return np.zeros((height, width, 3), dtype=image.dtype)
 
     monkeypatch.setattr(collection_module, "resize_direct", resize)
-    logger = _collection_logger(
-        tmp_path, save_video=True, save_image_height=4, save_image_width=6
-    )
+    logger = _collection_logger(tmp_path, save_video=True, save_image_height=4, save_image_width=6)
     qpos = np.zeros(_DIM, dtype=np.float32)
 
     logger.start_episode("t")
@@ -911,9 +922,7 @@ def test_collection_skips_resize_when_saved_size_matches_frame(tmp_path, monkeyp
 
     monkeypatch.setattr(collection_module, "resize_direct", resize)
     monkeypatch.setattr(episode_module.imageio, "get_writer", lambda *a, **k: _Writer())
-    logger = _collection_logger(
-        tmp_path, save_video=True, save_image_height=8, save_image_width=8
-    )
+    logger = _collection_logger(tmp_path, save_video=True, save_image_height=8, save_image_width=8)
     qpos = np.zeros(_DIM, dtype=np.float32)
 
     logger.start_episode("t")
@@ -928,7 +937,38 @@ def test_collection_skips_resize_when_saved_size_matches_frame(tmp_path, monkeyp
     assert logger.end_episode()
 
 
-def test_collection_status_reflects_qc_written_after_save(tmp_path):
+def test_collection_qc_updates_saved_episode_while_another_episode_is_queued(tmp_path, monkeypatch):
+    logger = _collection_logger(tmp_path, async_save=True)
+    monkeypatch.setattr(logger, "_start_save_worker", lambda: None)
+    qpos = np.zeros(_DIM, dtype=np.float32)
+    image = np.zeros((8, 8, 3), dtype=np.uint8)
+
+    logger.start_episode("t")
+    logger.ingest_collection_snapshot(_collection_raw_snapshot(0.0, image=image, state=qpos))
+    assert logger.end_episode()
+    first_job = logger._save_jobs[0]
+    first_job.status = "saving"
+    logger._write_job(first_job)
+
+    assert logger.status_snapshot("t")["episodes"] == []
+    assert logger.mark_collection_qc("t", 0, "fail", "still saving") is False
+
+    with logger._lock:
+        logger._save_jobs.remove(first_job)
+
+    logger.start_episode("t")
+    logger.ingest_collection_snapshot(_collection_raw_snapshot(0.1, image=image, state=qpos))
+    assert logger.end_episode()
+
+    assert logger.mark_collection_qc("t", 0, "fail", "bad contact") is True
+    assert logger.mark_collection_qc("t", 1, "pass", "not saved") is False
+
+    episode = logger.status_snapshot("t")["episodes"][0]
+    assert episode["qc_verdict"] == "fail"
+    assert episode["qc_note"] == "bad contact"
+
+
+def test_collection_qc_note_only_preserves_existing_verdict(tmp_path):
     logger = _collection_logger(tmp_path)
     qpos = np.zeros(_DIM, dtype=np.float32)
     image = np.zeros((8, 8, 3), dtype=np.uint8)
@@ -936,12 +976,101 @@ def test_collection_status_reflects_qc_written_after_save(tmp_path):
     logger.ingest_collection_snapshot(_collection_raw_snapshot(0.0, image=image, state=qpos))
     logger.end_episode()
 
-    task_dir = _collection_task_dir(tmp_path)
-    assert LeRobotDatasetIO(task_dir).mark_qc(0, "fail", "bad contact") is True
+    assert logger.mark_collection_qc("t", 0, "pass", "initial") is True
+    assert logger.mark_collection_qc("t", 0, "", "updated note") is True
 
     episode = logger.status_snapshot("t")["episodes"][0]
-    assert episode["qc_verdict"] == "fail"
-    assert episode["qc_note"] == "bad contact"
+    assert episode["qc_verdict"] == "pass"
+    assert episode["qc_note"] == "updated note"
+
+
+def test_collection_qc_and_save_append_share_metadata_lock(tmp_path, monkeypatch):
+    logger = _collection_logger(tmp_path)
+    qpos = np.zeros(_DIM, dtype=np.float32)
+    image = np.zeros((8, 8, 3), dtype=np.uint8)
+    logger.start_episode("t")
+    logger.ingest_collection_snapshot(_collection_raw_snapshot(0.0, image=image, state=qpos))
+    assert logger.end_episode()
+
+    qc_reading = threading.Event()
+    release_qc = threading.Event()
+    original_read_jsonl = episode_module._read_jsonl
+
+    def blocking_read_jsonl(path):
+        if threading.current_thread().name == "collection_qc":
+            qc_reading.set()
+            assert release_qc.wait(timeout=5.0)
+        return original_read_jsonl(path)
+
+    monkeypatch.setattr(episode_module, "_read_jsonl", blocking_read_jsonl)
+    qc_result = []
+
+    def mark_qc():
+        qc_result.append(logger.mark_collection_qc("t", 0, "pass", "approved"))
+
+    def save_next_episode():
+        logger.start_episode("t")
+        logger.ingest_collection_snapshot(_collection_raw_snapshot(0.1, image=image, state=qpos))
+        assert logger.end_episode()
+
+    qc_thread = threading.Thread(target=mark_qc, name="collection_qc")
+    save_thread = threading.Thread(target=save_next_episode, name="collection_save")
+    qc_thread.start()
+    assert qc_reading.wait(timeout=5.0)
+    save_thread.start()
+    release_qc.set()
+    qc_thread.join(timeout=5.0)
+    save_thread.join(timeout=5.0)
+
+    assert not qc_thread.is_alive()
+    assert not save_thread.is_alive()
+    assert qc_result == [True]
+    episodes = _read_jsonl(_collection_task_dir(tmp_path) / "meta" / "episodes.jsonl")
+    assert [episode["episode_index"] for episode in episodes] == [0, 1]
+    assert episodes[0]["qc_verdict"] == "pass"
+
+
+def test_collection_qc_rewrite_is_atomic_for_concurrent_readers(tmp_path, monkeypatch):
+    logger = _collection_logger(tmp_path)
+    qpos = np.zeros(_DIM, dtype=np.float32)
+    image = np.zeros((8, 8, 3), dtype=np.uint8)
+    for timestamp in (0.0, 0.1):
+        logger.start_episode("t")
+        logger.ingest_collection_snapshot(
+            _collection_raw_snapshot(timestamp, image=image, state=qpos)
+        )
+        assert logger.end_episode()
+
+    second_row_started = threading.Event()
+    release_write = threading.Event()
+    original_dumps = episode_module.json.dumps
+    qc_dumps = 0
+
+    def blocking_dumps(value, *args, **kwargs):
+        nonlocal qc_dumps
+        if threading.current_thread().name == "collection_qc":
+            qc_dumps += 1
+            if qc_dumps == 2:
+                second_row_started.set()
+                assert release_write.wait(timeout=5.0)
+        return original_dumps(value, *args, **kwargs)
+
+    monkeypatch.setattr(episode_module.json, "dumps", blocking_dumps)
+    qc_thread = threading.Thread(
+        target=lambda: logger.mark_collection_qc("t", 0, "pass", "approved"),
+        name="collection_qc",
+    )
+    qc_thread.start()
+    assert second_row_started.wait(timeout=5.0)
+
+    path = _collection_task_dir(tmp_path) / "meta" / "episodes.jsonl"
+    visible_episodes = _read_jsonl(path)
+    release_write.set()
+    qc_thread.join(timeout=5.0)
+
+    assert not qc_thread.is_alive()
+    assert [episode["episode_index"] for episode in visible_episodes] == [0, 1]
+    assert _read_jsonl(path)[0]["qc_verdict"] == "pass"
 
 
 def test_collection_saves_each_task_in_own_dataset_dir(tmp_path):
@@ -1151,12 +1280,8 @@ def test_image_episode_stats_does_not_stack_all_frames_as_float64(monkeypatch):
     expected = original_asarray(frames, dtype=np.float64).reshape(-1, 3) / 255.0
     expected_mean = expected.mean(axis=0)
     expected_std = expected.std(axis=0)
-    np.testing.assert_allclose(
-        stats["min"], [[[float(x)]] for x in expected.min(axis=0)]
-    )
-    np.testing.assert_allclose(
-        stats["max"], [[[float(x)]] for x in expected.max(axis=0)]
-    )
+    np.testing.assert_allclose(stats["min"], [[[float(x)]] for x in expected.min(axis=0)])
+    np.testing.assert_allclose(stats["max"], [[[float(x)]] for x in expected.max(axis=0)])
     np.testing.assert_allclose(stats["mean"], [[[float(x)]] for x in expected_mean])
     np.testing.assert_allclose(stats["std"], [[[float(x)]] for x in expected_std])
     assert stats["count"] == [2]
@@ -1359,12 +1484,11 @@ def test_image_episode_stats_matches_stacked_formula():
 
 def test_collection_writes_eef_uv_column_when_frames_carry_it(tmp_path):
     """When an Observation carries eef_uv dict, per-camera uv columns land in parquet."""
+
     def fill_eef_uv(frame: Observation) -> None:
         frame_index = round(float(frame.timestamp) * 10)
         frame.eef_uv = {
-            "cam_high": np.array(
-                [[100.0 + frame_index, 200.0 + frame_index]], dtype=np.float32
-            ),
+            "cam_high": np.array([[100.0 + frame_index, 200.0 + frame_index]], dtype=np.float32),
         }
 
     logger = _collection_logger(tmp_path, on_collection_frame=fill_eef_uv)

@@ -601,15 +601,15 @@ document.querySelectorAll("#collect-queue-tiles .collect-tile.replayable").lengt
 
 COLLECT_REPLAY_BUTTON_READY_EXPR = """
 (() => {
-  const button = document.querySelector("#b-collect-replay-toggle");
-  return button && !button.disabled && button.textContent.includes("REPLAY");
+  const button = document.querySelector("#review-return-live");
+  return button && button.style.display === "none";
 })()
 """
 
 COLLECT_REPLAY_STOP_READY_EXPR = """
 (() => {
-  const button = document.querySelector("#b-collect-replay-toggle");
-  return button && !button.disabled && button.textContent.includes("STOP");
+  const button = document.querySelector("#review-return-live");
+  return button && button.style.display !== "none";
 })()
 """
 
@@ -755,7 +755,7 @@ def ensure_collect_replay_stopped(cdp: Cdp) -> None:
     active = cdp.eval(COLLECT_REPLAY_STOP_READY_EXPR)
     if not active:
         return
-    human_click(cdp, "#b-collect-replay-toggle")
+    human_click(cdp, "#review-return-live")
     wait_for(cdp, COLLECT_REPLAY_BUTTON_READY_EXPR, 10)
 
 

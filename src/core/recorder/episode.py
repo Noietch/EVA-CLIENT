@@ -362,9 +362,7 @@ class EpisodeLogger:
         """Attach eval metadata (score, milestones, ...) to the current episode."""
         self._episode_meta.update(fields)
 
-    def set_rollout_intervention_segments(
-        self, segments: list[RolloutInterventionSegment]
-    ) -> None:
+    def set_rollout_intervention_segments(self, segments: list[RolloutInterventionSegment]) -> None:
         """Attach accepted rollout intervention segments to the active episode."""
         self._intervention_segments = [
             _copy_intervention_segment(segment) for segment in segments if segment.frames
@@ -392,6 +390,50 @@ class EpisodeLogger:
             if self._eval_mode and ("score" in fields or "max_score" in fields):
                 self._write_info_json()
         return patched
+
+    def mark_collection_qc(
+        self,
+        task: str,
+        episode_index: int,
+        verdict: str,
+        note: str,
+    ) -> bool:
+        """Write QC metadata for one fully saved collection episode.
+
+        Args:
+            task: Collection task whose task-specific dataset contains the episode.
+            episode_index: Integer episode id in that dataset.
+            verdict: ``"pass"``, ``"fail"``, or empty for a note-only update.
+            note: QC note to replace the existing value.
+
+        Returns:
+            True when the saved episode row was updated, otherwise False.
+        """
+        if self._collection_writer is None:
+            return False
+        dataset_dir = self._collection_dataset_dir(task)
+        path = self._meta_path("episodes.jsonl", dataset_dir)
+        with self._lock:
+            if any(
+                job.episode_index == episode_index
+                and (job.dataset_dir or self._log_dir) == dataset_dir
+                for job in self._save_jobs
+            ):
+                return False
+            rows = _read_jsonl(path)
+            for row in rows:
+                if int(row.get("episode_index", -1)) != episode_index:
+                    continue
+                if verdict:
+                    row["qc_verdict"] = verdict
+                row["qc_note"] = note
+                replacement = path.with_suffix(f"{path.suffix}.qc.tmp")
+                with replacement.open("w") as f:
+                    for existing in rows:
+                        f.write(json.dumps(existing, ensure_ascii=False) + "\n")
+                replacement.replace(path)
+                return True
+        return False
 
     def patch_episode_meta_by_clip(self, clip_id: str, **fields: Any) -> int | None:
         """Merge eval metadata into an existing or still-saving episode for clip_id.
@@ -438,7 +480,7 @@ class EpisodeLogger:
         if self._collection_writer is not None:
             return self._collection_writer.frame_counts()["received"]
         return max(
-            len(self._steps),
+            len(self._live_steps),
             len(self._raw_episode_frame_labels),
             len(self._raw_episode_snapshots),
         )
@@ -654,9 +696,7 @@ class EpisodeLogger:
             return
         raise ValueError("save job missing raw payload")
 
-    def _record_step_timestamp(
-        self, obs: Observation, timestamp: float | None
-    ) -> float:
+    def _record_step_timestamp(self, obs: Observation, timestamp: float | None) -> float:
         if timestamp is not None:
             return float(timestamp)
         if obs.timestamp is not None:
@@ -706,9 +746,7 @@ class EpisodeLogger:
             )
         if batch.end_time is not None:
             target.end_time = (
-                batch.end_time
-                if target.end_time is None
-                else max(target.end_time, batch.end_time)
+                batch.end_time if target.end_time is None else max(target.end_time, batch.end_time)
             )
         for key, samples in batch.images.items():
             target.images.setdefault(key, []).extend(samples)
@@ -814,9 +852,7 @@ class EpisodeLogger:
     def _raw_episode_vector_fields(self, batch: CollectionRawBatch) -> tuple[str, ...]:
         fields = []
         for field in _COLLECTION_VECTOR_FIELDS:
-            if field in batch.vectors or any(
-                key.startswith(f"{field}:") for key in batch.vectors
-            ):
+            if field in batch.vectors or any(key.startswith(f"{field}:") for key in batch.vectors):
                 fields.append(field)
         if "state_qpos" not in fields:
             raise ValueError("raw episode missing state_qpos samples")
@@ -866,9 +902,7 @@ class EpisodeLogger:
         )
         if not frames:
             raise ValueError("raw episode produced 0 frames")
-        issues = [
-            QualityIssue("red", issue.code, issue.detail) for issue in report.issues
-        ]
+        issues = [QualityIssue("red", issue.code, issue.detail) for issue in report.issues]
         labels = self._labels_for_aligned_frames(frames, payload.frame_labels)
         n_frames = len(frames)
         global_index = job.global_index
@@ -877,17 +911,14 @@ class EpisodeLogger:
         fps = float(self._fps)
         columns: dict[str, Any] = {
             self._keys.state_key: [
-                np.asarray(frame.state_qpos, dtype=np.float32).tolist()
-                for frame in frames
+                np.asarray(frame.state_qpos, dtype=np.float32).tolist() for frame in frames
             ],
             self._keys.action_key: [
-                np.asarray(frame.action_qpos, dtype=np.float32).tolist()
-                for frame in frames
+                np.asarray(frame.action_qpos, dtype=np.float32).tolist() for frame in frames
             ],
             "timestamp": [i / fps for i in range(n_frames)],
             "capture_time": [
-                float(frame.timestamp if frame.timestamp is not None else 0.0)
-                for frame in frames
+                float(frame.timestamp if frame.timestamp is not None else 0.0) for frame in frames
             ],
             "frame_index": list(range(n_frames)),
             "episode_index": [job.episode_index] * n_frames,
@@ -903,9 +934,7 @@ class EpisodeLogger:
             ]
         if any(label.intervention for label in labels):
             columns["intervention"] = [label.intervention for label in labels]
-            columns["intervention_segment_index"] = [
-                label.segment_index for label in labels
-            ]
+            columns["intervention_segment_index"] = [label.segment_index for label in labels]
         videos = self._videos_from_records(frames, camera_keys)
         if self._save_video and videos:
             for video_key, video_frames in videos.items():
@@ -927,9 +956,7 @@ class EpisodeLogger:
             "alignment_fps": fps,
             "alignment_grid_start": report.grid_start,
             "alignment_grid_end": report.grid_end,
-            "alignment_image_skew_tolerance_sec": (
-                self._raw_episode_image_skew_tolerance_sec()
-            ),
+            "alignment_image_skew_tolerance_sec": (self._raw_episode_image_skew_tolerance_sec()),
             "alignment_image_max_skew_sec": report.image_max_skew,
             "alignment_image_stream_stats": report.image_stream_stats,
         }
@@ -1127,17 +1154,20 @@ class EpisodeLogger:
             jobs = [
                 job
                 for job in self._save_jobs
-                if not self._collection_writer
-                or (job.dataset_dir or self._log_dir) == dataset_dir
+                if not self._collection_writer or (job.dataset_dir or self._log_dir) == dataset_dir
             ]
             save_durations = list(self._save_durations)
             queue_size = len(jobs)
             global_queue_size = len(self._save_jobs)
             saving = any(j.status == "saving" for j in jobs)
-        if self._collection_writer is not None:
-            history = self._load_collection_history(dataset_dir)
-        else:
-            with self._lock:
+            if self._collection_writer is not None:
+                pending_episode_indices = {job.episode_index for job in jobs}
+                history = [
+                    row
+                    for row in self._load_collection_history(dataset_dir)
+                    if row["episode_index"] not in pending_episode_indices
+                ]
+            else:
                 history = list(self._collection_history)
         current_episode_frames = 0
         current_episode_recorded_frames = 0
@@ -1787,9 +1817,9 @@ def _image_episode_stats(frames: list[np.ndarray]) -> dict[str, Any]:
     for frame in frames:
         arr = np.asarray(frame)
         for channel in range(3):
-            hist[channel] += np.bincount(
-                arr[..., channel].reshape(-1), minlength=256
-            ).astype(np.uint64)
+            hist[channel] += np.bincount(arr[..., channel].reshape(-1), minlength=256).astype(
+                np.uint64
+            )
 
     values = np.arange(256, dtype=np.float64)
     scale = 255.0

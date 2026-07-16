@@ -229,6 +229,14 @@
     font-family: var(--mono); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase;
   }
   .cam-cell.loading .cam-loading { display: flex; }
+  .cam-error {
+    display: none; flex: 1 1 auto; align-items: center; justify-content: center;
+    border: 1px solid rgba(224,49,49,0.28); border-radius: var(--radius-sm);
+    background: rgba(224,49,49,0.06); color: var(--danger);
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase;
+  }
+  .cam-cell.failed .cam, .cam-cell.failed .cam-loading { display: none; }
+  .cam-cell.failed .cam-error { display: flex; }
   /* row 2: ACTION + STATE charts side-by-side, filling the height below row 1 */
   .stage-charts {
     flex: 1 1 auto; min-height: 220px; overflow: visible;
@@ -349,6 +357,9 @@
   .stage-scrub input[type=range]:disabled { opacity: 0.4; }
   .stage-scrub .scrub-pos { flex: 0 0 auto; color: var(--ink-faint); }
   .stage-scrub .scrub-time { flex: 0 0 auto; color: var(--accent); }
+  .stage-scrub .review-return-live {
+    flex: 0 0 auto; padding: 6px 10px; border-radius: 999px; font-size: 9px;
+  }
   .stage.no-series .stage-top {
     flex: 1 1 auto; height: auto; min-height: 0;
   }
@@ -539,7 +550,6 @@
   .btn.primary:hover:not(:disabled) { box-shadow: var(--shadow-pop); transform: translateY(-1px); }
   .btn.danger { border-color: var(--rule-strong); color: var(--danger); }
   .btn.danger:hover:not(:disabled) { border-color: var(--danger); box-shadow: var(--shadow-pop); transform: translateY(-1px); }
-  .btn.collect-replay-stop { color: var(--danger); }
   .btn-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; }
   .btn-grid .full { grid-column: 1 / -1; }
   .btn.full { width: 100%; display: block; }

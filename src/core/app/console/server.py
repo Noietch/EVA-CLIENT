@@ -9,12 +9,15 @@ from the robot's URDF, served via /api/scene + /api/meshes).
 
 from __future__ import annotations
 
+import concurrent.futures
+import copy
 import dataclasses
 import datetime as _dt
 import gzip
 import hashlib
 import json
 import logging
+import multiprocessing
 import os
 import random
 import re
@@ -31,6 +34,7 @@ import imageio_ffmpeg
 import numpy as np
 from tqdm import tqdm
 
+from core.app.console.transform_worker import build_transform_blob
 from core.app.handlers import (
     _resolve_runtime_path,
     eval_episode_dir,
@@ -66,6 +70,131 @@ _VIDEO_CACHE_CONTROL = "public, max-age=3600"
 _VIDEO_FASTSTART_CACHE_ENV = "EVA_VIDEO_CACHE_DIR"
 _VIDEO_FASTSTART_LOCK = threading.Lock()
 _VIDEO_POSTER_LOCK = threading.Lock()
+_TRANSFORM_EXECUTOR: concurrent.futures.ProcessPoolExecutor | None = None
+_TRANSFORM_EXECUTOR_LOCK = threading.Lock()
+_TRACE_EVENT_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,96}$")
+
+
+def _trace_json(value: Any, limit: int = 1600) -> str:
+    """Compact, bounded JSON for diagnostic logs without large control payloads."""
+    try:
+        encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
+    except (TypeError, ValueError):
+        encoded = repr(value)
+    return encoded if len(encoded) <= limit else encoded[:limit] + "…"
+
+
+def _post_body_summary(body: dict) -> dict:
+    """Keep routing evidence while excluding large vectors and free-form text."""
+    summary: dict[str, Any] = {}
+    for key, value in body.items():
+        if key in {"qpos", "actions", "state", "image", "images"}:
+            summary[key] = f"<{len(value) if hasattr(value, '__len__') else '?'} values>"
+        elif key in {"note", "annotation"}:
+            summary[key] = f"<{len(str(value))} chars>"
+        elif isinstance(value, (dict, list, tuple)):
+            summary[key] = _trace_json(value, 240)
+        else:
+            summary[key] = value
+    return summary
+
+
+def _command_summary(command: str) -> str:
+    if command.startswith(("web:manual_qpos:", "web:update_infer_params:")):
+        return command.split(":", 2)[0] + ":" + command.split(":", 2)[1] + ":<payload>"
+    return command if len(command) <= 240 else command[:240] + "…"
+
+
+def _get_transform_executor() -> concurrent.futures.ProcessPoolExecutor:
+    global _TRANSFORM_EXECUTOR
+    with _TRANSFORM_EXECUTOR_LOCK:
+        if _TRANSFORM_EXECUTOR is None:
+            _TRANSFORM_EXECUTOR = concurrent.futures.ProcessPoolExecutor(
+                max_workers=1,
+                mp_context=multiprocessing.get_context("spawn"),
+            )
+        return _TRANSFORM_EXECUTOR
+
+
+def _is_native_urdf_scene(scene: object) -> bool:
+    cls = type(scene)
+    return cls.__module__ == "robots.utils" and cls.__name__ == "UrdfScene"
+
+
+def _compute_transform_blob(
+    scene: object,
+    qpos: np.ndarray,
+    robot_type: str,
+    gripper_open: float | None,
+    gripper_close: float | None,
+    batch_loading: threading.Event | None = None,
+) -> bytes:
+    """Compute a batch outside the web process when using the production scene."""
+    qpos = np.ascontiguousarray(qpos, dtype=np.float32)
+    started = time.monotonic()
+    if _is_native_urdf_scene(scene):
+        try:
+            raw = (
+                _get_transform_executor()
+                .submit(
+                    build_transform_blob,
+                    robot_type,
+                    gripper_open,
+                    gripper_close,
+                    qpos,
+                )
+                .result(timeout=120)
+            )
+            logger.info(
+                "[TRANSFORM_BATCH] mode=worker frames=%d bytes=%d elapsed_ms=%.1f",
+                len(qpos),
+                len(raw),
+                (time.monotonic() - started) * 1000.0,
+            )
+            return raw
+        except Exception:
+            logger.exception("[TRANSFORM_BATCH] worker failed; falling back in-process")
+
+    if batch_loading is not None:
+        batch_loading.set()
+    try:
+        raw = scene.all_transforms_blob(qpos)  # type: ignore[attr-defined]
+    finally:
+        if batch_loading is not None:
+            batch_loading.clear()
+    logger.info(
+        "[TRANSFORM_BATCH] mode=in_process frames=%d bytes=%d elapsed_ms=%.1f",
+        len(qpos),
+        len(raw),
+        (time.monotonic() - started) * 1000.0,
+    )
+    return raw
+
+
+def _prewarm_transform_worker(config: ConfigDict, runtime: RuntimeState) -> None:
+    """Start and initialize the isolated URDF worker without delaying web startup."""
+    started = time.monotonic()
+    empty = np.empty((0, int(runtime.robot.total_action_dim)), dtype=np.float32)
+    future = _get_transform_executor().submit(
+        build_transform_blob,
+        str(config.robot.type),
+        config.robot.gripper_open,
+        config.robot.gripper_close,
+        empty,
+    )
+
+    def report(done: concurrent.futures.Future) -> None:
+        try:
+            done.result()
+        except Exception:
+            logger.exception("[TRANSFORM_WORKER] prewarm failed")
+            return
+        logger.info(
+            "[TRANSFORM_WORKER] prewarm complete elapsed_ms=%.1f",
+            (time.monotonic() - started) * 1000.0,
+        )
+
+    future.add_done_callback(report)
 
 
 def _mp4_atom_offsets(path: Path) -> dict[bytes, int]:
@@ -111,8 +240,10 @@ def _video_faststart_cache_path(path: Path) -> Path:
         f"{path.resolve()}\0{stat.st_size}\0{stat.st_mtime_ns}".encode()
     ).hexdigest()[:24]
     cache_root_env = os.environ.get(_VIDEO_FASTSTART_CACHE_ENV)
-    cache_root = Path(cache_root_env) if cache_root_env else _resolve_runtime_path(
-        "work_dirs/.video_faststart"
+    cache_root = (
+        Path(cache_root_env)
+        if cache_root_env
+        else _resolve_runtime_path("work_dirs/.video_faststart")
     )
     return cache_root / f"{path.stem}-{digest}.mp4"
 
@@ -123,8 +254,10 @@ def _video_poster_cache_path(path: Path) -> Path:
         f"{path.resolve()}\0{stat.st_size}\0{stat.st_mtime_ns}".encode()
     ).hexdigest()[:24]
     cache_root_env = os.environ.get(_VIDEO_FASTSTART_CACHE_ENV)
-    cache_root = Path(cache_root_env) if cache_root_env else _resolve_runtime_path(
-        "work_dirs/.video_faststart"
+    cache_root = (
+        Path(cache_root_env)
+        if cache_root_env
+        else _resolve_runtime_path("work_dirs/.video_faststart")
     )
     return cache_root / f"{path.stem}-{digest}.jpg"
 
@@ -219,6 +352,52 @@ def _infer_replay_video_key(dataset_dir: Path, cam: str) -> str:
     return match or image.get("default") or ""
 
 
+def _open_review_episode(
+    ctx: ConsoleContext,
+    dataset_dir: str | Path,
+    episode_index: int,
+) -> tuple[DatasetTransport, dict[str, str]]:
+    """Open one saved episode without attaching it to shared console runtime state.
+
+    Args:
+        ctx: Active console context supplying robot and config definitions.
+        dataset_dir: Resolved LeRobot dataset directory.
+        episode_index: Zero-based saved episode index.
+
+    Returns:
+        source: Dataset transport positioned on the requested episode.
+        video_keys: Camera observation keys mapped to dataset video keys.
+    """
+    runtime = ctx.runtime
+    config = runtime.active_config or ctx.config
+    inferred = LeRobotDatasetIO(dataset_dir).infer_keys()
+    state_key = (inferred.get("state") or {}).get("default") or "observations.state.qpos"
+    action_key = (inferred.get("action") or {}).get("default") or "action"
+    image = inferred.get("image") or {}
+    candidates = image.get("candidates") or []
+    video_keys = {
+        camera.observation_key: match
+        for camera in runtime.robot.observation_schema.cameras
+        if (match := _match_video_key(candidates, camera.observation_key)) is not None
+    }
+    if not video_keys and image.get("default"):
+        camera = runtime.robot.observation_schema.cameras[0].observation_key
+        video_keys[camera] = str(image["default"])
+
+    review_config = copy.deepcopy(config)
+    review_config.transport.dataset_dir = dataset_dir
+    review_config.transport.episode_id = episode_index
+    review_config.transport.dataset_keys = ConfigDict(
+        state_key=state_key,
+        action_key=action_key,
+        video_keys=video_keys,
+    )
+    return (
+        DatasetTransport(review_config, runtime.robot, dataset_dir, episode_index),
+        video_keys,
+    )
+
+
 def _ensure_ckpt_order(config: ConfigDict, runtime: RuntimeState) -> None:
     eval_cfg = config.eval
     if eval_cfg is None or not eval_cfg.checkpoints or runtime.ckpt_order:
@@ -241,6 +420,7 @@ class ConsoleContext:
     scene_cache_key: object | None = None  # last qpos signature fed to scene.transforms
     scene_cache: dict | None = None  # cached transforms payload for that signature
     scene_log_key: object | None = None
+    scene_batch_loading: threading.Event = dataclasses.field(default_factory=threading.Event)
     scene_pbar: tqdm | None = None  # collection-replay playback progress bar
     active_tab: str = "debug"
     output_dir: str = ""  # results root; debug results land in <output_dir>/console/
@@ -321,8 +501,7 @@ def _serialize_gripper_controls(ctx: ConsoleContext) -> list[dict[str, str]]:
 def _serialize_manual_qpos_limits(ctx: ConsoleContext) -> list[dict[str, float]]:
     config = ctx.runtime.active_config or ctx.config
     limits = [
-        {"min": -3.2, "max": 3.2, "step": 0.005}
-        for _ in range(ctx.runtime.robot.total_action_dim)
+        {"min": -3.2, "max": 3.2, "step": 0.005} for _ in range(ctx.runtime.robot.total_action_dim)
     ]
     gripper_min = float(min(config.robot.gripper_open, config.robot.gripper_close))
     gripper_max = float(max(config.robot.gripper_open, config.robot.gripper_close))
@@ -594,9 +773,7 @@ def _camera_jpeg_payload(
     return _encode_jpeg(image, convert_bgr_to_rgb), sig
 
 
-def _compute_T_gripper_base(
-    ctx: ConsoleContext, attach_link: str
-) -> np.ndarray | None:
+def _compute_T_gripper_base(ctx: ConsoleContext, attach_link: str) -> np.ndarray | None:
     """Compute the current gripper->base transform for hand-eye calibration.
 
     Reads the transport's latest joint positions, runs FK via the robot's built-
@@ -778,6 +955,11 @@ def _serialize_scene(ctx: ConsoleContext) -> dict:
     # Cache by qpos signature so a static arm doesn't re-run forward kinematics each poll.
     if ctx.scene is None:
         return {"available": False, "arms": {}}
+    # Whole-episode FK has priority over high-rate live scene polling. Return the last
+    # rendered pose while the batch owns the mutable yourdfpy graph; otherwise dozens
+    # of poll threads can starve the batch before it acquires the scene lock.
+    if ctx.scene_batch_loading.is_set():
+        return ctx.scene_cache or {"available": False, "arms": {}, "loading": True}
     reader = _observation_reader(ctx)
     session = ctx.session
     collection_qpos, collection_frame_index = _active_collection_replay_qpos(ctx.runtime)
@@ -901,6 +1083,12 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     timeout = 30
 
+    def _request_trace_id(self) -> str:
+        supplied = self.headers.get("X-EVA-Trace-ID", "").strip()
+        if supplied and len(supplied) <= 96 and _TRACE_EVENT_RE.fullmatch(supplied):
+            return supplied
+        return f"srv-{random.getrandbits(40):010x}"
+
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         """Silence the default per-request access log (unless CONSOLE_ACCESS_LOG is set)."""
         if os.environ.get("CONSOLE_ACCESS_LOG"):
@@ -917,6 +1105,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
     def _send_empty(self, status: int) -> None:
         # HTTP/1.1 requires a framed body even for errors; without Content-Length a
         # keep-alive client would block waiting for a body that never comes.
+        self._response_status = status
         self.send_response(status)
         self.send_header("Content-Length", "0")
         self.end_headers()
@@ -932,6 +1121,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
 
     def _send_json(self, status: int, payload: dict | list) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self._response_status = status
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -999,6 +1189,11 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
 
     def _enqueue(self, command: str) -> None:
         assert self.ctx.runtime.command_queue is not None
+        logger.info(
+            "[COMMAND_ENQUEUE] trace=%s command=%s",
+            getattr(self, "_active_trace_id", "none"),
+            _command_summary(command),
+        )
         self.ctx.runtime.command_queue.put(command)
 
     def _invalidate_scene_cache(self) -> None:
@@ -1048,43 +1243,47 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             {"ok": True, "episode": episode_index, "frames": int(qpos.shape[0])},
         )
 
-    def _start_episode_review(self, body: dict) -> None:
-        runtime = self.ctx.runtime
-        config = runtime.active_config or self.ctx.config
+    def _post_review_episode(self, body: dict) -> None:
         dataset_dir = _resolve_dataset_dir(str(body.get("dataset_dir", "")).strip())
         episode_index = int(body.get("episode", 0))
         try:
-            inferred = LeRobotDatasetIO(dataset_dir).infer_keys()
-            state_key = (inferred.get("state") or {}).get("default") or "observations.state.qpos"
-            action_key = (inferred.get("action") or {}).get("default") or "action"
-            image = inferred.get("image") or {}
-            candidates = image.get("candidates") or []
-            video_keys: dict[str, str] = {}
-            for camera in runtime.robot.observation_schema.cameras:
-                cam_key = camera.observation_key
-                match = _match_video_key(candidates, cam_key)
-                if match is not None:
-                    video_keys[cam_key] = match
-            if not video_keys and image.get("default"):
-                video_keys[runtime.robot.observation_schema.cameras[0].observation_key] = str(
-                    image["default"]
+            source, video_keys = _open_review_episode(self.ctx, dataset_dir, episode_index)
+            try:
+                series = source.series()
+                payload = {
+                    "ok": True,
+                    "episode": episode_index,
+                    "frames": source.n_steps,
+                    "fps": source.fps,
+                    "task": source.current_task,
+                    "video_keys": video_keys,
+                    **series,
+                }
+            finally:
+                source.close()
+        except Exception as error:
+            self._send_json(404, {"ok": False, "error": str(error)})
+            return
+        if payload["frames"] <= 0:
+            self._send_json(404, {"ok": False, "error": "episode has no frames"})
+            return
+        self._send_json(200, payload)
+
+    def _post_rollout_review_episode(self, body: dict) -> None:
+        runtime = self.ctx.runtime
+        dataset_dir = _resolve_dataset_dir(str(body.get("dataset_dir", "")).strip())
+        episode_index = int(body.get("episode", 0))
+        try:
+            source, video_keys = _open_review_episode(self.ctx, dataset_dir, episode_index)
+            try:
+                qpos = np.asarray(
+                    [source.get_scene_qpos(i) for i in range(source.n_steps)],
+                    dtype=np.float32,
                 )
-            import copy
-            review_config = copy.deepcopy(config)
-            review_config.transport.dataset_dir = dataset_dir
-            review_config.transport.episode_id = episode_index
-            review_config.transport.dataset_keys = ConfigDict(
-                state_key=state_key,
-                action_key=action_key,
-                video_keys=video_keys,
-            )
-            source = DatasetTransport(review_config, runtime.robot, dataset_dir, episode_index)
-            qpos = np.asarray(
-                [source.get_scene_qpos(i) for i in range(source.n_steps)], dtype=np.float32
-            )
-            fps = source.fps
-            task = source.current_task
-            source.close()
+                fps = source.fps
+                task = source.current_task
+            finally:
+                source.close()
         except Exception as error:
             self._send_json(404, {"ok": False, "error": str(error)})
             return
@@ -1469,12 +1668,73 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                 seq = np.stack(
                     [np.asarray(replay.get_scene_qpos(i), dtype=np.float32) for i in range(n)]  # type: ignore[attr-defined]
                 )
-                raw = scene.all_transforms_blob(seq)  # type: ignore[attr-defined]
+                effective = ctx.runtime.active_config or ctx.config
+                raw = _compute_transform_blob(
+                    scene,
+                    seq,
+                    str(effective.robot.type),
+                    effective.robot.gripper_open,
+                    effective.robot.gripper_close,
+                    ctx.scene_batch_loading,
+                )
                 entry = (raw, gzip.compress(raw))
                 # Bound the cache to the two most recent episodes.
                 if len(cache) >= 2:
                     cache.pop(next(iter(cache)))
                 cache[key] = entry
+        use_gzip = "gzip" in self.headers.get("Accept-Encoding", "").lower()
+        body = entry[1] if use_gzip else entry[0]
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(len(body)))
+        if use_gzip:
+            self.send_header("Content-Encoding", "gzip")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _get_review_transforms(self) -> None:
+        dataset_dir = _resolve_dataset_dir(self._query_str("dataset_dir"))
+        episode_index = self._query_int("episode", -1)
+        scene = self.ctx.scene
+        if scene is None or episode_index < 0:
+            self._send_json(404, {"ok": False, "error": "review transforms unavailable"})
+            return
+        try:
+            source, _ = _open_review_episode(self.ctx, dataset_dir, episode_index)
+            try:
+                n = source.n_steps
+                if n <= 0:
+                    self._send_json(404, {"ok": False, "error": "episode has no frames"})
+                    return
+                key = (id(scene), str(Path(dataset_dir).resolve()), episode_index, n)
+                with type(self)._xf_lock:
+                    entry = type(self)._xf_cache.get(key)
+                    if entry is None:
+                        qpos = np.stack(
+                            [
+                                np.asarray(source.get_scene_qpos(i), dtype=np.float32)
+                                for i in range(n)
+                            ]
+                        )
+                        effective = self.ctx.runtime.active_config or self.ctx.config
+                        raw = _compute_transform_blob(
+                            scene,
+                            qpos,
+                            str(effective.robot.type),
+                            effective.robot.gripper_open,
+                            effective.robot.gripper_close,
+                            self.ctx.scene_batch_loading,
+                        )
+                        entry = (raw, gzip.compress(raw))
+                        if len(type(self)._xf_cache) >= 4:
+                            type(self)._xf_cache.pop(next(iter(type(self)._xf_cache)))
+                        type(self)._xf_cache[key] = entry
+            finally:
+                source.close()
+        except Exception as error:
+            self._send_json(404, {"ok": False, "error": str(error)})
+            return
+
         use_gzip = "gzip" in self.headers.get("Accept-Encoding", "").lower()
         body = entry[1] if use_gzip else entry[0]
         self.send_response(200)
@@ -1662,21 +1922,62 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         """Route a POST to a constant-command enqueue or a body-driven handler."""
         path = urlparse(self.path).path
         body = self._read_json_body()
-        # Constant control verbs: enqueue and ack. Everything else routes to a method
-        # that owns its own response (custom command arg, runtime mutation, or payload).
-        cmd = _POST_COMMANDS.get(path)
-        if cmd is not None:
-            self._enqueue(cmd)
-            self._send_json(200, {"ok": True})
-            return
-        handler = _POST_ROUTES.get(path)
-        if handler is None:
-            self._send_empty(404)
-            return
-        handler(self, body)
+        trace_id = self._request_trace_id()
+        self._active_trace_id = trace_id
+        started = time.monotonic()
+        self._response_status = None
+        if path != "/api/client_trace":
+            logger.info(
+                "[HTTP_POST_BEGIN] trace=%s path=%s body=%s",
+                trace_id,
+                path,
+                _trace_json(_post_body_summary(body)),
+            )
+        try:
+            # Constant control verbs: enqueue and ack. Everything else routes to a method
+            # that owns its own response (custom command arg, runtime mutation, or payload).
+            cmd = _POST_COMMANDS.get(path)
+            if cmd is not None:
+                self._enqueue(cmd)
+                self._send_json(200, {"ok": True})
+                return
+            handler = _POST_ROUTES.get(path)
+            if handler is None:
+                self._send_empty(404)
+                return
+            handler(self, body)
+        except Exception:
+            logger.exception("[HTTP_POST_ERROR] trace=%s path=%s", trace_id, path)
+            raise
+        finally:
+            if path != "/api/client_trace":
+                logger.info(
+                    "[HTTP_POST_END] trace=%s path=%s status=%s elapsed_ms=%.1f",
+                    trace_id,
+                    path,
+                    self._response_status,
+                    (time.monotonic() - started) * 1000.0,
+                )
 
     def _enqueue_ok(self, command: str) -> None:
         self._enqueue(command)
+        self._send_json(200, {"ok": True})
+
+    def _post_client_trace(self, body: dict) -> None:
+        client_id = str(body.get("client_id", "unknown"))[:96]
+        event = str(body.get("event", ""))[:96]
+        seq = body.get("seq", 0)
+        details = body.get("details")
+        if not _TRACE_EVENT_RE.fullmatch(event):
+            self._send_json(400, {"ok": False, "error": "invalid trace event"})
+            return
+        logger.info(
+            "[UI_TRACE] client=%s seq=%s event=%s details=%s",
+            client_id,
+            seq,
+            event,
+            _trace_json(details if isinstance(details, dict) else {}),
+        )
         self._send_json(200, {"ok": True})
 
     # --- POST route handlers (body-derived command arg / payload / mutation) ---
@@ -1822,6 +2123,61 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         else:
             self._send_json(404, {"ok": False, "error": "episode not found in dataset"})
 
+    def _post_collect_qc_mark(self, body: dict) -> None:
+        episode_value = body.get("episode")
+        if (
+            isinstance(episode_value, int)
+            and not isinstance(episode_value, bool)
+            and episode_value >= 0
+        ):
+            episode = episode_value
+        elif isinstance(episode_value, str) and episode_value.isascii() and episode_value.isdigit():
+            episode = int(episode_value)
+        else:
+            self._send_json(
+                400,
+                {
+                    "ok": False,
+                    "error": "collection episode must be a non-negative integer",
+                },
+            )
+            return
+        verdict = str(body.get("verdict", ""))
+        if verdict not in {"", "pass", "fail"}:
+            self._send_json(
+                400,
+                {"ok": False, "error": f"unsupported QC verdict: {verdict}"},
+            )
+            return
+        logger_obj = self.ctx.runtime.episode_logger
+        if logger_obj is None:
+            self._send_json(
+                409,
+                {"ok": False, "error": "collection recording is unavailable"},
+            )
+            return
+        task = str(body.get("task", ""))
+        active_task = format_task_label(self.ctx.session.selected_collect_task)
+        if task != active_task:
+            self._send_json(
+                409,
+                {"ok": False, "error": "collection review task is no longer active"},
+            )
+            return
+        ok = logger_obj.mark_collection_qc(
+            task,
+            episode,
+            verdict,
+            str(body.get("note", "")),
+        )
+        if not ok:
+            self._send_json(
+                409,
+                {"ok": False, "error": "collection episode is not saved"},
+            )
+            return
+        self._send_json(200, {"ok": True, "episode": episode, "verdict": verdict})
+
     def _post_annotate(self, body: dict) -> None:
         # Write/overwrite an episode's language annotation directly into the lerobot
         # dataset (episodes.jsonl key + per-frame parquet column + info.json feature).
@@ -1881,9 +2237,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             spec.observation_key for spec in self.ctx.runtime.robot.observation_schema.cameras
         )
         board = (
-            getattr(self.ctx.calibrate, "board", None)
-            if self.ctx.calibrate is not None
-            else None
+            getattr(self.ctx.calibrate, "board", None) if self.ctx.calibrate is not None else None
         )
         self.ctx.calibrate = new_calibrate_session(board or CharucoBoardSpec(), keys)
         for spec in self.ctx.runtime.robot.observation_schema.cameras:
@@ -1991,9 +2345,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         if session.mode == "real":
             qpos = session.poses[idx]
             try:
-                self._enqueue(
-                    "web:manual_send:" + json.dumps({"qpos": [float(x) for x in qpos]})
-                )
+                self._enqueue("web:manual_send:" + json.dumps({"qpos": [float(x) for x in qpos]}))
                 dispatched = True
             except Exception as exc:
                 logger.warning("move_to real dispatch failed: %s", exc)
@@ -2083,6 +2435,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         # Compute T_gripper_base via FK of the current qpos. This is what feeds
         # cv2.calibrateHandEye downstream — without it we'd never build pose pairs.
         T_gripper_base = _compute_T_gripper_base(self.ctx, session.attach_links.get(key, ""))
+
         def encode(img: np.ndarray) -> bytes:
             return _encode_jpeg(img, convert_bgr_to_rgb=False) or b""
 
@@ -2210,6 +2563,7 @@ _GET_ROUTES = {
     "/api/replay_series": ConsoleRequestHandler._get_replay_series,
     "/api/replay_scene_frame": ConsoleRequestHandler._get_replay_scene_frame,
     "/api/replay_transforms": ConsoleRequestHandler._get_replay_transforms,
+    "/api/review_transforms": ConsoleRequestHandler._get_review_transforms,
     "/api/replay_video": ConsoleRequestHandler._get_replay_video,
     "/api/replay_poster": ConsoleRequestHandler._get_replay_poster,
     "/api/live_series": ConsoleRequestHandler._get_live_series,
@@ -2246,9 +2600,11 @@ _POST_COMMANDS = {
 # POST endpoints needing a body-derived command arg, a runtime mutation, or a custom
 # response. Each handler owns its own _send_json. Values are unbound (self, body) methods.
 _POST_ROUTES = {
+    "/api/client_trace": ConsoleRequestHandler._post_client_trace,
     "/api/collect_replay": ConsoleRequestHandler._start_collection_replay,
     "/api/exit_collect_replay": ConsoleRequestHandler._post_exit_collection_replay,
-    "/api/review_episode": ConsoleRequestHandler._start_episode_review,
+    "/api/review_episode": ConsoleRequestHandler._post_review_episode,
+    "/api/rollout_review_episode": ConsoleRequestHandler._post_rollout_review_episode,
     "/api/review_replay_start": ConsoleRequestHandler._start_review_replay,
     "/api/select_task": ConsoleRequestHandler._post_select_task,
     "/api/select_collect_task": ConsoleRequestHandler._post_select_collect_task,
@@ -2256,6 +2612,7 @@ _POST_ROUTES = {
     "/api/tab_switch": ConsoleRequestHandler._post_tab_switch,
     "/api/inspect_dataset": ConsoleRequestHandler._post_inspect_dataset,
     "/api/qc_mark": ConsoleRequestHandler._post_qc_mark,
+    "/api/collect_qc_mark": ConsoleRequestHandler._post_collect_qc_mark,
     "/api/annotate": ConsoleRequestHandler._post_annotate,
     "/api/episode_annotation": ConsoleRequestHandler._post_episode_annotation,
     "/api/load_replay_dataset": ConsoleRequestHandler._post_load_replay_dataset,
@@ -2338,4 +2695,6 @@ def start_console_server(
 
     thread = threading.Thread(target=serve, name="eva-console-server", daemon=True)
     thread.start()
+    if str(config.transport.type) in _LIVE_TRANSPORT_TYPES:
+        _prewarm_transform_worker(config, runtime)
     return thread

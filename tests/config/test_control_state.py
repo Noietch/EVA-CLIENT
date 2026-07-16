@@ -197,12 +197,21 @@ class _RawEpisodeLogger:
     active_frame_count = 1
 
     def __init__(self) -> None:
-        self.raw: list[tuple[RawCollectionSnapshot, np.ndarray]] = []
+        self.raw: list[tuple[RawCollectionSnapshot, np.ndarray, np.ndarray]] = []
 
     def ingest_raw_episode_snapshot(
-        self, snapshot: RawCollectionSnapshot, action: np.ndarray
+        self,
+        snapshot: RawCollectionSnapshot,
+        action: np.ndarray,
+        state_qpos: np.ndarray,
     ) -> None:
-        self.raw.append((snapshot, np.asarray(action, dtype=np.float32).copy()))
+        self.raw.append(
+            (
+                snapshot,
+                np.asarray(action, dtype=np.float32).copy(),
+                np.asarray(state_qpos, dtype=np.float32).copy(),
+            )
+        )
 
     def record_step(self, _frame: Observation, _action: np.ndarray) -> None:
         raise AssertionError("raw-capable recording must not call record_step")
@@ -227,6 +236,9 @@ class _RawTransport:
     def get_frame(self) -> Observation | None:
         self.get_frame_calls += 1
         raise AssertionError("raw-capable recording must not call get_frame")
+
+    def get_latest_qpos(self) -> np.ndarray:
+        return np.array([3.0, 4.0], dtype=np.float32)
 
 
 class _ResettableStrategy:
@@ -387,9 +399,7 @@ def test_start_rollout_intervention_starts_transport_collection():
     runtime, session = _runtime_and_session()
     runtime.rollout_intervention_enabled = True
 
-    assert recording.start_rollout_intervention(
-        _config(), runtime, session
-    ) is True
+    assert recording.start_rollout_intervention(_config(), runtime, session) is True
     assert runtime.rollout_intervention_active is True
     assert runtime.transport.started == 1
     assert runtime.transport.cleared == 1
@@ -437,9 +447,7 @@ def test_start_rollout_intervention_resets_policy_strategy():
     strategy = _ResettableStrategy()
     runtime.infer_strategy = strategy
 
-    assert recording.start_rollout_intervention(
-        _config(), runtime, session
-    ) is True
+    assert recording.start_rollout_intervention(_config(), runtime, session) is True
     assert strategy.resets == 1
 
 
@@ -447,9 +455,7 @@ def test_start_rollout_intervention_clears_collection_backlog():
     runtime, session = _runtime_and_session()
     runtime.rollout_intervention_enabled = True
 
-    assert recording.start_rollout_intervention(
-        _config(), runtime, session
-    ) is True
+    assert recording.start_rollout_intervention(_config(), runtime, session) is True
     assert runtime.rollout_intervention_active is True
     assert runtime.transport.started == 1
     assert runtime.transport.cleared == 1
@@ -708,3 +714,4 @@ def test_record_executed_action_uses_raw_snapshot_without_get_frame():
     assert len(logger.raw) == 1
     assert logger.raw[0][0].timestamp == 1.0
     np.testing.assert_allclose(logger.raw[0][1], action)
+    np.testing.assert_allclose(logger.raw[0][2], [3.0, 4.0])
