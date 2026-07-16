@@ -41,11 +41,7 @@ def _is_eef_key(key: str) -> bool:
 
 def _eef_dimension_names(robot: Robot, vector_dim: int) -> list[str]:
     per_arm_dim = vector_dim // len(robot.arm_groups)
-    return [
-        f"{group.name}.{dim}"
-        for group in robot.arm_groups
-        for dim in _EEF_DIMS[:per_arm_dim]
-    ]
+    return [f"{group.name}.{dim}" for group in robot.arm_groups for dim in _EEF_DIMS[:per_arm_dim]]
 
 
 class _FrameSource:
@@ -234,6 +230,23 @@ class DatasetTransport(TransportBridge):
         table = pq.read_table(str(parquet_path))
         self._obs_state = np.array(table.column(keys.state_key).to_pylist(), dtype=np.float32)
         self._actions = np.array(table.column(keys.action_key).to_pylist(), dtype=np.float32)
+        if "control_source" in table.column_names:
+            self._control_source = [
+                str(value) for value in table.column("control_source").to_pylist()
+            ]
+        elif "intervention" in table.column_names:
+            self._control_source = [
+                "intervention" if value else "policy"
+                for value in table.column("intervention").to_pylist()
+            ]
+        else:
+            self._control_source = ["policy"] * len(self._actions)
+        self._intervention = [value == "intervention" for value in self._control_source]
+        self._intervention_segment_index = (
+            [int(value) for value in table.column("intervention_segment_index").to_pylist()]
+            if "intervention_segment_index" in table.column_names
+            else [-1] * len(self._actions)
+        )
         series_state_key = keys.get("series_state_key", "")
         self._series_state = (
             np.array(table.column(series_state_key).to_pylist(), dtype=np.float32)
@@ -368,6 +381,9 @@ class DatasetTransport(TransportBridge):
             "action": self._actions.tolist(),
             "state_names": self._state_names,
             "action_names": self._action_names,
+            "control_source": self._control_source,
+            "intervention": self._intervention,
+            "intervention_segment_index": self._intervention_segment_index,
         }
 
     def video_paths(self) -> dict[str, Path]:

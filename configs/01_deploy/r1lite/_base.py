@@ -106,5 +106,5 @@ rollout = dict(
 
 operator_control = dict(
     enabled=True,
-    button_topic='/eva/operator_button',
+    action_topic='/eva/operator_action',
 )

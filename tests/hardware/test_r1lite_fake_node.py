@@ -40,7 +40,7 @@ def test_r1lite_ros2_fake_uses_real_r1lite_topics():
     assert fake_node.ARM_TOPICS["right_arm"].gripper_command == (
         "/motion_target/target_position_gripper_right"
     )
-    assert fake_node.OPERATOR_BUTTON_TOPIC == "/eva/operator_button"
+    assert fake_node.OPERATOR_ACTION_TOPIC == "/eva/operator_action"
 
 
 def test_fake_state_tracks_feedback_and_hil_positions_separately():
@@ -67,17 +67,17 @@ def test_fake_state_accepts_full_group_command_and_splits_gripper():
     assert snapshot["feedback"]["left_arm"]["gripper"] == 12.0
 
 
-def test_control_api_publishes_operator_buttons_and_hil_joint_updates():
+def test_control_api_publishes_operator_actions_and_hil_joint_updates():
     state = fake_node.R1LiteFakeState()
     bridge = _FakeBridge()
     api = fake_node.R1LiteFakeControlApi(state, bridge)
 
-    api.operator_button("x")
+    api.operator_action("intervention_toggle")
     api.gripper("right", "close")
     api.set_joint("left_arm", 1, 0.5)
     api.adjust_joint("left_arm", 1, -0.125)
 
-    assert bridge.operator_buttons == ["x", "right_gripper_close"]
+    assert bridge.operator_actions == ["intervention_toggle", "gripper_right_close"]
     assert [msg[0] for msg in bridge.hil_messages] == ["left_arm", "left_arm"]
     np.testing.assert_allclose(bridge.hil_messages[-1][1], [0.0, 0.375, 0.0, 0.0, 0.0, 0.0])
 
@@ -147,7 +147,7 @@ def test_ros2_fake_registers_publishers_subscribers_and_publishes_hil():
         "/hdas/feedback_arm_left",
         "/hdas/feedback_gripper_left",
         "/relaxed_ik/motion_control/pose_ee_arm_right",
-        "/eva/operator_button",
+        "/eva/operator_action",
         "/eva/hil/input_joint_state_arm_right",
         "/motion_target/target_joint_state_arm_right",
     }
@@ -157,16 +157,16 @@ def test_ros2_fake_registers_publishers_subscribers_and_publishes_hil():
         "/motion_target/target_joint_state_arm_right",
         "/motion_target/target_position_gripper_right",
     }
-    assert node.publisher_qos["/eva/operator_button"] == 10
+    assert node.publisher_qos["/eva/operator_action"] == 10
     assert node.publisher_qos["/eva/hil/input_joint_state_arm_right"] is live_qos
     assert set(node.subscription_callback_groups.values()) == {None}
     assert node.timer_callback_groups == [None]
 
-    bridge.publish_operator_button("y")
+    bridge.publish_operator_action("intervention_accept")
     bridge.publish_hil("right_arm", np.arange(6, dtype=np.float32))
     bridge.publish_command("right_arm", np.arange(10, 16, dtype=np.float32))
 
-    assert node.publishers["/eva/operator_button"].messages[-1].data == "y"
+    assert node.publishers["/eva/operator_action"].messages[-1].data == "intervention_accept"
     hil_msg = node.publishers["/eva/hil/input_joint_state_arm_right"].messages[-1]
     assert hil_msg.name == list(fake_node.RIGHT_ARM_JOINTS)
     np.testing.assert_allclose(hil_msg.position, [0.0, 1.0, 2.0, 3.0, 4.0, 5.0])
@@ -315,9 +315,9 @@ def test_ros2_fake_can_use_separate_control_node_for_command_subscriptions():
     )
 
     assert "/hdas/feedback_arm_left" in sensor_node.publishers
-    assert "/eva/operator_button" not in sensor_node.publishers
+    assert "/eva/operator_action" not in sensor_node.publishers
     assert "/motion_target/target_joint_state_arm_left" not in sensor_node.subscriptions
-    assert "/eva/operator_button" in control_node.publishers
+    assert "/eva/operator_action" in control_node.publishers
     assert "/eva/hil/input_joint_state_arm_left" in control_node.publishers
     assert "/motion_target/target_joint_state_arm_left" in control_node.subscriptions
     assert "/motion_target/target_position_gripper_right" in control_node.subscriptions
@@ -464,12 +464,12 @@ def test_ros2_fake_reuses_precomputed_camera_frames_while_publishing(monkeypatch
 
 class _FakeBridge:
     def __init__(self) -> None:
-        self.operator_buttons: list[str] = []
+        self.operator_actions: list[str] = []
         self.hil_messages: list[tuple[str, np.ndarray]] = []
         self.command_messages: list[tuple[str, np.ndarray]] = []
 
-    def publish_operator_button(self, label: str) -> None:
-        self.operator_buttons.append(label)
+    def publish_operator_action(self, action: str) -> None:
+        self.operator_actions.append(action)
 
     def publish_hil(self, group_name: str, positions: np.ndarray) -> None:
         self.hil_messages.append((group_name, np.asarray(positions, dtype=np.float32)))

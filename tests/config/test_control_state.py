@@ -149,13 +149,11 @@ class _CollectionTransport:
             return HilStatus(supported=True, error=self.hil_start_error)
         self.reset_hil_control()
         self.set_hil_control_mode(mode)
-        self.start_collection()
         self.set_hil_relay_enabled(True)
         return HilStatus(supported=True, active=True)
 
     def stop_hil_control(self) -> HilStatus:
         self.set_hil_relay_enabled(False)
-        self.stop_collection()
         return HilStatus(supported=True, active=False)
 
     def get_hil_frame(self) -> Observation | None:
@@ -190,6 +188,33 @@ class _ActiveRolloutLogger:
 
     def cancel_episode(self, _reason: str) -> None:
         raise AssertionError("active rollout should not be cancelled")
+
+
+class _RolloutLifecycleLogger:
+    has_active_episode = False
+    active_frame_count = 3
+
+    def __init__(self) -> None:
+        self.started_tasks = []
+        self.cancelled = []
+        self.segments = []
+        self.ended = 0
+
+    def start_episode(self, task: str) -> None:
+        self.has_active_episode = True
+        self.started_tasks.append(task)
+
+    def cancel_episode(self, reason: str) -> None:
+        self.has_active_episode = False
+        self.cancelled.append(reason)
+
+    def set_rollout_intervention_segments(self, segments) -> None:
+        self.segments = list(segments)
+
+    def end_episode(self) -> bool:
+        self.has_active_episode = False
+        self.ended += 1
+        return True
 
 
 class _RawEpisodeLogger:
@@ -395,18 +420,62 @@ def test_collect_stop_reports_collection_diagnostics(caplog):
     assert session.last_error in caplog.text
 
 
-def test_start_rollout_intervention_starts_transport_collection():
+def test_start_rollout_intervention_does_not_restart_transport_collection():
     runtime, session = _runtime_and_session()
     runtime.rollout_intervention_enabled = True
 
     assert recording.start_rollout_intervention(_config(), runtime, session) is True
     assert runtime.rollout_intervention_active is True
-    assert runtime.transport.started == 1
-    assert runtime.transport.cleared == 1
+    assert runtime.transport.started == 0
+    assert runtime.transport.cleared == 0
     assert runtime.transport.hil_resets == 1
     assert runtime.transport.hil_relay_enabled == [True]
     np.testing.assert_allclose(runtime.rollout_intervention_pre_qpos, [0.1, 0.2])
     assert runtime.rollout_intervention_active_segment is not None
+
+
+def test_rollout_episode_starts_collection_before_policy_capture(monkeypatch):
+    runtime, session = _runtime_and_session()
+    episode_logger = _RolloutLifecycleLogger()
+    runtime.rollout_episode_logger = episode_logger
+    session.selected_task = "pick"
+    monkeypatch.setattr(recording, "maybe_build_rollout_episode_logger", lambda *args: None)
+
+    recording.begin_rollout_save_episode(_config(), runtime, session)
+
+    assert runtime.transport.started == 1
+    assert runtime.transport.cleared == 1
+    assert episode_logger.started_tasks == ["pick"]
+    recording.stop_collection_capture(runtime)
+
+
+def test_rollout_ui_save_stops_collection_and_persists_whole_episode():
+    runtime, session = _runtime_and_session()
+    episode_logger = _RolloutLifecycleLogger()
+    episode_logger.has_active_episode = True
+    runtime.rollout_episode_logger = episode_logger
+    runtime.rollout_save_ready = True
+
+    saved = recording.save_rollout_episode(runtime, session)
+
+    assert saved is True
+    assert runtime.transport.stopped == 1
+    assert episode_logger.ended == 1
+    assert runtime.rollout_save_ready is False
+
+
+def test_rollout_reset_discards_episode_and_stops_collection():
+    runtime, _session = _runtime_and_session()
+    episode_logger = _RolloutLifecycleLogger()
+    episode_logger.has_active_episode = True
+    runtime.rollout_episode_logger = episode_logger
+    runtime.rollout_save_ready = True
+
+    recording.discard_rollout_episode(runtime)
+
+    assert runtime.transport.stopped == 1
+    assert episode_logger.cancelled == ["user reset"]
+    assert runtime.rollout_save_ready is False
 
 
 def test_start_rollout_intervention_refuses_when_hil_off():
@@ -451,25 +520,25 @@ def test_start_rollout_intervention_resets_policy_strategy():
     assert strategy.resets == 1
 
 
-def test_start_rollout_intervention_clears_collection_backlog():
+def test_start_rollout_intervention_preserves_collection_backlog():
     runtime, session = _runtime_and_session()
     runtime.rollout_intervention_enabled = True
 
     assert recording.start_rollout_intervention(_config(), runtime, session) is True
     assert runtime.rollout_intervention_active is True
-    assert runtime.transport.started == 1
-    assert runtime.transport.cleared == 1
+    assert runtime.transport.started == 0
+    assert runtime.transport.cleared == 0
     assert runtime.transport.hil_resets == 1
     assert runtime.rollout_intervention_active_segment is not None
 
 
-def test_stop_rollout_intervention_disables_hil_relay():
+def test_stop_rollout_intervention_disables_only_hil_relay():
     runtime, session = _runtime_and_session()
     runtime.rollout_intervention_active = True
 
     assert recording.stop_rollout_intervention(_config(), runtime, session, required=True) is True
 
-    assert runtime.transport.stopped == 1
+    assert runtime.transport.stopped == 0
     assert runtime.rollout_intervention_active is False
     assert runtime.transport.hil_relay_enabled == [False]
 
@@ -604,14 +673,14 @@ def test_rollout_intervention_enabled_command_updates_runtime_flag():
     assert session.last_error == ""
 
 
-def test_operator_button_interrupt_respects_runtime_hil_off():
+def test_intervention_action_interrupt_respects_runtime_hil_off():
     runtime, session = _runtime_and_session()
     session.mode = SessionMode.REAL
     session.status = SessionStatus.RUNNING
     runtime.rollout_episode_logger = _ActiveRolloutLogger()
     runtime.rollout_intervention_enabled = False
     runtime.command_queue = queue.Queue()
-    runtime.command_queue.put("web:operator_button:x:cat")
+    runtime.command_queue.put("web:operator_action:intervention_toggle:external")
 
     interrupted = control.poll_motion_commands(
         _config(),
@@ -626,14 +695,14 @@ def test_operator_button_interrupt_respects_runtime_hil_off():
     assert runtime.transport.started == 0
 
 
-def test_operator_button_interrupts_sync_motion_and_starts_intervention():
+def test_intervention_action_interrupts_sync_motion_and_starts_intervention():
     runtime, session = _runtime_and_session()
     session.mode = SessionMode.REAL
     session.status = SessionStatus.RUNNING
     runtime.rollout_episode_logger = _ActiveRolloutLogger()
     runtime.rollout_intervention_enabled = True
     runtime.command_queue = queue.Queue()
-    runtime.command_queue.put("web:operator_button:x:cat")
+    runtime.command_queue.put("web:operator_action:intervention_toggle:external")
 
     interrupted = control.poll_motion_commands(
         _config(),
@@ -645,8 +714,8 @@ def test_operator_button_interrupts_sync_motion_and_starts_intervention():
     assert session.interrupt_requested is True
     assert runtime.rollout_intervention_active is True
     assert runtime.rollout_save_ready is True
-    assert runtime.transport.started == 1
-    assert runtime.transport.cleared == 1
+    assert runtime.transport.started == 0
+    assert runtime.transport.cleared == 0
 
 
 def test_rollout_stop_stops_without_starting_new_intervention():
@@ -701,6 +770,55 @@ def test_rollout_save_rejects_active_intervention(monkeypatch):
     assert session.last_error == "Continue or abandon the active intervention before saving"
 
 
+def test_rollout_save_button_stops_running_policy_and_saves(monkeypatch):
+    calls = []
+    runtime, session = _runtime_and_session()
+    runtime.rollout_episode_logger = _ActiveRolloutLogger()
+    session.mode = SessionMode.REAL
+    session.status = SessionStatus.RUNNING
+    monkeypatch.setattr(
+        app,
+        "save_rollout_episode",
+        lambda runtime, session: calls.append((session.status, runtime.rollout_save_ready)) or True,
+    )
+    monkeypatch.setattr(
+        app,
+        "run_reset",
+        lambda config, runtime, session: calls.append(("reset", session.status)),
+    )
+
+    app.handle_command("web:rollout_save", _config(), runtime, session)
+
+    assert calls == [(SessionStatus.READY, True), ("reset", SessionStatus.READY)]
+
+
+def test_rollout_save_failure_does_not_reset(monkeypatch):
+    calls = []
+    runtime, session = _runtime_and_session()
+    session.mode = SessionMode.REAL
+    session.status = SessionStatus.READY
+    monkeypatch.setattr(app, "save_rollout_episode", lambda runtime, session: False)
+    monkeypatch.setattr(app, "run_reset", lambda *args: calls.append("reset"))
+
+    app.handle_command("web:rollout_save", _config(), runtime, session)
+
+    assert calls == []
+
+
+def test_rollout_save_interrupts_sync_policy_and_requeues_save():
+    runtime, session = _runtime_and_session()
+    runtime.rollout_episode_logger = _ActiveRolloutLogger()
+    runtime.command_queue = queue.Queue()
+    session.mode = SessionMode.REAL
+    session.status = SessionStatus.RUNNING
+    runtime.command_queue.put("web:rollout_save")
+
+    assert control.poll_motion_commands(_config(), runtime, session) is True
+
+    assert runtime.rollout_save_ready is True
+    assert runtime.command_queue.get_nowait() == "web:rollout_save"
+
+
 def test_record_executed_action_uses_raw_snapshot_without_get_frame():
     transport = _RawTransport()
     logger = _RawEpisodeLogger()
@@ -715,3 +833,26 @@ def test_record_executed_action_uses_raw_snapshot_without_get_frame():
     assert logger.raw[0][0].timestamp == 1.0
     np.testing.assert_allclose(logger.raw[0][1], action)
     np.testing.assert_allclose(logger.raw[0][2], [3.0, 4.0])
+
+
+def test_record_executed_action_waits_for_raw_snapshot():
+    class _DelayedRawTransport(_RawTransport):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        def acquire_collection_raw(self) -> RawCollectionSnapshot | None:
+            self.calls += 1
+            if self.calls == 1:
+                return None
+            return super().acquire_collection_raw()
+
+    transport = _DelayedRawTransport()
+    logger = _RawEpisodeLogger()
+    runtime = RuntimeState(robot=_robot(), transport=transport)
+    runtime.rollout_episode_logger = logger
+
+    recording.record_executed_action(_config(), SessionState(), np.array([1.0, 2.0]), runtime)
+
+    assert transport.calls >= 2
+    assert len(logger.raw) == 1

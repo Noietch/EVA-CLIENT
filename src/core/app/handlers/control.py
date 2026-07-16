@@ -40,7 +40,7 @@ from core.app.handlers.utils import (
     reset_run_state,
     reset_session_progress,
 )
-from core.app.operator_control import resolve_operator_event
+from core.app.operator_control import resolve_operator_action
 from core.app.state import (
     OutputTarget,
     RuntimeState,
@@ -454,27 +454,12 @@ def handle_motion_command(
     # is what lets a mode switch abort an in-progress setup instead of being dropped.
     raw_verb = command.strip().lower().removeprefix("web:")
     verb, _, arg = raw_verb.partition(":")
-    if verb == "operator_button":
-        button, _, source = arg.partition(":")
-        resolved_command = resolve_operator_event(
-            config,
-            runtime,
-            session,
-            button=button,
-            source=source or "cat",
-        )
-        return (
-            resolved_command is not None
-            and resolved_command != command
-            and handle_motion_command(resolved_command, config, runtime, session)
-        )
     if verb == "operator_action":
-        intent, _, source = arg.partition(":")
-        resolved_command = resolve_operator_event(
-            config,
+        action, _, source = arg.partition(":")
+        resolved_command = resolve_operator_action(
             runtime,
             session,
-            intent=intent,
+            action,
             source=source or "ui",
         )
         return (
@@ -492,6 +477,19 @@ def handle_motion_command(
         if was_running and not is_replay(runtime):
             mark_rollout_save_ready(runtime, "stop")
         return True
+    if verb == "rollout_save":
+        was_running = session.status is SessionStatus.RUNNING and session.mode in (
+            SessionMode.REAL,
+            SessionMode.SIM,
+        )
+        if not was_running or is_replay(runtime):
+            return False
+        session.interrupt_requested = True
+        mark_rollout_save_ready(runtime, "save")
+        if runtime.command_queue is not None:
+            runtime.command_queue.put(command)
+        logger.info("Rollout save requested; stopping current motion")
+        return True
     if verb == "halt":
         was_running = session.status is SessionStatus.RUNNING and session.mode in (
             SessionMode.REAL,
@@ -501,10 +499,7 @@ def handle_motion_command(
         logger.info("Interrupt requested; stopping current motion")
         if was_running and not is_replay(runtime):
             mark_rollout_save_ready(runtime, "stop")
-            if (
-                session.mode is SessionMode.REAL
-                and runtime.rollout_intervention_enabled
-            ):
+            if session.mode is SessionMode.REAL and runtime.rollout_intervention_enabled:
                 start_rollout_intervention(config, runtime, session)
         return True
     if verb == "stop" and runtime.web_phase == "running":
@@ -1198,11 +1193,10 @@ def update_inference_params(
         spec = strategies[key]
         merged = dict(spec.get("args") or {})
         merged.update({k: v for k, v in args.items() if v is not None})
-        strategies[key] = StrategyYamlSpec(
-            type=spec["type"], args=cast(StrategyYamlArgs, merged)
-        )
+        strategies[key] = StrategyYamlSpec(type=spec["type"], args=cast(StrategyYamlArgs, merged))
 
     import copy
+
     new_config = copy.deepcopy(config)
     new_config.inference_cfg.inference_rate = float(
         params.get("inference_rate", config.inference_cfg.inference_rate)
@@ -1314,9 +1308,7 @@ def select_task(
         return
     session.selected_task = task
     reset_run_state(config, runtime, session)
-    logger.info(
-        "Selected task %s; status is now unset", format_task_label(session.selected_task)
-    )
+    logger.info("Selected task %s; status is now unset", format_task_label(session.selected_task))
 
 
 __all__ = [

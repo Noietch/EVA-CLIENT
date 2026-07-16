@@ -14,6 +14,8 @@ from transport.base import resolve_topics
 
 _CONFIGS_DIR = Path(__file__).resolve().parents[2] / "configs"
 _DEFAULTS = _CONFIGS_DIR / "00_base" / "defaults.py"
+
+
 def _write_config(path: Path, body: str) -> Path:
     """Write a .py config inheriting the real defaults via an absolute ``_base_``."""
     path.write_text(f"_base_ = [{str(_DEFAULTS)!r}]\n{body}", encoding="utf-8")
@@ -126,7 +128,7 @@ def test_operator_control_defaults_disabled():
     cfg = load_config(_CONFIGS_DIR / "00_base" / "defaults.py")
 
     assert cfg.operator_control.enabled is False
-    assert cfg.operator_control.button_topic == "/eva/operator_button"
+    assert cfg.operator_control.action_topic == "/eva/operator_action"
 
 
 def test_r1lite_enables_operator_control():
@@ -134,7 +136,7 @@ def test_r1lite_enables_operator_control():
 
     assert "hardware" not in cfg
     assert cfg.operator_control.enabled is True
-    assert cfg.operator_control.button_topic == "/eva/operator_button"
+    assert cfg.operator_control.action_topic == "/eva/operator_action"
     assert cfg.rollout.storage.image_height == 360
     assert cfg.rollout.storage.image_width == 640
 
@@ -143,7 +145,7 @@ def test_r1lite_collection_enables_operator_control():
     cfg = load_config(_CONFIGS_DIR / "02_collection" / "r1lite.py")
 
     assert cfg.operator_control.enabled is True
-    assert cfg.operator_control.button_topic == "/eva/operator_button"
+    assert cfg.operator_control.action_topic == "/eva/operator_action"
 
 
 def test_load_eval_config_resolves_checkpoints():
@@ -197,11 +199,7 @@ def test_collection_schema_requires_cameras(tmp_path):
 
 @pytest.mark.parametrize(
     "preset",
-    sorted(
-        str(p)
-        for p in _CONFIGS_DIR.glob("01_deploy/**/*.py")
-        if not p.name.startswith("_")
-    ),
+    sorted(str(p) for p in _CONFIGS_DIR.glob("01_deploy/**/*.py") if not p.name.startswith("_")),
 )
 def test_all_deploy_presets_load_without_error(preset):
     cfg = load_config(preset)

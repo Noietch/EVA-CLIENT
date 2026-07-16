@@ -1269,59 +1269,6 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             return
         self._send_json(200, payload)
 
-    def _post_rollout_review_episode(self, body: dict) -> None:
-        runtime = self.ctx.runtime
-        dataset_dir = _resolve_dataset_dir(str(body.get("dataset_dir", "")).strip())
-        episode_index = int(body.get("episode", 0))
-        try:
-            source, video_keys = _open_review_episode(self.ctx, dataset_dir, episode_index)
-            try:
-                qpos = np.asarray(
-                    [source.get_scene_qpos(i) for i in range(source.n_steps)],
-                    dtype=np.float32,
-                )
-                fps = source.fps
-                task = source.current_task
-            finally:
-                source.close()
-        except Exception as error:
-            self._send_json(404, {"ok": False, "error": str(error)})
-            return
-        if len(qpos) == 0:
-            self._send_json(404, {"ok": False, "error": "episode has no frames"})
-            return
-        runtime.collection_replay_qpos = qpos
-        runtime.collection_replay_episode = episode_index
-        runtime.collection_replay_started = 0.0
-        runtime.collection_replay_fps = max(
-            1, int(round(fps or self.ctx.config.inference_cfg.publish_rate))
-        )
-        self._invalidate_scene_cache()
-        self._send_json(
-            200,
-            {
-                "ok": True,
-                "episode": episode_index,
-                "frames": int(qpos.shape[0]),
-                "fps": runtime.collection_replay_fps,
-                "task": task,
-                "video_keys": video_keys,
-            },
-        )
-
-    def _start_review_replay(self, body: dict) -> None:
-        runtime = self.ctx.runtime
-        episode_index = int(body.get("episode", runtime.collection_replay_episode or 0))
-        if (
-            runtime.collection_replay_qpos is None
-            or runtime.collection_replay_episode != episode_index
-        ):
-            self._send_json(404, {"ok": False, "error": "review episode unavailable"})
-            return
-        runtime.collection_replay_started = time.monotonic()
-        self._invalidate_scene_cache()
-        self._send_json(200, {"ok": True, "episode": episode_index})
-
     def _eval_start(self, body: dict) -> None:
         # EVAL tab "RUN": bind a fresh clip_id + prompt/trial to this run. The recorder
         # stamps these onto the episode's meta at web:start (set_episode_meta), so the
@@ -2604,8 +2551,6 @@ _POST_ROUTES = {
     "/api/collect_replay": ConsoleRequestHandler._start_collection_replay,
     "/api/exit_collect_replay": ConsoleRequestHandler._post_exit_collection_replay,
     "/api/review_episode": ConsoleRequestHandler._post_review_episode,
-    "/api/rollout_review_episode": ConsoleRequestHandler._post_rollout_review_episode,
-    "/api/review_replay_start": ConsoleRequestHandler._start_review_replay,
     "/api/select_task": ConsoleRequestHandler._post_select_task,
     "/api/select_collect_task": ConsoleRequestHandler._post_select_collect_task,
     "/api/select_episode": ConsoleRequestHandler._post_select_episode,

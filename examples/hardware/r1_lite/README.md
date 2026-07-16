@@ -11,7 +11,7 @@ fixed-clock dataset save logic; robot startup details stay here.
 - `run_fake_node.sh`: starts the local ROS2 fake camera and robot processes.
 - `fake_node.py`: ROS2-only R1 Lite fake publishers/subscribers and control UI.
 - `cat_operator_button.py`: CAT-side ROS2 bridge from Joy-Con buttons to
-  `/eva/operator_button`.
+  semantic actions on `/eva/operator_action`.
 - `reset_torso.py`: publishes the fixed R1 Lite torso pose.
 
 ## Real Hardware
@@ -46,7 +46,7 @@ CAT host: tmux session eva_r1lite_teleop
     /tabletop/hdas/feedback_arm_left:=/eva/hil/input_joint_state_arm_left
     /tabletop/hdas/feedback_arm_right:=/eva/hil/input_joint_state_arm_right
   ros2 launch joycon_evdev_publisher joy_evdev_launch.py
-  python3 /tmp/eva_cat_operator_button.py --topic /eva/operator_button
+  python3 /tmp/eva_cat_operator_button.py --topic /eva/operator_action
 ```
 
 `run_hardware.sh` writes `/tmp/eva_r1lite_body_no_teleop_bootstrap` on the R1
@@ -181,22 +181,25 @@ eva --config configs/01_deploy/r1lite/openpi_qpos.py --web-port 8080
 
 ## Operator Buttons
 
-`cat_operator_button.py` subscribes to CAT Joy topics and publishes string events
-to `/eva/operator_button`:
+`cat_operator_button.py` owns the physical layout and publishes device-independent
+actions to `/eva/operator_action`:
 
 ```text
-right Joy button 2 -> x
-right Joy button 3 -> y
-left Joy button 4  -> left_gripper_open
-left Joy button 5  -> left_gripper_close
-right Joy button 4 -> right_gripper_open
-right Joy button 5 -> right_gripper_close
+right Joy button 0 -> rollout_toggle
+right Joy button 1 -> rollout_reset
+right Joy button 2 -> intervention_toggle
+right Joy button 3 -> intervention_accept
+left Joy button 4  -> gripper_left_open
+left Joy button 5  -> gripper_left_close
+right Joy button 4 -> gripper_right_open
+right Joy button 5 -> gripper_right_close
 ```
 
-EVA maps `x` / `y` according to the current state: collect start/stop/cancel,
-rollout intervention continue/abandon, or rollout save. Gripper labels route to
-the normal EVA gripper commands. During rollout, HIL is off by default; turn HIL
-ON before pressing CAT X to enter intervention.
+For rollout, `a` starts an idle rollout and saves an active rollout, then resets
+the robot; `b` resets the robot and discards the active rollout. `x` starts or
+abandons the current intervention segment, while `y` accepts it and resumes the
+policy. Gripper labels route to the normal EVA gripper commands. HIL is off by
+default; turn HIL ON before pressing CAT X to enter intervention.
 
 ## Cleanup
 

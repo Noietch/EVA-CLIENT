@@ -4,9 +4,7 @@ import { $, LIVE, S, apiGet, apiPost, clientTrace } from "./core.js";
 import { updateScrub } from "./charts.js";
 import { collectTaskValue, setPanel, applyStatus, uiMode } from "./run.js";
 import {
-  exitReplayMode, loadReviewPlayback, mountEpisodeVideos, playStageVideos,
-  refreshCameraStreams, replayStop, waitForStageVideosPainted,
-  waitForStageVideosReady,
+  exitReplayMode, loadReviewPlayback, refreshCameraStreams, replayStop,
 } from "./replay.js";
 import { setActiveTab } from "./main.js";
 
@@ -242,18 +240,15 @@ function renderRolloutSave() {
           ? `continue or abandon intervention · active ${activeInterventionFrames}f · accepted ${acceptedInterventions}`
           : (saveReady ? `ready after ${rollout.reason || "stop"}` : ""))
       : "rollout saving is disabled";
-    $("b-rollout-save").disabled = !enabled || !saveReady || running || saveBlocked;
+    const hasFrames = Number(rollout.current_episode_frames || 0) > 0;
+    $("b-rollout-save").disabled = !enabled || (!saveReady && !running) || !hasFrames || saveBlocked;
     $("b-rollout-qc-pass").disabled = !enabled || S.rolloutSaveEpisode == null;
     $("b-rollout-qc-fail").disabled = !enabled || S.rolloutSaveEpisode == null;
 
     renderRolloutSaveTiles(items);
     renderRolloutSaveList(items);
 
-    const replay = S.STATUS.collection_replay || {};
-    if (S.reviewKind === "rollout" && replay.active && replay.episode_index != null) {
-      S.rolloutSaveEpisode = replay.episode_index;
-      $("rollout-review-title").textContent = `episode ${replay.episode_index} · replay`;
-    } else if (S.rolloutSaveEpisode == null) {
+    if (S.rolloutSaveEpisode == null) {
       $("rollout-review-title").textContent = "no rollout selected";
     }
   }
@@ -391,7 +386,7 @@ function clearReviewPlayback() {
   }
 
 function showReviewError(kind, message) {
-    LIVE.replayOwner = "collect";
+    LIVE.replayOwner = kind;
     LIVE.replayMode = true;
     LIVE.replayLoading = false;
     LIVE.replayError = message;
@@ -405,6 +400,7 @@ function showReviewError(kind, message) {
 
 function returnReviewToLive() {
     S.collectReplayEpisode = null;
+    S.rolloutSaveEpisode = null;
     clearReviewPlayback();
     exitReplayMode();
     refreshCameraStreams();
@@ -449,7 +445,7 @@ async function reviewCollectEpisode(item) {
       showReviewError("collect", r.error || "review failed");
       return;
     }
-    const started = await loadReviewPlayback({ ...r, dataset_dir: reviewDatasetDir });
+    const started = await loadReviewPlayback({ ...r, dataset_dir: reviewDatasetDir }, "collect");
     if (requestId !== reviewRequestId) return;
     if (!started) {
       clientTrace("review.collect.error", {
@@ -471,42 +467,31 @@ async function reviewRolloutEpisode(item) {
     reviewTask = "";
     reviewDatasetDir = reviewDatasetFor("rollout");
     reviewEpisodeId = episode;
+    LIVE.replayOwner = "rollout";
+    LIVE.replayMode = true;
+    LIVE.replayLoading = true;
+    LIVE.replayError = "";
+    updateScrub();
     const title = reviewTitleFor("rollout");
     const err = reviewErrorFor("rollout");
     if (title) title.textContent = `episode ${episode} · loading`;
     if (err) err.textContent = "";
-    const r = await apiPost("/api/rollout_review_episode", {
+    const r = await apiPost("/api/review_episode", {
       dataset_dir: reviewDatasetDir,
       episode: String(reviewEpisodeId),
     });
     if (requestId !== reviewRequestId) return;
     if (!r.ok) {
-      if (err) err.textContent = r.error || "review failed";
-      if (title) title.textContent = `episode ${episode} · unavailable`;
+      showReviewError("rollout", r.error || "review failed");
       return;
     }
-    const reviewVideoKeys = r.video_keys || {};
-    mountEpisodeVideos({
-      datasetDir: reviewDatasetDir,
-      episodeId: reviewEpisodeId,
-      videoKeys: reviewVideoKeys,
-    });
-    await waitForStageVideosReady();
+    const started = await loadReviewPlayback({ ...r, dataset_dir: reviewDatasetDir }, "rollout");
     if (requestId !== reviewRequestId) return;
-    await waitForStageVideosPainted();
-    if (requestId !== reviewRequestId) return;
-    const start = await apiPost("/api/review_replay_start", {
-      episode: String(reviewEpisodeId),
-    });
-    if (requestId !== reviewRequestId) return;
-    if (!start.ok) {
-      if (err) err.textContent = start.error || "review start failed";
-      if (title) title.textContent = `episode ${episode} · unavailable`;
+    if (!started) {
+      showReviewError("rollout", LIVE.replayError || "review playback failed");
       return;
     }
-    playStageVideos();
     if (title) title.textContent = `episode ${episode} · review`;
-    applyStatus(await apiGet("/api/status"));
   }
 
 async function submitEpisodeQc(kind, verdict) {

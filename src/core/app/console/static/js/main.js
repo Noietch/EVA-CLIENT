@@ -30,7 +30,8 @@ function relocateCanvas(tab) {
     else host = $("view-" + tab);
     if (host && stage.parentElement !== host) host.appendChild(stage);
     const showSeries = tab === "replay" ||
-      (tab === "collect" && LIVE.replayOwner === "collect");
+      (tab === "collect" && LIVE.replayOwner === "collect") ||
+      (tab === "debug" && LIVE.replayOwner === "rollout");
     stage.classList.toggle("no-series", !showSeries);
     if (window.Scene3D && Scene3D.resize) requestAnimationFrame(() => Scene3D.resize());
     if (typeof drawLiveCharts === "function") requestAnimationFrame(() => drawLiveCharts());

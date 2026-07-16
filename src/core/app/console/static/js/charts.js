@@ -80,6 +80,24 @@ function setScrubValue(frac) {
     range.style.setProperty("--pct", pct.toFixed(2) + "%");
   }
 
+function interventionTrackGradient() {
+    if (LIVE.intervention.length !== LIVE.n || !LIVE.intervention.some(Boolean)) return "";
+    const stops = [];
+    let start = 0;
+    let active = !!LIVE.intervention[0];
+    for (let i = 1; i <= LIVE.n; i++) {
+      const next = i < LIVE.n ? !!LIVE.intervention[i] : !active;
+      if (i < LIVE.n && next === active) continue;
+      const from = (start / LIVE.n * 100).toFixed(3);
+      const to = (i / LIVE.n * 100).toFixed(3);
+      const color = active ? "var(--accent)" : "var(--rule-strong)";
+      stops.push(`${color} ${from}%`, `${color} ${to}%`);
+      start = i;
+      active = next;
+    }
+    return `linear-gradient(to right, ${stops.join(", ")})`;
+  }
+
 function updateScrubText() {
     const idx = LIVE.replayMode && LIVE.cursorFrac != null
       ? LIVE.cursorFrac
@@ -97,9 +115,14 @@ function updateScrub() {
     const stage = $("stage");
     if (stage && S.ACTIVE_TAB === "collect") {
       stage.classList.toggle("no-series", LIVE.replayOwner !== "collect");
+    } else if (stage && S.ACTIVE_TAB === "debug") {
+      stage.classList.toggle("no-series", LIVE.replayOwner !== "rollout");
     }
     range.max = String(Math.max(LIVE.n - 1, 0));
     range.step = "0.01";   // fine step so the thumb can glide between frames
+    const controlTrack = interventionTrackGradient();
+    range.style.setProperty("--control-track", controlTrack);
+    range.classList.toggle("has-intervention", !!controlTrack);
     // The local play button only makes sense in REPLAY mode; a REAL run owns the cursor
     // (chase-the-hardware), so hide it there to keep playback authority with the robot.
     const playBtn = $("scrub-play");
@@ -112,13 +135,15 @@ function updateScrub() {
     }
     const returnLive = $("review-return-live");
     if (returnLive) {
-      returnLive.style.display = LIVE.replayOwner === "collect" ? "" : "none";
+      returnLive.style.display = ["collect", "rollout"].includes(LIVE.replayOwner) ? "" : "none";
     }
     if (LIVE.replayMode) {
       bar.classList.remove("live");
       stateEl.textContent = LIVE.replayOwner === "collect"
         ? `REVIEW · EPISODE ${S.collectReplayEpisode}`
-        : "REPLAY";
+        : (LIVE.replayOwner === "rollout"
+            ? `REVIEW · EPISODE ${S.rolloutSaveEpisode}`
+            : "REPLAY");
       range.disabled = LIVE.replayLoading || LIVE.n === 0;
       setScrubValue(LIVE.cursorFrac != null ? LIVE.cursorFrac : LIVE.cursor);
     } else if (LIVE.following) {
@@ -152,6 +177,7 @@ function onScrubInput(v) {
 function resetLiveSeries() {
     LIVE.timestamp = []; LIVE.playTime = []; LIVE.action = []; LIVE.state = []; LIVE.n = 0;
     LIVE.actionNames = []; LIVE.stateNames = [];
+    LIVE.controlSource = []; LIVE.intervention = []; LIVE.interventionSegmentIndex = [];
     LIVE.dimsOnA = {}; LIVE.dimsOnS = {}; LIVE.dimsBuilt = false;
     LIVE.following = true; LIVE.cursor = 0;
     renderLiveDims("chart-action-dims", 0, LIVE.dimsOnA, "a");

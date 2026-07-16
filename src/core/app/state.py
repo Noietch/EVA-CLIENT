@@ -16,7 +16,7 @@ import numpy as np
 
 from core.config import ConfigDict
 from core.recorder.episode import EpisodeLogger
-from core.types import RolloutInterventionSegment
+from core.types import RawCollectionSnapshot, RolloutInterventionSegment
 from policy_client.base import PolicyClient
 from robots.base import Robot
 from strategy.base_strategy import BaseInferStrategy
@@ -149,6 +149,8 @@ class RuntimeState:
         last_collection_timestamp: Timestamp of the last recorded collection frame.
         collection_capture_runner: Background raw snapshot capture loop for the
             active collection episode.
+        rollout_raw_snapshots: Raw snapshots buffered for policy rollout recording.
+        rollout_policy_actions: Policy actions captured independently from raw snapshots.
         collection_replay_qpos: qpos sequence loaded for collection replay.
         collection_replay_episode: Episode index currently loaded for collection replay.
         collection_replay_started: Monotonic timestamp when collection replay started.
@@ -225,6 +227,12 @@ class RuntimeState:
     collection_teleop_active: bool = False
     last_collection_timestamp: float | None = None
     collection_capture_runner: CollectionCaptureRunner | None = None
+    rollout_raw_snapshots: queue.Queue[RawCollectionSnapshot] = dataclasses.field(
+        default_factory=queue.Queue
+    )
+    rollout_policy_actions: list[
+        tuple[float, np.ndarray, np.ndarray | None, np.ndarray | None, np.ndarray | None]
+    ] = dataclasses.field(default_factory=list)
     collection_replay_qpos: np.ndarray | None = None
     collection_replay_episode: int | None = None
     collection_replay_started: float = 0.0

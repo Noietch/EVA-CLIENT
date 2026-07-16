@@ -217,39 +217,55 @@ class Ros2Transport(_RosTransportBase):
             return status
         self.set_hil_control_mode(mode)
         self.set_hil_relay_enabled(True)
-        self.start_collection()
         return self.hil_status()
 
     def stop_hil_control(self) -> HilStatus:
         self.set_hil_relay_enabled(False)
-        self.stop_collection()
         return self.hil_status()
 
     def get_hil_frame(self) -> Observation | None:
-        frame = self.get_collection_frame()
-        if frame is not None:
-            return frame
-        frame = self.get_frame()
-        if frame is None:
-            return None
+        state_parts: list[np.ndarray] = []
         action_parts: list[np.ndarray] = []
+        state_timestamps: list[float] = []
         for group in self._robot.actuator_groups:
             command = self._last_group_joint_commands.get(group.name)
-            state = self._latest_group_qpos(group)
-            if command is None or state is None:
+            state_msg = self._latest_group_qpos_msg(group)
+            if command is None:
                 return None
+            if state_msg is None:
+                state = self._latest_group_qpos(group)
+                if state is None:
+                    return None
+                state_timestamps.append(0.0)
+                state_has_gripper = group.gripper_index is not None and state.shape[0] == group.dof
+            else:
+                state_timestamps.append(_stamp_to_sec(state_msg))
+                state = np.asarray(state_msg.position, dtype=np.float32)
+                state_has_gripper = False
+            if group.gripper_index is not None and not state_has_gripper:
+                gripper_feedback = self._latest_group_gripper_feedback(group)
+                if gripper_feedback is None:
+                    return None
+                state = np.insert(state, group.gripper_index, gripper_feedback).astype(np.float32)
+            state_parts.append(state)
             if command.shape[0] == group.dof:
                 action_parts.append(command.copy())
                 continue
             if group.gripper_index is None or command.shape[0] != group.dof - 1:
                 return None
+            gripper = self._last_group_gripper_commands.get(group.name)
+            if gripper is None:
+                gripper = float(state[group.gripper_index])
             action_parts.append(
-                np.insert(command, group.gripper_index, state[group.gripper_index]).astype(
-                    np.float32
-                )
+                np.insert(command, group.gripper_index, gripper).astype(np.float32)
             )
-        frame.action_qpos = np.concatenate(action_parts)
-        return frame
+        state_qpos = np.concatenate(state_parts).astype(np.float32)
+        return Observation(
+            images={},
+            state_qpos=state_qpos,
+            action_qpos=np.concatenate(action_parts).astype(np.float32),
+            timestamp=max(state_timestamps),
+        )
 
     def _init_ros(self) -> None:
         schema = self._robot.observation_schema

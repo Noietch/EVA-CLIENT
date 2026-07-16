@@ -16,6 +16,7 @@ import numpy as np
 
 from core.app.console.server import start_console_server
 from core.app.handlers import (
+    COLLECT_STEP_MAX_RAW_SNAPSHOTS,
     _anchor_buffer_to_current_qpos,
     accept_rollout_intervention_segment,
     begin_rollout_save_episode,
@@ -27,6 +28,7 @@ from core.app.handlers import (
     collect_stop,
     collect_stop_teleop,
     connect_policy,
+    discard_rollout_episode,
     discard_rollout_intervention_segment,
     disconnect_policy,
     enable_default_recording,
@@ -61,16 +63,18 @@ from core.app.handlers import (
     set_gripper_open_close,
     set_manual_qpos,
     set_replay_fps,
+    start_collection_capture,
     start_episode,
     start_inference_loop,
     start_rollout_intervention,
+    stop_collection_capture,
     stop_rollout_intervention,
     toggle_gripper_immediate,
     update_inference_params,
 )
 from core.app.operator_control import (
-    maybe_start_operator_button_listener,
-    resolve_operator_event,
+    maybe_start_operator_action_listener,
+    resolve_operator_action,
 )
 from core.app.state import (
     RuntimeState,
@@ -180,6 +184,7 @@ def _activate_ckpt_slot(
     """
     ckpt = eval_cfg.checkpoints[runtime.ckpt_order[slot]]
     import copy
+
     config = copy.deepcopy(ckpt.config)
     config.eval = eval_cfg
     runtime.active_config = config
@@ -476,26 +481,12 @@ def _handle_web_command(
     # --- console verbs (eval-independent; drive the debug mainline directly) ---
 
     if verb == "operator_action":
-        intent, _, source = arg.partition(":")
-        resolved_command = resolve_operator_event(
-            config,
+        action, _, source = arg.partition(":")
+        resolved_command = resolve_operator_action(
             runtime,
             session,
-            intent=intent,
+            action,
             source=source or "ui",
-        )
-        if resolved_command is not None:
-            handle_command(resolved_command, config, runtime, session)
-        return
-
-    if verb == "operator_button":
-        button, _, source = arg.partition(":")
-        resolved_command = resolve_operator_event(
-            config,
-            runtime,
-            session,
-            button=button,
-            source=source or "cat",
         )
         if resolved_command is not None:
             handle_command(resolved_command, config, runtime, session)
@@ -600,6 +591,12 @@ def _handle_web_command(
             session.chunk_index = 0
             if not run_warmup_and_start(config, runtime, session):
                 return
+            if runtime.collection_capture_runner is None:
+                start_collection_capture(
+                    runtime,
+                    fps=config.inference_cfg.publish_rate,
+                    max_raw_snapshots_per_tick=COLLECT_STEP_MAX_RAW_SNAPSHOTS,
+                )
             session.run_start_time = time.monotonic()
             set_status(session, SessionStatus.RUNNING, reason="resume after teleop intervention")
             return
@@ -642,10 +639,7 @@ def _handle_web_command(
         _dispatch_halt(config, runtime, session)
         if was_running and not is_replay(runtime):
             mark_rollout_save_ready(runtime, "stop")
-            if (
-                session.mode is SessionMode.REAL
-                and runtime.rollout_intervention_enabled
-            ):
+            if session.mode is SessionMode.REAL and runtime.rollout_intervention_enabled:
                 start_rollout_intervention(config, runtime, session)
         return
 
@@ -659,12 +653,19 @@ def _handle_web_command(
             discard_rollout_intervention_segment(runtime)
             return
         discard_rollout_intervention_segment(runtime)
+        runtime.transport.clear_collection_backlog()
         runtime.rollout_save_ready = False
         runtime.rollout_save_reason = ""
         session.action_chunk = None
         session.chunk_index = 0
         if not run_warmup_and_start(config, runtime, session):
             return
+        if runtime.collection_capture_runner is None:
+            start_collection_capture(
+                runtime,
+                fps=config.inference_cfg.publish_rate,
+                max_raw_snapshots_per_tick=COLLECT_STEP_MAX_RAW_SNAPSHOTS,
+            )
         session.run_start_time = time.monotonic()
         set_status(session, SessionStatus.RUNNING, reason="resume after abandoned intervention")
         return
@@ -682,7 +683,7 @@ def _handle_web_command(
         stop_rollout_intervention(config, runtime, session, required=False)
         discard_rollout_intervention_segment(runtime)
         if not is_replay(runtime) and session.mode in (SessionMode.REAL, SessionMode.SIM):
-            mark_rollout_save_ready(runtime, "reset")
+            discard_rollout_episode(runtime)
         run_reset(config, runtime, session)
         return
 
@@ -690,7 +691,14 @@ def _handle_web_command(
         if getattr(runtime, "rollout_intervention_active", False):
             session.last_error = "Continue or abandon the active intervention before saving"
             return
-        save_rollout_episode(runtime, session)
+        if session.status is SessionStatus.RUNNING and session.mode in (
+            SessionMode.REAL,
+            SessionMode.SIM,
+        ):
+            _dispatch_halt(config, runtime, session)
+            mark_rollout_save_ready(runtime, "save")
+        if save_rollout_episode(runtime, session):
+            run_reset(config, runtime, session)
         return
 
     if verb == "rollout_stop":
@@ -870,8 +878,9 @@ def _dispatch_run(config: ConfigDict, runtime: RuntimeState, session: SessionSta
         if not run_warmup_and_start(config, runtime, session):
             return
         if not is_replay(runtime):
-            start_episode(runtime, session)
             begin_rollout_save_episode(config, runtime, session)
+            if runtime.rollout_episode_logger is None:
+                start_episode(runtime, session)
         session.run_start_time = time.monotonic()
         set_status(session, SessionStatus.RUNNING, reason="start")
         return
@@ -990,7 +999,7 @@ def run(
     prompt_ready.set()
     runtime.command_queue = command_queue
     runtime.prompt_ready = prompt_ready
-    maybe_start_operator_button_listener(config, runtime)
+    maybe_start_operator_action_listener(config, runtime)
     loop_rate = transport.create_rate(config.inference_cfg.publish_rate)
     loop_rate_hz = config.inference_cfg.publish_rate
 
@@ -1076,6 +1085,7 @@ def run(
             loop_rate.sleep()
     finally:
         stop_rollout_intervention(config, runtime, session, required=False)
+        stop_collection_capture(runtime)
         discard_rollout_intervention_segment(runtime)
         end_episode(runtime)
         if runtime.episode_logger is not None:

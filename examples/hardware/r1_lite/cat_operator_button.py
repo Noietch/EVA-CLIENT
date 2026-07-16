@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Publish CAT Joy-Con X/Y Joy messages as EVA operator button events."""
+"""Publish CAT Joy-Con buttons as EVA operator events."""
 
 from __future__ import annotations
 
@@ -14,15 +14,17 @@ from sensor_msgs.msg import Joy
 from std_msgs.msg import String
 
 RIGHT_JOY_BUTTONS = {
-    2: "x",
-    3: "y",
-    4: "right_gripper_open",
-    5: "right_gripper_close",
+    0: "rollout_toggle",
+    1: "rollout_reset",
+    2: "intervention_toggle",
+    3: "intervention_accept",
+    4: "gripper_right_open",
+    5: "gripper_right_close",
 }
 
 LEFT_JOY_BUTTONS = {
-    4: "left_gripper_open",
-    5: "left_gripper_close",
+    4: "gripper_left_open",
+    5: "gripper_left_close",
 }
 
 
@@ -93,7 +95,7 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--left-joy-topic", default="/joy_left")
     parser.add_argument("--right-joy-topic", default="/joy_right")
-    parser.add_argument("--topic", default="/eva/operator_button")
+    parser.add_argument("--topic", default="/eva/operator_action")
     return parser.parse_args(remove_ros_args(args)[1:])
 
 

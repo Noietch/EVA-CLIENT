@@ -209,9 +209,9 @@ def test_collect_tile_click_starts_review_immediately():
 def test_collect_review_uses_shared_local_replay_engine():
     html = console_source()
 
-    assert "async function loadReviewPlayback(info)" in html
+    assert "async function loadReviewPlayback(info, owner)" in html
     assert "function installReplaySeries(series)" in html
-    assert 'LIVE.replayOwner = "collect";' in html
+    assert "LIVE.replayOwner = owner;" in html
     assert "replayTransformsUrl = `/api/review_transforms?${params.toString()}`;" in html
     assert "await videosReady;" in html
     assert "transformsReady.then" in html
@@ -294,7 +294,7 @@ def test_review_episode_starts_after_video_without_waiting_for_transforms():
 
     assert "function waitForStageVideosReady()" in html
     assert "function waitForStageVideosPainted()" in html
-    local_start = html.index("async function loadReviewPlayback(info)")
+    local_start = html.index("async function loadReviewPlayback(info, owner)")
     local_body = html[local_start : html.index("function replayApplyTransformFrame", local_start)]
     assert "const videosReady = waitForStageVideosReady();" in local_body
     assert "const transformsReady = loadReplayTransforms(loadSeq);" in local_body
@@ -306,13 +306,25 @@ def test_review_episode_starts_after_video_without_waiting_for_transforms():
         "const transformsReady = loadReplayTransforms(loadSeq);"
     )
     assert local_body.index("replayPlay();") < local_body.index("transformsReady.then")
-    assert 'LIVE.replayOwner === "collect" && REPLAY_XF_LOADING' in html
+    assert '["collect", "rollout"].includes(LIVE.replayOwner) && REPLAY_XF_LOADING' in html
 
     rollout_start = html.index("async function reviewRolloutEpisode(item)")
     rollout_body = html[rollout_start : html.index("async function submitEpisodeQc", rollout_start)]
-    assert "await waitForStageVideosReady();" in rollout_body
-    assert "await waitForStageVideosPainted();" in rollout_body
-    assert 'apiPost("/api/review_replay_start"' in rollout_body
+    assert 'apiPost("/api/review_episode"' in rollout_body
+    assert 'loadReviewPlayback({ ...r, dataset_dir: reviewDatasetDir }, "rollout")' in rollout_body
+    assert 'apiPost("/api/review_replay_start"' not in rollout_body
+
+
+def test_replay_scrub_marks_rollout_intervention_ranges():
+    html = console_source()
+
+    assert "LIVE.intervention = series.intervention || [];" in html
+    assert "function interventionTrackGradient()" in html
+    assert 'const color = active ? "var(--accent)" : "var(--rule-strong)";' in html
+    assert 'range.classList.toggle("has-intervention", !!controlTrack);' in html
+    assert 'LIVE.replayOwner = "rollout";' in html
+    assert 'loadReviewPlayback({ ...r, dataset_dir: reviewDatasetDir }, "rollout")' in html
+    assert "S.rolloutSaveEpisode = null;" in html
 
 
 def test_browser_diagnostics_trace_api_errors_and_review_nodes():

@@ -80,6 +80,7 @@ def _write_lerobot_episode(
     task: str = "do a thing",
     timestamps: list[float] | None = None,
     fps: float | None = None,
+    extra_columns: dict | None = None,
 ) -> None:
     """Build a minimal LeRobot v2.1 dataset (no video) with one episode at index 0."""
     meta = dataset_dir / "meta"
@@ -110,21 +111,28 @@ def _write_lerobot_episode(
     }
     if timestamps is not None:
         columns["timestamp"] = timestamps
+    if extra_columns is not None:
+        columns.update(extra_columns)
     table = pa.table(columns)
     pq.write_table(table, str(parquet_path))
 
 
 def _dataset_config() -> ConfigDict:
     # image_* feed get_frame's black-frame fallback; defaults already work here.
-    return ConfigDict(transport=ConfigDict(
-        type="dataset", image_height=32, image_width=32,
-        disabled_cameras=[], disabled_groups=[],
-        dataset_keys=ConfigDict(
-            state_key="observations.state.qpos",
-            action_key="action",
-            video_keys={},
-        ),
-    ))
+    return ConfigDict(
+        transport=ConfigDict(
+            type="dataset",
+            image_height=32,
+            image_width=32,
+            disabled_cameras=[],
+            disabled_groups=[],
+            dataset_keys=ConfigDict(
+                state_key="observations.state.qpos",
+                action_key="action",
+                video_keys={},
+            ),
+        )
+    )
 
 
 def test_dataset_transport_deterministic_replay_from_parquet(tmp_path):
@@ -171,6 +179,32 @@ def test_dataset_transport_uses_recorded_timestamps_for_series_and_fps(tmp_path)
 
     assert transport.fps == 15
     np.testing.assert_allclose(series["timestamp"], timestamps)
+    assert series["control_source"] == ["policy"] * n
+    assert series["intervention"] == [False] * n
+    assert series["intervention_segment_index"] == [-1] * n
+
+
+def test_dataset_transport_exposes_intervention_series(tmp_path):
+    robot = _franka_like_robot()
+    n, dim = 4, 16
+    states = np.zeros((n, dim), dtype=np.float32)
+    actions = np.ones((n, dim), dtype=np.float32)
+    _write_lerobot_episode(
+        tmp_path,
+        states,
+        actions,
+        extra_columns={
+            "control_source": ["policy", "intervention", "intervention", "policy"],
+            "intervention": [False, True, True, False],
+            "intervention_segment_index": [-1, 0, 0, -1],
+        },
+    )
+
+    series = DatasetTransport(_dataset_config(), robot, tmp_path).series()
+
+    assert series["control_source"] == ["policy", "intervention", "intervention", "policy"]
+    assert series["intervention"] == [False, True, True, False]
+    assert series["intervention_segment_index"] == [-1, 0, 0, -1]
 
 
 def test_dataset_transport_defers_video_decoder_until_frame_read(tmp_path, monkeypatch):
@@ -180,11 +214,7 @@ def test_dataset_transport_defers_video_decoder_until_frame_read(tmp_path, monke
     actions = (np.arange(n * dim, dtype=np.float32) * 0.2).reshape(n, dim)
     _write_lerobot_episode(tmp_path, states, actions)
     video_path = (
-        tmp_path
-        / "videos"
-        / "chunk-000"
-        / "observation.images.cam_high"
-        / "episode_000000.mp4"
+        tmp_path / "videos" / "chunk-000" / "observation.images.cam_high" / "episode_000000.mp4"
     )
     video_path.parent.mkdir(parents=True)
     video_path.write_bytes(b"not decoded during mount")
@@ -299,8 +329,10 @@ def test_get_action_trajectory_uses_configured_action_key_when_action_eef_exists
         transport=ConfigDict(
             type="dataset",
             dataset_dir=str(tmp_path),
-            image_height=32, image_width=32,
-            disabled_cameras=[], disabled_groups=[],
+            image_height=32,
+            image_width=32,
+            disabled_cameras=[],
+            disabled_groups=[],
             dataset_keys=ConfigDict(
                 state_key="observations.state.qpos",
                 action_key="action",
