@@ -177,6 +177,9 @@ function installReplaySeries(series) {
     LIVE.state = series.state || [];
     LIVE.actionNames = series.action_names || [];
     LIVE.stateNames = series.state_names || [];
+    LIVE.controlSource = series.control_source || [];
+    LIVE.intervention = series.intervention || [];
+    LIVE.interventionSegmentIndex = series.intervention_segment_index || [];
     LIVE.n = LIVE.state.length;
     LIVE.playTime = buildReplayPlayTimeline(LIVE.timestamp, LIVE.n);
     LIVE.dimsOnA = {};
@@ -251,7 +254,7 @@ async function loadReplayTransforms(loadSeq) {
     }
   }
 
-async function loadReviewPlayback(info) {
+async function loadReviewPlayback(info, owner) {
     const loadSeq = ++replayLoadSeq;
     clientTrace("review.playback.begin", {
       episode: Number(info.episode || 0),
@@ -260,7 +263,7 @@ async function loadReviewPlayback(info) {
       fps: Number(info.fps || 0),
       load_seq: loadSeq,
     });
-    LIVE.replayOwner = "collect";
+    LIVE.replayOwner = owner;
     LIVE.replayError = "";
     LIVE.replayMode = true;
     LIVE.replayLoading = true;
@@ -575,7 +578,7 @@ function replaySetUrdfFrame(frame) {
     // Stateless collection review computes a whole-episode transform blob in the
     // background. Do not issue unrelated mounted-replay frame requests while waiting;
     // the completion callback applies the current local cursor directly.
-    if (LIVE.replayOwner === "collect" && REPLAY_XF_LOADING) return;
+    if (["collect", "rollout"].includes(LIVE.replayOwner) && REPLAY_XF_LOADING) return;
     const i = Math.max(0, Math.min(Math.round(Number(frame) || 0), LIVE.n - 1));
     if (i === replayUrdfAppliedFrame && !replayUrdfInFlight) return;
     if (replayUrdfInFlight) {

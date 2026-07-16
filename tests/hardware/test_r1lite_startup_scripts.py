@@ -28,9 +28,7 @@ REMOVED_HELPERS = {
 def test_r1lite_directory_keeps_only_current_entrypoints():
     files = {path.name for path in R1_LITE_DIR.iterdir() if path.is_file()}
     dirs = {
-        path.name
-        for path in R1_LITE_DIR.iterdir()
-        if path.is_dir() and path.name != "__pycache__"
+        path.name for path in R1_LITE_DIR.iterdir() if path.is_dir() and path.name != "__pycache__"
     }
 
     assert files == ALLOWED_FILES
@@ -53,7 +51,7 @@ def test_r1lite_fastdds_directory_contains_sanitized_profile_template():
         for element in root.iter()
         if element.tag.endswith("receiveBufferSize")
     )
-    assert '<discoveryProtocol>SUPER_CLIENT</discoveryProtocol>' in xml
+    assert "<discoveryProtocol>SUPER_CLIENT</discoveryProtocol>" in xml
     assert "__EVA_LOCAL_IP__" in xml
     assert "__DISCOVERY_SERVER_GUID_PREFIX__" in xml
     assert "__DISCOVERY_SERVER_IP__" in xml
@@ -100,20 +98,18 @@ def test_run_hardware_starts_r1lite_and_cat_through_eva_hil_bootstrap():
         '"${R1LITE_BODY_SESSION_REMOTE}/${yaml}"' in script
     )
     expected_loop = (
-        'for yaml in hdas.yaml mobiman.yaml ros2_discovery.yaml system.yaml tools.yaml; do'
+        "for yaml in hdas.yaml mobiman.yaml ros2_discovery.yaml system.yaml tools.yaml; do"
     )
     assert expected_loop in script
     assert 'tmuxp load "${R1LITE_BODY_SESSION_REMOTE}/${yaml}" -d' in script
     assert (
         "R1LITE_BODY_SESSION_SOURCE='${R1LITE_BODY_SESSION_SOURCE}' "
-        "R1LITE_BODY_SESSION_REMOTE='${R1LITE_BODY_SESSION_REMOTE}'"
-        in script
+        "R1LITE_BODY_SESSION_REMOTE='${R1LITE_BODY_SESSION_REMOTE}'" in script
     )
     assert (
         'start_remote_tmux "${R1LITE_HOST}" "${R1LITE_SESSION}" '
-        '"R1LITE_BODY_SESSION_SOURCE=\'${R1LITE_BODY_SESSION_SOURCE}\' '
-        "R1LITE_BODY_SESSION_REMOTE='${R1LITE_BODY_SESSION_REMOTE}' ${R1LITE_START_CMD}\""
-        in script
+        "\"R1LITE_BODY_SESSION_SOURCE='${R1LITE_BODY_SESSION_SOURCE}' "
+        "R1LITE_BODY_SESSION_REMOTE='${R1LITE_BODY_SESSION_REMOTE}' ${R1LITE_START_CMD}\"" in script
     )
     assert "cd ~/workspace/robot && bash start_robot.sh" not in script
     assert "R1LITEBodyTakeover.d" not in script
@@ -165,8 +161,7 @@ def test_run_hardware_copies_and_starts_operator_button_node():
         in script
     )
     assert (
-        'EVA_OPERATOR_BUTTON_TOPIC="${EVA_OPERATOR_BUTTON_TOPIC:-/eva/operator_button}"'
-        in script
+        'EVA_OPERATOR_ACTION_TOPIC="${EVA_OPERATOR_ACTION_TOPIC:-/eva/operator_action}"' in script
     )
     assert (
         'install_remote_script "${CAT_HOST}" "${CAT_OPERATOR_BUTTON_LOCAL}" '
@@ -182,12 +177,14 @@ def test_cat_operator_button_maps_joy_edges_to_eva_events():
 
     assert "RIGHT_JOY_BUTTONS = {" in script
     assert "LEFT_JOY_BUTTONS = {" in script
-    assert '2: "x"' in script
-    assert '3: "y"' in script
-    assert '4: "left_gripper_open"' in script
-    assert '5: "left_gripper_close"' in script
-    assert '4: "right_gripper_open"' in script
-    assert '5: "right_gripper_close"' in script
+    assert '0: "rollout_toggle"' in script
+    assert '1: "rollout_reset"' in script
+    assert '2: "intervention_toggle"' in script
+    assert '3: "intervention_accept"' in script
+    assert '4: "gripper_left_open"' in script
+    assert '5: "gripper_left_close"' in script
+    assert '4: "gripper_right_open"' in script
+    assert '5: "gripper_right_close"' in script
     assert "JoyButtonEdgeAdapter" in script
     assert "self.previous_buttons = current" in script
     assert "self.pub = self.create_publisher(String, output_topic, 10)" in script
@@ -215,7 +212,7 @@ def test_run_fake_node_forces_local_ros2_discovery():
     script = (R1_LITE_DIR / "run_fake_node.sh").read_text()
 
     assert "source .venv/bin/activate" in script
-    assert 'unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY' in script
+    assert "unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY" in script
     assert "unset FASTRTPS_DEFAULT_PROFILES_FILE ROS_DISCOVERY_SERVER RMW_IMPLEMENTATION" in script
     assert "export ROS_LOCALHOST_ONLY=1" in script
     assert "python examples/hardware/r1_lite/fake_node.py" in script

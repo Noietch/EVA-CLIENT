@@ -844,7 +844,7 @@ def test_review_transforms_are_addressed_by_episode_without_runtime_mount(tmp_pa
         assert h.runtime.replay_source is None
 
 
-def test_review_replay_start_releases_paused_review(tmp_path, monkeypatch):
+def test_rollout_review_is_stateless_local_playback(tmp_path, monkeypatch):
     repo_root = tmp_path / "repo"
     dataset_dir = repo_root / "work_dirs" / "review"
     data_dir = dataset_dir / "data" / "chunk-000"
@@ -893,15 +893,18 @@ def test_review_replay_start_releases_paused_review(tmp_path, monkeypatch):
             data_dir / "episode_000000.parquet",
         )
 
-        h.post(
-            "/api/rollout_review_episode",
+        sentinel_qpos = np.ones((1, dim), dtype=np.float32)
+        h.runtime.collection_replay_qpos = sentinel_qpos
+        resp = h.post(
+            "/api/review_episode",
             {"dataset_dir": "work_dirs/review", "episode": 0},
         )
-        resp = h.post("/api/review_replay_start", {"episode": 0})
 
         assert resp.status == 200
         assert resp.json["ok"] is True
-        assert h.runtime.collection_replay_started > 0.0
+        assert resp.json["frames"] == 2
+        assert h.runtime.collection_replay_qpos is sentinel_qpos
+        assert h.runtime.collection_replay_started == 0.0
 
 
 def test_collection_replay_status_stops_playing_at_last_frame():
@@ -972,6 +975,7 @@ def test_collect_start_runs_collection_capture_in_background():
 
     class _Logger:
         is_collection_enabled = True
+        has_active_episode = True
 
         def is_queue_full(self):
             return False
@@ -1469,6 +1473,36 @@ def test_run_clears_collection_replay_preview():
 
     assert runtime.collection_replay_qpos is None
     assert runtime.collection_replay_episode is None
+
+
+def test_run_uses_rollout_logger_without_opening_collection_logger(monkeypatch):
+    calls = []
+    rollout_logger = object()
+    runtime = SimpleNamespace(
+        rollout_episode_logger=None,
+        replay_source=None,
+    )
+    session = SessionState(
+        mode=SessionMode.REAL,
+        status=SessionStatus.READY,
+        is_setup_done=True,
+        selected_task="pick up the cup",
+    )
+    monkeypatch.setattr(app, "_select_only_inference_strategy_if_needed", lambda *args: True)
+    monkeypatch.setattr(app, "run_warmup_and_start", lambda *args: True)
+    monkeypatch.setattr(app, "is_replay", lambda runtime: False)
+
+    def _begin_rollout(config, runtime, session):
+        calls.append("rollout")
+        runtime.rollout_episode_logger = rollout_logger
+
+    monkeypatch.setattr(app, "begin_rollout_save_episode", _begin_rollout)
+    monkeypatch.setattr(app, "start_episode", lambda *args: calls.append("collection"))
+
+    app._dispatch_run(ConfigDict(), cast(RuntimeState, runtime), session)
+
+    assert calls == ["rollout"]
+    assert session.status is SessionStatus.RUNNING
 
 
 def test_repeated_setup_run_stop_cycles_never_pin_running(console):

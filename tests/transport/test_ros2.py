@@ -15,6 +15,7 @@ import transport.ros2 as ros2
 import transport.utils as transport_utils
 from core.config import load_config
 from core.registry import ROBOT_REGISTRY
+from core.types import Observation
 
 _CONFIGS_DIR = Path(__file__).resolve().parents[2] / "configs"
 _R1LITE_COLLECTION = _CONFIGS_DIR / "02_collection" / "r1lite.py"
@@ -504,6 +505,40 @@ def test_ros2_hil_relay_does_not_publish_gripper_target(monkeypatch):
 
     published = node.publishers_by_topic["/motion_target/target_position_gripper_left"].messages
     assert published == []
+
+
+def test_ros2_hil_frame_uses_last_gripper_command_when_collection_frame_missing(monkeypatch):
+    node = _FakeNode()
+    runtime = types.SimpleNamespace(
+        node=node,
+        cv_bridge=object(),
+        image_type=object,
+        compressed_image_type=object,
+        joint_state_type=_FakeJointState,
+        pose_stamped_type=object,
+    )
+    monkeypatch.setattr(ros2, "get_ros2_runtime", lambda node_name: runtime)
+    monkeypatch.setattr(ros2, "_make_live_qos", lambda depth=10: object())
+
+    config = load_config(_R1LITE_COLLECTION)
+    robot = ROBOT_REGISTRY.build(config.robot.type)
+    transport = ros2.Ros2Transport(config, robot)
+    transport.get_collection_frame = lambda: None
+    transport.get_frame = lambda: Observation(
+        images={}, state_qpos=np.zeros(robot.total_action_dim, dtype=np.float32), timestamp=1.0
+    )
+    transport._last_group_joint_commands = {
+        "left_arm": np.zeros(6, dtype=np.float32),
+        "right_arm": np.zeros(6, dtype=np.float32),
+    }
+    transport._last_group_gripper_commands = {"left_arm": 0.0, "right_arm": 100.0}
+    transport._latest_group_qpos = lambda group: np.full(group.dof, 100.0, dtype=np.float32)
+
+    frame = transport.get_hil_frame()
+
+    assert frame is not None
+    assert frame.action_qpos is not None
+    np.testing.assert_allclose(frame.action_qpos[[6, 13]], [0.0, 100.0])
 
 
 def test_ros2_hil_reorders_named_full_group_and_publishes_split_gripper(monkeypatch):

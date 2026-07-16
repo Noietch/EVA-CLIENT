@@ -25,15 +25,17 @@ RIGHT_ARM_JOINTS = tuple(f"right_arm_joint{i}" for i in range(1, 7))
 GRIPPER_OPEN = 100.0
 GRIPPER_CLOSE = 0.0
 JOINT_STEP = 0.05
-OPERATOR_BUTTON_TOPIC = "/eva/operator_button"
-SUPPORTED_OPERATOR_BUTTONS = frozenset(
+OPERATOR_ACTION_TOPIC = "/eva/operator_action"
+SUPPORTED_OPERATOR_ACTIONS = frozenset(
     {
-        "x",
-        "y",
-        "left_gripper_open",
-        "left_gripper_close",
-        "right_gripper_open",
-        "right_gripper_close",
+        "rollout_toggle",
+        "rollout_reset",
+        "intervention_toggle",
+        "intervention_accept",
+        "gripper_left_open",
+        "gripper_left_close",
+        "gripper_right_open",
+        "gripper_right_close",
     }
 )
 
@@ -144,8 +146,7 @@ class R1LiteFakeState:
                 },
                 "hil": {group: self._hil[group].astype(float).tolist() for group in ARM_TOPICS},
                 "command": {
-                    group: self._commands[group].astype(float).tolist()
-                    for group in ARM_TOPICS
+                    group: self._commands[group].astype(float).tolist() for group in ARM_TOPICS
                 },
                 "joint_step": JOINT_STEP,
             }
@@ -225,9 +226,7 @@ class R1LiteFakeState:
             self._hil[group_name][joint_index] += float(delta)
             return self._hil[group_name].copy()
 
-    def apply_command_delta(
-        self, group_name: str, joint_index: int, delta: float
-    ) -> np.ndarray:
+    def apply_command_delta(self, group_name: str, joint_index: int, delta: float) -> np.ndarray:
         """Add a delta to one feedback joint and return the full command vector.
 
         Args:
@@ -304,20 +303,20 @@ class R1LiteFakeControlApi:
         """
         return self._state.snapshot()
 
-    def operator_button(self, label: str) -> dict[str, str]:
-        """Publish one EVA operator button label.
+    def operator_action(self, action: str) -> dict[str, str]:
+        """Publish one semantic EVA operator action.
 
         Args:
-            label: x, y, or one of the gripper operator labels.
+            action: Device-independent operator action.
 
         Returns:
             result: JSON-serializable acknowledgement.
         """
-        value = str(label).strip().lower()
-        if value not in SUPPORTED_OPERATOR_BUTTONS:
-            raise ValueError(f"unsupported operator button {label!r}")
-        self._bridge.publish_operator_button(value)
-        return {"ok": "true", "button": value}
+        value = str(action).strip().lower()
+        if value not in SUPPORTED_OPERATOR_ACTIONS:
+            raise ValueError(f"unsupported operator action {action!r}")
+        self._bridge.publish_operator_action(value)
+        return {"ok": "true", "action": value}
 
     def gripper(self, side: str, command: str) -> dict[str, str]:
         """Publish one gripper operator label.
@@ -335,7 +334,7 @@ class R1LiteFakeControlApi:
             raise ValueError(f"unsupported gripper side {side!r}")
         if command_value not in {"open", "close"}:
             raise ValueError(f"unsupported gripper command {command!r}")
-        return self.operator_button(f"{side_value}_gripper_{command_value}")
+        return self.operator_action(f"gripper_{side_value}_{command_value}")
 
     def set_joint(self, group_name: str, joint_index: int, value: float) -> dict[str, Any]:
         """Set one HIL joint and publish the full HIL vector.
@@ -367,9 +366,7 @@ class R1LiteFakeControlApi:
         self._bridge.publish_hil(group_name, positions)
         return {"group": group_name, "positions": positions.astype(float).tolist()}
 
-    def adjust_command(
-        self, group_name: str, joint_index: int, delta: float
-    ) -> dict[str, Any]:
+    def adjust_command(self, group_name: str, joint_index: int, delta: float) -> dict[str, Any]:
         """Add a delta to one command joint and publish a motion target.
 
         Args:
@@ -463,7 +460,7 @@ class R1LiteRos2Fake:
         self._command_publishers = {}
         self._gripper_publishers = {}
         self._eef_publishers = {}
-        self._operator_button_publisher = None
+        self._operator_action_publisher = None
         self._hil_publishers = {}
         if publish_robot:
             self._arm_publishers = {
@@ -480,9 +477,9 @@ class R1LiteRos2Fake:
                 group: node.create_publisher(message_types.pose_stamped, topics.eef, qos)
                 for group, topics in ARM_TOPICS.items()
             }
-            self._operator_button_publisher = self._control_node.create_publisher(
+            self._operator_action_publisher = self._control_node.create_publisher(
                 message_types.string,
-                OPERATOR_BUTTON_TOPIC,
+                OPERATOR_ACTION_TOPIC,
                 10,
             )
             self._hil_publishers = {
@@ -525,19 +522,19 @@ class R1LiteRos2Fake:
                 callback_group=timer_callback_group,
             )
 
-    def publish_operator_button(self, label: str) -> None:
-        """Publish one operator button event on /eva/operator_button.
+    def publish_operator_action(self, action: str) -> None:
+        """Publish one semantic event on /eva/operator_action.
 
         Args:
-            label: normalized button label accepted by EVA operator_control.
+            action: Device-independent action accepted by EVA operator_control.
         """
-        if label not in SUPPORTED_OPERATOR_BUTTONS:
-            raise ValueError(f"unsupported operator button {label!r}")
-        if self._operator_button_publisher is None:
-            raise RuntimeError("operator button publisher is disabled")
+        if action not in SUPPORTED_OPERATOR_ACTIONS:
+            raise ValueError(f"unsupported operator action {action!r}")
+        if self._operator_action_publisher is None:
+            raise RuntimeError("operator action publisher is disabled")
         message = self._types.string()
-        message.data = label
-        self._operator_button_publisher.publish(message)
+        message.data = action
+        self._operator_action_publisher.publish(message)
 
     def publish_hil(self, group_name: str, positions: np.ndarray) -> None:
         """Publish one HIL input JointState for a group.
@@ -702,7 +699,7 @@ def make_ui_handler(api: R1LiteFakeControlApi) -> type[BaseHTTPRequestHandler]:
             try:
                 payload = self._read_json()
                 if self.path == "/api/operator":
-                    self._send_json(api.operator_button(payload["button"]))
+                    self._send_json(api.operator_action(payload["action"]))
                     return
                 if self.path == "/api/gripper":
                     self._send_json(api.gripper(payload["side"], payload["command"]))
@@ -857,8 +854,10 @@ button:hover {
     <div class="panel">
       <h2>Operator</h2>
       <div class="buttons">
-        <button data-button="x">X</button>
-        <button data-button="y">Y</button>
+        <button data-action="rollout_toggle">A · Run/Save</button>
+        <button data-action="rollout_reset">B · Reset</button>
+        <button data-action="intervention_toggle">X · Takeover/Abandon</button>
+        <button data-action="intervention_accept">Y · Accept</button>
         <button id="sync-hil">Sync HIL</button>
       </div>
     </div>
@@ -942,9 +941,9 @@ function buildArm(group, title) {
 function install() {
   const arms = document.querySelector("#arms");
   groups.forEach(([group, title]) => arms.appendChild(buildArm(group, title)));
-  document.querySelectorAll("[data-button]").forEach((button) => {
+  document.querySelectorAll("[data-action]").forEach((button) => {
     button.addEventListener("click", () => {
-      postJson("/api/operator", {button: button.dataset.button}).catch(console.error);
+      postJson("/api/operator", {action: button.dataset.action}).catch(console.error);
     });
   });
   document.querySelector("#sync-hil").addEventListener("click", () => {

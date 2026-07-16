@@ -115,7 +115,7 @@ rollout = dict(
 
 operator_control = dict(
     enabled=False,
-    button_topic="/eva/operator_button",
+    action_topic="/eva/operator_action",
 )
 
 eval_cfg = {}  # Empty dict marks a non-eval config; eval configs fill this block.

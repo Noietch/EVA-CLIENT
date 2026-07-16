@@ -101,12 +101,17 @@ def test_rollout_save_merges_intervention_into_episode_table(tmp_path):
         np.array([0.6, 0.6, 0.6], dtype=np.float32),
         timestamp=0.1,
     )
+    logger.record_step(
+        _obs(np.array([0.7, 0.7, 0.7], dtype=np.float32), 4),
+        np.array([0.8, 0.8, 0.8], dtype=np.float32),
+        timestamp=0.4,
+    )
     logger.set_rollout_intervention_segments([segment])
 
     assert logger.end_episode() is True
 
     rollout_table = pq.read_table(str(tmp_path / "data" / "chunk-000" / "episode_000000.parquet"))
-    assert rollout_table.num_rows == 4
+    assert rollout_table.num_rows == 5
     np.testing.assert_allclose(
         np.array(rollout_table.column(keys.state_key).to_pylist(), dtype=np.float32),
         np.array(
@@ -115,6 +120,7 @@ def test_rollout_save_merges_intervention_into_episode_table(tmp_path):
                 [0.1, 0.1, 0.1],
                 [1.0, 1.1, 1.2],
                 [3.0, 3.1, 3.2],
+                [0.7, 0.7, 0.7],
             ],
             dtype=np.float32,
         ),
@@ -127,18 +133,41 @@ def test_rollout_save_merges_intervention_into_episode_table(tmp_path):
                 [0.6, 0.6, 0.6],
                 [2.0, 2.1, 2.2],
                 [4.0, 4.1, 4.2],
+                [0.8, 0.8, 0.8],
             ],
             dtype=np.float32,
         ),
     )
-    assert rollout_table.column("intervention").to_pylist() == [False, False, True, True]
-    assert rollout_table.column("intervention_segment_index").to_pylist() == [-1, -1, 0, 0]
+    assert rollout_table.column("intervention").to_pylist() == [
+        False,
+        False,
+        True,
+        True,
+        False,
+    ]
+    assert rollout_table.column("intervention_segment_index").to_pylist() == [
+        -1,
+        -1,
+        0,
+        0,
+        -1,
+    ]
+    assert rollout_table.column("control_source").to_pylist() == [
+        "policy",
+        "policy",
+        "intervention",
+        "intervention",
+        "policy",
+    ]
     assert not (tmp_path / "interventions").exists()
 
     episodes = _read_jsonl(tmp_path / "meta" / "episodes.jsonl")
     assert episodes[0]["has_intervention"] is True
     assert episodes[0]["intervention_segments"] == 1
     assert episodes[0]["intervention_frames"] == 2
+    assert episodes[0]["intervention_ranges"] == [
+        {"segment_index": 0, "start_frame": 2, "end_frame": 3}
+    ]
 
 
 def test_rollout_intervention_video_uses_episode_writer_when_size_set(tmp_path, monkeypatch):

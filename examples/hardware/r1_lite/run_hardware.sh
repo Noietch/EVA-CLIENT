@@ -20,7 +20,7 @@ R1LITE_DISCOVERY_SERVER_PORT="${R1LITE_DISCOVERY_SERVER_PORT:-11811}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CAT_OPERATOR_BUTTON_LOCAL="${CAT_OPERATOR_BUTTON_LOCAL:-${SCRIPT_DIR}/cat_operator_button.py}"
 CAT_OPERATOR_BUTTON_REMOTE="${CAT_OPERATOR_BUTTON_REMOTE:-/tmp/eva_cat_operator_button.py}"
-EVA_OPERATOR_BUTTON_TOPIC="${EVA_OPERATOR_BUTTON_TOPIC:-/eva/operator_button}"
+EVA_OPERATOR_ACTION_TOPIC="${EVA_OPERATOR_ACTION_TOPIC:-/eva/operator_action}"
 CAT_OPERATOR_BUTTON="${CAT_OPERATOR_BUTTON:-1}"
 
 install_remote_script() {
@@ -136,7 +136,7 @@ CAT_FASTRTPS_PROFILE="${CAT_FASTRTPS_PROFILE:-/tmp/eva_cat_fastdds_super_client.
 CAT_GELLO_CMD="${CAT_GELLO_CMD:-python3 /home/cat/galaxea/install/mobiman/lib/DynamixelTeleop/GelloTeleop/gello_teleop.py}"
 CAT_JOYCON_CMD="${CAT_JOYCON_CMD:-ros2 launch joycon_evdev_publisher joy_evdev_launch.py}"
 CAT_OPERATOR_BUTTON_PATH="${CAT_OPERATOR_BUTTON_PATH:-/tmp/eva_cat_operator_button.py}"
-EVA_OPERATOR_BUTTON_TOPIC="${EVA_OPERATOR_BUTTON_TOPIC:-/eva/operator_button}"
+EVA_OPERATOR_ACTION_TOPIC="${EVA_OPERATOR_ACTION_TOPIC:-/eva/operator_action}"
 CAT_OPERATOR_BUTTON="${CAT_OPERATOR_BUTTON:-1}"
 
 export FASTRTPS_DEFAULT_PROFILES_FILE="${CAT_FASTRTPS_PROFILE}"
@@ -148,7 +148,7 @@ bash -lc "${CAT_GELLO_CMD} --ros-args -r /tabletop/hdas/feedback_arm_left:=/eva/
 gello_pid="$!"
 
 if [[ "${CAT_OPERATOR_BUTTON}" == "1" ]]; then
-  python3 "${CAT_OPERATOR_BUTTON_PATH}" --topic "${EVA_OPERATOR_BUTTON_TOPIC}" &
+  python3 "${CAT_OPERATOR_BUTTON_PATH}" --topic "${EVA_OPERATOR_ACTION_TOPIC}" &
   button_pid="$!"
   wait -n "${joycon_pid}" "${gello_pid}" "${button_pid}"
 else
@@ -196,5 +196,5 @@ if [[ "${START_CAT}" == "1" ]]; then
   install_remote_script "${CAT_HOST}" "${CAT_OPERATOR_BUTTON_LOCAL}" "${CAT_OPERATOR_BUTTON_REMOTE}"
   install_cat_fastdds_profile "${CAT_HOST}" "${CAT_FASTRTPS_PROFILE}"
   install_cat_hil_teleop_script "${CAT_HOST}" "${CAT_HIL_TELEOP_REMOTE}"
-  start_remote_tmux "${CAT_HOST}" "${CAT_SESSION}" "${CAT_SETUP_CMD}; CAT_FASTRTPS_PROFILE='${CAT_FASTRTPS_PROFILE}' CAT_OPERATOR_BUTTON_PATH='${CAT_OPERATOR_BUTTON_REMOTE}' EVA_OPERATOR_BUTTON_TOPIC='${EVA_OPERATOR_BUTTON_TOPIC}' CAT_OPERATOR_BUTTON='${CAT_OPERATOR_BUTTON}' '${CAT_HIL_TELEOP_REMOTE}'"
+  start_remote_tmux "${CAT_HOST}" "${CAT_SESSION}" "${CAT_SETUP_CMD}; CAT_FASTRTPS_PROFILE='${CAT_FASTRTPS_PROFILE}' CAT_OPERATOR_BUTTON_PATH='${CAT_OPERATOR_BUTTON_REMOTE}' EVA_OPERATOR_ACTION_TOPIC='${EVA_OPERATOR_ACTION_TOPIC}' CAT_OPERATOR_BUTTON='${CAT_OPERATOR_BUTTON}' '${CAT_HIL_TELEOP_REMOTE}'"
 fi

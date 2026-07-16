@@ -165,7 +165,7 @@ class RawEpisodeSnapshot:
     """One raw eval/rollout source snapshot plus the action executed at that tick."""
 
     snapshot: RawCollectionSnapshot
-    action_qpos: np.ndarray
+    action_qpos: np.ndarray | None
     intervention: bool = False
     segment_index: int = -1
 
@@ -200,6 +200,10 @@ class EpisodeLogger:
         save_image_height: int | None = None,
         save_image_width: int | None = None,
         on_collection_frame: Callable[[Observation], None] | None = None,
+        recording_space: str = "qpos",
+        gripper_open: float | None = None,
+        gripper_close: float | None = None,
+        gripper_threshold: float | None = None,
     ) -> None:
         self._log_dir = Path(log_dir)
         self._robot = robot
@@ -209,6 +213,12 @@ class EpisodeLogger:
         self._convert_bgr_to_rgb = convert_bgr_to_rgb
         self._collection = collection
         self._on_collection_frame = on_collection_frame
+        if recording_space not in {"qpos", "eef"}:
+            raise ValueError(f"unsupported recording space: {recording_space}")
+        self._recording_space = recording_space
+        self._gripper_open = gripper_open
+        self._gripper_close = gripper_close
+        self._gripper_threshold = gripper_threshold
         # Target saved-video resolution; both None keeps each camera's native size.
         self._save_image_height = save_image_height
         self._save_image_width = save_image_width
@@ -329,17 +339,21 @@ class EpisodeLogger:
     def ingest_raw_episode_snapshot(
         self,
         snapshot: RawCollectionSnapshot,
-        action: np.ndarray,
+        action: np.ndarray | None = None,
         state_qpos: np.ndarray | None = None,
+        intervention: bool = False,
+        segment_index: int = -1,
     ) -> None:
         """Store one pre-decode eval/rollout snapshot and executed action."""
         if not self._active:
             return
-        action_qpos = np.asarray(action, dtype=np.float32).copy()
+        action_qpos = None if action is None else np.asarray(action, dtype=np.float32).copy()
         self._raw_episode_snapshots.append(
             RawEpisodeSnapshot(
                 snapshot=snapshot,
                 action_qpos=action_qpos,
+                intervention=intervention,
+                segment_index=segment_index,
             )
         )
         if state_qpos is not None:
@@ -347,10 +361,63 @@ class EpisodeLogger:
                 Observation(
                     images={},
                     state_qpos=np.asarray(state_qpos, dtype=np.float32).copy(),
-                    action_qpos=action_qpos.copy(),
+                    action_qpos=None if action_qpos is None else action_qpos.copy(),
                     timestamp=float(snapshot.timestamp),
                 )
             )
+
+    def ingest_policy_action(
+        self,
+        action: np.ndarray,
+        state_qpos: np.ndarray | None,
+        timestamp: float,
+        state_eef: np.ndarray | None = None,
+        action_eef: np.ndarray | None = None,
+    ) -> None:
+        """Store a policy action independently from raw sensor snapshots."""
+        if not self._active:
+            return
+        action_value = np.asarray(action, dtype=np.float32).copy()
+        timestamp = float(timestamp)
+        if state_qpos is None:
+            self._raw_episode_batch.vectors.setdefault("action_qpos", []).append(
+                CollectionRawSample(timestamp, action_value)
+            )
+            if self._recording_space == "eef" and action_eef is not None:
+                self._raw_episode_batch.vectors.setdefault("action_eef", []).append(
+                    CollectionRawSample(timestamp, np.asarray(action_eef, dtype=np.float32).copy())
+                )
+            if self._recording_space == "eef" and state_eef is not None:
+                self._raw_episode_batch.vectors.setdefault("state_eef", []).append(
+                    CollectionRawSample(timestamp, np.asarray(state_eef, dtype=np.float32).copy())
+                )
+            self._raw_episode_frame_labels.append(
+                RawEpisodeFrameLabel(timestamp, False, -1)
+            )
+            self._extend_raw_episode_time_bounds(
+                self._raw_episode_batch,
+                self._raw_episode_batch.vectors["action_qpos"][-1:],
+            )
+            return
+        frame = Observation(
+            images={},
+            state_qpos=np.asarray(state_qpos, dtype=np.float32).copy(),
+            action_qpos=action_value,
+            timestamp=timestamp,
+        )
+        if self._recording_space == "eef":
+            frame.state_eef = (
+                None if state_eef is None else np.asarray(state_eef, dtype=np.float32).copy()
+            )
+            frame.action_eef = (
+                None if action_eef is None else np.asarray(action_eef, dtype=np.float32).copy()
+            )
+        self._append_raw_episode_observation(
+            self._raw_episode_batch,
+            frame,
+            RawEpisodeFrameLabel(timestamp, False, -1),
+            self._raw_episode_frame_labels,
+        )
 
     def ingest_collection_snapshot(self, snapshot: RawCollectionSnapshot) -> None:
         """Hand one pre-decode snapshot to the collection writer (O(1))."""
@@ -562,7 +629,9 @@ class EpisodeLogger:
         raw_snapshots = [
             RawEpisodeSnapshot(
                 snapshot=sample.snapshot,
-                action_qpos=sample.action_qpos.copy(),
+                action_qpos=None
+                if sample.action_qpos is None
+                else sample.action_qpos.copy(),
                 intervention=sample.intervention,
                 segment_index=sample.segment_index,
             )
@@ -775,12 +844,19 @@ class EpisodeLogger:
     def _decode_raw_episode_snapshots(self, payload: RawEpisodeSavePayload) -> None:
         for raw in payload.raw_snapshots:
             batch = raw.snapshot.decode_raw()
-            batch.vectors.setdefault("action_qpos", []).append(
-                CollectionRawSample(
-                    raw.snapshot.timestamp,
-                    raw.action_qpos.copy(),
+            if raw.action_qpos is None:
+                # Rollout actions/state are captured as a separate timestamped
+                # stream. Raw snapshots contribute images only; mixing their
+                # per-arm vector streams would shrink the common coverage window
+                # to the latest arm cursor and drop rollout boundaries.
+                batch.vectors.clear()
+            if raw.action_qpos is not None:
+                batch.vectors.setdefault("action_qpos", []).append(
+                    CollectionRawSample(
+                        raw.snapshot.timestamp,
+                        raw.action_qpos.copy(),
+                    )
                 )
-            )
             self._merge_raw_episode_batch(payload.raw_batch, batch)
             payload.frame_labels.append(
                 RawEpisodeFrameLabel(
@@ -806,6 +882,9 @@ class EpisodeLogger:
                 )
                 record = _copy_observation(frame)
                 record.timestamp = timestamp
+                if self._recording_space == "qpos":
+                    record.state_eef = None
+                    record.action_eef = None
                 self._append_raw_episode_observation(
                     batch,
                     record,
@@ -889,6 +968,7 @@ class EpisodeLogger:
         payload = job.raw_episode_payload
         if payload is None:
             return
+        raw_snapshot_count = len(payload.raw_snapshots)
         self._decode_raw_episode_snapshots(payload)
         fields = self._raw_episode_vector_fields(payload.raw_batch)
         camera_keys = tuple(payload.raw_batch.images.keys())
@@ -900,10 +980,31 @@ class EpisodeLogger:
             fps=float(self._fps),
             image_skew_sec=self._raw_episode_image_skew_tolerance_sec(),
         )
+        logger.info(
+            "[ROLLOUT_SAVE] episode=%d raw_snapshots=%d labels=%d vectors=%s frames=%d "
+            "grid_start=%.6f grid_end=%.6f",
+            job.episode_index,
+            raw_snapshot_count,
+            len(payload.frame_labels),
+            {key: len(samples) for key, samples in payload.raw_batch.vectors.items()},
+            len(frames),
+            report.grid_start,
+            report.grid_end,
+        )
         if not frames:
             raise ValueError("raw episode produced 0 frames")
         issues = [QualityIssue("red", issue.code, issue.detail) for issue in report.issues]
         labels = self._labels_for_aligned_frames(frames, payload.frame_labels)
+        self._quantize_action_grippers(frames)
+        logger.info(
+            "[ROLLOUT_SAVE] episode=%d aligned_policy=%d aligned_intervention=%d "
+            "first_capture=%.6f last_capture=%.6f",
+            job.episode_index,
+            sum(not label.intervention for label in labels),
+            sum(label.intervention for label in labels),
+            float(frames[0].timestamp or 0.0),
+            float(frames[-1].timestamp or 0.0),
+        )
         n_frames = len(frames)
         global_index = job.global_index
         if global_index < 0:
@@ -924,6 +1025,11 @@ class EpisodeLogger:
             "episode_index": [job.episode_index] * n_frames,
             "index": list(range(global_index, global_index + n_frames)),
             "task_index": [job.task_index] * n_frames,
+            "intervention": [label.intervention for label in labels],
+            "intervention_segment_index": [label.segment_index for label in labels],
+            "control_source": [
+                "intervention" if label.intervention else "policy" for label in labels
+            ],
         }
         if any(frame.state_eef is not None for frame in frames):
             columns[self._keys.eef_key] = [
@@ -932,9 +1038,6 @@ class EpisodeLogger:
                 else np.asarray(frame.state_eef, dtype=np.float32).tolist()
                 for frame in frames
             ]
-        if any(label.intervention for label in labels):
-            columns["intervention"] = [label.intervention for label in labels]
-            columns["intervention_segment_index"] = [label.segment_index for label in labels]
         videos = self._videos_from_records(frames, camera_keys)
         if self._save_video and videos:
             for video_key, video_frames in videos.items():
@@ -965,12 +1068,63 @@ class EpisodeLogger:
             row["episode_fps"] = episode_fps
         if job.episode_meta:
             row.update(job.episode_meta)
+        intervention_ranges = []
+        range_start = None
+        range_segment = -1
+        for frame_index, label in enumerate([*labels, None]):
+            if label is not None and label.intervention:
+                if range_start is None:
+                    range_start = frame_index
+                    range_segment = label.segment_index
+                elif label.segment_index != range_segment:
+                    intervention_ranges.append(
+                        {
+                            "segment_index": range_segment,
+                            "start_frame": range_start,
+                            "end_frame": frame_index - 1,
+                        }
+                    )
+                    range_start = frame_index
+                    range_segment = label.segment_index
+                continue
+            if range_start is not None:
+                intervention_ranges.append(
+                    {
+                        "segment_index": range_segment,
+                        "start_frame": range_start,
+                        "end_frame": frame_index - 1,
+                    }
+                )
+                range_start = None
+        row["has_intervention"] = bool(intervention_ranges)
+        row["intervention_segments"] = len(intervention_ranges)
+        row["intervention_frames"] = sum(label.intervention for label in labels)
+        row["intervention_ranges"] = intervention_ranges
         job.global_index = global_index
         job.collection_columns = columns
         job.collection_episode_row = row
         job.videos = videos
         job.video_fps = fps
         job.raw_episode_payload = None
+
+    def _quantize_action_grippers(self, frames: list[Observation]) -> None:
+        """Map recorded qpos gripper actions to the configured open/close values."""
+        if self._gripper_open is None or self._gripper_close is None:
+            return
+        threshold = self._gripper_threshold
+        if threshold is None:
+            threshold = (self._gripper_open + self._gripper_close) * 0.5
+        high_is_open = self._gripper_open >= self._gripper_close
+        for frame in frames:
+            if frame.action_qpos is None:
+                continue
+            action = np.asarray(frame.action_qpos, dtype=np.float32).copy()
+            for index in self._robot.gripper_indices:
+                if index >= action.size:
+                    continue
+                is_open = action[index] >= threshold if high_is_open else action[index] <= threshold
+                action[index] = self._gripper_open if is_open else self._gripper_close
+            frame.action_qpos = action
 
     def _episode_index_for_clip_id(self, clip_id: str) -> int | None:
         match = None
@@ -1182,8 +1336,8 @@ class EpisodeLogger:
                 current_episode_pending_frames = counts["pending"]
                 current_episode_skipped_before_start = counts["skipped_before_start"]
             else:
-                current_episode_frames = len(self._steps)
-                current_episode_recorded_frames = len(self._steps)
+                current_episode_frames = self.active_frame_count
+                current_episode_recorded_frames = self.active_frame_count
         if active_for_task:
             pipeline_state = "COLLECTING"
         elif global_queue_size >= self._save_queue_max:
@@ -1555,6 +1709,13 @@ class EpisodeLogger:
             features[col] = {"dtype": "float32", "shape": [1], "names": None}
         for col in ("frame_index", "episode_index", "index", "task_index"):
             features[col] = {"dtype": "int64", "shape": [1], "names": None}
+        features["intervention"] = {"dtype": "bool", "shape": [1], "names": None}
+        features["intervention_segment_index"] = {
+            "dtype": "int64",
+            "shape": [1],
+            "names": None,
+        }
+        features["control_source"] = {"dtype": "string", "shape": [1], "names": None}
         return features
 
     def _write_stats_json(self) -> None:
