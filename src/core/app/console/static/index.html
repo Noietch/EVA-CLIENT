@@ -208,10 +208,7 @@
         <div class="panel" id="collect-panel-replay">
           <div class="panel-h"><span class="step-badge">4</span>QUALITY CHECK</div>
           <div class="card">
-            <div class="kv"><span class="k">frame</span><span class="v tnum" id="collect-replay-frame">—</span></div>
-            <div class="collect-progress"><i id="collect-replay-fill"></i></div>
             <div class="review-actions">
-              <button class="btn primary full" id="b-collect-replay-toggle">REPLAY ▶</button>
               <button class="btn" id="b-collect-qc-pass">PASS ✓</button>
               <button class="btn danger" id="b-goto-qc">FAIL ✗</button>
             </div>
@@ -279,6 +276,7 @@
           <input type="range" id="scrub-range" min="0" max="0" value="0" disabled>
           <span class="tnum scrub-pos" id="scrub-pos">0 / 0</span>
           <span class="tnum scrub-time" id="scrub-time">0.0s</span>
+          <button class="btn review-return-live" id="review-return-live" style="display:none">RETURN TO LIVE</button>
         </div>
       </div>
     </div>
