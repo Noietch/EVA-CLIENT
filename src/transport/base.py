@@ -143,6 +143,20 @@ class TransportBridge(abc.ABC):
         """True if this transport can record data-collection frames."""
         return False
 
+    def get_intrinsics(
+        self, camera_key: str
+    ) -> tuple[np.ndarray, np.ndarray, tuple[int, int]] | None:
+        """Return SDK-side intrinsics for ``camera_key`` if available.
+
+        A live sensor transport (RealSense/ZED) can override this to report
+        (K 3x3 float64, dist 1-D float64, (width, height)) straight from the
+        camera SDK — the CALIBRATE workspace uses this as the option-A path.
+        Default None means "no SDK intrinsics"; callers should fall back to
+        solving from captured board images (option B).
+        """
+        del camera_key
+        return None
+
     def start_collection(self) -> None:
         """Signal the source to begin emitting collection frames (no-op default)."""
         return None

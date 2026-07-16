@@ -30,6 +30,10 @@ class Observation:
     None when not available. action_qpos / action_eef carry the teleop (collection)
     or executed (eval/exec) action in joint / EEF space. timestamp is the source
     capture time (collection/recording); None for pure inference frames.
+    eef_uv is per-camera projected end-effector pixel coordinates keyed by camera
+    observation_key; each value is a (n_arms, 2) float32 array with NaN entries
+    for arms that fall behind the camera. Only populated when the loop was told to
+    project (calibration + kinematics available); None otherwise.
     """
 
     images: dict[str, np.ndarray]
@@ -38,6 +42,7 @@ class Observation:
     action_qpos: np.ndarray | None = None
     action_eef: np.ndarray | None = None
     timestamp: float | None = None
+    eef_uv: dict[str, np.ndarray] | None = None
 
 
 @dataclasses.dataclass

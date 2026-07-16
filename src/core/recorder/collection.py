@@ -144,6 +144,9 @@ class CollectionEpisodeWriter:
         """
         if frame.timestamp is None or frame.state_qpos is None:
             raise ValueError("collection frame missing timestamp or state_qpos")
+        hook = self._logger._on_collection_frame
+        if hook is not None:
+            hook(frame)
         with self._state_lock:
             frame_index = len(self._records)
             images = {
@@ -158,10 +161,16 @@ class CollectionEpisodeWriter:
                 for field in _COLLECTION_VECTOR_FIELDS
                 if field != "state_qpos"
             }
+            uv_map = frame.eef_uv or {}
+            uv_copy = {
+                camera: np.asarray(value, dtype=np.float32).copy()
+                for camera, value in uv_map.items()
+            }
             record = Observation(
                 timestamp=float(frame.timestamp),
                 images=images,
                 state_qpos=np.asarray(frame.state_qpos, dtype=np.float32).copy(),
+                eef_uv=uv_copy or None,
                 **vectors,
             )
             self._records.append(record)
@@ -377,6 +386,28 @@ class CollectionEpisodeWriter:
                 self._clean_vector(field, getattr(record, field), frame_index).tolist()
                 for frame_index, record in enumerate(self._records)
             ]
+        # Optional eef_uv columns — one per camera whose calibration was live at
+        # capture time. Absent from the schema/config; opt-in by simply having
+        # calibration set. Written as observation.eef_uv.<cam> so downstream
+        # trainers can pick them up per camera.
+        uv_cams: dict[str, list[list[float]]] = {}
+        for frame_index, record in enumerate(self._records):
+            uv_map = getattr(record, "eef_uv", None) or {}
+            for cam_key, uv_array in uv_map.items():
+                col = uv_cams.setdefault(cam_key, [])
+                # (n_arms, 2) -> flat list of 2*n_arms floats per row.
+                arr = np.asarray(uv_array, dtype=np.float32).reshape(-1)
+                # Backfill NaNs for earlier frames that were missing this camera.
+                while len(col) < frame_index:
+                    col.append([float("nan")] * arr.size)
+                col.append(arr.tolist())
+        for cam_key, col in uv_cams.items():
+            while len(col) < n_frames:
+                col.append([float("nan")] * (len(col[0]) if col else 2))
+            columns[f"observation.eef_uv.{cam_key}"] = col
+        # LeRobot requires timestamp[i] == i/fps (strictly equal-interval, tol 1e-4),
+        # so synthesize it from the target fps. The real hardware capture time (raw,
+        # jittery uptime seconds) is preserved out-of-band in ``capture_time``.
         fps = float(self._logger._fps)
         dataset_dir = job.dataset_dir or self._logger._collection_dataset_dir(job.task)
         global_index = job.global_index
@@ -642,10 +673,10 @@ class CollectionEpisodeWriter:
         return features
 
     def _write_stats_json(self, dataset_dir: Path) -> None:
-        stats = self._stats_from_episode_stats(dataset_dir)
-        if stats is not None:
+        cached_stats = self._stats_from_episode_stats(dataset_dir)
+        if cached_stats is not None:
             with self._logger._meta_path("stats.json", dataset_dir).open("w") as f:
-                json.dump(stats, f, indent=2)
+                json.dump(cached_stats, f, indent=2)
             return
 
         accumulators = {

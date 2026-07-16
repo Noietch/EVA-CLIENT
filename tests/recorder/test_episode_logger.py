@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import threading
+from collections.abc import Callable
 
 import numpy as np
 import pyarrow.parquet as pq
@@ -97,6 +98,7 @@ def _collection_logger(
     save_image_height: int | None = None,
     save_image_width: int | None = None,
     async_save: bool = False,
+    on_collection_frame: Callable[[Observation], None] | None = None,
 ) -> EpisodeLogger:
     return EpisodeLogger(
         log_dir,
@@ -126,6 +128,7 @@ def _collection_logger(
         async_save=async_save,
         save_image_height=save_image_height,
         save_image_width=save_image_width,
+        on_collection_frame=on_collection_frame,
     )
 
 
@@ -1352,3 +1355,57 @@ def test_image_episode_stats_matches_stacked_formula():
     np.testing.assert_allclose(flat(stats["mean"]), per_channel.mean(axis=0))
     np.testing.assert_allclose(flat(stats["std"]), per_channel.std(axis=0))
     assert stats["count"] == [3]
+
+
+def test_collection_writes_eef_uv_column_when_frames_carry_it(tmp_path):
+    """When an Observation carries eef_uv dict, per-camera uv columns land in parquet."""
+    def fill_eef_uv(frame: Observation) -> None:
+        frame_index = round(float(frame.timestamp) * 10)
+        frame.eef_uv = {
+            "cam_high": np.array(
+                [[100.0 + frame_index, 200.0 + frame_index]], dtype=np.float32
+            ),
+        }
+
+    logger = _collection_logger(tmp_path, on_collection_frame=fill_eef_uv)
+    qpos = np.zeros(_DIM, dtype=np.float32)
+    image = np.zeros((8, 8, 3), dtype=np.uint8)
+    timestamps = (0.0, 0.1, 0.2)
+
+    logger.start_episode("t")
+    logger.ingest_collection_snapshot(
+        RawCollectionSnapshot(
+            timestamp=timestamps[-1],
+            decode_raw=lambda: _collection_raw_batch(
+                timestamps, image=image, state=qpos, action=qpos
+            ),
+        )
+    )
+    logger.end_episode()
+
+    task_dir = _collection_task_dir(tmp_path)
+    table = pq.read_table(task_dir / "data" / "chunk-000" / "episode_000000.parquet")
+    assert "observation.eef_uv.cam_high" in table.column_names
+    rows = table.column("observation.eef_uv.cam_high").to_pylist()
+    assert rows == [[100.0, 200.0], [101.0, 201.0], [102.0, 202.0]]
+
+
+def test_collection_omits_eef_uv_column_when_frames_lack_it(tmp_path):
+    logger = _collection_logger(tmp_path)
+    qpos = np.zeros(_DIM, dtype=np.float32)
+    image = np.zeros((8, 8, 3), dtype=np.uint8)
+    timestamps = (0.0, 0.1)
+    logger.start_episode("t")
+    logger.ingest_collection_snapshot(
+        RawCollectionSnapshot(
+            timestamp=timestamps[-1],
+            decode_raw=lambda: _collection_raw_batch(
+                timestamps, image=image, state=qpos, action=qpos
+            ),
+        )
+    )
+    logger.end_episode()
+    task_dir = _collection_task_dir(tmp_path)
+    table = pq.read_table(task_dir / "data" / "chunk-000" / "episode_000000.parquet")
+    uv_cols = [c for c in table.column_names if c.startswith("observation.eef_uv")]
+    assert uv_cols == []
