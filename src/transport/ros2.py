@@ -21,11 +21,15 @@ from PIL import Image, UnidentifiedImageError
 
 from core.config import ConfigDict
 from core.registry import TRANSPORT_REGISTRY
-from core.types import CollectionRawImage, Observation
+from core.types import (
+    CollectionRawImage,
+    Observation,
+    RawCollectionSnapshot,
+)
 from robots.base import Robot
 from transport.base import (
-    HilStatus,
     _COLLECTION_DEQUE_MAX,
+    HilStatus,
     _RosTransportBase,
     resolve_topics,
 )
@@ -186,6 +190,7 @@ class Ros2Transport(_RosTransportBase):
             g.name: list(g.joint_names) for g in self._robot.actuator_groups
         }
         self._last_acquire_stamp: float | None = None
+        self._collection_capture_active = False
 
         self.set_hil_control_mode(self._configured_hil_control_mode())
         self._init_ros()
@@ -290,7 +295,12 @@ class Ros2Transport(_RosTransportBase):
     ) -> None:
         self._image_rate.mark(camera_name)
         with self._deque_guard():
-            for target in (live_deque, collection_deque):
+            targets = (
+                (live_deque, collection_deque)
+                if self._collection_capture_active
+                else (live_deque,)
+            )
+            for target in targets:
                 if len(target) >= _COLLECTION_DEQUE_MAX:
                     target.popleft()
                 target.append(msg)
@@ -459,6 +469,8 @@ class Ros2Transport(_RosTransportBase):
 
     def start_collection(self) -> None:
         """Seed collection-only gripper action from the current target/feedback."""
+        with self._deque_guard():
+            self._collection_capture_active = True
         for group in self._robot.actuator_groups:
             if not self._uses_operator_action_gripper(group):
                 continue
@@ -467,6 +479,30 @@ class Ros2Transport(_RosTransportBase):
                 value = self._latest_group_gripper_feedback(group)
             if value is not None:
                 self.record_collection_gripper_action(group.name, value)
+
+    def stop_collection(self) -> None:
+        """Stop collection-only camera capture and release cached ROS images."""
+        with self._deque_guard():
+            self._collection_capture_active = False
+            for deque in self._collection_camera_deques.values():
+                deque.clear()
+            self._collection_raw_cursors().clear()
+
+    def acquire_collection_raw(self) -> RawCollectionSnapshot | None:
+        """Capture fresh raw streams and release consumed collection camera messages."""
+        snapshot = super().acquire_collection_raw()
+        if snapshot is None:
+            return None
+        cursors = self._collection_raw_cursors()
+        with self._deque_guard():
+            for camera in self._collection_camera_specs():
+                deque = self._collection_camera_deques.get(camera.name)
+                cursor = cursors.get(f"image:{camera.observation_key}:{camera.name}")
+                if deque is None or cursor is None:
+                    continue
+                while len(deque) > 1 and self._stamp_to_sec(deque[1]) <= cursor:
+                    deque.popleft()
+        return snapshot
 
     def clear_collection_backlog(self) -> float | None:
         """Advance raw cursors after seeding operator-sourced gripper action."""

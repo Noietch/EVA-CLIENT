@@ -188,12 +188,83 @@ def test_ros2_camera_subscription_keeps_raw_capture_deque_independent(monkeypatc
     camera = robot.observation_schema.cameras[0]
     callback = _subscription_callback(node, transport._camera_topics[camera.name])
 
-    callback(_compressed_msg(1, b"jpeg"))
+    callback(_compressed_msg(1, b"before collection"))
 
     assert len(transport._camera_deques[camera.name]) == 1
+    assert len(transport._collection_camera_deques[camera.name]) == 0
+
+    transport.start_collection()
+    callback(_compressed_msg(2, b"during collection"))
+
+    assert len(transport._camera_deques[camera.name]) == 2
     assert len(transport._collection_camera_deques[camera.name]) == 1
     transport._camera_deques[camera.name].popleft()
     assert len(transport._collection_camera_deques[camera.name]) == 1
+
+    transport.stop_collection()
+
+    assert len(transport._collection_camera_deques[camera.name]) == 0
+
+
+def test_ros2_collection_raw_releases_consumed_camera_messages(monkeypatch):
+    node = _FakeNode()
+    runtime = types.SimpleNamespace(
+        node=node,
+        cv_bridge=object(),
+        image_type=object,
+        compressed_image_type=object,
+        joint_state_type=_FakeJointState,
+        pose_stamped_type=object,
+    )
+    monkeypatch.setattr(ros2, "get_ros2_runtime", lambda node_name: runtime)
+    monkeypatch.setattr(ros2, "_make_live_qos", lambda depth=10: object())
+
+    config = load_config(_R1LITE_COLLECTION)
+    robot = ROBOT_REGISTRY.build(config.robot.type)
+    transport = ros2.Ros2Transport(config, robot)
+    camera = robot.observation_schema.cameras[0]
+    callback = _subscription_callback(node, transport._camera_topics[camera.name])
+    transport.start_collection()
+    callback(_compressed_msg(1, b"one"))
+    callback(_compressed_msg(2, b"two"))
+    callback(_compressed_msg(3, b"three"))
+
+    snapshot = transport.acquire_collection_raw()
+
+    assert snapshot is not None
+    assert len(transport._collection_camera_deques[camera.name]) == 1
+    assert transport._collection_camera_deques[camera.name][0].data == b"three"
+
+
+def test_ros2_hil_relay_switch_keeps_collection_camera_capture_active(monkeypatch):
+    node = _FakeNode()
+    runtime = types.SimpleNamespace(
+        node=node,
+        cv_bridge=object(),
+        image_type=object,
+        compressed_image_type=object,
+        joint_state_type=_FakeJointState,
+        pose_stamped_type=object,
+    )
+    monkeypatch.setattr(ros2, "get_ros2_runtime", lambda node_name: runtime)
+    monkeypatch.setattr(ros2, "_make_live_qos", lambda depth=10: object())
+
+    config = load_config(_R1LITE_COLLECTION)
+    robot = ROBOT_REGISTRY.build(config.robot.type)
+    transport = ros2.Ros2Transport(config, robot)
+    camera = robot.observation_schema.cameras[0]
+    callback = _subscription_callback(node, transport._camera_topics[camera.name])
+    transport.start_collection()
+
+    transport.set_hil_relay_enabled(True)
+    callback(_compressed_msg(1, b"hil"))
+    transport.set_hil_relay_enabled(False)
+    callback(_compressed_msg(2, b"policy"))
+
+    assert [msg.data for msg in transport._collection_camera_deques[camera.name]] == [
+        b"hil",
+        b"policy",
+    ]
 
 
 def test_ros2_camera_subscriptions_report_minimum_image_hz(monkeypatch):
