@@ -383,7 +383,7 @@ def fetch_action_chunk(
             config.robot.gripper_close,
         )
         step_index = session.step_index if session is not None else -1
-        logger.info(
+        logger.debug(
             "[INFER_CHUNK] step=%d infer_ms=%.1f raw_shape=%s action_shape=%s "
             "delta=%.4f first=%s last=%s",
             step_index,

@@ -964,6 +964,47 @@ class EpisodeLogger:
                 self._write_info_json()
         self._clear_pending_episode_meta_for_job(job)
 
+    def _exclude_raw_episode_ranges(
+        self,
+        frames: list[Observation],
+        labels: list[RawEpisodeFrameLabel],
+        ranges: list[dict[str, Any]],
+    ) -> tuple[list[Observation], list[RawEpisodeFrameLabel], list[dict[str, Any]]]:
+        kept_frames: list[Observation] = []
+        kept_labels: list[RawEpisodeFrameLabel] = []
+        removed_counts = [0] * len(ranges)
+        for frame, label in zip(frames, labels, strict=True):
+            assert frame.timestamp is not None
+            timestamp = float(frame.timestamp)
+            excluded_index = next(
+                (
+                    index
+                    for index, interval in enumerate(ranges)
+                    if float(interval["start_time"]) < timestamp
+                    < float(interval["end_time"])
+                ),
+                None,
+            )
+            if excluded_index is not None:
+                removed_counts[excluded_index] += 1
+                continue
+            kept_frames.append(frame)
+            kept_labels.append(label)
+        details = []
+        for interval, removed_frames in zip(ranges, removed_counts, strict=True):
+            start_time = float(interval["start_time"])
+            end_time = float(interval["end_time"])
+            details.append(
+                {
+                    "reason": str(interval["reason"]),
+                    "start_time": start_time,
+                    "end_time": end_time,
+                    "duration_sec": round(end_time - start_time, 6),
+                    "removed_frames": removed_frames,
+                }
+            )
+        return kept_frames, kept_labels, details
+
     def _prepare_raw_episode_job(self, job: SaveJob) -> None:
         payload = job.raw_episode_payload
         if payload is None:
@@ -993,8 +1034,23 @@ class EpisodeLogger:
         )
         if not frames:
             raise ValueError("raw episode produced 0 frames")
-        issues = [QualityIssue("red", issue.code, issue.detail) for issue in report.issues]
         labels = self._labels_for_aligned_frames(frames, payload.frame_labels)
+        excluded_ranges = list(job.episode_meta.pop("excluded_ranges", []))
+        excluded_details: list[dict[str, Any]] = []
+        if excluded_ranges:
+            original_frame_count = len(frames)
+            frames, labels, excluded_details = self._exclude_raw_episode_ranges(
+                frames, labels, excluded_ranges
+            )
+            logger.info(
+                "[ROLLOUT_SAVE] episode=%d excluded_frames=%d ranges=%s",
+                job.episode_index,
+                original_frame_count - len(frames),
+                excluded_details,
+            )
+            if not frames:
+                raise ValueError("raw episode exclusions removed every aligned frame")
+        issues = [QualityIssue("red", issue.code, issue.detail) for issue in report.issues]
         self._quantize_action_grippers(frames)
         logger.info(
             "[ROLLOUT_SAVE] episode=%d aligned_policy=%d aligned_intervention=%d "
@@ -1068,6 +1124,11 @@ class EpisodeLogger:
             row["episode_fps"] = episode_fps
         if job.episode_meta:
             row.update(job.episode_meta)
+        if excluded_details:
+            row["excluded_ranges"] = excluded_details
+            row["excluded_frames"] = sum(
+                int(interval["removed_frames"]) for interval in excluded_details
+            )
         intervention_ranges = []
         range_start = None
         range_segment = -1
@@ -1934,6 +1995,7 @@ def _copy_intervention_segment(segment: RolloutInterventionSegment) -> RolloutIn
         segment_index=segment.segment_index,
         start_policy_frame_index=segment.start_policy_frame_index,
         pre_intervention_qpos=np.asarray(segment.pre_intervention_qpos, dtype=np.float32).copy(),
+        start_time=segment.start_time,
         frames=[_copy_observation(frame) for frame in segment.frames],
         resume_policy_frame_index=segment.resume_policy_frame_index,
         invalid_reason=segment.invalid_reason,

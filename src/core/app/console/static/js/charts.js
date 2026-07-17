@@ -2,6 +2,9 @@
 import { $, LIVE, RT_COLORS, S } from "./core.js";
 import { replayStop, seekReplay } from "./replay.js";
 
+let interventionTrackSource = null;
+let interventionTrackCache = "";
+
 function buildLiveDims() {
     const da = LIVE.action.length ? LIVE.action[0].length : 0;
     const ds = LIVE.state.length ? LIVE.state[0].length : 0;
@@ -81,7 +84,12 @@ function setScrubValue(frac) {
   }
 
 function interventionTrackGradient() {
-    if (LIVE.intervention.length !== LIVE.n || !LIVE.intervention.some(Boolean)) return "";
+    if (interventionTrackSource === LIVE.intervention) return interventionTrackCache;
+    interventionTrackSource = LIVE.intervention;
+    if (LIVE.intervention.length !== LIVE.n || !LIVE.intervention.some(Boolean)) {
+      interventionTrackCache = "";
+      return interventionTrackCache;
+    }
     const stops = [];
     let start = 0;
     let active = !!LIVE.intervention[0];
@@ -95,7 +103,8 @@ function interventionTrackGradient() {
       start = i;
       active = next;
     }
-    return `linear-gradient(to right, ${stops.join(", ")})`;
+    interventionTrackCache = `linear-gradient(to right, ${stops.join(", ")})`;
+    return interventionTrackCache;
   }
 
 function updateScrubText() {

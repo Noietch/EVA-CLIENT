@@ -209,6 +209,9 @@ class RuntimeState:
         rollout_intervention_segments: Accepted segments saved with the rollout.
         rollout_intervention_next_segment_index: Monotonic segment id inside the rollout.
         rollout_intervention_enabled: Runtime HIL ON/OFF gate for rollout halt.
+        rollout_exclusion_active: Reason and source timestamp for a rollout interval
+            excluded until the first policy action is published.
+        rollout_exclusions: Completed excluded intervals removed when saving rollout data.
         hil_control_mode: HIL relay mode, either "absolute" or "relative".
     """
 
@@ -270,6 +273,8 @@ class RuntimeState:
     )
     rollout_intervention_next_segment_index: int = 0
     rollout_intervention_enabled: bool = False
+    rollout_exclusion_active: tuple[str, float] | None = None
+    rollout_exclusions: list[tuple[str, float, float]] = dataclasses.field(default_factory=list)
     hil_control_mode: str = "absolute"
     # EVAL-tab INIT panel: when init_qpos is set, the arm's reset target becomes this
     # recorded start pose instead of robot.initial_qpos (home). init_ready latches once
