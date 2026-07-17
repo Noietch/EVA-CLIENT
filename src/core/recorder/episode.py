@@ -43,6 +43,7 @@ from core.recorder.collection_alignment import (
 from core.recorder.lerobot_meta import build_info, history_row
 from core.types import (
     CollectionRawBatch,
+    CollectionRawImage,
     CollectionRawSample,
     Observation,
     RolloutInterventionSegment,
@@ -126,6 +127,7 @@ class SaveJob:
     collection_payload: Any | None = None
     raw_episode_payload: Any | None = None
     videos: dict[str, list[np.ndarray]] | None = None
+    raw_video_samples: dict[str, list[CollectionRawSample]] | None = None
     video_fps: float | None = None
     dataset_dir: Path | None = None
     intervention_segments: list[RolloutInterventionSegment] = dataclasses.field(
@@ -953,7 +955,14 @@ class EpisodeLogger:
         path = self._parquet_path(job.episode_index)
         path.parent.mkdir(parents=True, exist_ok=True)
         pq.write_table(pa.table(columns), str(path))
-        self._write_videos(job.episode_index, job.videos, job.video_fps)
+        try:
+            self._write_raw_sample_videos(
+                job.episode_index,
+                job.raw_video_samples,
+                job.video_fps,
+            )
+        finally:
+            job.raw_video_samples = None
         with self._lock:
             if self._eval_mode:
                 self._upsert_episode_dict_row_locked(row)
@@ -969,11 +978,18 @@ class EpisodeLogger:
         frames: list[Observation],
         labels: list[RawEpisodeFrameLabel],
         ranges: list[dict[str, Any]],
-    ) -> tuple[list[Observation], list[RawEpisodeFrameLabel], list[dict[str, Any]]]:
+        image_samples: dict[str, list[CollectionRawSample]],
+    ) -> tuple[
+        list[Observation],
+        list[RawEpisodeFrameLabel],
+        list[dict[str, Any]],
+        dict[str, list[CollectionRawSample]],
+    ]:
         kept_frames: list[Observation] = []
         kept_labels: list[RawEpisodeFrameLabel] = []
+        kept_image_samples = {key: [] for key in image_samples}
         removed_counts = [0] * len(ranges)
-        for frame, label in zip(frames, labels, strict=True):
+        for frame_index, (frame, label) in enumerate(zip(frames, labels, strict=True)):
             assert frame.timestamp is not None
             timestamp = float(frame.timestamp)
             excluded_index = next(
@@ -990,6 +1006,8 @@ class EpisodeLogger:
                 continue
             kept_frames.append(frame)
             kept_labels.append(label)
+            for key, samples in image_samples.items():
+                kept_image_samples[key].append(samples[frame_index])
         details = []
         for interval, removed_frames in zip(ranges, removed_counts, strict=True):
             start_time = float(interval["start_time"])
@@ -1003,7 +1021,7 @@ class EpisodeLogger:
                     "removed_frames": removed_frames,
                 }
             )
-        return kept_frames, kept_labels, details
+        return kept_frames, kept_labels, details, kept_image_samples
 
     def _prepare_raw_episode_job(self, job: SaveJob) -> None:
         payload = job.raw_episode_payload
@@ -1013,6 +1031,7 @@ class EpisodeLogger:
         self._decode_raw_episode_snapshots(payload)
         fields = self._raw_episode_vector_fields(payload.raw_batch)
         camera_keys = tuple(payload.raw_batch.images.keys())
+        aligned_image_samples: dict[str, list[CollectionRawSample]] = {}
         frames, report = align_collection_samples(
             payload.raw_batch,
             robot=self._robot,
@@ -1020,6 +1039,7 @@ class EpisodeLogger:
             vector_fields=fields,
             fps=float(self._fps),
             image_skew_sec=self._raw_episode_image_skew_tolerance_sec(),
+            deferred_images=aligned_image_samples,
         )
         logger.info(
             "[ROLLOUT_SAVE] episode=%d raw_snapshots=%d labels=%d vectors=%s frames=%d "
@@ -1039,8 +1059,13 @@ class EpisodeLogger:
         excluded_details: list[dict[str, Any]] = []
         if excluded_ranges:
             original_frame_count = len(frames)
-            frames, labels, excluded_details = self._exclude_raw_episode_ranges(
-                frames, labels, excluded_ranges
+            frames, labels, excluded_details, aligned_image_samples = (
+                self._exclude_raw_episode_ranges(
+                    frames,
+                    labels,
+                    excluded_ranges,
+                    aligned_image_samples,
+                )
             )
             logger.info(
                 "[ROLLOUT_SAVE] episode=%d excluded_frames=%d ranges=%s",
@@ -1094,15 +1119,15 @@ class EpisodeLogger:
                 else np.asarray(frame.state_eef, dtype=np.float32).tolist()
                 for frame in frames
             ]
-        videos = self._videos_from_records(frames, camera_keys)
-        if self._save_video and videos:
-            for video_key, video_frames in videos.items():
-                if len(video_frames) != n_frames:
+        raw_video_samples = self._raw_video_samples(aligned_image_samples, camera_keys)
+        if self._save_video and raw_video_samples:
+            for video_key, samples in raw_video_samples.items():
+                if len(samples) != n_frames:
                     issues.append(
                         QualityIssue(
                             "red",
                             "frame_count_mismatch",
-                            f"video {video_key} has {len(video_frames)} frames but "
+                            f"video {video_key} has {len(samples)} frames but "
                             f"data table has {n_frames} rows",
                         )
                     )
@@ -1164,7 +1189,7 @@ class EpisodeLogger:
         job.global_index = global_index
         job.collection_columns = columns
         job.collection_episode_row = row
-        job.videos = videos
+        job.raw_video_samples = raw_video_samples
         job.video_fps = fps
         job.raw_episode_payload = None
 
@@ -1266,33 +1291,70 @@ class EpisodeLogger:
             return None
         return (len(timestamps) - 1) / duration
 
-    def _videos_from_records(
+    def _raw_video_samples(
         self,
-        records: list[Observation],
+        aligned_images: dict[str, list[CollectionRawSample]],
         camera_keys: tuple[str, ...],
-    ) -> dict[str, list[np.ndarray]] | None:
+    ) -> dict[str, list[CollectionRawSample]] | None:
         if not self._save_video:
             return None
-        size = self._save_size()
-        videos: dict[str, list[np.ndarray]] = {}
+        videos: dict[str, list[CollectionRawSample]] = {}
         for cam_key in camera_keys:
             video_key = resolve_video_key(self._keys, cam_key)
             if video_key is None:
                 continue
-            frames = []
-            for record in records:
-                image = record.images.get(cam_key)
-                if image is None:
-                    continue
-                rgb = _to_rgb_uint8(image, self._convert_bgr_to_rgb)
-                if size is not None and rgb.shape[:2] != size:
-                    rgb = resize_direct(rgb, size[0], size[1])
-                if self._image_shape is None:
-                    self._image_shape = (rgb.shape[0], rgb.shape[1])
-                frames.append(np.ascontiguousarray(rgb))
-            if frames:
-                videos[video_key] = frames
+            samples = aligned_images.get(cam_key, [])
+            if samples:
+                videos[video_key] = samples
         return videos or None
+
+    def _write_raw_sample_videos(
+        self,
+        episode_index: int,
+        videos: dict[str, list[CollectionRawSample]] | None,
+        fps: float | None,
+    ) -> None:
+        if not videos:
+            return
+        video_fps = float(fps or self._fps)
+        size = self._save_size()
+        for video_key, samples in videos.items():
+            path = (
+                self._log_dir
+                / "videos"
+                / "chunk-000"
+                / video_key
+                / f"episode_{episode_index:06d}.mp4"
+            )
+            path.parent.mkdir(parents=True, exist_ok=True)
+            writer = imageio.get_writer(
+                str(path),
+                fps=video_fps,
+                codec="libx264",
+                macro_block_size=1,
+                ffmpeg_params=["-preset", "ultrafast", "-movflags", "+faststart"],
+            )
+            active_value: Any | None = None
+            active_frame: np.ndarray | None = None
+            try:
+                for sample in samples:
+                    value = sample.value
+                    if value is not active_value or active_frame is None:
+                        if isinstance(active_value, CollectionRawImage):
+                            active_value.release_decoded()
+                        image = value.decode() if isinstance(value, CollectionRawImage) else value
+                        rgb = _to_rgb_uint8(np.asarray(image), self._convert_bgr_to_rgb)
+                        if size is not None and rgb.shape[:2] != size:
+                            rgb = resize_direct(rgb, size[0], size[1])
+                        active_value = value
+                        active_frame = np.ascontiguousarray(rgb)
+                        if self._image_shape is None:
+                            self._image_shape = (active_frame.shape[0], active_frame.shape[1])
+                    writer.append_data(active_frame)
+            finally:
+                if isinstance(active_value, CollectionRawImage):
+                    active_value.release_decoded()
+                writer.close()
 
     def _next_episode_global_index(self, n_frames: int) -> int:
         with self._lock:

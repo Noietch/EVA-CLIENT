@@ -593,6 +593,56 @@ def test_raw_episode_snapshots_decode_on_async_save_worker(tmp_path):
     assert episode["alignment_image_skew_tolerance_sec"] == 1.0 / 18.0
 
 
+def test_raw_episode_video_writer_holds_only_one_decoded_image(tmp_path, monkeypatch):
+    raw_images: list[CollectionRawImage] = []
+    written_values: list[int] = []
+
+    class _Writer:
+        def append_data(self, frame: np.ndarray) -> None:
+            assert sum(image._decoded is not None for image in raw_images) == 1
+            written_values.append(int(frame[0, 0, 0]))
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(episode_module.imageio, "get_writer", lambda *args, **kwargs: _Writer())
+    logger = _logger(tmp_path, fps=10, async_save=True)
+
+    def snapshot(timestamp: float, value: int) -> RawCollectionSnapshot:
+        image = CollectionRawImage(
+            lambda value=value: np.full((2, 2, 3), value, dtype=np.uint8)
+        )
+        raw_images.append(image)
+
+        def decode_raw() -> CollectionRawBatch:
+            state = np.full(_DIM, timestamp, dtype=np.float32)
+            return CollectionRawBatch(
+                images={"cam_high": [CollectionRawSample(timestamp, image)]},
+                vectors={"state_qpos": [CollectionRawSample(timestamp, state)]},
+            )
+
+        return RawCollectionSnapshot(timestamp=timestamp, decode_raw=decode_raw)
+
+    logger.start_episode("t")
+    logger.ingest_raw_episode_snapshot(
+        snapshot(1.0, 10),
+        np.zeros(_DIM, dtype=np.float32),
+    )
+    logger.ingest_raw_episode_snapshot(
+        snapshot(1.1, 20),
+        np.ones(_DIM, dtype=np.float32),
+    )
+    monkeypatch.setattr(logger, "_start_save_worker", lambda: None)
+
+    assert logger.end_episode()
+    assert all(image._decoded is None for image in raw_images)
+
+    logger._save_queue_worker()
+
+    assert written_values == [10, 20]
+    assert all(image._decoded is None for image in raw_images)
+
+
 def test_pending_score_patch_applies_to_async_save_job(tmp_path):
     logger = _logger(tmp_path, fps=10, async_save=True)
 

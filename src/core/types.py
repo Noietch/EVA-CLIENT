@@ -72,6 +72,11 @@ class CollectionRawImage:
         assert self._decoded is not None
         return self._decoded
 
+    def release_decoded(self) -> None:
+        """Release the decoded pixels while retaining the raw decoder."""
+        self._decoded = None
+        self._decoded_once = False
+
 
 @dataclasses.dataclass
 class CollectionRawBatch:

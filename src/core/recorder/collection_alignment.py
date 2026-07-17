@@ -67,6 +67,7 @@ def align_collection_samples(
     image_skew_sec: float,
     start_time: float | None = None,
     end_time: float | None = None,
+    deferred_images: dict[str, list[CollectionRawSample]] | None = None,
 ) -> tuple[list[Observation], CollectionAlignmentReport]:
     """Align raw collection streams to a fixed fps grid.
 
@@ -83,6 +84,8 @@ def align_collection_samples(
             batch.start_time.
         end_time: Optional episode upper bound in source-clock seconds. Defaults to
             batch.end_time.
+        deferred_images: Optional output mapping receiving the selected raw image
+            samples. When provided, aligned Observations carry no decoded images.
 
     Returns:
         frames: Observations on the fixed grid. Images are nearest-neighbor selected;
@@ -96,6 +99,9 @@ def align_collection_samples(
     upper_bound = batch.end_time if end_time is None else end_time
     required_images = tuple(camera_keys)
     required_vectors = tuple(vector_fields)
+    if deferred_images is not None:
+        deferred_images.clear()
+        deferred_images.update({key: [] for key in required_images})
     image_series: dict[str, list[CollectionRawSample]] = {
         key: _sorted_samples(batch.images.get(key, [])) for key in required_images
     }
@@ -209,7 +215,10 @@ def align_collection_samples(
                         ),
                     )
                 )
-            images[key] = _image_sample_value(sample)
+            if deferred_images is None:
+                images[key] = _image_sample_value(sample)
+            else:
+                deferred_images[key].append(sample)
 
         vectors: dict[str, np.ndarray] = {}
         for field, components in vector_series.items():
