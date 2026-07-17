@@ -370,11 +370,25 @@ def publish_real_action_with_preview(
     should_preview = runtime.transport.has_sim_publishers() and (
         session is None or session.pending_real_chunk is None
     )
+    started = time.monotonic()
     if should_preview:
         publish_action(runtime, action, target=OutputTarget.SIM.value)
+    preview_done = time.monotonic()
     publish_action(runtime, action, target=OutputTarget.REAL.value)
+    real_done = time.monotonic()
     if session is not None:
         record_executed_action(config, session, action, runtime)
+    record_done = time.monotonic()
+    if record_done - started >= 0.02:
+        logger.warning(
+            "[CONTROL_TIMING] stage=dispatch preview_ms=%.1f real_publish_ms=%.1f "
+            "record_ms=%.1f total_ms=%.1f step=%d",
+            (preview_done - started) * 1000.0,
+            (real_done - preview_done) * 1000.0,
+            (record_done - real_done) * 1000.0,
+            (record_done - started) * 1000.0,
+            session.step_index if session is not None else -1,
+        )
 
 
 def publish_action_chunk(
@@ -951,22 +965,38 @@ def publish_next_action(config: ConfigDict, runtime: RuntimeState, session: Sess
 
     # Continuous mode: pop individual actions from the buffer
     if strategy is not None and strategy.is_loop_running():
+        started = time.monotonic()
         action = strategy.pop_next_action()
+        pop_done = time.monotonic()
         if action is None:
             return False  # buffer empty, skip this tick
         action = apply_gripper_control_overrides(runtime, action, session)
-        logger.info(
+        override_done = time.monotonic()
+        logger.debug(
             "[PUBLISH_ACTION] mode=%s strategy=loop step=%d action=%s",
             session.mode.value,
             session.step_index,
             _format_diag_vector(action),
         )
+        log_done = time.monotonic()
         if sim_only:
             publish_action(runtime, action, target=OutputTarget.SIM.value)
             session.sim_preview_qpos = action.copy()
             record_executed_action(config, session, action, runtime)
         else:
             publish_real_action_with_preview(config, runtime, action, session=session)
+        publish_done = time.monotonic()
+        if publish_done - started >= 0.02:
+            logger.warning(
+                "[CONTROL_TIMING] stage=publish_next pop_ms=%.1f override_ms=%.1f "
+                "action_log_ms=%.1f dispatch_ms=%.1f total_ms=%.1f step=%d",
+                (pop_done - started) * 1000.0,
+                (override_done - pop_done) * 1000.0,
+                (log_done - override_done) * 1000.0,
+                (publish_done - log_done) * 1000.0,
+                (publish_done - started) * 1000.0,
+                session.step_index,
+            )
         session.step_index += 1
         return True
 
@@ -976,7 +1006,7 @@ def publish_next_action(config: ConfigDict, runtime: RuntimeState, session: Sess
     action = apply_gripper_control_overrides(
         runtime, session.action_chunk[session.chunk_index], session
     )
-    logger.info(
+    logger.debug(
         "[PUBLISH_ACTION] mode=%s strategy=chunk step=%d chunk=%d/%d action=%s",
         session.mode.value,
         session.step_index,

@@ -2,11 +2,47 @@
 
 from __future__ import annotations
 
+import gc
 import logging
 import threading
+import time
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+_gc_collect_thread: threading.Thread | None = None
+
+
+def _collect_cycles() -> None:
+    started = time.monotonic()
+    collected = gc.collect()
+    logger.info(
+        "[CAPTURE_GC] state=collected objects=%d duration_ms=%.1f",
+        collected,
+        (time.monotonic() - started) * 1000.0,
+    )
+
+
+def _suspend_cyclic_gc() -> None:
+    global _gc_collect_thread
+    if _gc_collect_thread is not None:
+        _gc_collect_thread.join()
+        _gc_collect_thread = None
+    _collect_cycles()
+    gc.disable()
+    logger.info("[CAPTURE_GC] state=suspended")
+
+
+def _resume_cyclic_gc() -> None:
+    global _gc_collect_thread
+    gc.enable()
+    _gc_collect_thread = threading.Thread(
+        target=_collect_cycles,
+        name="eva-capture-gc",
+        daemon=True,
+    )
+    _gc_collect_thread.start()
+    logger.info("[CAPTURE_GC] state=resumed")
 
 
 class CollectionCaptureRunner:
@@ -127,9 +163,15 @@ def start_collection_capture(
     """Attach and start one collection capture runner on the runtime."""
     if getattr(runtime, "collection_capture_runner", None) is not None:
         raise RuntimeError("collection capture runner is already active")
+    _suspend_cyclic_gc()
     runner = CollectionCaptureRunner(runtime, fps, max_raw_snapshots_per_tick)
     runtime.collection_capture_runner = runner
-    runner.start()
+    try:
+        runner.start()
+    except BaseException:
+        runtime.collection_capture_runner = None
+        _resume_cyclic_gc()
+        raise
 
 
 def stop_collection_capture(runtime: Any) -> None:
@@ -141,3 +183,4 @@ def stop_collection_capture(runtime: Any) -> None:
         runner.stop()
     finally:
         runtime.collection_capture_runner = None
+        _resume_cyclic_gc()

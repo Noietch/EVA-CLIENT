@@ -22,9 +22,13 @@ let REPLAY_XF_NG = 0;
 
 let REPLAY_XF_LOADING = false;
 
+let replayTransformsPromise = null;
+
 let _lastReplayChartDraw = 0;
 
 const REPLAY_DEFAULT_FPS = 10;
+
+let replayVideoFps = REPLAY_DEFAULT_FPS;
 
 const REAL_REPLAY_MAX_EXTRAPOLATE_S = 0.5;
 
@@ -33,6 +37,8 @@ let realReplayVizRaf = null;
 let realReplayAnchorFrame = 0;
 
 let realReplayAnchorWall = 0;
+
+let realReplayReportedFrame = 0;
 
 let realReplayLastVideoSync = 0;
 
@@ -114,6 +120,7 @@ function maybeSyncReplayPlayer(s) {
       replayLoadedDatasetDir = s.replay_dataset_dir || "";
       replayLoadedEpisodeId = s.replay_episode_id || 0;
       replayLoadedVideoKeys = { ...S.replayVideoKeys };
+      replayVideoFps = Math.max(1, Number(s.replay_fps) || REPLAY_DEFAULT_FPS);
       loadReplaySeries();
       return;
     }
@@ -138,6 +145,7 @@ function loadMountedReplaySeries(info) {
     replayLoadedDatasetDir = info.dataset_dir || "";
     replayLoadedEpisodeId = Number(info.episode || 0);
     replayLoadedVideoKeys = { ...(info.video_keys || {}) };
+    replayVideoFps = Math.max(1, Number(info.fps) || REPLAY_DEFAULT_FPS);
     return loadReplaySeries();
   }
 
@@ -172,6 +180,8 @@ async function loadReplaySeries() {
   }
 
 function installReplaySeries(series) {
+    const seriesFps = Number(series.fps);
+    if (seriesFps > 0) replayVideoFps = seriesFps;
     LIVE.timestamp = series.timestamp || [];
     LIVE.action = series.action || [];
     LIVE.state = series.state || [];
@@ -193,6 +203,17 @@ function installReplaySeries(series) {
   }
 
 async function loadReplayTransforms(loadSeq) {
+    if (REPLAY_XF_LOADING && replayTransformsPromise) return replayTransformsPromise;
+    const promise = loadReplayTransformsOperation(loadSeq);
+    replayTransformsPromise = promise;
+    try {
+      return await promise;
+    } finally {
+      if (replayTransformsPromise === promise) replayTransformsPromise = null;
+    }
+  }
+
+async function loadReplayTransformsOperation(loadSeq) {
     REPLAY_XF = null; REPLAY_XF_PARTS = null; REPLAY_XF_GEOMS = null; REPLAY_XF_NG = 0;
     REPLAY_XF_LOADING = true;
     clientTrace("review.transforms.begin", {
@@ -277,6 +298,7 @@ async function loadReviewPlayback(info, owner) {
     REPLAY_XF_GEOMS = null;
     REPLAY_XF_NG = 0;
     REPLAY_XF_LOADING = false;
+    replayTransformsPromise = null;
     resetReplayUrdfRequests();
     mountEpisodeVideos({
       datasetDir: replayLoadedDatasetDir,
@@ -332,13 +354,23 @@ function replayApplyTransformFrame(frame) {
 
 function syncRealReplayVisual(frame) {
     if (!LIVE.n) return;
-    realReplayAnchorFrame = Math.max(0, Math.min(Number(frame) || 0, LIVE.n - 1));
-    realReplayAnchorWall = performance.now();
+    const reportedFrame = Math.max(0, Math.min(Number(frame) || 0, LIVE.n - 1));
+    const now = performance.now();
     if (realReplayVizRaf === null) {
+      realReplayReportedFrame = reportedFrame;
+      realReplayAnchorFrame = reportedFrame;
+      realReplayAnchorWall = now;
       syncReplayVideos(realReplayAnchorFrame);
       playStageVideos();
       realReplayLastVideoSync = realReplayAnchorWall;
       realReplayVizRaf = requestAnimationFrame(realReplayVisualFrame);
+      return;
+    }
+    if (reportedFrame > realReplayReportedFrame) {
+      const cursor = LIVE.cursorFrac != null ? LIVE.cursorFrac : LIVE.cursor;
+      realReplayReportedFrame = reportedFrame;
+      realReplayAnchorFrame = Math.max(reportedFrame, cursor);
+      realReplayAnchorWall = now;
     }
   }
 
@@ -349,7 +381,8 @@ function realReplayVisualFrame() {
       REAL_REPLAY_MAX_EXTRAPOLATE_S,
     );
     const anchorTime = replayTimeAtFrame(realReplayAnchorFrame);
-    const frame = replayFrameAtTime(anchorTime + elapsed);
+    const cursor = LIVE.cursorFrac != null ? LIVE.cursorFrac : LIVE.cursor;
+    const frame = Math.max(cursor, replayFrameAtTime(anchorTime + elapsed));
     setReplayCursorFrame(frame, false);
     const now = performance.now();
     if (now - realReplayLastVideoSync > 250) {
@@ -547,11 +580,15 @@ function replayMasterVideo() {
     }) || null;
   }
 
-function syncReplayVideos(frame) {
+function syncReplayVideos(frame, master = null, force = false) {
     const t = replayTimeAtFrame(frame);
+    if (!Number.isFinite(t)) return;
+    const tolerance = 0.5 / replayVideoFps;
     replayVideos().forEach((v) => {
-      if (isFinite(t) && Math.abs((v.currentTime || 0) - t) > 0.12) {
-        try { v.currentTime = t; } catch (e) {}
+      if (v === master) return;
+      if (v.error) return;
+      if (force || Math.abs((v.currentTime || 0) - t) > tolerance) {
+        v.currentTime = t;
       }
     });
   }
@@ -625,6 +662,7 @@ function exitReplayMode() {
     replayLoadedVideoKeys = {};
     REPLAY_XF = null; REPLAY_XF_NG = 0;
     REPLAY_XF_LOADING = false;
+    replayTransformsPromise = null;
     REPLAY_XF_PARTS = null; REPLAY_XF_GEOMS = null; _lastReplayChartDraw = 0;
     resetReplayUrdfRequests();
     LIVE.playTime = [];
@@ -637,7 +675,7 @@ function seekReplay(i, syncVideos = true) {
     LIVE.cursor = Math.max(0, Math.min(i, LIVE.n - 1));
     LIVE.cursorFrac = null;
     replaySetUrdfFrame(LIVE.cursor);
-    if (syncVideos) syncReplayVideos(LIVE.cursor);
+    if (syncVideos) syncReplayVideos(LIVE.cursor, null, true);
     updateScrub();
     drawReplayCharts();
   }
@@ -648,7 +686,7 @@ function setReplayCursorFrame(frame, syncVideos = false) {
     LIVE.cursorFrac = frac;
     LIVE.cursor = Math.max(0, Math.min(Math.floor(frac), LIVE.n - 1));
     replaySetUrdfFrame(frac);
-    if (syncVideos) syncReplayVideos(frac);
+    if (syncVideos) syncReplayVideos(frac, null, true);
     updateScrub();
     drawReplayCharts();
   }
@@ -689,8 +727,10 @@ function replayPlay() {
       } else {
         targetTime = playT0 + (performance.now() - wall0) / 1000;
       }
-      const framePos = replayFrameAtTime(targetTime);
+      const cursor = LIVE.cursorFrac != null ? LIVE.cursorFrac : LIVE.cursor;
+      const framePos = Math.max(cursor, replayFrameAtTime(targetTime));
       setReplayCursorFrame(framePos, false);
+      syncReplayVideos(framePos, master);
       if (framePos >= LIVE.n - 1) { replayStop(); return; }
       LIVE.raf = requestAnimationFrame(frame);
     };

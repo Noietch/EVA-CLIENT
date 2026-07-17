@@ -395,6 +395,7 @@ class _RosTransportBase(TransportBridge):
     _freshness: StreamFreshness
     _image_rate: ImageRateTracker
     _camera_deques: dict[str, collections.deque]
+    _collection_camera_deques: dict[str, collections.deque]
     _collection_qpos_deques: dict[str, collections.deque]
     _collection_eef_deques: dict[str, collections.deque]
     _collection_action_qpos_deques: dict[str, collections.deque]
@@ -525,10 +526,14 @@ class _RosTransportBase(TransportBridge):
             if camera.observation_key in cameras or camera.name in cameras
         ]
 
+    def _collection_capture_camera_deques(self) -> dict[str, collections.deque]:
+        return getattr(self, "_collection_camera_deques", self._camera_deques)
+
     def _collection_images(self, frame_time: float) -> dict[str, np.ndarray] | None:
         images: dict[str, np.ndarray] = {}
+        camera_deques = self._collection_capture_camera_deques()
         for camera in self._collection_camera_specs():
-            deque = self._camera_deques.get(camera.name)
+            deque = camera_deques.get(camera.name)
             if deque is None:
                 return None
             msg = self._collection_latest_msg(deque, frame_time)
@@ -542,11 +547,12 @@ class _RosTransportBase(TransportBridge):
 
     def _collection_frame_time(self) -> float | None:
         primary_camera = self._collection_cfg.primary_camera
+        camera_deques = self._collection_capture_camera_deques()
         if primary_camera:
             for camera in self._robot.observation_schema.cameras:
                 if primary_camera not in (camera.observation_key, camera.name):
                     continue
-                deque = self._camera_deques.get(camera.name)
+                deque = camera_deques.get(camera.name)
                 if deque is None or len(deque) == 0:
                     return None
                 return self._stamp_to_sec(deque[-1])
@@ -554,7 +560,7 @@ class _RosTransportBase(TransportBridge):
 
         required: list[collections.deque] = []
         for camera in self._collection_camera_specs():
-            deque = self._camera_deques.get(camera.name)
+            deque = camera_deques.get(camera.name)
             if deque is None:
                 return None
             required.append(deque)
@@ -647,8 +653,9 @@ class _RosTransportBase(TransportBridge):
 
     def _collection_raw_streams(self) -> list[tuple[str, str, str, Any, collections.deque]]:
         streams: list[tuple[str, str, str, Any, collections.deque]] = []
+        camera_deques = self._collection_capture_camera_deques()
         for camera in self._collection_camera_specs():
-            deque = self._camera_deques.get(camera.name)
+            deque = camera_deques.get(camera.name)
             if deque is not None:
                 streams.append(("image", camera.observation_key, camera.name, camera, deque))
 
@@ -721,11 +728,7 @@ class _RosTransportBase(TransportBridge):
                     batch.images.setdefault(field, []).append(
                         CollectionRawSample(
                             timestamp=self._stamp_to_sec(msg),
-                            value=CollectionRawImage(
-                                lambda camera_name=source.name, raw_msg=msg: (
-                                    self._decode_image_msg(camera_name, raw_msg)
-                                )
-                            ),
+                            value=self._deferred_collection_image(source.name, msg),
                         )
                     )
                 continue
@@ -745,6 +748,13 @@ class _RosTransportBase(TransportBridge):
                     CollectionRawSample(timestamp=timestamp, value=value.astype(np.float32))
                 )
         return batch
+
+    def _deferred_collection_image(self, camera_name: str, msg: Any) -> CollectionRawImage:
+        return CollectionRawImage(
+            lambda camera_name=camera_name, raw_msg=msg: self._decode_image_msg(
+                camera_name, raw_msg
+            )
+        )
 
     def _collection_fresh_messages(
         self,
@@ -841,8 +851,10 @@ class _RosTransportBase(TransportBridge):
                     snapshot_timestamp,
                 )
 
+        batch = self._collection_raw_batch_from_msgs(new_messages, pinned_streams)
+
         def decode_raw() -> CollectionRawBatch:
-            return self._collection_raw_batch_from_msgs(new_messages, pinned_streams)
+            return batch
 
         return RawCollectionSnapshot(
             timestamp=snapshot_timestamp,

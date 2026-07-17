@@ -152,6 +152,10 @@ class BackgroundLoopInferStrategy(BaseInferStrategy):  # pyright: ignore[reportG
     _stop_event: threading.Event = dataclasses.field(default_factory=threading.Event, init=False)
     _loop_thread: threading.Thread | None = dataclasses.field(default=None, init=False)
     _loop_lock: threading.Lock = dataclasses.field(default_factory=threading.Lock, init=False)
+    _empty_buffer_started: float | None = dataclasses.field(default=None, init=False)
+    _empty_buffer_polls: int = dataclasses.field(default=0, init=False)
+    _missing_observation_started: float | None = dataclasses.field(default=None, init=False)
+    _missing_observation_polls: int = dataclasses.field(default=0, init=False)
 
     def __post_init__(self) -> None:
         self.inference_rate = max(0.0, float(self.inference_rate))
@@ -212,7 +216,23 @@ class BackgroundLoopInferStrategy(BaseInferStrategy):  # pyright: ignore[reportG
 
     def pop_next_action(self) -> np.ndarray | None:
         """Pop the next action [action_dim] float32 from the action buffer, else None."""
-        return self._smooth_buffer.pop_next_action()
+        action = self._smooth_buffer.pop_next_action()
+        now = time.monotonic()
+        if action is None:
+            self._empty_buffer_polls += 1
+            if self._empty_buffer_started is None:
+                self._empty_buffer_started = now
+                logger.warning("[ACTION_BUFFER_GAP] state=start")
+            return None
+        if self._empty_buffer_started is not None:
+            logger.warning(
+                "[ACTION_BUFFER_GAP] state=end duration_ms=%.1f empty_polls=%d",
+                (now - self._empty_buffer_started) * 1000.0,
+                self._empty_buffer_polls,
+            )
+            self._empty_buffer_started = None
+            self._empty_buffer_polls = 0
+        return action
 
     def _inference_loop(
         self,
@@ -225,19 +245,51 @@ class BackgroundLoopInferStrategy(BaseInferStrategy):  # pyright: ignore[reportG
         while not self._stop_event.is_set():
             if generation != self._generation:
                 return
+            observation_started = time.monotonic()
             obs = get_observation()
+            observation_done = time.monotonic()
+            observation_ms = (observation_done - observation_started) * 1000.0
+            if observation_ms >= 200.0:
+                logger.warning(
+                    "[INFERENCE_TIMING] stage=observation duration_ms=%.1f",
+                    observation_ms,
+                )
             if obs is None:
+                self._missing_observation_polls += 1
+                if self._missing_observation_started is None:
+                    self._missing_observation_started = observation_done
+                    logger.warning("[INFERENCE_OBSERVATION_GAP] state=start")
                 self._stop_event.wait(0.02)
                 continue
+            if self._missing_observation_started is not None:
+                logger.warning(
+                    "[INFERENCE_OBSERVATION_GAP] state=end duration_ms=%.1f polls=%d",
+                    (observation_done - self._missing_observation_started) * 1000.0,
+                    self._missing_observation_polls,
+                )
+                self._missing_observation_started = None
+                self._missing_observation_polls = 0
             loop_start = time.monotonic()
             try:
                 raw_chunk = self._crop_chunk(fetch_chunk(prompt, obs))
+                inference_done = time.monotonic()
                 if generation != self._generation:
                     return
                 self._smooth_buffer.integrate_new_chunk(
                     raw_chunk,
                     max_k=self.latency_k or 0,
                 )
+                integrate_done = time.monotonic()
+                inference_ms = (inference_done - loop_start) * 1000.0
+                integrate_ms = (integrate_done - inference_done) * 1000.0
+                if inference_ms >= 250.0 or integrate_ms >= 20.0:
+                    logger.warning(
+                        "[INFERENCE_TIMING] stage=chunk inference_ms=%.1f "
+                        "integrate_ms=%.1f chunk_steps=%d",
+                        inference_ms,
+                        integrate_ms,
+                        len(raw_chunk),
+                    )
                 logger.debug(
                     "%s loop: integrated %d-step chunk",
                     self._log_label,
@@ -277,4 +329,8 @@ class BackgroundLoopInferStrategy(BaseInferStrategy):  # pyright: ignore[reportG
         self._generation += 1
         if hasattr(self, "_smooth_buffer"):
             self._smooth_buffer.reset()
+        self._empty_buffer_started = None
+        self._empty_buffer_polls = 0
+        self._missing_observation_started = None
+        self._missing_observation_polls = 0
         super().reset()

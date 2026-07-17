@@ -110,6 +110,7 @@ class RolloutInterventionSegment:
     segment_index: int
     start_policy_frame_index: int
     pre_intervention_qpos: np.ndarray
+    start_time: float | None = None
     frames: list[Observation] = dataclasses.field(default_factory=list)
     resume_policy_frame_index: int | None = None
     invalid_reason: str = ""

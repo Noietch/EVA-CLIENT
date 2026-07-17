@@ -5,6 +5,7 @@ entry that wires transport, robot, and policy together. Commands arrive over HTT
 
 from __future__ import annotations
 
+import gc
 import json
 import logging
 import queue
@@ -577,12 +578,19 @@ def _handle_web_command(
         runtime.collection_replay_qpos = None
         runtime.collection_replay_episode = None
         if getattr(runtime, "rollout_intervention_active", False):
+            resume_started = time.monotonic()
             segment = getattr(runtime, "rollout_intervention_active_segment", None)
             if segment is not None and segment.invalid_reason:
                 session.last_error = segment.invalid_reason
                 return
+            warmup_exclusion_start = time.time()
+            if segment is not None and segment.frames:
+                last_intervention_time = segment.frames[-1].timestamp
+                if last_intervention_time is not None:
+                    warmup_exclusion_start = float(last_intervention_time)
             if not stop_rollout_intervention(config, runtime, session, required=True):
                 return
+            runtime.rollout_exclusion_active = ("policy_warmup", warmup_exclusion_start)
             if not accept_rollout_intervention_segment(runtime, session):
                 return
             runtime.rollout_save_ready = False
@@ -599,6 +607,12 @@ def _handle_web_command(
                 )
             session.run_start_time = time.monotonic()
             set_status(session, SessionStatus.RUNNING, reason="resume after teleop intervention")
+            logger.info(
+                "[HIL_RESUME] path=warmup transition_ms=%.1f step=%d exclusion_start=%.6f",
+                (time.monotonic() - resume_started) * 1000.0,
+                session.step_index,
+                warmup_exclusion_start,
+            )
             return
         if (
             session.mode in (SessionMode.REAL, SessionMode.SIM)
@@ -647,8 +661,17 @@ def _handle_web_command(
         if not getattr(runtime, "rollout_intervention_active", False):
             session.last_error = "No active rollout intervention to abandon"
             return
+        segment = runtime.rollout_intervention_active_segment
+        exclusion_start = time.time()
+        if segment is not None and segment.start_time is not None:
+            exclusion_start = float(segment.start_time)
+        elif segment is not None and segment.frames:
+            first_intervention_time = segment.frames[0].timestamp
+            if first_intervention_time is not None:
+                exclusion_start = float(first_intervention_time)
         if not stop_rollout_intervention(config, runtime, session, required=True):
             return
+        runtime.rollout_exclusion_active = ("abandoned_intervention", exclusion_start)
         if not rollback_rollout_intervention(config, runtime, session):
             discard_rollout_intervention_segment(runtime)
             return
@@ -1033,6 +1056,30 @@ def run(
     if config.eval:
         command_queue.put("web:bootstrap")
 
+    gc_started: dict[int, float] = {}
+
+    def log_gc_timing(phase: str, info: dict[str, int]) -> None:
+        generation = int(info["generation"])
+        now = time.monotonic()
+        if phase == "start":
+            gc_started[generation] = now
+            return
+        started = gc_started.pop(generation)
+        elapsed_ms = (now - started) * 1000.0
+        if elapsed_ms >= 20.0:
+            logger.warning(
+                "[GC_TIMING] generation=%d duration_ms=%.1f collected=%d "
+                "uncollectable=%d raw_snapshots=%d policy_actions=%d",
+                generation,
+                elapsed_ms,
+                int(info["collected"]),
+                int(info["uncollectable"]),
+                runtime.rollout_raw_snapshots.qsize(),
+                len(runtime.rollout_policy_actions),
+            )
+
+    gc.callbacks.append(log_gc_timing)
+    last_running_tick: float | None = None
     try:
         while session.status is not SessionStatus.EXIT and not transport.is_shutdown():
             # Multi-ckpt: a switch_ckpt swaps in the active ckpt's full config.
@@ -1054,6 +1101,17 @@ def run(
                 session.mode in (SessionMode.REAL, SessionMode.SIM)
                 and session.status is SessionStatus.RUNNING
             ):
+                running_tick = time.monotonic()
+                if (
+                    last_running_tick is not None
+                    and running_tick - last_running_tick >= 0.1
+                ):
+                    logger.warning(
+                        "[CONTROL_TIMING] stage=main_loop_gap duration_ms=%.1f step=%d",
+                        (running_tick - last_running_tick) * 1000.0,
+                        session.step_index,
+                    )
+                last_running_tick = running_tick
                 # Client-liveness watchdog: the frontend polls /api/status every ~250ms,
                 # so a stale timestamp means the operator's browser crashed or the network
                 # dropped. Halt the run rather than keep commanding the real robot blind.
@@ -1063,6 +1121,8 @@ def run(
                     _dispatch_halt(effective, runtime, session)
                 else:
                     publish_next_action(effective, runtime, session)
+            else:
+                last_running_tick = None
 
             if getattr(runtime, "rollout_intervention_active", False):
                 record_rollout_intervention_step(runtime, session)
@@ -1084,6 +1144,7 @@ def run(
 
             loop_rate.sleep()
     finally:
+        gc.callbacks.remove(log_gc_timing)
         stop_rollout_intervention(config, runtime, session, required=False)
         stop_collection_capture(runtime)
         discard_rollout_intervention_segment(runtime)

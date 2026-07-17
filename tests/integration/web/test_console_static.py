@@ -375,6 +375,25 @@ def test_replay_playback_buffers_until_video_has_future_data():
     assert "master.readyState < 2" not in html
 
 
+def test_replay_keeps_slave_cameras_on_the_master_clock():
+    html = console_source()
+    sync_start = html.index("function syncReplayVideos(frame, master = null, force = false)")
+    sync_body = html[sync_start : html.index("let _replayUrdfSeq", sync_start)]
+    play_start = html.index("function replayPlay()")
+    play_body = html[play_start : html.index("function replayStop()", play_start)]
+    seek_start = html.index("function seekReplay(i, syncVideos = true)")
+    seek_body = html[seek_start : html.index("function setReplayCursorFrame", seek_start)]
+
+    assert "const tolerance = 0.5 / replayVideoFps;" in sync_body
+    assert "replayVideoFps = Math.max(1, Number(s.replay_fps) || REPLAY_DEFAULT_FPS);" in html
+    assert "replayVideoFps = Math.max(1, Number(info.fps) || REPLAY_DEFAULT_FPS);" in html
+    assert "if (v === master) return;" in sync_body
+    assert "force || Math.abs((v.currentTime || 0) - t) > tolerance" in sync_body
+    assert "syncReplayVideos(framePos, master);" in play_body
+    assert "syncReplayVideos(LIVE.cursor, null, true);" in seek_body
+    assert "0.12" not in sync_body
+
+
 def test_replay_local_play_clock_drives_smooth_playback():
     html = console_source()
     load_start = html.index("async function loadReplaySeries()")
@@ -419,11 +438,14 @@ def test_replay_local_play_clock_drives_smooth_playback():
     assert "if (LIVE.replayLoading) return;" in html
     assert "const master = replayMasterVideo();" in html
     assert "targetTime = master.currentTime || 0;" in html
-    assert "const framePos = replayFrameAtTime(targetTime);" in html
+    assert "const framePos = Math.max(cursor, replayFrameAtTime(targetTime));" in html
     assert "setReplayCursorFrame(framePos, false);" in html
     assert "function syncRealReplayVisual(frame)" in html
     assert "function realReplayVisualFrame()" in html
     assert "REAL_REPLAY_MAX_EXTRAPOLATE_S" in html
+    assert "if (reportedFrame > realReplayReportedFrame)" in html
+    assert "realReplayAnchorFrame = Math.max(reportedFrame, cursor);" in html
+    assert "const frame = Math.max(cursor, replayFrameAtTime(anchorTime + elapsed));" in html
     assert "setReplayCursorFrame(frame, false);" in html
     assert "syncReplayVideos(frame);" in html
 

@@ -9,6 +9,7 @@ import numpy as np
 
 from core.app import run as app
 from core.app.handlers import control, recording
+from core.app.handlers.space import JointState
 from core.app.state import (
     RuntimeState,
     SessionMode,
@@ -274,6 +275,11 @@ class _ResettableStrategy:
         self.resets += 1
 
 
+class _BufferedBackgroundStrategy(_ResettableStrategy):
+    runs_background_loop = True
+
+
+
 def _robot() -> Robot:
     return Robot(
         name="fake_arm",
@@ -470,12 +476,14 @@ def test_rollout_reset_discards_episode_and_stops_collection():
     episode_logger.has_active_episode = True
     runtime.rollout_episode_logger = episode_logger
     runtime.rollout_save_ready = True
+    runtime.rollout_raw_snapshots.put(object())
 
     recording.discard_rollout_episode(runtime)
 
     assert runtime.transport.stopped == 1
     assert episode_logger.cancelled == ["user reset"]
     assert runtime.rollout_save_ready is False
+    assert runtime.rollout_raw_snapshots.empty()
 
 
 def test_start_rollout_intervention_refuses_when_hil_off():
@@ -520,9 +528,118 @@ def test_start_rollout_intervention_resets_policy_strategy():
     assert strategy.resets == 1
 
 
-def test_start_rollout_intervention_preserves_collection_backlog():
+def test_start_rollout_intervention_resets_background_policy_for_warmup():
     runtime, session = _runtime_and_session()
     runtime.rollout_intervention_enabled = True
+    strategy = _BufferedBackgroundStrategy()
+    runtime.infer_strategy = strategy
+
+    assert recording.start_rollout_intervention(_config(), runtime, session) is True
+
+    assert strategy.resets == 1
+
+
+def test_resume_intervention_records_and_runs_policy_warmup_after_stopping_hil(monkeypatch):
+    events: list[str] = []
+    runtime, session = _runtime_and_session()
+    strategy = _BufferedBackgroundStrategy()
+    runtime.infer_strategy = strategy
+    runtime.rollout_intervention_active = True
+    runtime.rollout_intervention_active_segment = RolloutInterventionSegment(
+        segment_index=0,
+        start_policy_frame_index=3,
+        pre_intervention_qpos=np.array([0.0, 0.0], dtype=np.float32),
+        frames=[_observation(12.0)],
+    )
+    runtime.transport.hil_relay_enabled = [True]
+    session.mode = SessionMode.REAL
+    session.status = SessionStatus.READY
+    session.is_setup_done = True
+    session.selected_task = "pick"
+
+    def stop_hil_control() -> HilStatus:
+        events.append("stop")
+        runtime.transport.hil_relay_enabled.append(False)
+        return HilStatus(supported=True, active=False)
+
+    runtime.transport.stop_hil_control = stop_hil_control
+    monkeypatch.setattr(
+        app,
+        "run_warmup_and_start",
+        lambda *_args, **_kwargs: events.append("warmup") or True,
+    )
+    monkeypatch.setattr(app, "start_collection_capture", lambda *_args, **_kwargs: None)
+
+    app.handle_command("web:run", _config(), runtime, session)
+
+    assert events == ["stop", "warmup"]
+    assert runtime.rollout_exclusion_active == ("policy_warmup", 12.0)
+    assert session.status is SessionStatus.RUNNING
+
+
+def test_first_published_policy_action_closes_warmup_exclusion(monkeypatch):
+    runtime, session = _runtime_and_session()
+    runtime.rollout_episode_logger = _ActiveRolloutLogger()
+    runtime.collection_capture_runner = object()
+    runtime.rollout_exclusion_active = ("policy_warmup", 12.0)
+    config = _config()
+    config.inference_cfg.obs_space = JointState()
+    monkeypatch.setattr(recording.time, "time", lambda: 12.75)
+
+    recording.record_executed_action(
+        config,
+        session,
+        np.array([0.3, 0.4], dtype=np.float32),
+        runtime,
+    )
+
+    assert runtime.rollout_exclusion_active is None
+    assert runtime.rollout_exclusions == [("policy_warmup", 12.0, 12.75)]
+    assert runtime.rollout_policy_actions[0][0] == 12.75
+
+
+def test_abandon_excludes_intervention_rollback_and_warmup(monkeypatch):
+    events: list[str] = []
+    runtime, session = _runtime_and_session()
+    runtime.rollout_intervention_active = True
+    runtime.rollout_intervention_pre_qpos = np.array([0.1, 0.2], dtype=np.float32)
+    runtime.rollout_intervention_active_segment = RolloutInterventionSegment(
+        segment_index=0,
+        start_policy_frame_index=3,
+        pre_intervention_qpos=np.array([0.1, 0.2], dtype=np.float32),
+        start_time=19.5,
+        frames=[_observation(20.0), _observation(21.0)],
+    )
+    runtime.transport.hil_relay_enabled = [True]
+    session.mode = SessionMode.REAL
+    session.status = SessionStatus.READY
+    session.is_setup_done = True
+    session.selected_task = "pick"
+
+    monkeypatch.setattr(
+        app,
+        "rollback_rollout_intervention",
+        lambda *_args, **_kwargs: events.append("rollback") or True,
+    )
+    monkeypatch.setattr(
+        app,
+        "run_warmup_and_start",
+        lambda *_args, **_kwargs: events.append("warmup") or True,
+    )
+    monkeypatch.setattr(app, "start_collection_capture", lambda *_args, **_kwargs: None)
+
+    app.handle_command("web:rollout_intervention_abandon", _config(), runtime, session)
+
+    assert events == ["rollback", "warmup"]
+    assert runtime.rollout_exclusion_active == ("abandoned_intervention", 19.5)
+    assert runtime.rollout_intervention_active_segment is None
+    assert session.status is SessionStatus.RUNNING
+
+
+def test_start_rollout_intervention_preserves_collection_backlog(monkeypatch):
+    runtime, session = _runtime_and_session()
+    runtime.rollout_intervention_enabled = True
+    monkeypatch.setattr(recording.time, "time", lambda: 19.5)
 
     assert recording.start_rollout_intervention(_config(), runtime, session) is True
     assert runtime.rollout_intervention_active is True
@@ -530,6 +647,21 @@ def test_start_rollout_intervention_preserves_collection_backlog():
     assert runtime.transport.cleared == 0
     assert runtime.transport.hil_resets == 1
     assert runtime.rollout_intervention_active_segment is not None
+    assert runtime.rollout_intervention_active_segment.start_time == 19.5
+
+
+def test_new_intervention_closes_pending_abandon_exclusion(monkeypatch):
+    runtime, session = _runtime_and_session()
+    runtime.rollout_intervention_enabled = True
+    runtime.rollout_exclusion_active = ("abandoned_intervention", 19.5)
+    monkeypatch.setattr(recording.time, "time", lambda: 25.0)
+
+    assert recording.start_rollout_intervention(_config(), runtime, session) is True
+
+    assert runtime.rollout_exclusion_active is None
+    assert runtime.rollout_exclusions == [("abandoned_intervention", 19.5, 25.0)]
+    assert runtime.rollout_intervention_active_segment is not None
+    assert runtime.rollout_intervention_active_segment.start_time == 25.0
 
 
 def test_stop_rollout_intervention_disables_only_hil_relay():

@@ -13,6 +13,7 @@ import collections
 import io
 import logging
 import threading
+import time
 from typing import Any
 
 import numpy as np
@@ -20,10 +21,11 @@ from PIL import Image, UnidentifiedImageError
 
 from core.config import ConfigDict
 from core.registry import TRANSPORT_REGISTRY
-from core.types import Observation
+from core.types import CollectionRawImage, Observation
 from robots.base import Robot
 from transport.base import (
     HilStatus,
+    _COLLECTION_DEQUE_MAX,
     _RosTransportBase,
     resolve_topics,
 )
@@ -34,6 +36,15 @@ logger = logging.getLogger(__name__)
 _ROS2_RUNTIME: _Ros2Runtime | None = None
 _HIL_CONTROL_MODES = frozenset({"absolute", "relative"})
 _CAMERA_QOS_DEPTH = 120
+
+
+def _decode_compressed_image(payload: bytes) -> np.ndarray | None:
+    try:
+        image = Image.open(io.BytesIO(payload)).convert("RGB")
+    except UnidentifiedImageError:
+        logger.debug("Failed to decode ROS2 compressed image", exc_info=True)
+        return None
+    return np.asarray(image)[:, :, ::-1].copy()
 
 
 class _Ros2Runtime:
@@ -150,6 +161,7 @@ class Ros2Transport(_RosTransportBase):
         self._PoseStamped = runtime.pose_stamped_type
 
         self._camera_deques: dict[str, collections.deque] = {}
+        self._collection_camera_deques: dict[str, collections.deque] = {}
         self._camera_is_compressed: dict[str, bool] = {}
         self._group_state_deques: dict[str, collections.deque] = {}
         self._group_eef_deques: dict[str, collections.deque] = {}
@@ -169,6 +181,7 @@ class Ros2Transport(_RosTransportBase):
         self._hil_supported_groups: set[str] = set()
         self._last_group_joint_commands: dict[str, np.ndarray] = {}
         self._last_group_gripper_commands: dict[str, float] = {}
+        self._last_hil_input_monotonic: dict[str, float] = {}
         self._group_joint_names: dict[str, list[str]] = {
             g.name: list(g.joint_names) for g in self._robot.actuator_groups
         }
@@ -202,6 +215,7 @@ class Ros2Transport(_RosTransportBase):
             return
         self._hil_relay_enabled = enabled
         self.reset_hil_control()
+        self._last_hil_input_monotonic.clear()
 
     def hil_status(self) -> HilStatus:
         supported = bool(self._hil_supported_groups)
@@ -267,6 +281,21 @@ class Ros2Transport(_RosTransportBase):
             timestamp=max(state_timestamps),
         )
 
+    def _append_camera_copies(
+        self,
+        camera_name: str,
+        live_deque: collections.deque,
+        collection_deque: collections.deque,
+        msg: Any,
+    ) -> None:
+        self._image_rate.mark(camera_name)
+        with self._deque_guard():
+            for target in (live_deque, collection_deque):
+                if len(target) >= _COLLECTION_DEQUE_MAX:
+                    target.popleft()
+                target.append(msg)
+        self._freshness.mark()
+
     def _init_ros(self) -> None:
         schema = self._robot.observation_schema
         live_qos = _make_live_qos()
@@ -278,14 +307,18 @@ class Ros2Transport(_RosTransportBase):
             if topic is None:
                 continue
             deque: collections.deque = collections.deque()
+            collection_deque: collections.deque = collections.deque()
             self._camera_deques[camera.name] = deque
+            self._collection_camera_deques[camera.name] = collection_deque
             is_compressed = topic.endswith("/compressed")
             self._camera_is_compressed[camera.name] = is_compressed
             msg_type = self._CompressedImage if is_compressed else self._Image
             self._node.create_subscription(
                 msg_type,
                 topic,
-                lambda msg, c=camera.name, d=deque: self._append_camera_msg(c, d, msg),
+                lambda msg, c=camera.name, d=deque, cd=collection_deque: self._append_camera_copies(
+                    c, d, cd, msg
+                ),
                 camera_qos,
             )
 
@@ -848,19 +881,21 @@ class Ros2Transport(_RosTransportBase):
     def _decode_image_msg(self, camera_name: str, msg: Any) -> np.ndarray | None:
         if not self._camera_is_compressed.get(camera_name, False):
             return self._bridge.imgmsg_to_cv2(msg, "passthrough")
-        try:
-            image = Image.open(io.BytesIO(bytes(msg.data))).convert("RGB")
-        except UnidentifiedImageError:
-            logger.debug("Failed to decode ROS2 compressed image", exc_info=True)
-            return None
-        return np.asarray(image)[:, :, ::-1].copy()
+        return _decode_compressed_image(bytes(msg.data))
+
+    def _deferred_collection_image(self, camera_name: str, msg: Any) -> CollectionRawImage:
+        if not self._camera_is_compressed.get(camera_name, False):
+            return super()._deferred_collection_image(camera_name, msg)
+        payload = bytes(msg.data)
+        return CollectionRawImage(lambda payload=payload: _decode_compressed_image(payload))
 
     def _pop_latest_before(self, deque: collections.deque, frame_time: float) -> Any | None:
-        while len(deque) > 1 and _stamp_to_sec(deque[1]) <= frame_time:
-            deque.popleft()
-        if len(deque) == 0:
-            return None
-        return deque[0]
+        with self._deque_guard():
+            while len(deque) > 1 and _stamp_to_sec(deque[1]) <= frame_time:
+                deque.popleft()
+            if len(deque) == 0:
+                return None
+            return deque[0]
 
     def _gripper_value(self, group_name: str, frame_time: float) -> float:
         gripper_deque = self._group_gripper_deques.get(group_name)
@@ -985,6 +1020,15 @@ class Ros2Transport(_RosTransportBase):
     def _handle_hil_joint_msg(self, group: Any, msg: Any) -> None:
         if not self._hil_relay_enabled:
             return
+        started = time.monotonic()
+        previous = self._last_hil_input_monotonic.get(group.name)
+        self._last_hil_input_monotonic[group.name] = started
+        if previous is not None and started - previous >= 0.08:
+            logger.warning(
+                "[HIL_TIMING] stage=input_gap group=%s duration_ms=%.1f",
+                group.name,
+                (started - previous) * 1000.0,
+            )
         robot_qpos = self._latest_group_qpos(group)
         if robot_qpos is None:
             logger.error("HIL relay cannot publish %s without joint feedback", group.name)
@@ -1023,6 +1067,13 @@ class Ros2Transport(_RosTransportBase):
             self._last_group_gripper_commands[group.name] = gripper
         publisher.publish(self._make_joint_state(group.name, joints, stamp))
         self._last_group_joint_commands[group.name] = joints.copy()
+        finished = time.monotonic()
+        if finished - started >= 0.02:
+            logger.warning(
+                "[HIL_TIMING] stage=callback group=%s duration_ms=%.1f",
+                group.name,
+                (finished - started) * 1000.0,
+            )
 
     def _eef_msg_to_state(self, group_name: str, msg: Any, frame_time: float) -> np.ndarray:
         pose = msg.pose

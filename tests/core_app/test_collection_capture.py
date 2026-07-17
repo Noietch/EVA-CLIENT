@@ -4,6 +4,7 @@ import queue
 import time
 from types import SimpleNamespace
 
+from core.app import collection_capture
 from core.app.collection_capture import CollectionCaptureRunner
 
 
@@ -128,3 +129,48 @@ def test_active_rollout_capture_is_not_routed_to_collection_logger():
 
     assert runtime.rollout_raw_snapshots.qsize() == 1
     assert ingested == []
+
+
+def test_capture_lifecycle_suspends_gc_until_capture_stops(monkeypatch):
+    events = []
+
+    class _Runner:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def start(self):
+            events.append("runner_start")
+
+        def stop(self):
+            events.append("runner_stop")
+
+    class _Thread:
+        def __init__(self, *, target, name, daemon):
+            _ = name, daemon
+            self._target = target
+
+        def start(self):
+            self._target()
+
+        def join(self):
+            pass
+
+    runtime = SimpleNamespace(collection_capture_runner=None)
+    monkeypatch.setattr(collection_capture, "CollectionCaptureRunner", _Runner)
+    monkeypatch.setattr(collection_capture.threading, "Thread", _Thread)
+    monkeypatch.setattr(collection_capture.gc, "collect", lambda: events.append("collect") or 0)
+    monkeypatch.setattr(collection_capture.gc, "disable", lambda: events.append("disable"))
+    monkeypatch.setattr(collection_capture.gc, "enable", lambda: events.append("enable"))
+    monkeypatch.setattr(collection_capture, "_gc_collect_thread", None)
+
+    collection_capture.start_collection_capture(runtime, fps=20, max_raw_snapshots_per_tick=2)
+    collection_capture.stop_collection_capture(runtime)
+
+    assert events == [
+        "collect",
+        "disable",
+        "runner_start",
+        "runner_stop",
+        "enable",
+        "collect",
+    ]

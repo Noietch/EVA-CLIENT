@@ -220,3 +220,53 @@ def test_rollout_intervention_video_uses_episode_writer_when_size_set(tmp_path, 
     assert episode_shapes == [[(120, 160, 3), (120, 160, 3), (120, 160, 3)]]
     intervention_dir = "/" + "inter" + "ventions/"
     assert not any(intervention_dir in path for path in frame_shapes)
+
+
+def test_rollout_save_removes_explicit_policy_warmup_interval(tmp_path, monkeypatch):
+    written_frames: list[int] = []
+
+    class _Writer:
+        def append_data(self, frame: np.ndarray) -> None:
+            written_frames.append(int(frame[0, 0, 0]))
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(episode_module.imageio, "get_writer", lambda *args, **kwargs: _Writer())
+    logger = _logger(tmp_path)
+    state = np.zeros(_DIM, dtype=np.float32)
+    logger.start_episode("pick")
+    for frame_index in range(6):
+        logger.record_step(
+            _obs(state + frame_index, frame_index),
+            state + frame_index,
+            timestamp=frame_index / 10.0,
+        )
+    logger.set_episode_meta(
+        excluded_ranges=[
+            {
+                "reason": "policy_warmup",
+                "start_time": 0.1,
+                "end_time": 0.4,
+            }
+        ]
+    )
+
+    assert logger.end_episode() is True
+
+    table = pq.read_table(tmp_path / "data" / "chunk-000" / "episode_000000.parquet")
+    assert table.num_rows == 4
+    np.testing.assert_allclose(table.column("capture_time").to_pylist(), [0.0, 0.1, 0.4, 0.5])
+    np.testing.assert_allclose(table.column("timestamp").to_pylist(), [0.0, 0.1, 0.2, 0.3])
+    assert written_frames == [0, 1, 4, 5]
+    episode = _read_jsonl(tmp_path / "meta" / "episodes.jsonl")[0]
+    assert episode["excluded_frames"] == 2
+    assert episode["excluded_ranges"] == [
+        {
+            "reason": "policy_warmup",
+            "start_time": 0.1,
+            "end_time": 0.4,
+            "duration_sec": 0.3,
+            "removed_frames": 2,
+        }
+    ]
