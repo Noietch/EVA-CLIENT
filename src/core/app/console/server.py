@@ -1608,6 +1608,7 @@ def start_console_server(
 
         ctx.preview = EpisodePreview(config, Path(output_dir))
     ConsoleRequestHandler.ctx = ctx
+    runtime.console_ctx = ctx
     server = ThreadingHTTPServer((host, port), ConsoleRequestHandler)
 
     def serve() -> None:

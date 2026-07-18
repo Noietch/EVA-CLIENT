@@ -119,6 +119,15 @@ operator_control = dict(
     button_topic="/eva/operator_button",
 )
 
+# ZMQ control channel: exposes every console button (web:* commands) + read-only
+# status/config/frame queries over a REP socket, for a simulator to drive automated
+# evaluation. Disabled by default; host stays local unless a deploy opens it up.
+control_channel = dict(
+    enabled=False,
+    host="127.0.0.1",
+    port=5757,
+)
+
 eval_cfg = {}  # Empty dict marks a non-eval config; eval configs fill this block.
 # Eval block template (see configs/03_evaluation/*); fill eval_cfg to turn a deploy preset
 # into an eval run:

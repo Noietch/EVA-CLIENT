@@ -14,6 +14,7 @@ import time
 import numpy as np
 
 from core.app.console.server import start_console_server
+from core.app.control_channel import maybe_start_control_channel
 from core.app.handlers import (
     _anchor_buffer_to_current_qpos,
     accept_rollout_intervention_segment,
@@ -1028,6 +1029,9 @@ def run(
 
     start_console_server(config, runtime, session, port=web_port, output_dir=output_dir)
     logger.info("Console web server started on port %d", web_port)
+    # Optional ZMQ control channel — must start AFTER the console server so it can share
+    # runtime.console_ctx (tab/arm/collect state). No-op unless control_channel.enabled.
+    maybe_start_control_channel(config, runtime)
     # An eval config bootstraps the eval state machine (connect ckpt policy, select
     # mode/strategy); plain console configs stay idle until the operator drives a tab.
     if config.eval:
