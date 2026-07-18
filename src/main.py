@@ -14,13 +14,13 @@ from core.app.run import run
 from core.config import ConfigDict, load_config
 
 
-def parse_args() -> tuple[ConfigDict, int, str | None]:
+def parse_args() -> tuple[ConfigDict, int, str | None, bool]:
     """Parse CLI arguments into an ConfigDict plus runtime options.
 
     Loads the ConfigDict from --config.
 
     Returns:
-        Tuple of (config, web_port, config_path), where config_path is the
+        Tuple of (config, web_port, config_path, headless), where config_path is the
         --config value or None.
     """
     parser = argparse.ArgumentParser(
@@ -28,11 +28,16 @@ def parse_args() -> tuple[ConfigDict, int, str | None]:
     )
     parser.add_argument("--config", type=str, required=True, help="Path to .py configuration file")
     parser.add_argument("--web-port", type=int, default=8080, help="Web server port (default 8080)")
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Low-power mode: no web server; control over the ZMQ channel, status via logs",
+    )
     args = parser.parse_args()
 
     config = load_config(args.config)
 
-    return config, args.web_port, args.config
+    return config, args.web_port, args.config, args.headless
 
 
 def main() -> None:
@@ -44,8 +49,8 @@ def main() -> None:
         datefmt="%H:%M:%S",
         force=True,
     )
-    config, web_port, config_path = parse_args()
-    run(config, web_port=web_port, config_path=config_path)
+    config, web_port, config_path, headless = parse_args()
+    run(config, web_port=web_port, config_path=config_path, headless=headless)
 
 
 if __name__ == "__main__":

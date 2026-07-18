@@ -2444,6 +2444,53 @@ _POST_ROUTES = {
 }
 
 
+def build_console_context(
+    config: ConfigDict,
+    runtime: RuntimeState,
+    session: SessionState,
+    output_dir: str = "",
+    *,
+    with_scene: bool = True,
+    with_obs_reader: bool = True,
+    with_preview: bool = True,
+) -> ConsoleContext:
+    """Build the shared ConsoleContext and attach it to ``runtime.console_ctx``.
+
+    The heavy pieces are opt-out so a headless run can skip them: ``with_scene``
+    (URDF 3D scene / forward kinematics), ``with_obs_reader`` (an extra visualization
+    SUB stream) and ``with_preview`` (RESULT-tab episode playback). Headless passes
+    all False, keeping only the light state the ZMQ control-channel queries read.
+    """
+    scene: object | None = None
+    if with_scene:
+        try:
+            from robots.utils import UrdfScene
+
+            scene = UrdfScene(
+                runtime.robot,
+                gripper_open=config.robot.gripper_open,
+                gripper_close=config.robot.gripper_close,
+            )
+        except Exception as exc:
+            logger.warning("UrdfScene unavailable; 3D canvas disabled: %s", exc)
+    _ensure_ckpt_order(config, runtime)
+    ctx = ConsoleContext(
+        config=config,
+        runtime=runtime,
+        session=session,
+        obs_reader=runtime.transport.create_observation_reader() if with_obs_reader else None,
+        scene=scene,
+        output_dir=output_dir,
+    )
+    # RESULT-tab playback reads recorded episodes under <output_dir>/episodes.
+    if with_preview and output_dir:
+        from core.app.console.episode_preview import EpisodePreview
+
+        ctx.preview = EpisodePreview(config, Path(output_dir))
+    runtime.console_ctx = ctx
+    return ctx
+
+
 def start_console_server(
     config: ConfigDict,
     runtime: RuntimeState,
@@ -2453,33 +2500,8 @@ def start_console_server(
     output_dir: str = "",
 ) -> threading.Thread:
     """Launch a daemon HTTP server thread bound to ``host:port``."""
-    scene: object | None = None
-    try:
-        from robots.utils import UrdfScene
-
-        scene = UrdfScene(
-            runtime.robot,
-            gripper_open=config.robot.gripper_open,
-            gripper_close=config.robot.gripper_close,
-        )
-    except Exception as exc:
-        logger.warning("UrdfScene unavailable; 3D canvas disabled: %s", exc)
-    _ensure_ckpt_order(config, runtime)
-    ctx = ConsoleContext(
-        config=config,
-        runtime=runtime,
-        session=session,
-        obs_reader=runtime.transport.create_observation_reader(),
-        scene=scene,
-        output_dir=output_dir,
-    )
-    # RESULT-tab playback reads recorded episodes under <output_dir>/episodes.
-    if output_dir:
-        from core.app.console.episode_preview import EpisodePreview
-
-        ctx.preview = EpisodePreview(config, Path(output_dir))
+    ctx = build_console_context(config, runtime, session, output_dir)
     ConsoleRequestHandler.ctx = ctx
-    runtime.console_ctx = ctx
     server = ThreadingHTTPServer((host, port), ConsoleRequestHandler)
 
     def serve() -> None:
