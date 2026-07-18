@@ -99,6 +99,98 @@ def wait_idle(
     return last
 
 
+_QUERY_WORDS = {"status", "config", "frame"}
+_STATUS_LINE = (
+    "mode={cli_mode} status={session_status} step={step_index} "
+    "infer={last_infer_ms}ms policy={policy}"
+)
+
+
+def _fmt_status(data: dict) -> str:
+    return _STATUS_LINE.format(
+        cli_mode=data.get("cli_mode", "?"),
+        session_status=data.get("session_status", "?"),
+        step_index=data.get("step_index", 0),
+        last_infer_ms=data.get("last_infer_ms", 0),
+        policy="ok" if data.get("policy_connected") else "none",
+    )
+
+
+def _repl_dispatch(line: str, host: str, port: int) -> dict:
+    """Map one REPL line to a send() call. Bare verbs get the ``web:`` prefix; the
+    read-only words (status/config/frame) go out as queries."""
+    parts = line.split()
+    head = parts[0]
+    if head in _QUERY_WORDS:
+        return send(query=head, host=host, port=port)
+    # e.g. "select_mode sim" -> web:select_mode:sim ; "gripper l open 0" -> web:gripper:l:open:0
+    verb = ":".join(parts)
+    cmd = verb if verb.startswith("web:") else f"web:{verb}"
+    return send(cmd=cmd, host=host, port=port)
+
+
+def _watch(host: str, port: int) -> None:
+    """Single-line live status refresh until Ctrl-C (REPL-side status display)."""
+    try:
+        while True:
+            reply = send(query="status", host=host, port=port)
+            if reply.get("ok"):
+                sys.stdout.write("\r" + _fmt_status(reply["data"]) + "   ")
+            else:
+                sys.stdout.write("\r" + str(reply.get("error", "error")) + "   ")
+            sys.stdout.flush()
+            time.sleep(1.0)
+    except KeyboardInterrupt:
+        sys.stdout.write("\n")
+
+
+_REPL_HELP = """commands:
+  <verb> [args]      send web:<verb>[:arg...]  (e.g. run, halt, setup, select_mode sim)
+  status|config|frame   read-only query
+  watch              live single-line status until Ctrl-C
+  help               this help
+  quit|exit          leave the REPL
+"""
+
+
+def repl(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT) -> int:
+    """Interactive prompt over the control channel. Pure client; no backend deps."""
+    try:
+        import readline  # noqa: F401  (enables line editing/history if available)
+    except Exception:
+        pass
+    print(f"eva control REPL — tcp://{host}:{port}. 'help' for commands, 'quit' to exit.")
+    while True:
+        try:
+            line = input("eva> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 0
+        if not line:
+            continue
+        if line in {"quit", "exit"}:
+            return 0
+        if line == "help":
+            print(_REPL_HELP)
+            continue
+        if line == "watch":
+            _watch(host, port)
+            continue
+        try:
+            reply = _repl_dispatch(line, host, port)
+        except Exception as error:  # keep the REPL alive on any client-side error
+            print(f"error: {error}")
+            continue
+        if reply.get("ok") and "data" in reply and isinstance(reply["data"], dict):
+            data = reply["data"]
+            if "session_status" in data:
+                print(_fmt_status(data))
+            else:
+                print(json.dumps(data, ensure_ascii=False))
+        else:
+            print(json.dumps(reply, ensure_ascii=False))
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="EVA control-channel CLI client")
     parser.add_argument("--host", default=DEFAULT_HOST)
@@ -113,6 +205,7 @@ def main() -> int:
     p_query.add_argument("name", choices=["status", "config", "frame"])
 
     sub.add_parser("wait-idle", help="block until the active run finishes")
+    sub.add_parser("repl", help="interactive prompt over the control channel")
 
     args = parser.parse_args()
 
@@ -123,6 +216,8 @@ def main() -> int:
         reply = send(query=args.name, host=args.host, port=args.port)
     elif args.action == "wait-idle":
         reply = {"ok": True, "data": wait_idle(host=args.host, port=args.port)}
+    elif args.action == "repl":
+        return repl(host=args.host, port=args.port)
     else:  # pragma: no cover - argparse guards this
         parser.error(f"unknown action {args.action!r}")
         return 2
