@@ -13,7 +13,8 @@ import time
 
 import numpy as np
 
-from core.app.console.server import start_console_server
+from core.app.cli import maybe_start_inference_cli
+from core.app.console.server import build_console_context, start_console_server
 from core.app.control_channel import maybe_start_control_channel
 from core.app.handlers import (
     _anchor_buffer_to_current_qpos,
@@ -92,6 +93,40 @@ logger = logging.getLogger(__name__)
 # The poll cadence is ~250ms, so this tolerates dozens of missed polls before tripping.
 CLIENT_WATCHDOG_TIMEOUT_S = 3.0
 _HIL_CONTROL_MODES = frozenset({"absolute", "relative"})
+
+# Headless heartbeat cadence. While RUNNING we log every beat (proof of life); while
+# idle we log far less often so a parked headless process doesn't spam the log.
+_HEARTBEAT_INTERVAL_S = 5.0
+_HEARTBEAT_IDLE_INTERVAL_S = 30.0
+
+
+def _maybe_log_heartbeat(
+    runtime: RuntimeState,
+    session: SessionState,
+    last_heartbeat: float,
+) -> float:
+    """Emit a throttled one-line status heartbeat; return the (possibly new) timestamp.
+
+    Running: every _HEARTBEAT_INTERVAL_S. Idle: every _HEARTBEAT_IDLE_INTERVAL_S. This
+    is the headless "still alive" signal that the browser's status poll used to give.
+    """
+    running = session.status is SessionStatus.RUNNING
+    interval = _HEARTBEAT_INTERVAL_S if running else _HEARTBEAT_IDLE_INTERVAL_S
+    now = time.monotonic()
+    if now - last_heartbeat < interval:
+        return last_heartbeat
+    logger.info(
+        "[HB] mode=%s status=%s phase=%s step=%d chunk=%d infer=%.1fms policy=%s error=%s",
+        session.mode.value,
+        session.status.value,
+        runtime.web_phase,
+        session.step_index,
+        session.chunk_index,
+        session.last_infer_ms,
+        "ok" if runtime.policy is not None else "none",
+        session.last_error or "-",
+    )
+    return now
 
 
 def _target_loop_rate_hz(
@@ -937,12 +972,18 @@ def run(
     config: ConfigDict,
     web_port: int,
     config_path: str | None = None,
+    headless: bool = False,
 ) -> None:
     """Main entry. Runs the unified console web server.
 
     The console hosts every workflow as a tab (DEBUG/REPLAY/COLLECT/MANUAL/EVAL/RESULT).
     When ``config.eval`` is set, the EVAL/RESULT tabs activate and — if it carries
     checkpoints — blind multi-ckpt SSH forwarding + result sync + bootstrap kick in.
+
+    In ``headless`` mode no web server is started: the HTTP console, 3D scene, camera
+    streams and episode preview are all skipped. Control comes solely over the ZMQ
+    control channel (forced on), and status is surfaced via structured logs + a
+    periodic heartbeat — for low-power / simulator-driven evaluation.
     """
     robot = ROBOT_REGISTRY.build(config.robot.type)
     if config.robot.initial_qpos is not None:
@@ -1027,15 +1068,55 @@ def run(
     else:
         free_local_ports([web_port])
 
-    start_console_server(config, runtime, session, port=web_port, output_dir=output_dir)
-    logger.info("Console web server started on port %d", web_port)
-    # Optional ZMQ control channel — must start AFTER the console server so it can share
-    # runtime.console_ctx (tab/arm/collect state). No-op unless control_channel.enabled.
-    maybe_start_control_channel(config, runtime)
+    if headless:
+        # Low-power path: no HTTP server, no 3D scene / camera streams / preview.
+        # Build a light ConsoleContext so the ZMQ control-channel queries still work,
+        # and force the control channel on (it is the ONLY control entry with no web).
+        build_console_context(
+            config,
+            runtime,
+            session,
+            output_dir=output_dir,
+            with_scene=False,
+            with_obs_reader=False,
+            with_preview=False,
+        )
+        channel_cfg = config.get("control_channel") or {}
+        if not channel_cfg.get("enabled", False):
+            # Headless with no channel would be uncontrollable — force it on.
+            config.control_channel = ConfigDict(
+                {**dict(channel_cfg), "enabled": True}
+            )
+        maybe_start_control_channel(config, runtime)
+        ch = config.control_channel
+        disp_host = "127.0.0.1" if ch.get("host") == "0.0.0.0" else ch.get("host", "127.0.0.1")
+        logger.info(
+            "HEADLESS mode: web disabled; control entry = ZMQ tcp://%s:%d",
+            disp_host,
+            int(ch.get("port", 5757)),
+        )
+        # Second entry: an in-process interactive CLI when stdin is a terminal. Both it
+        # and the ZMQ channel feed the same command_queue, so a human at the terminal and
+        # a simulator over ZMQ drive the same session. Skipped when backgrounded/piped.
+        # Select REAL synchronously here (before the CLI banner) so its [CMD]/[STATUS]
+        # logs land now, not asynchronously on top of the freshly-printed "eva> " prompt.
+        select_mode(SessionMode.REAL, config, session, runtime)
+        maybe_start_inference_cli(config, runtime, session)
+    else:
+        start_console_server(config, runtime, session, port=web_port, output_dir=output_dir)
+        logger.info("Console web server started on port %d", web_port)
+        # Optional ZMQ control channel — must start AFTER the console server so it can
+        # share runtime.console_ctx. No-op unless control_channel.enabled.
+        maybe_start_control_channel(config, runtime)
     # An eval config bootstraps the eval state machine (connect ckpt policy, select
     # mode/strategy); plain console configs stay idle until the operator drives a tab.
     if config.eval:
         command_queue.put("web:bootstrap")
+
+    # Headless heartbeat: no browser polls /api/status, so a periodic one-line status
+    # log is the "still alive" signal. State transitions already log via set_status /
+    # set_phase; this fills the gaps during a long RUNNING stretch.
+    last_heartbeat = 0.0
 
     try:
         while session.status is not SessionStatus.EXIT and not transport.is_shutdown():
@@ -1085,6 +1166,9 @@ def run(
             if runtime.web_phase == "running" and session.status is not SessionStatus.RUNNING:
                 set_phase(runtime, "ready")
                 runtime.needs_pre_start_reset = True
+
+            if headless:
+                last_heartbeat = _maybe_log_heartbeat(runtime, session, last_heartbeat)
 
             loop_rate.sleep()
     finally:

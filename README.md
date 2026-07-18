@@ -113,7 +113,7 @@ Full guides live in [`docs/`](./docs). Start here:
 |-------|---------------|
 | [📦 Installation](./docs/installation.md) | Requirements, `uv` setup, hardware extras, verify |
 | [🚀 Quick start](./docs/quick-start.md) | Two-process bring-up, supported transports, deploy/eval/replay presets |
-| [🧭 Web console](./docs/web-console.md) | The six tabs — MANUAL, COLLECT, REPLAY, DEBUG, EVAL, RESULT |
+| [🧭 Console](./docs/console.md) | The six tabs — MANUAL, COLLECT, REPLAY, DEBUG, EVAL, RESULT — plus headless / low-power mode |
 | [🎮 Control channel](./docs/control-channel.md) | Drive every console button over ZMQ for headless / simulator-driven eval |
 | [📚 Core concepts](./docs/concepts.md) | Transports, policy backends, inference strategies, robots, action spaces |
 | [⚙️ Configuration](./docs/configuration.md) | `_base_` inheritance, deep merge, startup pipeline |

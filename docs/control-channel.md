@@ -139,6 +139,12 @@ for task in tasks:
     # inspect `final` (step_index, last_error, …) to record the trial outcome
 ```
 
+## Headless / low-power mode
+
+Running `eva --headless` starts this channel automatically (no web server) and adds
+an in-process interactive CLI. See [Console → Headless / low-power mode](./console.md#-headless--low-power-mode).
+
+
 ## Adding a new command
 
 The allow-list in [`control_channel._ALLOWED_VERBS`](../src/core/app/control_channel.py)
