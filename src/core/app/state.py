@@ -296,6 +296,9 @@ class RuntimeState:
     rl_replay_dataset_dir: str = ""
     rl_replay_episode_id: int | None = None
     rl_replay_timestamps: list[float] = dataclasses.field(default_factory=list)
+    # Shared ConsoleContext, set by start_console_server. The ZMQ control channel reads
+    # it so external callers see the exact tab/arm/collect state the web console does.
+    console_ctx: Any | None = None
     # EVAL-tab INIT panel: when init_qpos is set, the arm's reset target becomes this
     # recorded start pose instead of robot.initial_qpos (home). init_ready latches once
     # the operator clicks DONE, gating RUN until the arm is positioned + gripper set.
