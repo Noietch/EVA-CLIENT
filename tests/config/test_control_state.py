@@ -42,6 +42,18 @@ def test_format_task_label_normal():
     assert format_task_label("pick up cup") == "pick up cup"
 
 
+def test_recording_space_follows_action_space_not_observation_space():
+    qpos = ConfigDict(is_eef=lambda: False)
+    eef = ConfigDict(is_eef=lambda: True)
+
+    assert recording._recording_space(
+        ConfigDict(inference_cfg=ConfigDict(obs_space=eef, action_space=qpos))
+    ) == "qpos"
+    assert recording._recording_space(
+        ConfigDict(inference_cfg=ConfigDict(obs_space=qpos, action_space=eef))
+    ) == "eef"
+
+
 def test_gripper_command_records_collection_action_target():
     transport = _CollectionTransport()
     transport.latest_qpos = np.array([1.0, 100.0, 2.0, 0.0], dtype=np.float32)
@@ -324,7 +336,11 @@ def _config() -> ConfigDict:
             schema=ConfigDict(columns={"qpos": "state", "action_qpos": "action"}),
         ),
         rollout=ConfigDict(intervention=ConfigDict(control_mode="relative")),
-        inference_cfg=ConfigDict(publish_rate=1000),
+        inference_cfg=ConfigDict(
+            publish_rate=1000,
+            obs_space=JointState(),
+            action_space=JointState(),
+        ),
     )
 
 

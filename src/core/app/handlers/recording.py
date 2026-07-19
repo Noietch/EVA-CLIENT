@@ -50,10 +50,14 @@ def state_to_eef(config: ConfigDict, runtime: RuntimeState, qpos_state: np.ndarr
     """
     if not config.inference_cfg.obs_space.is_eef():
         return qpos_state
+    return _qpos_to_eef(config, runtime, qpos_state)
+
+
+def _qpos_to_eef(config: ConfigDict, runtime: RuntimeState, qpos: np.ndarray) -> np.ndarray:
     from core.app.handlers.io import ensure_ik_solver
 
     solver = ensure_ik_solver(config, runtime)
-    return solver.fk_chunk(qpos_state[np.newaxis, :])[0]
+    return solver.fk_chunk(qpos[np.newaxis, :])[0]
 
 
 def _fill_record_eef(
@@ -74,14 +78,20 @@ def _fill_record_eef(
         frame: observation to fill in place; reads frame.state_qpos.
         action: [Da] executed/teleop action in joint space, mapped to action_eef.
     """
-    if not config.inference_cfg.obs_space.is_eef():
+    obs_is_eef = config.inference_cfg.obs_space.is_eef()
+    action_is_eef = config.inference_cfg.action_space.is_eef()
+    if not obs_is_eef and not action_is_eef:
         return
     if frame.state_qpos is None:
         raise RuntimeError("EEF recording requires state_qpos but the frame has none")
-    if frame.state_eef is None:
+    if obs_is_eef and frame.state_eef is None:
         frame.state_eef = state_to_eef(config, runtime, frame.state_qpos)
-    if frame.action_eef is None:
-        frame.action_eef = state_to_eef(config, runtime, np.asarray(action, dtype=np.float32))
+    if action_is_eef and frame.action_eef is None:
+        frame.action_eef = _qpos_to_eef(
+            config,
+            runtime,
+            np.asarray(action, dtype=np.float32),
+        )
 
 
 def _fill_record_eef_uv(
@@ -258,8 +268,8 @@ def _recording_space(config: ConfigDict) -> str:
     inference_cfg = config.get("inference_cfg")
     if inference_cfg is None:
         return "qpos"
-    obs_space = inference_cfg.get("obs_space")
-    return "eef" if obs_space is not None and obs_space.is_eef() else "qpos"
+    action_space = inference_cfg.get("action_space")
+    return "eef" if action_space is not None and action_space.is_eef() else "qpos"
 
 
 def _gripper_recording_config(config: ConfigDict) -> tuple[float | None, float | None, float | None]:
@@ -1095,7 +1105,12 @@ def record_executed_action(
         action_eef = None
         if config.inference_cfg.obs_space.is_eef() and state_qpos is not None:
             state_eef = state_to_eef(config, runtime, np.asarray(state_qpos, dtype=np.float32))
-            action_eef = state_to_eef(config, runtime, np.asarray(action, dtype=np.float32))
+        if config.inference_cfg.action_space.is_eef():
+            action_eef = _qpos_to_eef(
+                config,
+                runtime,
+                np.asarray(action, dtype=np.float32),
+            )
         runtime.rollout_policy_actions.append(
             (
                 timestamp,
