@@ -649,6 +649,25 @@ def collect_stop_teleop(config: ConfigDict, runtime: RuntimeState, session: Sess
     _ = config
 
 
+def _stamp_scene_meta(runtime: RuntimeState) -> None:
+    """Attach simulator scene metadata to the current episode for offline scene rebuild.
+
+    Only simulator nodes publish scene_index/seed/task_name; real-robot transports omit
+    them, so this is a no-op when the transport exposes no scene status.
+    """
+    get_status = getattr(runtime.transport, "get_task_status", None)
+    if get_status is None:
+        return
+    status = get_status()
+    scene_fields = {
+        key: status[key]
+        for key in ("scene_index", "seed", "task_name")
+        if status.get(key) is not None
+    }
+    if scene_fields:
+        runtime.episode_logger.set_episode_meta(**scene_fields)
+
+
 def collect_start(config: ConfigDict, runtime: RuntimeState, session: SessionState) -> bool:
     """Begin one teleop collection episode. Backpressure: refuse to start when the
     async save queue is full so we never grow memory unbounded. Returns True when
@@ -670,6 +689,7 @@ def collect_start(config: ConfigDict, runtime: RuntimeState, session: SessionSta
             task=format_task_label(session.selected_collect_task),
             collection_min_capture_time=collection_min_capture_time,
         )
+        _stamp_scene_meta(runtime)
         start_collection_capture(
             runtime,
             fps=config.inference_cfg.publish_rate,

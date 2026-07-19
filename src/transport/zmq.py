@@ -60,6 +60,9 @@ class WireObservation:
         action_eef: optional teleop end-effector action aligned with this frame.
         frame_id: optional simulator episode frame index.
         success: optional simulator task-success flag.
+        scene_index: optional simulator scene index for offline scene rebuild.
+        seed: optional simulator placement-jitter seed for offline scene rebuild.
+        task_name: optional simulator task behavior name for offline scene rebuild.
     """
 
     t: float
@@ -70,6 +73,9 @@ class WireObservation:
     action_eef: np.ndarray | None = None
     frame_id: int | None = None
     success: bool | None = None
+    scene_index: int | None = None
+    seed: int | None = None
+    task_name: str | None = None
 
 
 @dataclasses.dataclass
@@ -114,6 +120,12 @@ def pack_observation(obs: WireObservation) -> bytes:
         payload["frame_id"] = int(obs.frame_id)
     if obs.success is not None:
         payload["success"] = bool(obs.success)
+    if obs.scene_index is not None:
+        payload["scene_index"] = int(obs.scene_index)
+    if obs.seed is not None:
+        payload["seed"] = int(obs.seed)
+    if obs.task_name is not None:
+        payload["task_name"] = str(obs.task_name)
     return _PACKER.pack(payload)
 
 
@@ -142,6 +154,9 @@ def unpack_observation(payload: bytes) -> WireObservation:
         action_eef=None if action_eef is None else np.asarray(action_eef, dtype=np.float32),
         frame_id=None if "frame_id" not in raw else int(raw["frame_id"]),
         success=None if "success" not in raw else bool(raw["success"]),
+        scene_index=None if "scene_index" not in raw else int(raw["scene_index"]),
+        seed=None if "seed" not in raw else int(raw["seed"]),
+        task_name=None if "task_name" not in raw else str(raw["task_name"]),
     )
 
 
@@ -352,12 +367,15 @@ class _ObservationReader:
             success=wire_obs.success,
         )
 
-    def get_task_status(self) -> dict[str, int | bool | None]:
-        """Return optional simulator frame and success fields from the latest frame."""
+    def get_task_status(self) -> dict[str, int | bool | str | None]:
+        """Return optional simulator frame, success, and scene fields from the latest frame."""
         wire_obs = self._drain_latest()
         return {
             "frame_id": None if wire_obs is None else wire_obs.frame_id,
             "success": None if wire_obs is None else wire_obs.success,
+            "scene_index": None if wire_obs is None else wire_obs.scene_index,
+            "seed": None if wire_obs is None else wire_obs.seed,
+            "task_name": None if wire_obs is None else wire_obs.task_name,
         }
 
     def get_camera_frame(self, key: str) -> np.ndarray | None:
@@ -603,8 +621,8 @@ class ZmqTransport(TransportBridge):
         """Latest joint state [qpos_dim] float32 from the dedicated qpos reader."""
         return self._qpos_reader.get_latest_qpos()
 
-    def get_task_status(self) -> dict[str, int | bool | None]:
-        """Latest optional simulator frame and task-success fields."""
+    def get_task_status(self) -> dict[str, int | bool | str | None]:
+        """Latest optional simulator frame, task-success, and scene fields."""
         return self._qpos_reader.get_task_status()
 
     def seconds_since_last_recv(self) -> float | None:
