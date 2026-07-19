@@ -58,6 +58,8 @@ class WireObservation:
             mode only), used as action_qpos by the collection API.
         eef: optional actuator group_name -> end-effector pose array.
         action_eef: optional teleop end-effector action aligned with this frame.
+        frame_id: optional simulator episode frame index.
+        success: optional simulator task-success flag.
     """
 
     t: float
@@ -66,6 +68,8 @@ class WireObservation:
     action: np.ndarray | None = None
     eef: dict[str, np.ndarray] | None = None
     action_eef: np.ndarray | None = None
+    frame_id: int | None = None
+    success: bool | None = None
 
 
 @dataclasses.dataclass
@@ -106,6 +110,10 @@ def pack_observation(obs: WireObservation) -> bytes:
         payload["eef"] = {k: np.asarray(v, dtype=np.float32) for k, v in obs.eef.items()}
     if obs.action_eef is not None:
         payload["action_eef"] = np.asarray(obs.action_eef, dtype=np.float32)
+    if obs.frame_id is not None:
+        payload["frame_id"] = int(obs.frame_id)
+    if obs.success is not None:
+        payload["success"] = bool(obs.success)
     return _PACKER.pack(payload)
 
 
@@ -132,6 +140,8 @@ def unpack_observation(payload: bytes) -> WireObservation:
         action=None if action is None else np.asarray(action, dtype=np.float32),
         eef=(None if eef is None else {k: np.asarray(v, dtype=np.float32) for k, v in eef.items()}),
         action_eef=None if action_eef is None else np.asarray(action_eef, dtype=np.float32),
+        frame_id=None if "frame_id" not in raw else int(raw["frame_id"]),
+        success=None if "success" not in raw else bool(raw["success"]),
     )
 
 
@@ -331,8 +341,24 @@ class _ObservationReader:
                 state_qpos=state,
                 action_qpos=np.asarray(wire_obs.action, dtype=np.float32),
                 timestamp=wire_obs.t,
+                frame_id=wire_obs.frame_id,
+                success=wire_obs.success,
             )
-        return Observation(images=images, state_qpos=state, timestamp=wire_obs.t)
+        return Observation(
+            images=images,
+            state_qpos=state,
+            timestamp=wire_obs.t,
+            frame_id=wire_obs.frame_id,
+            success=wire_obs.success,
+        )
+
+    def get_task_status(self) -> dict[str, int | bool | None]:
+        """Return optional simulator frame and success fields from the latest frame."""
+        wire_obs = self._drain_latest()
+        return {
+            "frame_id": None if wire_obs is None else wire_obs.frame_id,
+            "success": None if wire_obs is None else wire_obs.success,
+        }
 
     def get_camera_frame(self, key: str) -> np.ndarray | None:
         """Single camera's image [H, W, 3] uint8 from the freshest snapshot, or None.
@@ -420,6 +446,8 @@ class _ObservationReader:
             action_qpos=wire_obs.action,
             action_eef=wire_obs.action_eef,
             timestamp=wire_obs.t,
+            frame_id=wire_obs.frame_id,
+            success=wire_obs.success,
         )
 
     def get_collection_frame(self) -> Observation | None:
@@ -574,6 +602,10 @@ class ZmqTransport(TransportBridge):
     def get_latest_qpos(self) -> np.ndarray | None:
         """Latest joint state [qpos_dim] float32 from the dedicated qpos reader."""
         return self._qpos_reader.get_latest_qpos()
+
+    def get_task_status(self) -> dict[str, int | bool | None]:
+        """Latest optional simulator frame and task-success fields."""
+        return self._qpos_reader.get_task_status()
 
     def seconds_since_last_recv(self) -> float | None:
         """Freshest receipt age across all readers, or None if none have received."""

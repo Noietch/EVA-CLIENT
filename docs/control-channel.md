@@ -55,7 +55,7 @@ below come from [`_handle_web_command`](../src/core/app/run.py).
 | Command | Arg | Web button | Notes |
 |---|---|---|---|
 | `web:select_mode:<mode>` | `real`/`sim`/`step`/`manual` | mode picker | pick before setup |
-| `web:select_task:<task>` | task string | DEBUG task picker | blocked while running |
+| `web:switch_task:<task>` | task string | DEBUG task picker | blocked while running |
 | `web:select_strategy:<key>` | strategy key | strategy picker | must exist in config |
 | `web:setup` | — | SETUP | needs task + mode selected |
 | `web:run` | — | RUN / START | REAL/SIM start; STEP previews a chunk |
@@ -106,7 +106,7 @@ below come from [`_handle_web_command`](../src/core/app/run.py).
 |---|---|
 | `status` | live snapshot — `session_status`, `cli_mode`, `step_index`, `chunk_index`, `policy_connected`, `transport_connected`, `collect`, `rollout`, `last_error`, … (full shape: `_serialize_status`) |
 | `config` | static config — robot/transport type, tasks, strategies, modes (`_serialize_config`) |
-| `frame` | latest qpos + camera keys (`_serialize_frame`) |
+| `frame` | latest qpos, camera keys, and optional simulator `frame_id` / `success` |
 
 ## CLI client
 
@@ -130,14 +130,21 @@ import time
 from eva_ctl import send, wait_idle
 
 send(cmd="web:select_mode:sim")
-send(cmd="web:setup")
 for task in tasks:
-    send(cmd=f"web:select_task:{task}")
+    send(cmd=f"web:switch_task:{task}")
+    send(cmd="web:setup")
     send(cmd="web:run")
     final = wait_idle()          # polls status until session_status != "running"
+    frame = send(query="frame")["data"]
+    result = frame.get("success")
     send(cmd="web:console_reset")
-    # inspect `final` (step_index, last_error, …) to record the trial outcome
+    # record result; inspect final for execution diagnostics
 ```
+
+For EVA Sim, use
+`configs/01_deploy/dual_agilex_piper/eva_sim_qpos.py`. Its frame query carries the
+simulator's boolean `success`, so an external evaluator can score each trial without
+using the manual dataset-scoring UI.
 
 ## Headless / low-power mode
 

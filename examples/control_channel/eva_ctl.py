@@ -17,6 +17,7 @@ The ``send()`` helper is import-friendly, so a simulator can drive the loop dire
 
     from eva_ctl import send
     send(cmd="web:select_mode:sim")
+    send(cmd="web:switch_task:pick up the object")
     send(cmd="web:setup")
     send(cmd="web:run")
     while send(query="status")["data"]["session_status"] == "running":

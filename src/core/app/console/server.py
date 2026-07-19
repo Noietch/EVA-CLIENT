@@ -527,6 +527,9 @@ def _serialize_frame(ctx: ConsoleContext) -> dict:
         "qpos": None if qpos is None else np.asarray(qpos, dtype=float).tolist(),
         "cameras": _live_camera_keys(ctx),
     }
+    get_task_status = getattr(reader, "get_task_status", None)
+    if get_task_status is not None:
+        out.update(get_task_status())
     return out
 
 

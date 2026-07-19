@@ -38,6 +38,8 @@ class Observation:
     action_qpos: np.ndarray | None = None
     action_eef: np.ndarray | None = None
     timestamp: float | None = None
+    frame_id: int | None = None
+    success: bool | None = None
 
 
 @dataclasses.dataclass

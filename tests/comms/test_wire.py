@@ -15,6 +15,7 @@ import transport.zmq as zmq_transport
 from core.config import ConfigDict
 from core.registry import ROBOT_REGISTRY
 from robots.base import Robot
+from transport.utils import ImageRateTracker
 from transport.zmq import (
     COLLECTION_CONTROL_REPEATS,
     WireAction,
@@ -26,7 +27,6 @@ from transport.zmq import (
     unpack_action,
     unpack_observation,
 )
-from transport.utils import ImageRateTracker
 
 
 def _build_zmq_transport_with_fake_readers(monkeypatch):
@@ -116,11 +116,19 @@ def test_observation_roundtrip_preserves_images_state_and_timestamp():
         "left_arm": np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.0], dtype=np.float32),
         "right_arm": np.array([-0.1, -0.2, 0.0, 0.0, 0.0, 0.0, 1.0], dtype=np.float32),
     }
-    obs = WireObservation(t=123.456, images=images, state=state)
+    obs = WireObservation(
+        t=123.456,
+        images=images,
+        state=state,
+        frame_id=42,
+        success=True,
+    )
 
     back = unpack_observation(pack_observation(obs))
 
     assert back.t == 123.456
+    assert back.frame_id == 42
+    assert back.success is True
     assert set(back.images) == set(images)
     for key, img in images.items():
         np.testing.assert_array_equal(back.images[key], img)
@@ -167,11 +175,15 @@ def test_wire_observation_converts_to_collection_frame_by_robot_group_order():
         eef={"right_arm": right_eef, "left_arm": left_eef},
         action=action_qpos,
         action_eef=action_eef,
+        frame_id=7,
+        success=False,
     )
 
     frame = reader._wire_to_observation(wire_obs)
 
     assert frame.timestamp == 3.0
+    assert frame.frame_id == 7
+    assert frame.success is False
     assert frame.state_eef is not None
     assert frame.action_qpos is not None
     assert frame.action_eef is not None
