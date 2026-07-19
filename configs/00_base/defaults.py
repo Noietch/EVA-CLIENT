@@ -33,6 +33,7 @@ transport = dict(
     image_width=224,
     resize_pad=True,
     image_layout="chw",
+    convert_bgr_to_rgb=True,  # BGR->RGB swap for JPEG encode / saved video; source of truth for omitted presets
     sub_endpoint="tcp://127.0.0.1:5555",
     pub_endpoint="tcp://127.0.0.1:5556",
     disabled_cameras=[],
