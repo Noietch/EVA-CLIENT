@@ -53,6 +53,7 @@ def _logger(
     save_video: bool = False,
     fps: int = 30,
     async_save: bool = False,
+    recording_space: str = "qpos",
 ) -> EpisodeLogger:
     return EpisodeLogger(
         log_dir,
@@ -65,6 +66,7 @@ def _logger(
             video_keys={},
         ),
         async_save=async_save,
+        recording_space=recording_space,
     )
 
 
@@ -290,6 +292,8 @@ def test_rollout_resizes_saved_frames_when_size_set(tmp_path, monkeypatch):
 
     assert logger.end_episode() is True
     assert frame_shapes == [(120, 160, 3)] * 3
+    info = json.loads((tmp_path / "meta" / "info.json").read_text())
+    assert info["features"]["observation.images.cam_high"]["shape"] == [120, 160, 3]
 
 
 def test_episode_logger_writes_faststart_mp4s(tmp_path, monkeypatch):
@@ -326,7 +330,7 @@ def test_episode_logger_sync_save_writes_n_rows(tmp_path):
     keys = ConfigDict(
         state_key="observations.state.qpos",
         eef_key="observations.state.eef",
-        action_key="action",
+        action_key="action.qpos",
         video_keys={},
     )
     logger = _logger(tmp_path)
@@ -403,7 +407,7 @@ def test_episode_logger_copies_inputs_and_skips_empty_episode(tmp_path):
     keys = ConfigDict(
         state_key="observations.state.qpos",
         eef_key="observations.state.eef",
-        action_key="action",
+        action_key="action.qpos",
         video_keys={},
     )
 
@@ -530,7 +534,7 @@ def test_record_step_batches_align_to_fixed_grid_before_save(tmp_path):
     np.testing.assert_allclose(table.column("timestamp").to_pylist(), [0.0, 0.1, 0.2])
     np.testing.assert_allclose(table.column("capture_time").to_pylist(), [1.0, 1.1, 1.2])
     np.testing.assert_allclose(table.column("observations.state.qpos").to_pylist()[1], [1.0] * _DIM)
-    np.testing.assert_allclose(table.column("action").to_pylist()[1], [11.0] * _DIM)
+    np.testing.assert_allclose(table.column("action.qpos").to_pylist()[1], [11.0] * _DIM)
 
     episode = _read_jsonl(tmp_path / "meta" / "episodes.jsonl")[0]
     assert episode["quality"] == "green"
@@ -588,9 +592,66 @@ def test_raw_episode_snapshots_decode_on_async_save_worker(tmp_path):
     np.testing.assert_allclose(table.column("timestamp").to_pylist(), [0.0, 0.1, 0.2])
     np.testing.assert_allclose(table.column("capture_time").to_pylist(), [1.0, 1.1, 1.2])
     np.testing.assert_allclose(table.column("observations.state.qpos").to_pylist()[1], [1.0] * _DIM)
-    np.testing.assert_allclose(table.column("action").to_pylist()[1], [11.0] * _DIM)
+    np.testing.assert_allclose(table.column("action.qpos").to_pylist()[1], [11.0] * _DIM)
     episode = _read_jsonl(tmp_path / "meta" / "episodes.jsonl")[0]
     assert episode["alignment_image_skew_tolerance_sec"] == 1.0 / 18.0
+
+
+def test_raw_episode_action_column_follows_recording_space(tmp_path):
+    qpos_logger = _logger(tmp_path / "qpos", fps=10, recording_space="qpos")
+    qpos = np.zeros(_DIM, dtype=np.float32)
+    qpos_logger.start_episode("t")
+    qpos_logger.record_step(_obs(qpos), qpos + 1.0, timestamp=0.0)
+    qpos_logger.record_step(_obs(qpos), qpos + 2.0, timestamp=0.1)
+
+    assert qpos_logger.end_episode()
+
+    qpos_table = pq.read_table(
+        tmp_path / "qpos" / "data" / "chunk-000" / "episode_000000.parquet"
+    )
+    assert "action.qpos" in qpos_table.column_names
+    assert "action" not in qpos_table.column_names
+
+    eef_logger = _logger(tmp_path / "eef", fps=10, recording_space="eef")
+    action_eef = np.arange(8, dtype=np.float32)
+    eef_logger.start_episode("t")
+    for timestamp in (0.0, 0.1):
+        eef_logger.record_step(
+            Observation(
+                images={},
+                state_qpos=qpos,
+                state_eef=np.zeros(8, dtype=np.float32),
+                action_eef=action_eef,
+            ),
+            qpos,
+            timestamp=timestamp,
+        )
+
+    assert eef_logger.end_episode()
+
+    eef_table = pq.read_table(
+        tmp_path / "eef" / "data" / "chunk-000" / "episode_000000.parquet"
+    )
+    assert "action.eef" in eef_table.column_names
+    np.testing.assert_allclose(eef_table.column("action.eef").to_pylist(), [action_eef] * 2)
+
+
+def test_raw_episode_save_refreshes_info_and_stats(tmp_path):
+    logger = _logger(tmp_path, fps=10)
+    qpos = np.zeros(_DIM, dtype=np.float32)
+    logger.start_episode("t")
+    logger.record_step(_obs(qpos), qpos + 1.0, timestamp=0.0)
+    logger.record_step(_obs(qpos), qpos + 2.0, timestamp=0.1)
+
+    assert logger.end_episode()
+
+    info = json.loads((tmp_path / "meta" / "info.json").read_text())
+    stats = json.loads((tmp_path / "meta" / "stats.json").read_text())
+    assert info["total_episodes"] == 1
+    assert info["total_frames"] == 2
+    assert info["splits"] == {"train": "0:1"}
+    assert "action.qpos" in info["features"]
+    assert set(stats) == {"observations.state.qpos", "action.qpos"}
 
 
 def test_raw_episode_video_writer_holds_only_one_decoded_image(tmp_path, monkeypatch):

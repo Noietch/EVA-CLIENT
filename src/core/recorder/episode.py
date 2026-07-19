@@ -218,6 +218,7 @@ class EpisodeLogger:
         if recording_space not in {"qpos", "eef"}:
             raise ValueError(f"unsupported recording space: {recording_space}")
         self._recording_space = recording_space
+        self._action_key = f"action.{recording_space}"
         self._gripper_open = gripper_open
         self._gripper_close = gripper_close
         self._gripper_threshold = gripper_threshold
@@ -969,8 +970,8 @@ class EpisodeLogger:
             else:
                 self._append_episode_dict_row_locked(row)
             self._write_tasks_jsonl_from(job.task_to_index)
-            if self._eval_mode:
-                self._write_info_json()
+        self._write_info_json()
+        self._write_stats_json()
         self._clear_pending_episode_meta_for_job(job)
 
     def _exclude_raw_episode_ranges(
@@ -1091,12 +1092,16 @@ class EpisodeLogger:
         if global_index < 0:
             global_index = self._next_episode_global_index(n_frames)
         fps = float(self._fps)
+        action_field = "action_eef" if self._recording_space == "eef" else "action_qpos"
+        action_values = [getattr(frame, action_field) for frame in frames]
+        if any(action is None for action in action_values):
+            raise ValueError(f"raw episode missing {action_field} values")
         columns: dict[str, Any] = {
             self._keys.state_key: [
                 np.asarray(frame.state_qpos, dtype=np.float32).tolist() for frame in frames
             ],
-            self._keys.action_key: [
-                np.asarray(frame.action_qpos, dtype=np.float32).tolist() for frame in frames
+            self._action_key: [
+                np.asarray(action, dtype=np.float32).tolist() for action in action_values
             ],
             "timestamp": [i / fps for i in range(n_frames)],
             "capture_time": [
@@ -1552,7 +1557,7 @@ class EpisodeLogger:
         if not path.exists():
             return None
         state_key = self._keys.state_key
-        action_key = self._keys.action_key
+        action_key = self._action_key
         table = pq.read_table(str(path), columns=[state_key, action_key, "timestamp"])
         return {
             "timestamp": [float(t) for t in table.column("timestamp").to_pylist()],
@@ -1820,7 +1825,7 @@ class EpisodeLogger:
                 }
         state_dim, action_dim = self._infer_vector_dims()
         features[self._keys.state_key] = {"dtype": "float32", "shape": [state_dim], "names": None}
-        features[self._keys.action_key] = {"dtype": "float32", "shape": [action_dim], "names": None}
+        features[self._action_key] = {"dtype": "float32", "shape": [action_dim], "names": None}
         eef_dim = self._infer_eef_dim()
         if eef_dim is not None:
             features[self._keys.eef_key] = {
@@ -1852,7 +1857,7 @@ class EpisodeLogger:
                 np.array(table.column(self._keys.state_key).to_pylist(), dtype=np.float64)
             )
             action_acc.update(
-                np.array(table.column(self._keys.action_key).to_pylist(), dtype=np.float64)
+                np.array(table.column(self._action_key).to_pylist(), dtype=np.float64)
             )
             if self._keys.eef_key in table.column_names:
                 eef_acc.update(
@@ -1862,7 +1867,7 @@ class EpisodeLogger:
         if state_acc.count:
             stats[self._keys.state_key] = state_acc.result()
         if action_acc.count:
-            stats[self._keys.action_key] = action_acc.result()
+            stats[self._action_key] = action_acc.result()
         if eef_acc.count:
             stats[self._keys.eef_key] = eef_acc.result()
         with self._meta_path("stats.json").open("w") as f:
@@ -1872,12 +1877,23 @@ class EpisodeLogger:
 
     def _infer_vector_dims(self) -> tuple[int, int]:
         if self._steps:
+            action = (
+                self._steps[0].action_eef
+                if self._recording_space == "eef"
+                else self._steps[0].action_qpos
+            )
+            if action is None:
+                raise ValueError(f"recorded episode missing action.{self._recording_space}")
             return (
                 self._steps[0].state_qpos.shape[0],
-                cast(np.ndarray, self._steps[0].action_qpos).shape[0],
+                action.shape[0],
             )
-        dim = self._robot.total_action_dim
-        return dim, dim
+        action_dim = (
+            8 * len(self._robot.arm_groups)
+            if self._recording_space == "eef"
+            else self._robot.total_action_dim
+        )
+        return self._robot.total_action_dim, action_dim
 
     def _infer_eef_dim(self) -> int | None:
         """Length of the eef state vector, or None when no episode recorded one.
@@ -1902,6 +1918,9 @@ class EpisodeLogger:
     def _infer_image_shape(self) -> tuple[int, int]:
         if self._image_shape is not None:
             return self._image_shape
+        configured = self._save_size()
+        if configured is not None:
+            return configured
         return 480, 640
 
     # -- dataset-resume discovery (so reruns append, not overwrite) -------------

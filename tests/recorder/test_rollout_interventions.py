@@ -45,7 +45,7 @@ def _logger(
         dataset_keys=ConfigDict(
             state_key="observations.state.qpos",
             eef_key="observations.state.eef",
-            action_key="action",
+            action_key="action.qpos",
             video_keys={},
         ),
         async_save=False,
@@ -68,7 +68,7 @@ def _read_jsonl(path):
 
 def test_rollout_save_merges_intervention_into_episode_table(tmp_path):
     logger = _logger(tmp_path)
-    keys = ConfigDict(state_key="observations.state.qpos", action_key="action")
+    keys = ConfigDict(state_key="observations.state.qpos", action_key="action.qpos")
     segment = RolloutInterventionSegment(
         segment_index=0,
         start_policy_frame_index=1,
