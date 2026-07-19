@@ -660,6 +660,11 @@ class ZmqTransport(TransportBridge):
             action: [action_dim] float32 flat action vector.
             target: "real" or "sim" routing tag carried on the wire.
         """
+        # The sole downstream channel executes every frame it receives; with no
+        # separate sim surface a "sim" preview frame would drive the robot. The
+        # console 3D canvas renders previews from local state, not the wire.
+        if target == "sim" and not self.has_sim_publishers():
+            return
         message = WireAction(t=time.monotonic(), action=np.asarray(action), target=target)
         self._pub.send(pack_action(message))
 
