@@ -12,6 +12,8 @@
     --signal:   #1F1E1C;
     --signal-soft: rgba(31,30,28,0.05);
     --accent:   #E8590C;
+    --policy:   #2563EB;
+    --intervention: #FF4D00;
     --ok:       #2F9E44;
     --danger:   #E03131;
     --radius:   10px;
@@ -89,7 +91,7 @@
     font-family: var(--mono); font-size: 11px; font-weight: 600;
     letter-spacing: 0.12em; text-transform: uppercase;
     color: var(--ink-dim); cursor: pointer; user-select: none;
-    padding: 7px 15px; border: 1px solid transparent; background: none;
+    padding: 7px 12px; border: 1px solid transparent; background: none;
     border-radius: 999px;
     display: inline-flex; align-items: center; gap: 8px;
     transition: color .14s ease;
@@ -171,6 +173,7 @@
 
   /* canvas views: control column | vertical instrument stage (3D+cams / action / state) */
   #view-debug   { grid-template-columns: 420px 1fr; gap: 0; }
+  #view-rl      { grid-template-columns: 420px 1fr; gap: 0; }
   #view-replay  { grid-template-columns: 420px 1fr; gap: 0; }
   #view-manual  { grid-template-columns: 420px 1fr; gap: 0; }
   #view-calibrate { grid-template-columns: 420px 1fr; gap: 0; }
@@ -178,7 +181,7 @@
   #view-debug.collect-mode #debug-control-col { display: none; }
   #view-debug.collect-mode #collect-control-col { display: block; }
   @media (max-width: 1100px) {
-    #view-debug, #view-replay, #view-manual, #view-calibrate { grid-template-columns: 360px 1fr; }
+    #view-debug, #view-rl, #view-replay, #view-manual, #view-calibrate { grid-template-columns: 360px 1fr; }
   }
 
   .col { min-height: 0; overflow-y: auto; padding: 16px; }
@@ -248,6 +251,14 @@
     background: var(--paper); border: 1px solid var(--rule);
     border-radius: var(--radius); box-shadow: var(--shadow);
     padding: 7px 14px 8px;
+  }
+  .stage-critic {
+    display: none; flex: 0 0 190px; min-height: 190px;
+  }
+  #view-rl .stage-critic { display: flex; }
+  .critic-latest {
+    margin-left: auto; color: var(--ink); font-family: var(--mono);
+    font-size: 14px; font-weight: 700;
   }
   /* expand affordance: a small button in the chart head opens the big-view modal */
   .chart-expand {
@@ -366,9 +377,18 @@
   .stage-scrub .review-return-live {
     flex: 0 0 auto; padding: 6px 10px; border-radius: 999px; font-size: 9px;
   }
+  .control-legend {
+    display: none; flex: 0 0 auto; align-items: center; gap: 5px;
+    color: var(--ink-dim); white-space: nowrap;
+  }
+  #view-rl .control-legend { display: inline-flex; }
+  .control-legend i { width: 9px; height: 5px; border-radius: 999px; }
+  .control-legend i.policy { background: var(--policy); }
+  .control-legend i.intervention { background: var(--intervention); margin-left: 4px; }
   .stage.no-series .stage-top {
     flex: 1 1 auto; height: auto; min-height: 0;
   }
+  .stage.no-series .stage-critic,
   .stage.no-series .stage-charts,
   .stage.no-series .stage-scrub {
     display: none;
@@ -473,6 +493,30 @@
     border-radius: var(--radius); box-shadow: var(--shadow);
     padding: 13px; position: relative;
   }
+
+  /* ============ RL workspace ============ */
+  #rl-stage-col {
+    min-height: 0; overflow-y: auto; padding: 12px; background: var(--surface-2);
+    animation: fadeIn .6s ease .18s both; display: flex; flex-direction: column;
+  }
+  #rl-stage-col > .stage { flex: 1 1 auto; min-height: 0; padding: 0; }
+  .model-link {
+    margin-left: auto; font-family: var(--mono); font-size: 9px; font-weight: 700;
+    color: var(--ink-faint); letter-spacing: 0.06em;
+  }
+  .model-link.selected { color: var(--ink); }
+  .rl-unavailable {
+    margin-top: 9px; padding: 8px 10px; border: 1px dashed var(--rule-strong);
+    border-radius: var(--radius-sm); color: var(--ink-faint); background: var(--surface);
+    font-family: var(--mono); font-size: 9px; line-height: 1.45;
+  }
+  #rl-panel-data .kv { margin-top: 8px; }
+  #rl-dataset-dir {
+    max-width: 66%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  #rl-panel-rollout .collect-arm-gate { margin-bottom: 8px; }
+  #rl-save-tiles { margin-top: 10px; }
+  #rl-gripper-buttons:empty { display: none; }
 
   /* segmented selectors (prompt / mode / strategy) */
   .seg-list { display: flex; flex-direction: column; gap: 6px; }

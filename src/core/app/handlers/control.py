@@ -455,8 +455,8 @@ def handle_motion_command(
 
     ``halt`` interrupts and is consumed. Verbs that change mode/prompt/episode/ckpt or
     request a reset also interrupt, but are re-queued so the main loop applies them once
-    it unwinds — this is what lets a mode switch abort an in-progress setup. All other
-    commands are ignored during the motion.
+    it unwinds — this is what lets a mode switch abort an in-progress setup. The RL HIL
+    enable switch is applied in place because it must remain responsive during sync waits.
 
     Returns:
         True when the motion should be interrupted, False to keep going.
@@ -481,6 +481,14 @@ def handle_motion_command(
             and resolved_command != command
             and handle_motion_command(resolved_command, config, runtime, session)
         )
+    if verb == "rollout_intervention_enabled":
+        enabled = arg not in {"", "0", "false", "off"}
+        if runtime.rollout_intervention_active:
+            session.last_error = "Stop or resume the active intervention before changing HIL"
+        else:
+            runtime.rollout_intervention_enabled = enabled
+            session.last_error = ""
+        return False
     if verb == "rollout_stop":
         was_running = session.status is SessionStatus.RUNNING and session.mode in (
             SessionMode.REAL,

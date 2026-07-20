@@ -23,5 +23,3 @@ Log/
 configs/01_deploy/r1lite/openpi_qpos.local.py
 configs/02_collection/r1lite_task1.py
 configs/02_collection/r1lite_task2.py
-tests/hardware/test_r1lite_fake_e2e_harness.py
-tools/run_r1lite_fake_e2e.py

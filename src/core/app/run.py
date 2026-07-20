@@ -21,6 +21,7 @@ from core.app.handlers import (
     _anchor_buffer_to_current_qpos,
     accept_rollout_intervention_segment,
     begin_rollout_save_episode,
+    build_policy_observation,
     clear_replay,
     collect_cancel,
     collect_start,
@@ -76,6 +77,13 @@ from core.app.handlers import (
 from core.app.operator_control import (
     maybe_start_operator_action_listener,
     resolve_operator_action,
+)
+from core.app.rl import (
+    build_rl_active_config,
+    close_rl_workspace,
+    connect_rl_critic,
+    reset_rl_series,
+    submit_rl_critic,
 )
 from core.app.state import (
     RuntimeState,
@@ -331,6 +339,67 @@ def _handle_web_command(
         stop_rollout_intervention(config, runtime, session, required=False)
         discard_rollout_intervention_segment(runtime)
         select_task(arg, config, session, runtime)
+        return
+
+    if verb == "rl_select_task":
+        rl_cfg = config.rl
+        if rl_cfg is None or arg not in rl_cfg.tasks:
+            session.last_error = f"Unknown RL task: {arg}"
+            return
+        session.selected_task = arg
+        session.last_error = ""
+        reset_session_progress(session)
+        return
+
+    if verb == "rl_select_policy":
+        slot = int(arg)
+        rl_cfg = config.rl
+        if rl_cfg is None or slot < 0 or slot >= len(rl_cfg.policies):
+            session.last_error = f"RL policy slot is out of range: {slot}"
+            return
+        runtime.rl_selected_policy_slot = slot
+        session.is_setup_done = False
+        session.last_error = ""
+        return
+
+    if verb == "rl_select_critic":
+        slot = int(arg)
+        rl_cfg = config.rl
+        if rl_cfg is None or slot < 0 or slot >= len(rl_cfg.critics):
+            session.last_error = f"RL critic slot is out of range: {slot}"
+            return
+        runtime.rl_selected_critic_slot = slot
+        session.is_setup_done = False
+        session.last_error = ""
+        return
+
+    if verb == "rl_setup":
+        policy_slot = runtime.rl_selected_policy_slot
+        critic_slot = runtime.rl_selected_critic_slot
+        if not runtime.rl_active:
+            session.last_error = "RL tab is not active"
+            return
+        if session.selected_task is None or policy_slot is None or critic_slot is None:
+            session.last_error = "Select an RL task, Policy, and Critic before setup"
+            return
+        active = build_rl_active_config(config, policy_slot)
+        runtime.active_config = active
+        config = active
+        reset_session_progress(session)
+        select_mode(SessionMode(config.rl.cli_mode), config, session, runtime)
+        runtime.selected_inference_strategy_key = None
+        strategy = str(config.rl.inference_strategy)
+        if strategy not in config.inference_strategies:
+            session.last_error = f"RL inference strategy is not configured: {strategy}"
+            return
+        select_inference_strategy(strategy, config, runtime, session)
+        if not connect_policy(config, runtime, session, force_reconnect=True):
+            session.last_error = runtime.last_policy_error
+            return
+        if not connect_rl_critic(config, runtime, critic_slot):
+            session.last_error = runtime.rl_critic_error
+            return
+        run_setup(config, runtime, session, fail_fast=True)
         return
 
     if verb == "start":
@@ -641,6 +710,8 @@ def _handle_web_command(
             return
         # Continuous run for real/sim — reuse the 's' dispatch (sets RUNNING; the main
         # loop then publishes). For STEP 's' instead previews one chunk.
+        if runtime.rl_active and session.step_index == 0:
+            reset_rl_series(runtime)
         _dispatch_run(config, runtime, session)
         return
 
@@ -744,6 +815,15 @@ def _handle_web_command(
         # would publish the recorded trajectory instead of querying the policy. Unmount it
         # whenever the destination isn't the REPLAY tab (clear_replay also reconnects the
         # policy that load_replay_dataset dropped).
+        was_rl_active = runtime.rl_active
+        if arg != "rl" and was_rl_active:
+            close_rl_workspace(runtime)
+            runtime.active_config = None
+            runtime.policy = None
+            runtime.policy_metadata = None
+            config = runtime.active_config or config
+        if arg == "rl":
+            runtime.rl_active = True
         if arg != "replay" and runtime.replay_source is not None:
             clear_replay(config, session, runtime)
         if arg != "collect":
@@ -765,6 +845,8 @@ def _handle_web_command(
         set_status(session, SessionStatus.UNSET, reason="tab switch")
         if arg == "collect" and getattr(runtime, "collection_teleop_armed", False):
             collect_start_teleop(config, runtime, session)
+        elif arg == "rl" and config.rl is not None:
+            session.mode = SessionMode(config.rl.cli_mode)
         elif arg == "eval" and config.eval is not None:
             # EVAL runs on the mode fixed by the config (cli_mode, normally REAL); the
             # generic SELECT reset below would force the operator to re-pick a mode that
@@ -1125,7 +1207,30 @@ def run(
                 last_running_tick = None
 
             if getattr(runtime, "rollout_intervention_active", False):
-                record_rollout_intervention_step(runtime, session)
+                if record_rollout_intervention_step(runtime, session):
+                    segment = runtime.rollout_intervention_active_segment
+                    assert segment is not None and segment.frames
+                    frame = segment.frames[-1]
+                    observation = build_policy_observation(
+                        frame,
+                        session.selected_task or "",
+                        effective,
+                        runtime,
+                    )
+                    action = (
+                        frame.action_eef
+                        if effective.inference_cfg.action_space.is_eef()
+                        else frame.action_qpos
+                    )
+                    if action is None:
+                        raise ValueError("Intervention frame is missing the configured action")
+                    submit_rl_critic(
+                        runtime,
+                        observation,
+                        np.asarray(action, dtype=np.float32)[None, :],
+                        "intervention",
+                        timestamp=frame.timestamp,
+                    )
 
             if session.mode is SessionMode.COLLECT and session.status is SessionStatus.RUNNING:
                 collect_step(effective, runtime)
@@ -1145,6 +1250,7 @@ def run(
             loop_rate.sleep()
     finally:
         gc.callbacks.remove(log_gc_timing)
+        close_rl_workspace(runtime)
         stop_rollout_intervention(config, runtime, session, required=False)
         stop_collection_capture(runtime)
         discard_rollout_intervention_segment(runtime)

@@ -50,21 +50,43 @@ function drawLiveCharts() {
     const ts = LIVE.replayMode && LIVE.playTime.length === LIVE.n ? LIVE.playTime : LIVE.timestamp;
     drawSeriesChart($("chart-action-cv"), LIVE.action, ts, LIVE.dimsOnA, cursor);
     drawSeriesChart($("chart-state-cv"), LIVE.state, ts, LIVE.dimsOnS, cursor);
+    const critic = LIVE.criticValue.map((value) => [value]);
+    const criticCursor = LIVE.criticValue.length ? LIVE.criticValue.length - 1 : null;
+    drawSeriesChart(
+      $("chart-critic-cv"), critic, LIVE.criticTimestamp, { 0: true }, criticCursor, ["#1F1E1C"],
+    );
+    const latest = $("critic-latest");
+    if (latest) {
+      latest.textContent = LIVE.criticValue.length
+        ? Number(LIVE.criticValue[LIVE.criticValue.length - 1]).toFixed(4)
+        : "—";
+    }
     if (S.chartModalWhich) {
-      const mat = S.chartModalWhich === "a" ? LIVE.action : LIVE.state;
-      const dimsOn = S.chartModalWhich === "a" ? LIVE.dimsOnA : LIVE.dimsOnS;
-      drawSeriesChart($("chart-modal-cv"), mat, ts, dimsOn, cursor);
+      const isCritic = S.chartModalWhich === "c";
+      const mat = isCritic ? critic : (S.chartModalWhich === "a" ? LIVE.action : LIVE.state);
+      const dimsOn = isCritic ? { 0: true } : (S.chartModalWhich === "a" ? LIVE.dimsOnA : LIVE.dimsOnS);
+      drawSeriesChart(
+        $("chart-modal-cv"),
+        mat,
+        isCritic ? LIVE.criticTimestamp : ts,
+        dimsOn,
+        isCritic ? criticCursor : cursor,
+        isCritic ? ["#1F1E1C"] : RT_COLORS,
+      );
     }
   }
 
 function openChartModal(which) {
     S.chartModalWhich = which;
+    const isCritic = which === "c";
     const nd = which === "a"
       ? (LIVE.action.length ? LIVE.action[0].length : 0)
-      : (LIVE.state.length ? LIVE.state[0].length : 0);
+      : (which === "s" ? (LIVE.state.length ? LIVE.state[0].length : 0) : 0);
     const dimsOn = which === "a" ? LIVE.dimsOnA : LIVE.dimsOnS;
-    $("chart-modal-title").textContent = which === "a" ? "ACTION" : "STATE";
-    renderLiveDims("chart-modal-dims", nd, dimsOn, which === "a" ? "a" : "s");
+    $("chart-modal-title").textContent = which === "a" ? "ACTION" : (which === "s" ? "STATE" : "CRITIC VALUE");
+    $("chart-modal-all").style.display = isCritic ? "none" : "";
+    if (isCritic) $("chart-modal-dims").innerHTML = "";
+    else renderLiveDims("chart-modal-dims", nd, dimsOn, which === "a" ? "a" : "s");
     $("chart-modal").classList.add("on");
     requestAnimationFrame(drawLiveCharts);
   }
@@ -98,7 +120,7 @@ function interventionTrackGradient() {
       if (i < LIVE.n && next === active) continue;
       const from = (start / LIVE.n * 100).toFixed(3);
       const to = (i / LIVE.n * 100).toFixed(3);
-      const color = active ? "var(--accent)" : "var(--rule-strong)";
+      const color = active ? "var(--intervention)" : "var(--policy)";
       stops.push(`${color} ${from}%`, `${color} ${to}%`);
       start = i;
       active = next;
@@ -187,6 +209,7 @@ function resetLiveSeries() {
     LIVE.timestamp = []; LIVE.playTime = []; LIVE.action = []; LIVE.state = []; LIVE.n = 0;
     LIVE.actionNames = []; LIVE.stateNames = [];
     LIVE.controlSource = []; LIVE.intervention = []; LIVE.interventionSegmentIndex = [];
+    LIVE.criticTimestamp = []; LIVE.criticValue = [];
     LIVE.dimsOnA = {}; LIVE.dimsOnS = {}; LIVE.dimsBuilt = false;
     LIVE.following = true; LIVE.cursor = 0;
     renderLiveDims("chart-action-dims", 0, LIVE.dimsOnA, "a");
@@ -205,7 +228,7 @@ function timeAtIndex(ts, idx) {
     return t0 + (t1 - t0) * a;
   }
 
-function drawSeriesChart(cv, mat, ts, dimsOn, cursorIdx) {
+function drawSeriesChart(cv, mat, ts, dimsOn, cursorIdx, colors = RT_COLORS) {
     const rect = cv.getBoundingClientRect();
     if (rect.width < 2 || rect.height < 2) return;
     const dpr = Math.min(window.devicePixelRatio, 2);
@@ -221,8 +244,13 @@ function drawSeriesChart(cv, mat, ts, dimsOn, cursorIdx) {
       ctx.fillText(n ? "no dims" : "awaiting data…", pad + 6, H / 2);
       return;
     }
+    const maxDrawPoints = Math.max(64, Math.floor(W * 2));
+    const stride = Math.max(1, Math.ceil((n - 1) / Math.max(1, maxDrawPoints - 1)));
+    const indices = [];
+    for (let i = 0; i < n; i += stride) indices.push(i);
+    if (indices[indices.length - 1] !== n - 1) indices.push(n - 1);
     let lo = Infinity, hi = -Infinity;
-    for (const d of dims) for (let i = 0; i < n; i++) { const v = mat[i][d]; if (v < lo) lo = v; if (v > hi) hi = v; }
+    for (const d of dims) for (const i of indices) { const v = mat[i][d]; if (v < lo) lo = v; if (v > hi) hi = v; }
     if (!isFinite(lo)) { lo = -1; hi = 1; }
     if (hi - lo < 1e-6) { hi += 1; lo -= 1; }
     const t0 = ts[0], t1 = ts[n - 1] || (t0 + 1);
@@ -234,8 +262,11 @@ function drawSeriesChart(cv, mat, ts, dimsOn, cursorIdx) {
     ctx.globalAlpha = 0.6;           // soften the trace lines; legend chips stay vivid
     ctx.lineJoin = "round";
     for (const d of dims) {
-      ctx.strokeStyle = RT_COLORS[d % RT_COLORS.length]; ctx.lineWidth = 1.4; ctx.beginPath();
-      for (let i = 0; i < n; i++) { const x = X(ts[i]), y = Y(mat[i][d]); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }
+      ctx.strokeStyle = colors[d % colors.length]; ctx.lineWidth = 1.4; ctx.beginPath();
+      indices.forEach((i, point) => {
+        const x = X(ts[i]), y = Y(mat[i][d]);
+        point ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+      });
       ctx.stroke();
     }
     ctx.restore();

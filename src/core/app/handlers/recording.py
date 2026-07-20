@@ -15,6 +15,7 @@ import numpy as np
 from core.app.collection_capture import start_collection_capture, stop_collection_capture
 from core.app.handlers.imaging import prepare_image
 from core.app.handlers.utils import _resolve_runtime_path
+from core.app.rl import record_rl_sample
 from core.app.state import (
     RuntimeState,
     SessionMode,
@@ -272,7 +273,9 @@ def _recording_space(config: ConfigDict) -> str:
     return "eef" if action_space is not None and action_space.is_eef() else "qpos"
 
 
-def _gripper_recording_config(config: ConfigDict) -> tuple[float | None, float | None, float | None]:
+def _gripper_recording_config(
+    config: ConfigDict,
+) -> tuple[float | None, float | None, float | None]:
     robot = config.get("robot") or {}
     return (
         robot.get("gripper_open"),
@@ -836,7 +839,18 @@ def _record_rollout_intervention_frame(
         segment.invalid_reason = "Intervention frame has no state"
         session.last_error = segment.invalid_reason
         return False
-    segment.frames.append(_copy_observation(frame))
+    copied = _copy_observation(frame)
+    segment.frames.append(copied)
+    state = copied.state_qpos if copied.state_qpos is not None else copied.state_eef
+    action = copied.action_qpos if copied.action_qpos is not None else copied.action_eef
+    record_rl_sample(
+        runtime,
+        state,
+        action,
+        "intervention",
+        timestamp=copied.timestamp,
+        segment_index=segment.segment_index,
+    )
     return True
 
 
@@ -1077,14 +1091,15 @@ def record_executed_action(
     _ = config, session
     if runtime is None:
         return
-    loggers = _active_loggers(runtime)
-    if not loggers:
-        return
     state_qpos = (
         runtime.transport.get_latest_qpos()
         if hasattr(runtime.transport, "get_latest_qpos")
         else None
     )
+    record_rl_sample(runtime, state_qpos, action, "policy")
+    loggers = _active_loggers(runtime)
+    if not loggers:
+        return
     rollout_logger = runtime.rollout_episode_logger
     runner = getattr(runtime, "collection_capture_runner", None)
     rollout_timestamp = None

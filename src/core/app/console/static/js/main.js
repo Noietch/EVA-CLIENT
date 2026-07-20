@@ -7,6 +7,7 @@ import { collectConfigured, renderCollect, renderRolloutSave, returnReviewToLive
 import { evalEnabled, evalReset, evalSetup, evalRunToggle, evalResumeOnEnter, submitEvalScore, loadEvalResults, renderEvalSelectors, loadResultsAll, tpSeek, tpToggle, trialPopClose } from "./eval.js";
 import { replayPlay, replayStop, replayToggle, seekReplay, loop, pollFrame, pollScene, refreshCameraStreams, exitReplayMode } from "./replay.js";
 import { refreshCameras, reloadCameras, renderCalibratePanels, applyBoard, startCalibrate, resetCalibrate, setMode, captureSample, currentCalibCam, solveAll, saveCalibration, moveToPose, addPoseFromCurrent, commitEditPose, cancelEditPose, estop } from "./calibrate.js";
+import { pollRlSeries, renderRlConfig, renderRlStatus } from "./rl.js";
 
 // ===== tabs =====
 function moveTabThumb() {
@@ -22,14 +23,15 @@ function relocateCanvas(tab) {
     const stage = $("stage");
     if (!stage) return;
     // RESULT is a browser-style tab with no live stage; park the stage in the hidden
-    // DEBUG view so its single WebGL context stays alive. EVAL hosts the live stage in
-    // its right column (#eval-replay-col), showing the same live 3D + cameras as DEBUG.
+    // DEBUG view so its single WebGL context stays alive. EVAL and RL host the same
+    // live stage in their dedicated right columns.
     let host;
     if (tab === "result") host = $("view-debug");
     else if (tab === "eval") host = $("eval-replay-col");
+    else if (tab === "rl") host = $("rl-stage-col");
     else host = $("view-" + tab);
     if (host && stage.parentElement !== host) host.appendChild(stage);
-    const showSeries = tab === "replay" ||
+    const showSeries = tab === "rl" || tab === "replay" ||
       (tab === "collect" && LIVE.replayOwner === "collect") ||
       (tab === "debug" && LIVE.replayOwner === "rollout");
     stage.classList.toggle("no-series", !showSeries);
@@ -126,6 +128,7 @@ function setActiveTab(tab) {
     // robot is a separate, optional step gated on the backend's live link state.
     if (tab === "manual") enterManualSim();
     if (tab === "calibrate") renderCalibratePanels();
+    if (tab === "rl") renderRlConfig();
     if (tab === "eval") { renderEvalSelectors(); loadEvalResults().then(evalResumeOnEnter); }
     if (tab === "result") { loadResultsAll(); }
     updateGuide();
@@ -148,8 +151,12 @@ async function boot() {
     window.trialPopClose = trialPopClose;
     const s = await apiGet("/api/status");
     applyStatus(s);
+    renderRlStatus(s);
     if (!collectConfigured()) {
       document.querySelector('.tab[data-tab="collect"]').classList.add("disabled");
+    }
+    if (!(S.CFG.rl && S.CFG.rl.enabled)) {
+      document.querySelector('.tab[data-tab="rl"]').classList.add("disabled");
     }
     // An eval config opens straight on the EVAL tab. Without one the console still boots on
     // DEBUG, but EVAL/RESULT stay reachable as a read-only viewer over recorded results.
@@ -161,6 +168,7 @@ async function boot() {
     // expand a chart into the big-view modal
     $("action-expand").addEventListener("click", () => openChartModal("a"));
     $("state-expand").addEventListener("click", () => openChartModal("s"));
+    $("critic-expand").addEventListener("click", () => openChartModal("c"));
     $("chart-modal-all").addEventListener("click", () => { if (S.chartModalWhich) liveDimsAll(S.chartModalWhich); });
     $("chart-modal-close").addEventListener("click", closeChartModal);
     $("chart-modal").addEventListener("click", (e) => { if (e.target === $("chart-modal")) closeChartModal(); });
@@ -177,7 +185,14 @@ async function boot() {
     window.addEventListener("resize", moveTabThumb);
     window.addEventListener("pagehide", closeMediaStreams);
     window.addEventListener("beforeunload", closeMediaStreams);
-    loop(async () => { try { applyStatus(await apiGet("/api/status")); } catch (e) {} }, 250);
+    loop(async () => {
+      try {
+        const status = await apiGet("/api/status");
+        applyStatus(status);
+        renderRlStatus(status);
+      } catch (e) {}
+    }, 250);
+    loop(pollRlSeries, 100);
     afterWindowLoad(() => loop(pollFrame, 200));
     loop(pollScene, 80);
   }
@@ -278,14 +293,6 @@ $("collect-arm-enable").onchange = () => {
       collect_teleop_armed: S.ACTIVE_TAB === "collect" && S.collectArmEnabled,
     });
   };
-$("hil-intervention-enable").onchange = () => {
-    const enabled = $("hil-intervention-enable").checked;
-    if (S.STATUS) {
-      S.STATUS.rollout_intervention_enabled = enabled;
-      applyStatus(S.STATUS);
-    }
-    apiPost("/api/rollout_intervention_enabled", { enabled });
-  };
 $("b-collect-cancel").onclick = () => {
     S.collectQueueEnabled = false;
     renderCollect();
@@ -294,10 +301,6 @@ $("b-collect-cancel").onclick = () => {
 $("b-collect-qc-pass").onclick = () => submitEpisodeQc("collect", "pass");
 $("b-goto-qc").onclick = () => submitEpisodeQc("collect", "fail");
 $("b-collect-note-save").onclick = () => submitEpisodeNote("collect");
-$("b-rollout-save").onclick = () => apiPost("/api/rollout_save");
-$("b-rollout-intervention-abandon").onclick = () => apiPost("/api/operator_action", { intent: "cancel" });
-$("b-rollout-qc-pass").onclick = () => submitEpisodeQc("rollout", "pass");
-$("b-rollout-qc-fail").onclick = () => submitEpisodeQc("rollout", "fail");
 $("review-return-live").onclick = returnReviewToLive;
 $("replay-b-qc-pass").onclick = () => submitQc("pass");
 $("replay-b-qc-fail").onclick = () => submitQc("fail");
@@ -305,10 +308,6 @@ $("replay-b-anno-save").onclick = () => saveAnnotation();
 $("collect-queue-toggle").onclick = () => {
     S.collectQueueExpanded = !S.collectQueueExpanded;
     renderCollect();
-  };
-$("rollout-save-queue-toggle").onclick = () => {
-    S.rolloutSaveQueueExpanded = !S.rolloutSaveQueueExpanded;
-    renderRolloutSave();
   };
 document.querySelector("#panel-setup .auto-setup-row").onclick = () => {
     if ($("panel-setup").dataset.st === "error") retrySetup();

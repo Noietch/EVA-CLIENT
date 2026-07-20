@@ -65,6 +65,33 @@ def test_load_deploy_config_resolves_spaces_and_defaults():
     assert not cfg.inference_cfg.obs_space.is_eef()
     assert cfg.eval_cfg is None
     assert cfg.eval is None
+    assert cfg.rl_cfg is None
+    assert cfg.rl is None
+
+
+def test_rl_config_exposes_preview_models_and_lerobot_storage():
+    cfg = load_config(_CONFIGS_DIR / "04_rl" / "r1lite_rl.py")
+
+    assert cfg.rl.cli_mode == "real"
+    assert cfg.rl.inference_strategy == "rtc"
+    assert cfg.rl.data.format == "lerobot"
+    assert cfg.rl.policies[0].name == "r1lite_openpi_qpos"
+    assert cfg.rl.policies[0].config.policy.type == "openpi"
+    assert cfg.rl.policies[0].config.policy.host == "127.0.0.1"
+    assert cfg.rl.policies[0].config.policy.port == 9000
+    assert cfg.rl.critics[0].name == "r1lite_critic"
+
+
+def test_rl_config_rejects_unimplemented_transition_storage(tmp_path):
+    config = tmp_path / "rl_transition.py"
+    config.write_text(
+        "_base_ = ['"
+        + str((_CONFIGS_DIR / "04_rl" / "r1lite_rl.py").resolve())
+        + "']\nrl_cfg = dict(data=dict(format='transition'))\n"
+    )
+
+    with pytest.raises(ValueError, match="rl.data.format must be 'lerobot'"):
+        load_config(config)
 
 
 def test_load_eef_config_builds_eef_space():
