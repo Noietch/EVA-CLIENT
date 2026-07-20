@@ -128,11 +128,70 @@ PROBE_JS = r"""
       videos: {},
       events: [],
       ignoredVideos,
+      rafGaps: [],
+      syncSamples: [],
+      urdfFrames: [],
+      longTasks: [],
+      originalRaf: null,
+      originalSceneApply: null,
+      originalResultSetFrame: null,
+      currentNodes: {},
     };
+
+    const installHooks = () => {
+      if (!state.originalRaf) {
+        state.originalRaf = window.requestAnimationFrame;
+        const requestAnimationFrame = state.originalRaf.bind(window);
+        window.requestAnimationFrame = (callback) => requestAnimationFrame((stamp) => {
+          const now = performance.now();
+          if (state.start > 0 && state.lastRaf != null) state.rafGaps.push(now - state.lastRaf);
+          state.lastRaf = now;
+          const range = Array.from(document.querySelectorAll("#scrub-range, #tp-seek"))
+            .find((node) => getComputedStyle(node).display !== "none" && !node.disabled);
+          const cursor = range ? Number(range.value) : null;
+          const videos = Array.from(document.querySelectorAll(
+            "#cam-strip video.cam, #tp-cam-strip video.tp-cam",
+          ));
+          const times = videos.map((video) => Number(video.currentTime)).filter(Number.isFinite);
+          const urdf = Number(window.__evaReplayAppliedFrame ?? window.__evaResultUrdfAppliedFrame);
+          state.syncSamples.push({
+            t: now - state.start,
+            cursor: Number.isFinite(cursor) ? cursor : null,
+            urdf: Number.isFinite(urdf) ? urdf : null,
+            times,
+          });
+          return callback(stamp);
+        });
+      }
+      if (!state.originalSceneApply && window.Scene3D &&
+          typeof window.Scene3D.applyTransformFrame === "function") {
+        state.originalSceneApply = window.Scene3D.applyTransformFrame;
+        window.Scene3D.applyTransformFrame = function(...args) {
+          state.urdfFrames.push({ t: performance.now() - state.start, frame: Number(args[4]) });
+          return state.originalSceneApply.apply(this, args);
+        };
+      }
+      if (!state.originalResultSetFrame && window.ReplayScene &&
+          typeof window.ReplayScene.setFrame === "function") {
+        state.originalResultSetFrame = window.ReplayScene.setFrame;
+        window.ReplayScene.setFrame = function(...args) {
+          state.urdfFrames.push({ t: performance.now() - state.start, frame: Number(args[1]) });
+          return state.originalResultSetFrame.apply(this, args);
+        };
+      }
+    };
+    const longTaskObserver = window.PerformanceObserver && new PerformanceObserver((list) => {
+      list.getEntries().forEach((entry) => state.longTasks.push({
+        t: entry.startTime - state.start, duration: entry.duration,
+      }));
+    });
+    if (longTaskObserver) {
+      try { longTaskObserver.observe({ type: "longtask", buffered: true }); } catch (e) {}
+    }
 
     const markVisible = (node, rec) => {
       if (rec.visible !== null || rec.firstFrame === null) return;
-      const cell = node.closest(".cam-cell");
+      const cell = node.closest(".cam-cell, .tp-cam-cell");
       const rect = node.getBoundingClientRect();
       const overlay = cell ? cell.querySelector(".cam-loading") : null;
       const overlayRect = overlay ? overlay.getBoundingClientRect() : null;
@@ -154,7 +213,10 @@ PROBE_JS = r"""
 
     const watch = (node) => {
       if (state.ignoredVideos.has(node)) return;
-      const key = node.dataset.key || `video-${Object.keys(state.videos).length}`;
+      const baseKey = node.dataset.key || `video-${Object.keys(state.videos).length}`;
+      const key = node.tagName === "IMG" ? `poster:${baseKey}` : baseKey;
+      const previous = state.videos[key];
+      if (previous && state.currentNodes[key] !== node) delete state.videos[key];
       if (state.videos[key]) {
         markVisible(node, state.videos[key]);
         return;
@@ -173,8 +235,10 @@ PROBE_JS = r"""
         seeking: [],
         seeked: [],
         timeupdate: [],
+        videoFrames: [],
       };
       state.videos[key] = rec;
+      state.currentNodes[key] = node;
       const mark = (name) => {
         rec[name] = performance.now() - state.start;
         state.events.push([
@@ -220,6 +284,13 @@ PROBE_JS = r"""
         frameDone();
       };
       if (typeof node.requestVideoFrameCallback === "function") {
+        const mediaFrame = (stamp) => {
+          rec.videoFrames.push([stamp - state.start, node.currentTime || 0]);
+          if (rec.videoFrames.length < 4000 && !state.stopped) {
+            node.requestVideoFrameCallback(mediaFrame);
+          }
+        };
+        node.requestVideoFrameCallback(mediaFrame);
         try {
           node.requestVideoFrameCallback(frameDone);
         } catch (e) {
@@ -232,7 +303,8 @@ PROBE_JS = r"""
     };
 
     const scan = () => {
-      const mediaSelector = "#cam-strip video.cam, #cam-strip img.cam-poster";
+    const mediaSelector = "#cam-strip video.cam, #cam-strip img.cam-poster, " +
+      "#tp-cam-strip video.tp-cam";
       document.querySelectorAll(mediaSelector).forEach(watch);
       document.querySelectorAll(mediaSelector).forEach((node) => {
         const key = node.dataset.key || "";
@@ -255,14 +327,28 @@ PROBE_JS = r"""
     };
 
     const observer = new MutationObserver(scan);
-    observer.observe(document.getElementById("cam-strip"), {
-      childList: true,
-      subtree: true,
-      attributes: true,
-      attributeFilter: ["class", "style"],
-    });
+    [document.getElementById("cam-strip"), document.getElementById("tp-cam-strip")]
+      .filter(Boolean)
+      .forEach((host) => observer.observe(host, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ["class", "style"],
+      }));
     state.stop = () => observer.disconnect();
-    state.scan = scan;
+    state.stop = () => {
+      state.stopped = true;
+      observer.disconnect();
+      if (state.originalRaf) window.requestAnimationFrame = state.originalRaf;
+      if (state.originalSceneApply && window.Scene3D) {
+        window.Scene3D.applyTransformFrame = state.originalSceneApply;
+      }
+      if (state.originalResultSetFrame && window.ReplayScene) {
+        window.ReplayScene.setFrame = state.originalResultSetFrame;
+      }
+      if (longTaskObserver) longTaskObserver.disconnect();
+    };
+    state.scan = () => { installHooks(); scan(); };
     return state;
   }
 
@@ -276,12 +362,14 @@ PROBE_JS = r"""
     if (typeof performance.clearResourceTimings === "function") {
       performance.clearResourceTimings();
     }
-    const ignoredVideos = new WeakSet(
-      Array.from(document.querySelectorAll("#cam-strip video.cam, #cam-strip img.cam-poster")),
-    );
+    const ignoredVideos = new WeakSet(Array.from(document.querySelectorAll(
+      "#cam-strip video.cam, #cam-strip img.cam-poster, #tp-cam-strip video.tp-cam",
+    )));
     const state = createProbe(ignoredVideos);
     window.__replayPerfProbe = state;
     state.start = performance.now();
+    state.lastRaf = state.start;
+    state.scan();
     state.events.push(["mouseStart", label || "*", 0, null, null]);
     return { x, y };
   }
@@ -389,6 +477,11 @@ def human_click_target_and_start_probe(cdp: Cdp, target: dict[str, Any], label: 
         """
     )
     dispatch_mouse_click(cdp, point["x"], point["y"])
+
+
+def human_click_target(cdp: Cdp, target: dict[str, Any]) -> None:
+    """Dispatch a browser mouse click at a previously hit-tested target."""
+    dispatch_mouse_click(cdp, float(target["x"]), float(target["y"]))
 
 
 def select_clickable_tile(
@@ -537,6 +630,31 @@ def start_replay_playback(cdp: Cdp) -> None:
     )
 
 
+def rapid_tile_switch(
+    cdp: Cdp,
+    container_selector: str,
+    name: str,
+    timeout: float,
+    play_seconds: float,
+) -> dict[str, Any] | None:
+    """Exercise A→B→A with real clicks and measure the final A playback."""
+    count = cdp.eval(
+        f"document.querySelectorAll({json.dumps(container_selector)} + "
+        "' .collect-tile.replayable').length"
+    )
+    if not count or int(count) < 2:
+        return None
+    first = select_clickable_tile(cdp, container_selector, 0)
+    second = select_clickable_tile(cdp, container_selector, 1)
+    human_click_target_and_start_probe(cdp, first, f"{name}-a")
+    time.sleep(0.1)
+    human_click_target(cdp, second)
+    time.sleep(0.1)
+    final = select_clickable_tile(cdp, container_selector, 0)
+    human_click_target(cdp, final)
+    return capture_measurement(cdp, f"{name}-rapid-a-b-a", timeout, play_seconds)
+
+
 PAGE_READY_EXPR = """
 document.readyState === "complete" && !!document.querySelector("#replay-dataset-input")
 """
@@ -546,7 +664,9 @@ VIDEOS_VISIBLE_READY_EXPR = """
   const p = window.__replayPerfProbe;
   if (!p) return false;
   if (typeof p.scan === "function") p.scan();
-  const cells = Array.from(document.querySelectorAll("#cam-strip .cam-cell"))
+  const cells = Array.from(document.querySelectorAll(
+    "#cam-strip .cam-cell, #tp-cam-strip .tp-cam-cell",
+  ))
     .filter((cell) => getComputedStyle(cell).display !== "none");
   const paintedCells = cells.filter((cell) => {
     const overlay = cell.querySelector(".cam-loading");
@@ -554,7 +674,9 @@ VIDEOS_VISIBLE_READY_EXPR = """
     const overlayVisible = overlay && getComputedStyle(overlay).display !== "none" &&
       overlayRect && overlayRect.width > 0 && overlayRect.height > 0;
     if (overlayVisible) return false;
-    return Array.from(cell.querySelectorAll("img.cam-poster, video.cam-video")).some((node) => {
+    return Array.from(cell.querySelectorAll(
+      "img.cam-poster, video.cam-video, video.tp-cam",
+    )).some((node) => {
       const rect = node.getBoundingClientRect();
       const style = getComputedStyle(node);
       if (style.display === "none" || style.visibility === "hidden" ||
@@ -565,8 +687,9 @@ VIDEOS_VISIBLE_READY_EXPR = """
       return node.readyState >= 2;
     });
   });
-  const videos = Object.values(p.videos);
-  return paintedCells.length >= 3 && videos.length >= 3 && videos.every((v) => v.visible !== null);
+  const videos = Object.values(p.videos).filter((v) => v.tag === "VIDEO");
+  return paintedCells.length >= 3 && videos.length >= 3 &&
+    videos.every((v) => v.visible !== null);
 })()
 """
 
@@ -617,6 +740,21 @@ ROLLOUT_REPLAYABLE_READY_EXPR = """
 document.querySelectorAll("#rollout-save-queue-tiles .collect-tile.replayable").length > 0
 """
 
+RL_REPLAYABLE_READY_EXPR = """
+document.querySelectorAll("#rl-save-tiles .collect-tile.replayable").length > 0
+"""
+
+RESULT_TRIAL_READY_EXPR = """
+document.querySelectorAll(".rv-trials .eval-trial.scored").length > 0
+"""
+
+RESULT_POP_READY_EXPR = """
+(() => {
+  const pop = document.querySelector("#trial-pop");
+  return pop && pop.classList.contains("open");
+})()
+"""
+
 
 def tab_active_expr(tab: str) -> str:
     return f"""
@@ -641,7 +779,13 @@ def read_probe(cdp: Cdp) -> dict[str, Any]:
                   "/api/load_replay_dataset",
                   "/api/replay_series",
                   "/api/replay_video",
+                  "/api/replay_transforms",
                   "/api/review_episode",
+                  "/api/review_transforms",
+                  "/api/episode_cams",
+                  "/api/episode_series",
+                  "/api/episode_video",
+                  "/api/episode_transforms",
                 ].includes(url.pathname);
               } catch (e) {
                 return false;
@@ -665,12 +809,18 @@ def read_probe(cdp: Cdp) -> dict[str, Any]:
             events: p.events,
             playCommand: p.playCommand || null,
             resources,
-            videoStates: Array.from(document.querySelectorAll("#cam-strip video.cam")).map((v) => ({
+            videoStates: Array.from(document.querySelectorAll(
+              "#cam-strip video.cam, #tp-cam-strip video.tp-cam",
+            )).map((v) => ({
               key: v.dataset.key || "",
               paused: v.paused,
               readyState: v.readyState,
               currentTime: v.currentTime,
             })),
+            rafGaps: p.rafGaps,
+            syncSamples: p.syncSamples,
+            urdfFrames: p.urdfFrames,
+            longTasks: p.longTasks,
             now: performance.now() - p.start,
           };
         })()
@@ -701,7 +851,7 @@ def summarize_resources(resources: list[dict[str, Any]]) -> list[dict[str, Any]]
 
 
 def summarize(name: str, data: dict[str, Any]) -> dict[str, Any]:
-    videos = data["videos"]
+    videos = [video for video in data["videos"] if video.get("tag") == "VIDEO"]
     first_frames = [v["firstFrame"] for v in videos if v["firstFrame"] is not None]
     visible = [v["visible"] for v in videos if v["visible"] is not None]
     canplays = [v["canplay"] for v in videos if v["canplay"] is not None]
@@ -719,6 +869,60 @@ def summarize(name: str, data: dict[str, Any]) -> dict[str, Any]:
         if playback_start is None:
             continue
         seeking_after_play += sum(1 for row in v["seeking"] if row[0] > playback_start + 250)
+    play_markers = [
+        marker
+        for video in videos
+        for marker in (video.get("playing"), video.get("play"))
+        if marker is not None
+    ]
+    stable_start = (min(play_markers) if play_markers else data.get("playCommand"))
+    stable_start = None if stable_start is None else float(stable_start) + 250.0
+    stable_waiting = sum(
+        sum(1 for row in video["waiting"] if stable_start is not None and row[0] >= stable_start)
+        for video in videos
+    )
+    stable_stalled = sum(
+        sum(1 for row in video["stalled"] if stable_start is not None and row[0] >= stable_start)
+        for video in videos
+    )
+    def percentile(values: list[float], ratio: float) -> float | None:
+        if not values:
+            return None
+        ordered = sorted(values)
+        index = min(len(ordered) - 1, int(round((len(ordered) - 1) * ratio)))
+        return ordered[index]
+
+    raf_gaps = [float(value) for value in data.get("rafGaps") or [] if float(value) >= 0]
+    sync_samples = [
+        sample
+        for sample in data.get("syncSamples") or []
+        if len(sample.get("times") or []) >= len(videos)
+    ]
+    camera_skews = [max(sample["times"]) - min(sample["times"]) for sample in sync_samples]
+    urdf_skews = [
+        abs(float(sample["cursor"]) - float(sample["urdf"]))
+        for sample in sync_samples
+        if sample.get("cursor") is not None and sample.get("urdf") is not None
+    ]
+    media_intervals = {
+        v["key"]: [
+            float(curr[0]) - float(prev[0])
+            for prev, curr in zip(
+                v.get("videoFrames") or [], (v.get("videoFrames") or [])[1:], strict=False
+            )
+            if float(curr[0]) > float(prev[0])
+        ]
+        for v in videos
+    }
+    media_p95 = {
+        key: percentile(values, 0.95)
+        for key, values in media_intervals.items()
+    }
+    media_max = {
+        key: max(values) if values else None
+        for key, values in media_intervals.items()
+    }
+    long_tasks = [float(row.get("duration", 0)) for row in data.get("longTasks") or []]
     return {
         "name": name,
         "video_count": len(videos),
@@ -732,7 +936,19 @@ def summarize(name: str, data: dict[str, Any]) -> dict[str, Any]:
         "min_current_time_sec": min(current_times) if current_times else None,
         "waiting_events": waiting,
         "stalled_events": stalled,
+        "stable_waiting_events": stable_waiting,
+        "stable_stalled_events": stable_stalled,
         "seeking_after_play_events": seeking_after_play,
+        "raf_gap_p95_ms": percentile(raf_gaps, 0.95),
+        "raf_gap_max_ms": max(raf_gaps) if raf_gaps else None,
+        "camera_skew_p95_ms": percentile(camera_skews, 0.95),
+        "camera_skew_max_ms": max(camera_skews) if camera_skews else None,
+        "urdf_frame_skew_p95": percentile(urdf_skews, 0.95),
+        "urdf_frame_skew_max": max(urdf_skews) if urdf_skews else None,
+        "urdf_update_count": len(data.get("urdfFrames") or []),
+        "video_interval_p95_ms": media_p95,
+        "video_interval_max_ms": media_max,
+        "long_task_max_ms": max(long_tasks) if long_tasks else None,
         "resources": summarize_resources(data.get("resources") or []),
         "screenshot_path": data.get("screenshotPath"),
         "error": data.get("error"),
@@ -740,9 +956,13 @@ def summarize(name: str, data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def capture_measurement(cdp: Cdp, name: str, timeout: float) -> dict[str, Any]:
+def capture_measurement(
+    cdp: Cdp, name: str, timeout: float, play_seconds: float
+) -> dict[str, Any]:
     try:
         wait_for(cdp, VIDEOS_VISIBLE_READY_EXPR, timeout)
+        if play_seconds > 0:
+            time.sleep(play_seconds)
         data = read_probe(cdp)
     except Exception as exc:
         data = read_probe(cdp) or {"videos": [], "events": [], "videoStates": []}
@@ -760,14 +980,56 @@ def ensure_collect_replay_stopped(cdp: Cdp) -> None:
 
 
 def measurement_failures(
-    summaries: list[dict[str, Any]], max_visible_ms: float
+    summaries: list[dict[str, Any]],
+    max_visible_ms: float,
+    max_raf_p95_ms: float,
+    max_raf_gap_ms: float,
+    max_camera_p95_ms: float,
+    max_camera_skew_ms: float,
+    max_urdf_frame_skew: float,
+    max_video_p95_ms: float,
+    max_video_gap_ms: float,
+    max_long_task_ms: float,
 ) -> list[dict[str, Any]]:
-    if max_visible_ms <= 0:
-        return []
     failures = []
     for row in summaries:
         visible_ms = row.get("all_visible_ms")
-        if row.get("error") or visible_ms is None or float(visible_ms) > max_visible_ms:
+        media_p95 = [v for v in (row.get("video_interval_p95_ms") or {}).values() if v is not None]
+        media_max = [v for v in (row.get("video_interval_max_ms") or {}).values() if v is not None]
+        failed = bool(row.get("error"))
+        failed |= max_visible_ms > 0 and (visible_ms is None or float(visible_ms) > max_visible_ms)
+        failed |= max_raf_p95_ms > 0 and (
+            row.get("raf_gap_p95_ms") is None or float(row["raf_gap_p95_ms"]) > max_raf_p95_ms
+        )
+        failed |= max_raf_gap_ms > 0 and (
+            row.get("raf_gap_max_ms") is None or float(row["raf_gap_max_ms"]) > max_raf_gap_ms
+        )
+        failed |= max_camera_p95_ms > 0 and (
+            row.get("camera_skew_p95_ms") is None
+            or float(row["camera_skew_p95_ms"]) > max_camera_p95_ms
+        )
+        failed |= max_camera_skew_ms > 0 and (
+            row.get("camera_skew_max_ms") is None
+            or float(row["camera_skew_max_ms"]) > max_camera_skew_ms
+        )
+        failed |= max_urdf_frame_skew > 0 and (
+            row.get("urdf_frame_skew_max") is None
+            or float(row["urdf_frame_skew_max"]) > max_urdf_frame_skew
+        )
+        failed |= max_video_p95_ms > 0 and (
+            len(media_p95) < row.get("video_count", 0)
+            or any(float(value) > max_video_p95_ms for value in media_p95)
+        )
+        failed |= max_video_gap_ms > 0 and (
+            len(media_max) < row.get("video_count", 0)
+            or any(float(value) > max_video_gap_ms for value in media_max)
+        )
+        failed |= max_long_task_ms > 0 and (
+            row.get("long_task_max_ms") is not None
+            and float(row["long_task_max_ms"]) > max_long_task_ms
+        )
+        failed |= row.get("stable_stalled_events", 0) > 0
+        if failed:
             failures.append(row)
     return failures
 
@@ -778,13 +1040,24 @@ def main() -> None:
     parser.add_argument("--collection-dataset", required=True)
     parser.add_argument("--collection-episode", type=int, default=0)
     parser.add_argument("--rollout-episode", type=int, default=0)
-    parser.add_argument("--play-seconds", type=float, default=3.0)
+    parser.add_argument("--play-seconds", type=float, default=5.0)
     parser.add_argument("--replay-next-count", type=int, default=0)
     parser.add_argument("--collect-task", default="")
     parser.add_argument("--collect-count", type=int, default=1)
     parser.add_argument("--debug-count", type=int, default=1)
+    parser.add_argument("--rl-count", type=int, default=1)
+    parser.add_argument("--result-count", type=int, default=1)
+    parser.add_argument("--rapid-switches", action="store_true")
     parser.add_argument("--visible-timeout", type=float, default=20.0)
     parser.add_argument("--max-visible-ms", type=float, default=1000.0)
+    parser.add_argument("--max-raf-p95-ms", type=float, default=25.0)
+    parser.add_argument("--max-raf-gap-ms", type=float, default=100.0)
+    parser.add_argument("--max-camera-p95-ms", type=float, default=33.0)
+    parser.add_argument("--max-camera-skew-ms", type=float, default=80.0)
+    parser.add_argument("--max-urdf-frame-skew", type=float, default=1.0)
+    parser.add_argument("--max-video-p95-ms", type=float, default=100.0)
+    parser.add_argument("--max-video-gap-ms", type=float, default=150.0)
+    parser.add_argument("--max-long-task-ms", type=float, default=100.0)
     args = parser.parse_args()
 
     chrome, cdp = start_chrome()
@@ -802,12 +1075,20 @@ def main() -> None:
         set_value(cdp, "#replay-dataset-input", args.collection_dataset)
         set_value(cdp, "#replay-episode-input", str(args.collection_episode))
         human_click_and_start_probe(cdp, "#replay-b-episode-confirm")
-        summaries.append(capture_measurement(cdp, "replay-load", args.visible_timeout))
+        human_click(cdp, "#scrub-play")
+        summaries.append(
+            capture_measurement(cdp, "replay-load", args.visible_timeout, args.play_seconds)
+        )
         wait_for(cdp, SCRUB_PLAY_VISIBLE_EXPR, 10)
         for i in range(args.replay_next_count):
             wait_for(cdp, REPLAY_NEXT_READY_EXPR, 10)
             human_click_and_start_probe(cdp, "#replay-b-episode-next")
-            summaries.append(capture_measurement(cdp, f"replay-next-{i + 1}", args.visible_timeout))
+            human_click(cdp, "#scrub-play")
+            summaries.append(
+                capture_measurement(
+                    cdp, f"replay-next-{i + 1}", args.visible_timeout, args.play_seconds
+                )
+            )
 
         human_click(cdp, '.tab[data-tab="collect"]')
         wait_for(cdp, tab_active_expr("collect"), 5)
@@ -818,7 +1099,9 @@ def main() -> None:
             ensure_collect_replay_stopped(cdp)
             target = select_clickable_tile(cdp, "#collect-queue-tiles", i)
             human_click_target_and_start_probe(cdp, target, f"collect-tile-{i}")
-            summaries.append(capture_measurement(cdp, f"collect-{i}", args.visible_timeout))
+            summaries.append(
+                capture_measurement(cdp, f"collect-{i}", args.visible_timeout, args.play_seconds)
+            )
 
         human_click(cdp, '.tab[data-tab="debug"]')
         wait_for(cdp, tab_active_expr("debug"), 5)
@@ -826,7 +1109,51 @@ def main() -> None:
         for i in range(args.debug_count):
             target = select_clickable_tile(cdp, "#rollout-save-queue-tiles", i)
             human_click_target_and_start_probe(cdp, target, f"debug-tile-{i}")
-            summaries.append(capture_measurement(cdp, f"debug-{i}", args.visible_timeout))
+            summaries.append(
+                capture_measurement(cdp, f"debug-{i}", args.visible_timeout, args.play_seconds)
+            )
+
+        human_click(cdp, '.tab[data-tab="rl"]')
+        wait_for(cdp, tab_active_expr("rl"), 5)
+        wait_for(cdp, RL_REPLAYABLE_READY_EXPR, 10)
+        for i in range(args.rl_count):
+            target = select_clickable_tile(cdp, "#rl-save-tiles", i)
+            human_click_target_and_start_probe(cdp, target, f"rl-tile-{i}")
+            summaries.append(
+                capture_measurement(cdp, f"rl-{i}", args.visible_timeout, args.play_seconds)
+            )
+
+        human_click(cdp, '.tab[data-tab="result"]')
+        wait_for(cdp, tab_active_expr("result"), 5)
+        wait_for(cdp, RESULT_TRIAL_READY_EXPR, 10)
+        for i in range(args.result_count):
+            human_click(cdp, ".rv-model .rv-node-head")
+            wait_for(cdp, ".rv-task .rv-node-head", 5)
+            human_click(cdp, ".rv-task .rv-node-head")
+            wait_for(cdp, RESULT_TRIAL_READY_EXPR, 5)
+            target = select_clickable_tile(
+                cdp, ".rv-trials", i, ".eval-trial.scored"
+            )
+            human_click_target_and_start_probe(cdp, target, f"result-trial-{i}")
+            wait_for(cdp, RESULT_POP_READY_EXPR, 10)
+            human_click(cdp, "#tp-play")
+            summaries.append(
+                capture_measurement(cdp, f"result-{i}", args.visible_timeout, args.play_seconds)
+            )
+
+        if args.rapid_switches:
+            for tab, container in (
+                ("collect", "#collect-queue-tiles"),
+                ("debug", "#rollout-save-queue-tiles"),
+                ("rl", "#rl-save-tiles"),
+            ):
+                human_click(cdp, f'.tab[data-tab="{tab}"]')
+                wait_for(cdp, tab_active_expr(tab), 5)
+                row = rapid_tile_switch(
+                    cdp, container, tab, args.visible_timeout, args.play_seconds
+                )
+                if row is not None:
+                    summaries.append(row)
     except Exception as exc:
         probe_error = str(exc)
         summaries.append(
@@ -858,7 +1185,18 @@ def main() -> None:
     print(json.dumps(summaries, indent=2))
     if probe_error:
         raise SystemExit(f"probe failed: {probe_error}")
-    failures = measurement_failures(summaries, args.max_visible_ms)
+    failures = measurement_failures(
+        summaries,
+        args.max_visible_ms,
+        args.max_raf_p95_ms,
+        args.max_raf_gap_ms,
+        args.max_camera_p95_ms,
+        args.max_camera_skew_ms,
+        args.max_urdf_frame_skew,
+        args.max_video_p95_ms,
+        args.max_video_gap_ms,
+        args.max_long_task_ms,
+    )
     if failures:
         names = ", ".join(str(row["name"]) for row in failures)
         raise SystemExit(f"visible video threshold failed for: {names}")

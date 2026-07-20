@@ -84,7 +84,8 @@ class EpisodePreview:
         self._reader: EpisodeLogger | None = None
         self._scene: UrdfScene | None = None
         self._scene_tried = False
-        self._xf_cache: dict[tuple[Path, int, int], bytes] = {}
+        self._series_cache: dict[int, dict[str, Any]] = {}
+        self._xf_cache: dict[tuple[Path, int, int, int, int], bytes] = {}
 
     def set_dataset_root(self, dataset_root: Path) -> None:
         """Repoint at a different per-model dataset (on ckpt switch). Drops the cached
@@ -94,6 +95,7 @@ class EpisodePreview:
             return
         self._dataset_root = Path(dataset_root)
         self._reader = None
+        self._series_cache.clear()
         self._xf_cache.clear()
 
     def result_rows(self) -> list[dict[str, Any]]:
@@ -142,10 +144,16 @@ class EpisodePreview:
 
     def series(self, episode_index: int) -> dict[str, Any] | None:
         """Per-frame timestamp/state/action for the time-series chart + replay clock."""
+        cached = self._series_cache.get(int(episode_index))
+        if cached is not None:
+            return cached
         reader = self._episode_reader()
         if reader is None:
             return None
-        return reader.load_episode_series(episode_index)
+        series = reader.load_episode_series(episode_index)
+        if series is not None:
+            self._series_cache[int(episode_index)] = series
+        return series
 
     def episode_index_by_clip(self) -> dict[str, int]:
         """Map clip_id -> episode_index from the recorded dataset's episodes.jsonl.
@@ -185,7 +193,9 @@ class EpisodePreview:
         frame = max(0, min(frame, len(states) - 1))
         return scene.transforms(states[frame])  # type: ignore[attr-defined]
 
-    def transforms_blob(self, episode_index: int) -> bytes | None:
+    def transforms_blob(
+        self, episode_index: int, start: int | None = None, count: int | None = None
+    ) -> bytes | None:
         """Whole-episode URDF transforms packed as an EVAXFRM1 binary blob."""
         scene = self._urdf_scene()
         if scene is None:
@@ -196,10 +206,18 @@ class EpisodePreview:
         states = series["state"]
         if not states:
             return None
-        key = (self._dataset_root, int(episode_index), len(states))
+        total = len(states)
+        chunk_start = 0 if start is None else max(0, int(start))
+        if chunk_start >= total:
+            return None
+        chunk_count = total - chunk_start if count is None else max(1, int(count))
+        chunk_end = min(total, chunk_start + chunk_count)
+        key = (self._dataset_root, int(episode_index), total, chunk_start, chunk_end)
         raw = self._xf_cache.get(key)
         if raw is None:
-            raw = scene.all_transforms_blob(np.asarray(states, dtype=np.float32))  # type: ignore[attr-defined]
+            raw = scene.all_transforms_blob(  # type: ignore[attr-defined]
+                np.asarray(states[chunk_start:chunk_end], dtype=np.float32)
+            )
             if len(self._xf_cache) >= 4:
                 self._xf_cache.pop(next(iter(self._xf_cache)))
             self._xf_cache[key] = raw

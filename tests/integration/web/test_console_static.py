@@ -213,9 +213,10 @@ def test_collect_review_uses_shared_local_replay_engine():
     assert "function installReplaySeries(series)" in html
     assert "LIVE.replayOwner = owner;" in html
     assert "replayTransformsUrl = `/api/review_transforms?${params.toString()}`;" in html
-    assert "await videosReady;" in html
-    assert "transformsReady.then" in html
-    assert "await Promise.all([videosReady, transformsReady]);" not in html
+    assert "const videosReady = waitForStageVideosReady();" in html
+    assert "const transformsReady = loadReplayTransformChunk(" in html
+    assert "const [videosOk, transformsOk] = await Promise.all([videosReady, transformsReady]);" in html
+    assert "await waitForStageVideosPainted();" in html
     assert "seekReplay(0);" in html
     assert "replayPlay();" in html
 
@@ -289,7 +290,7 @@ def test_review_episode_videos_are_not_seeked_by_status_poll_during_playback():
     assert 'LIVE.replayOwner === "collect"' in html
 
 
-def test_review_episode_starts_after_video_without_waiting_for_transforms():
+def test_review_episode_gates_playback_on_all_videos_and_first_transform_chunk():
     html = console_source()
 
     assert "function waitForStageVideosReady()" in html
@@ -297,16 +298,10 @@ def test_review_episode_starts_after_video_without_waiting_for_transforms():
     local_start = html.index("async function loadReviewPlayback(info, owner)")
     local_body = html[local_start : html.index("function replayApplyTransformFrame", local_start)]
     assert "const videosReady = waitForStageVideosReady();" in local_body
-    assert "const transformsReady = loadReplayTransforms(loadSeq);" in local_body
-    assert "await videosReady;" in local_body
-    assert "transformsReady.then" in local_body
-    assert "await Promise.all([videosReady, transformsReady]);" not in local_body
+    assert "const transformsReady = loadReplayTransformChunk(" in local_body
+    assert "const [videosOk, transformsOk] = await Promise.all([videosReady, transformsReady]);" in local_body
+    assert local_body.index("await waitForStageVideosPainted();") < local_body.index("replayPlay();")
     assert local_body.index("seekReplay(0);") < local_body.index("replayPlay();")
-    assert local_body.index("replayPlay();") < local_body.index(
-        "const transformsReady = loadReplayTransforms(loadSeq);"
-    )
-    assert local_body.index("replayPlay();") < local_body.index("transformsReady.then")
-    assert '["collect", "rollout"].includes(LIVE.replayOwner) && REPLAY_XF_LOADING' in html
 
     rollout_start = html.index("async function reviewRolloutEpisode(item)")
     rollout_body = html[rollout_start : html.index("async function submitEpisodeQc", rollout_start)]
@@ -371,8 +366,9 @@ def test_replay_waits_for_canplay_instead_of_loadeddata():
 def test_replay_playback_buffers_until_video_has_future_data():
     html = console_source()
 
-    assert "master.readyState < 3" in html
-    assert "master.readyState < 2" not in html
+    assert "return v.error || v.readyState >= 3;" in html
+    assert "videos.every((v) => !v.error && v.readyState >= 3)" in html
+    assert "waitForStageVideosReady()" in html
 
 
 def test_replay_keeps_slave_cameras_on_the_master_clock():
@@ -384,27 +380,28 @@ def test_replay_keeps_slave_cameras_on_the_master_clock():
     seek_start = html.index("function seekReplay(i, syncVideos = true)")
     seek_body = html[seek_start : html.index("function setReplayCursorFrame", seek_start)]
 
-    assert "const tolerance = 0.5 / replayVideoFps;" in sync_body
+    assert "const tolerance = Math.min(0.5 / replayVideoFps, 0.03);" in sync_body
     assert "replayVideoFps = Math.max(1, Number(s.replay_fps) || REPLAY_DEFAULT_FPS);" in html
     assert "replayVideoFps = Math.max(1, Number(info.fps) || REPLAY_DEFAULT_FPS);" in html
     assert "if (v === master) return;" in sync_body
     assert "force || Math.abs((v.currentTime || 0) - t) > tolerance" in sync_body
-    assert "syncReplayVideos(framePos, master);" in play_body
+    assert "syncReplayVideos(framePos, null);" in play_body
+    assert "await alignStageVideos(LIVE.cursor);" in play_body
     assert "syncReplayVideos(LIVE.cursor, null, true);" in seek_body
-    assert "0.12" not in sync_body
+    assert "const playT0 = replayTimeAtFrame(LIVE.cursor);" in play_body
+    assert "const wall0 = performance.now();" in play_body
 
 
 def test_replay_local_play_clock_drives_smooth_playback():
     html = console_source()
     load_start = html.index("async function loadReplaySeries()")
-    load_body = html[load_start : html.index("async function loadReplayTransforms", load_start)]
-    xf_start = html.index("async function loadReplayTransforms(loadSeq)")
-    xf_body = html[xf_start : html.index("function replayApplyTransformFrame", xf_start)]
+    load_body = html[load_start : html.index("function installReplaySeries", load_start)]
     set_frame_start = html.index("function replaySetUrdfFrame(frame)")
     set_frame_body = html[set_frame_start : html.index("function exitReplayMode", set_frame_start)]
 
-    # The whole-episode transforms blob is fetched once and decoded locally.
-    assert "const resp = await fetch(replayTransformsUrl);" in html
+    # Transform chunks are fetched on demand and decoded locally.
+    assert 'url.searchParams.set("start", String(start));' in html
+    assert 'url.searchParams.set("count", String(count));' in html
     assert 'magic !== "EVAXFRM1"' in html
     assert "function replayApplyTransformFrame(frame)" in html
     assert "REPLAY_XF_LOADING" in html
@@ -413,7 +410,7 @@ def test_replay_local_play_clock_drives_smooth_playback():
     assert "let replayUrdfPendingFrame = null;" in html
     assert "if (replayUrdfInFlight) {" in set_frame_body
     assert "replayUrdfPendingFrame = i;" in set_frame_body
-    assert "resetReplayUrdfRequests();" in xf_body
+    assert "resetReplayUrdfRequests();" in load_body
     # Local play clock + scrub play button, no per-frame network in the fast path.
     assert "function replayPlay()" in html
     assert "function replayStop()" in html
@@ -428,16 +425,15 @@ def test_replay_local_play_clock_drives_smooth_playback():
     assert "now - _lastReplayChartDraw < 100" in html
     assert "LIVE.replayLoading = true;" in html
     assert load_body.index("mountReplayVideos();") < load_body.index('apiGet("/api/replay_series")')
+    assert "loadReplayTransformChunk(" in load_body
     assert "seekReplay(0);" in load_body
     assert 'await waitForStageVideosReady("replay");' not in load_body
     assert 'await waitForStageVideosPainted("replay");' not in load_body
     assert "await transformsReady" not in load_body
     assert load_body.index("seekReplay(0);") < load_body.rindex("LIVE.replayLoading = false;")
-    assert "loadReplayTransforms(loadSeq)" not in load_body
-    assert "transformsReady.then" not in load_body
     assert "if (LIVE.replayLoading) return;" in html
-    assert "const master = replayMasterVideo();" in html
-    assert "targetTime = master.currentTime || 0;" in html
+    assert "const playT0 = replayTimeAtFrame(LIVE.cursor);" in html
+    assert "const wall0 = performance.now();" in html
     assert "const framePos = Math.max(cursor, replayFrameAtTime(targetTime));" in html
     assert "setReplayCursorFrame(framePos, false);" in html
     assert "function syncRealReplayVisual(frame)" in html
@@ -450,27 +446,44 @@ def test_replay_local_play_clock_drives_smooth_playback():
     assert "syncReplayVideos(frame);" in html
 
 
+def test_replay_prefetches_before_chunk_boundary_and_counts_missing_urdf_frames():
+    html = console_source()
+    set_frame_start = html.index("function replaySetUrdfFrame(frame)")
+    set_frame_body = html[set_frame_start : html.index("function exitReplayMode", set_frame_start)]
+    sync_start = html.index("function recordReplaySync(frame)")
+    sync_body = html[sync_start : html.index("function replayFallbackDt", sync_start)]
+
+    assert "if (nextStart < LIVE.n)" in set_frame_body
+    assert "prefetchReplayTransformChunk(replayLoadSeq, nextStart);" in set_frame_body
+    assert "function prefetchReplayTransformChunk(loadSeq, start)" in html
+    assert "start + count / 2" not in set_frame_body
+    assert "metrics.urdfMissingSamples += 1;" in sync_body
+    assert "? (LIVE.playing ? LIVE.n : 0)" in sync_body
+
+
 def test_replay_load_does_not_prebuffer_video_before_user_playback():
     html = console_source()
     load_start = html.index("async function loadReplaySeries()")
-    load_body = html[load_start : html.index("async function loadReplayTransforms", load_start)]
+    load_body = html[load_start : html.index("function installReplaySeries", load_start)]
     play_start = html.index("function replayPlay()")
     play_body = html[play_start : html.index("function replayStop", play_start)]
 
     assert 'await waitForStageVideosReady("replay");' not in load_body
     assert 'await waitForStageVideosPainted("replay");' not in load_body
-    assert "playStageVideos();" in play_body
+    assert "waitForStageVideosReady()" in play_body
+    assert "video.play()" in play_body
 
 
 def test_replay_load_does_not_compute_full_transforms_before_user_playback():
     html = console_source()
     load_start = html.index("async function loadReplaySeries()")
-    load_body = html[load_start : html.index("async function loadReplayTransforms", load_start)]
+    load_body = html[load_start : html.index("function installReplaySeries", load_start)]
     play_start = html.index("function replayPlay()")
     play_body = html[play_start : html.index("function replayStop", play_start)]
 
-    assert "loadReplayTransforms(loadSeq)" not in load_body
-    assert "loadReplayTransforms(replayLoadSeq)" in play_body
+    assert "loadReplayTransforms" not in html
+    assert "loadReplayTransformChunk(" in load_body
+    assert "loadReplayTransformChunk(" in play_body
 
 
 def test_replay_load_mounts_videos_from_load_response_without_status_poll():
@@ -575,12 +588,12 @@ def test_replay_setup_controls_are_guarded_for_console_boot():
 def test_replay_scene_interpolates_fractional_transform_frames():
     html = console_source()
 
-    assert "function setMeshInterpolatedTarget(mesh, floats, o0, o1, a)" in html
+    assert "function setMeshInterpolatedTarget(mesh, floats, o0, o1, a, immediate = false)" in html
     assert "const frame0 = Math.floor(frame);" in html
     assert "const frame1 = Math.min(frame0 + 1, nFrames - 1);" in html
     assert "u.tPos.copy(_p0).lerp(_p1, a);" in html
     assert "u.tQuat.copy(_q0).slerp(_q1, a);" in html
-    assert "setMeshInterpolatedTarget(mesh, floats, o0, base1 + g * 16, a);" in html
+    assert "setMeshInterpolatedTarget(mesh, floats, o0, base1 + g * 16, a, immediate);" in html
 
 
 def test_result_replay_uses_local_clock_and_default_all_chart_dims():
@@ -594,7 +607,9 @@ def test_result_replay_uses_local_clock_and_default_all_chart_dims():
     assert "requestAnimationFrame(tpPlayFrame)" in html
     assert "TP.raf = null" in html
     assert 'preload="auto"' in html
-    assert "master && master.readyState < 3" in html
+    assert "const camerasReady = TP.camerasReady;" in html
+    assert "await camerasReady;" in html
+    assert "tpSeekVideos(frame);" in html
     assert (
         'drawSeriesChart($("tp-achart-cv"), TP.series.action, TP.playTime, TP.dimsOnA, TP.i);'
         in html
@@ -1020,7 +1035,10 @@ def test_rl_workspace_has_eval_style_workflow_and_hides_data_config():
         assert f'id="{control}"' in html
     assert 'apiPost("/api/rl/setup")' in html
     assert 'apiPost("/api/rl/reset")' in html
-    assert 'apiPost("/api/rl/replay_critic"' in html
+    assert 'fetch("/api/rl/replay_critic"' in html
+    assert "let rlCriticPendingFrame = null;" in html
+    assert "function flushRlCriticQueue()" in html
+    assert "if (generation === rlCriticGeneration) flushRlCriticQueue();" in html
     assert '!rollout.save_ready || intervention' in html
     assert '!rollout.save_ready || !hasFrames' not in html
     assert 'id="rl-save-count"' in html

@@ -66,7 +66,7 @@ def test_rl_browser_harness_covers_episode_switch_and_sync_metrics():
     assert '#rl-save-tiles .collect-tile.replayable:nth-of-type(2)' in source
     assert 'window.__evaReplaySync' in source
     assert 'maxReadyVideos' in source
-    assert 'maxVideoSkewSec' in source
+    assert 'maxCameraSkewSec' in source
     assert 'maxUrdfFrameSkew' in source
     assert 'maxFrameGapMs' in source
 

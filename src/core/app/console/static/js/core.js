@@ -38,7 +38,10 @@ export const LIVE = {
   replaySync: {
     samples: 0, videoSamples: 0, maxReadyVideos: 0, expectedVideos: 0,
     maxVideoSkewSec: 0, maxUrdfFrameSkew: 0,
+    maxCameraSkewSec: 0,
     maxFrameGapMs: 0, lastFrameGapMs: 0, lastVideoSkewSec: 0, lastUrdfFrameSkew: 0,
+    videoSkewSamples: [],
+    urdfMissingSamples: 0,
   },
 };
 

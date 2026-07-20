@@ -463,6 +463,7 @@ async function reviewRolloutEpisode(item) {
     const episode = savedEpisodeId(item);
     if (episode == null) return;
     const requestId = ++reviewRequestId;
+    exitReplayMode();
     S.rolloutSaveEpisode = episode;
     S.reviewKind = "rollout";
     reviewTask = "";

@@ -14,17 +14,12 @@ let replayLoadedEpisodeId = 0;
 
 let replayLoadedVideoKeys = {};
 
-let REPLAY_XF = null;
-
-let REPLAY_XF_PARTS = null;
-
-let REPLAY_XF_GEOMS = null;
-
-let REPLAY_XF_NG = 0;
-
 let REPLAY_XF_LOADING = false;
 
-let replayTransformsPromise = null;
+const REPLAY_INITIAL_TRANSFORM_FRAMES = 30;
+const REPLAY_TRANSFORM_CHUNK_FRAMES = 60;
+let replayTransformChunks = new Map();
+let replayTransformLoads = new Map();
 
 let _lastReplayChartDraw = 0;
 
@@ -64,10 +59,14 @@ function resetReplaySyncMetrics() {
     metrics.lastFrameGapMs = 0;
     metrics.lastVideoSkewSec = 0;
     metrics.lastUrdfFrameSkew = 0;
+    metrics.maxCameraSkewSec = 0;
+    metrics.videoSkewSamples = [];
+    metrics.urdfMissingSamples = 0;
     replayLastRafAt = 0;
   }
 
 function recordReplaySync(frame) {
+    const metrics = LIVE.replaySync;
     const targetTime = replayTimeAtFrame(frame);
     if (!Number.isFinite(targetTime)) return;
     const videos = replayVideos();
@@ -78,18 +77,32 @@ function recordReplaySync(frame) {
       maxVideoSkew = Math.max(maxVideoSkew, Math.abs(video.currentTime - targetTime));
       videoSamples += 1;
     });
+    if (replayUrdfAppliedFrame == null && LIVE.playing) {
+      metrics.urdfMissingSamples += 1;
+    }
     const urdfSkew = replayUrdfAppliedFrame == null
-      ? 0
+      ? (LIVE.playing ? LIVE.n : 0)
       : Math.abs(Number(replayUrdfAppliedFrame) - Number(frame));
-    const metrics = LIVE.replaySync;
+    const readyTimes = videos
+      .filter((video) => !video.error && Number.isFinite(video.currentTime))
+      .map((video) => video.currentTime);
+    const cameraSkew = readyTimes.length > 1
+      ? Math.max(...readyTimes) - Math.min(...readyTimes)
+      : 0;
     metrics.expectedVideos = videos.length;
     metrics.maxReadyVideos = Math.max(metrics.maxReadyVideos, videoSamples);
     metrics.samples += 1;
     metrics.videoSamples += videoSamples;
     metrics.lastVideoSkewSec = maxVideoSkew;
     metrics.maxVideoSkewSec = Math.max(metrics.maxVideoSkewSec, maxVideoSkew);
+    metrics.maxCameraSkewSec = Math.max(metrics.maxCameraSkewSec, cameraSkew);
     metrics.lastUrdfFrameSkew = urdfSkew;
     metrics.maxUrdfFrameSkew = Math.max(metrics.maxUrdfFrameSkew, urdfSkew);
+    metrics.videoSkewSamples.push({
+      frame: Number(frame), target: targetTime,
+      times: videos.map((video) => Number(video.currentTime)),
+    });
+    if (metrics.videoSkewSamples.length > 32) metrics.videoSkewSamples.shift();
   }
 
 function replayFallbackDt() {
@@ -218,10 +231,18 @@ async function loadReplaySeries() {
       return false;
     }
     installReplaySeries(r);
-    REPLAY_XF = null; REPLAY_XF_PARTS = null; REPLAY_XF_GEOMS = null; REPLAY_XF_NG = 0;
-    REPLAY_XF_LOADING = false;
+    resetReplayTransformChunks();
     resetReplayUrdfRequests();
+    const initialTransforms = loadReplayTransformChunk(
+      loadSeq, 0, REPLAY_INITIAL_TRANSFORM_FRAMES,
+    );
     seekReplay(0);
+    if (!(await initialTransforms)) {
+      LIVE.replayLoading = false;
+      LIVE.replayError = "initial URDF transforms unavailable";
+      updateScrub();
+      return false;
+    }
     if (loadSeq !== replayLoadSeq) return false;
     LIVE.replayLoading = false;
     updateScrub();
@@ -256,77 +277,98 @@ function installReplaySeries(series) {
     buildLiveDims();
   }
 
-async function loadReplayTransforms(loadSeq) {
-    if (REPLAY_XF_LOADING && replayTransformsPromise) return replayTransformsPromise;
-    const promise = loadReplayTransformsOperation(loadSeq);
-    replayTransformsPromise = promise;
-    try {
-      return await promise;
-    } finally {
-      if (replayTransformsPromise === promise) replayTransformsPromise = null;
-    }
+function resetReplayTransformChunks() {
+    replayTransformChunks = new Map();
+    replayTransformLoads = new Map();
+    REPLAY_XF_LOADING = false;
   }
 
-async function loadReplayTransformsOperation(loadSeq) {
-    REPLAY_XF = null; REPLAY_XF_PARTS = null; REPLAY_XF_GEOMS = null; REPLAY_XF_NG = 0;
+function replayTransformRange(frame) {
+    const index = Math.max(0, Math.floor(Number(frame) || 0));
+    if (index < REPLAY_INITIAL_TRANSFORM_FRAMES) {
+      return [0, REPLAY_INITIAL_TRANSFORM_FRAMES];
+    }
+    const start = REPLAY_INITIAL_TRANSFORM_FRAMES
+      + Math.floor((index - REPLAY_INITIAL_TRANSFORM_FRAMES) / REPLAY_TRANSFORM_CHUNK_FRAMES)
+        * REPLAY_TRANSFORM_CHUNK_FRAMES;
+    return [start, REPLAY_TRANSFORM_CHUNK_FRAMES];
+  }
+
+function parseReplayTransformChunk(buf, start) {
+    const view = new DataView(buf);
+    const magic = Array.from({ length: 8 }, (_, i) => String.fromCharCode(view.getUint8(i))).join("");
+    if (magic !== "EVAXFRM1") throw new Error("bad transform magic");
+    const nFrames = view.getUint32(8, true);
+    const nGeoms = view.getUint32(12, true);
+    const headerLength = view.getUint32(16, true);
+    const keys = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 20, headerLength)));
+    const floats = new Float32Array(buf.slice(20 + headerLength));
+    if (floats.length !== nFrames * nGeoms * 16) throw new Error("bad transform length");
+    const parts = [], geoms = [];
+    keys.forEach((key) => {
+      const slash = key.indexOf("/");
+      parts.push(key.slice(0, slash));
+      geoms.push(key.slice(slash + 1));
+    });
+    return { start, nFrames, nGeoms, parts, geoms, floats };
+  }
+
+async function loadReplayTransformChunk(loadSeq, start, count) {
+    if (loadSeq !== replayLoadSeq) return false;
+    const key = `${start}:${count}`;
+    if (replayTransformChunks.has(key)) return true;
+    const pending = replayTransformLoads.get(key);
+    if (pending) return pending;
+    const loads = replayTransformLoads;
+    const url = new URL(replayTransformsUrl, window.location.href);
+    url.searchParams.set("start", String(start));
+    url.searchParams.set("count", String(count));
+    const signal = replayVideoAbortController ? replayVideoAbortController.signal : undefined;
     REPLAY_XF_LOADING = true;
     clientTrace("review.transforms.begin", {
-      url: replayTransformsUrl,
+      url: url.pathname + url.search,
       episode: replayLoadedEpisodeId,
       load_seq: loadSeq,
+      start,
+      count,
     });
-    try {
-      const resp = await fetch(replayTransformsUrl);
-      const ctype = resp.headers.get("Content-Type") || "";
-      if (!resp.ok || ctype.indexOf("octet-stream") < 0) {
+    const promise = fetch(url, signal ? { signal } : {})
+      .then(async (resp) => {
+        if (!resp.ok) throw new Error(`transform HTTP ${resp.status}`);
+        const actualStart = Number(resp.headers.get("X-EVA-Transform-Start")) || start;
+        const chunk = parseReplayTransformChunk(await resp.arrayBuffer(), actualStart);
+        if (loadSeq !== replayLoadSeq) return false;
+        replayTransformChunks.set(key, chunk);
         clientTrace("review.transforms.end", {
-          ok: false, status: resp.status, content_type: ctype, load_seq: loadSeq,
+          ok: true,
+          n_frames: chunk.nFrames,
+          n_geoms: chunk.nGeoms,
+          bytes: chunk.floats.byteLength,
+          load_seq: loadSeq,
+          start: actualStart,
         });
+        return true;
+      })
+      .catch((error) => {
+        if (error && error.name === "AbortError") return false;
+        clientTrace("review.transforms.error", { message: String(error), load_seq: loadSeq, start });
         return false;
-      }
-      const buf = await resp.arrayBuffer();
-      const v = new DataView(buf);
-      const magic = Array.from({ length: 8 }, (_, i) => String.fromCharCode(v.getUint8(i))).join("");
-      if (magic !== "EVAXFRM1") {
-        clientTrace("review.transforms.end", { ok: false, reason: "bad_magic", magic, load_seq: loadSeq });
-        return false;
-      }
-      const nFrames = v.getUint32(8, true), nGeoms = v.getUint32(12, true), hdrLen = v.getUint32(16, true);
-      const keys = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 20, hdrLen)));
-      // Float32Array(buf, byteOffset) requires byteOffset % 4 === 0; the JSON header is
-      // variable-length so 20+hdrLen is usually misaligned and would throw. slice() copies
-      // out a fresh 0-offset buffer that is always aligned.
-      const floats = new Float32Array(buf.slice(20 + hdrLen));
-      if (floats.length !== nFrames * nGeoms * 16) {
-        clientTrace("review.transforms.end", {
-          ok: false, reason: "bad_length", floats: floats.length, n_frames: nFrames,
-          n_geoms: nGeoms, load_seq: loadSeq,
-        });
-        return false;
-      }
-      const parts = [], geoms = [];
-      keys.forEach((key) => {
-        const slash = key.indexOf("/");
-        parts.push(key.slice(0, slash));
-        geoms.push(key.slice(slash + 1));
+      })
+      .finally(() => {
+        loads.delete(key);
+        REPLAY_XF_LOADING = replayTransformLoads.size > 0;
       });
-      if (loadSeq !== replayLoadSeq) return false;
-      REPLAY_XF = floats;
-      REPLAY_XF_PARTS = parts;
-      REPLAY_XF_GEOMS = geoms;
-      REPLAY_XF_NG = nGeoms;
-      resetReplayUrdfRequests();
-      clientTrace("review.transforms.end", {
-        ok: true, n_frames: nFrames, n_geoms: nGeoms, bytes: buf.byteLength, load_seq: loadSeq,
-      });
-      return true;
-    } catch (e) {
-      clientTrace("review.transforms.error", { message: String(e), load_seq: loadSeq });
-      return false;
-    }
-    finally {
-      if (loadSeq === replayLoadSeq) REPLAY_XF_LOADING = false;
-    }
+    loads.set(key, promise);
+    return promise;
+  }
+
+function prefetchReplayTransformChunk(loadSeq, start) {
+    if (loadSeq !== replayLoadSeq || start >= LIVE.n) return;
+    const count = REPLAY_TRANSFORM_CHUNK_FRAMES;
+    loadReplayTransformChunk(loadSeq, start, count).then((loaded) => {
+      if (!loaded || loadSeq !== replayLoadSeq) return;
+      prefetchReplayTransformChunk(loadSeq, start + count);
+    });
   }
 
 async function loadReviewPlayback(info, owner) {
@@ -351,12 +393,7 @@ async function loadReviewPlayback(info, owner) {
     replayLoadedEpisodeId = Number(info.episode || 0);
     replayLoadedVideoKeys = { ...(info.video_keys || {}) };
     installReplaySeries(info);
-    REPLAY_XF = null;
-    REPLAY_XF_PARTS = null;
-    REPLAY_XF_GEOMS = null;
-    REPLAY_XF_NG = 0;
-    REPLAY_XF_LOADING = false;
-    replayTransformsPromise = null;
+    resetReplayTransformChunks();
     resetReplayUrdfRequests();
     mountEpisodeVideos({
       datasetDir: replayLoadedDatasetDir,
@@ -369,44 +406,65 @@ async function loadReviewPlayback(info, owner) {
     });
     replayTransformsUrl = `/api/review_transforms?${params.toString()}`;
     const videosReady = waitForStageVideosReady();
-    await videosReady;
+    const transformsReady = loadReplayTransformChunk(
+      loadSeq, 0, REPLAY_INITIAL_TRANSFORM_FRAMES,
+    );
+    const [videosOk, transformsOk] = await Promise.all([videosReady, transformsReady]);
     if (loadSeq !== replayLoadSeq) {
       clientTrace("review.playback.stale", { load_seq: loadSeq, current_seq: replayLoadSeq });
       return false;
     }
+    if (!videosOk || !transformsOk) {
+      LIVE.replayLoading = false;
+      LIVE.replayError = !videosOk
+        ? "one or more replay cameras failed to load"
+        : "initial URDF transforms unavailable";
+      updateScrub();
+      return false;
+    }
     seekReplay(0);
-    await waitForStageVideosPainted();
+    const painted = await waitForStageVideosPainted();
     if (loadSeq !== replayLoadSeq) return false;
+    if (!painted) {
+      LIVE.replayLoading = false;
+      LIVE.replayError = "one or more replay cameras failed to paint";
+      updateScrub();
+      return false;
+    }
     LIVE.replayLoading = false;
     updateScrub();
     replayPlay();
     clientTrace("review.playback.end", {
       ok: true, episode: replayLoadedEpisodeId, frames: LIVE.n, load_seq: loadSeq,
     });
-    const transformsReady = loadReplayTransforms(loadSeq);
-    transformsReady.then((transformsOk) => {
-      if (loadSeq !== replayLoadSeq) return;
-      clientTrace("review.media.ready", {
-        episode: replayLoadedEpisodeId,
-        videos: replayVideos().length,
-        video_errors: replayVideos().filter((v) => !!v.error).length,
-        transforms_ok: !!transformsOk,
-        load_seq: loadSeq,
-      });
-      if (!transformsOk) {
-        LIVE.replayError = "historical 3D transforms unavailable";
-        updateScrub();
-        return;
-      }
-      replaySetUrdfFrame(LIVE.cursorFrac != null ? LIVE.cursorFrac : LIVE.cursor);
+    clientTrace("review.media.ready", {
+      episode: replayLoadedEpisodeId,
+      videos: replayVideos().length,
+      video_errors: replayVideos().filter((v) => !!v.error).length,
+      transforms_ok: true,
+      load_seq: loadSeq,
     });
     return true;
   }
 
 function replayApplyTransformFrame(frame) {
     const sceneReady = window.Scene3D && Scene3D.applyTransformFrame;
-    if (!REPLAY_XF || !REPLAY_XF_PARTS || !REPLAY_XF_GEOMS || !sceneReady) return false;
-    Scene3D.applyTransformFrame(REPLAY_XF_PARTS, REPLAY_XF_GEOMS, REPLAY_XF, REPLAY_XF_NG, frame);
+    if (!sceneReady) return false;
+    const numericFrame = Math.max(0, Number(frame) || 0);
+    const chunk = [...replayTransformChunks.values()].find((candidate) => (
+      numericFrame >= candidate.start
+      && numericFrame < candidate.start + candidate.nFrames
+    ));
+    if (!chunk) return false;
+    Scene3D.applyTransformFrame(
+      chunk.parts,
+      chunk.geoms,
+      chunk.floats,
+      chunk.nGeoms,
+      numericFrame - chunk.start,
+      true,
+    );
+    window.__evaReplayAppliedFrame = numericFrame;
     replayUrdfAppliedFrame = Number(frame);
     return true;
   }
@@ -579,6 +637,24 @@ function waitForVideoReady(v) {
     });
   }
 
+function alignStageVideos(frame) {
+    const target = replayTimeAtFrame(frame);
+    return Promise.all(replayVideos().map((video) => {
+      if (video.error || !Number.isFinite(target)) return Promise.resolve();
+      if (Math.abs((video.currentTime || 0) - target) < 0.001) return Promise.resolve();
+      return new Promise((resolve) => {
+        const finish = () => {
+          video.removeEventListener("seeked", finish);
+          video.removeEventListener("error", finish);
+          resolve();
+        };
+        video.addEventListener("seeked", finish, { once: true });
+        video.addEventListener("error", finish, { once: true });
+        video.currentTime = target;
+      });
+    }));
+  }
+
 function waitForBrowserPaint() {
     return new Promise((resolve) => {
       requestAnimationFrame(() => requestAnimationFrame(resolve));
@@ -615,7 +691,7 @@ async function waitForStageVideosReady() {
     const signal = replayVideoAbortController ? replayVideoAbortController.signal : null;
     if (!videos.length) {
       clientTrace("review.videos.ready", { count: 0, errors: 0 });
-      return;
+      return false;
     }
     setVideosLoading(videos, true, "loading video");
     await Promise.all(videos.map((v) => waitForVideoReady(v)));
@@ -625,17 +701,19 @@ async function waitForStageVideosReady() {
       errors: videos.filter((v) => !!v.error).length,
       states: videos.map((v) => ({ camera: v.dataset.key || "", ready_state: v.readyState })),
     });
+    return videos.length >= 3 && videos.every((v) => !v.error && v.readyState >= 3);
   }
 
 async function waitForStageVideosPainted() {
     const videos = replayVideos();
-    if (!videos.length) return;
+    if (!videos.length) return false;
     const signal = replayVideoAbortController ? replayVideoAbortController.signal : null;
     setVideosLoading(videos, true, "rendering video");
     await Promise.all(videos.map((v) => waitForVideoPainted(v)));
     if (signal && signal.aborted) return;
     await waitForBrowserPaint();
     setVideosLoading(videos, false, "");
+    return videos.length >= 3 && videos.every((v) => !v.error);
   }
 
 function playStageVideos() {
@@ -659,7 +737,7 @@ function replayMasterVideo() {
 function syncReplayVideos(frame, master = null, force = false) {
     const t = replayTimeAtFrame(frame);
     if (!Number.isFinite(t)) return;
-    const tolerance = 0.5 / replayVideoFps;
+    const tolerance = Math.min(0.5 / replayVideoFps, 0.03);
     replayVideos().forEach((v) => {
       if (v === master) return;
       if (v.error) return;
@@ -682,45 +760,37 @@ function resetReplayUrdfRequests() {
     replayUrdfInFlight = false;
     replayUrdfPendingFrame = null;
     replayUrdfAppliedFrame = null;
+    window.__evaReplayAppliedFrame = null;
   }
 
 function replaySetUrdfFrame(frame) {
     if (replayApplyTransformFrame(frame)) {
+      const [start, count] = replayTransformRange(frame);
+      const nextStart = start === 0 ? REPLAY_INITIAL_TRANSFORM_FRAMES : start + count;
+      if (nextStart < LIVE.n) {
+        prefetchReplayTransformChunk(replayLoadSeq, nextStart);
+      }
       return;
     }
-    // Stateless collection review computes a whole-episode transform blob in the
-    // background. Do not issue unrelated mounted-replay frame requests while waiting;
-    // the completion callback applies the current local cursor directly.
-    if (["collect", "rollout"].includes(LIVE.replayOwner) && REPLAY_XF_LOADING) return;
-    const i = Math.max(0, Math.min(Math.round(Number(frame) || 0), LIVE.n - 1));
+    const numericFrame = Math.max(0, Math.min(Number(frame) || 0, LIVE.n - 1));
+    const [start, count] = replayTransformRange(numericFrame);
+    const i = Math.round(numericFrame);
     if (i === replayUrdfAppliedFrame && !replayUrdfInFlight) return;
     if (replayUrdfInFlight) {
       replayUrdfPendingFrame = i;
       return;
     }
-    requestReplayUrdfFrame(i);
-  }
-
-async function requestReplayUrdfFrame(i) {
     replayUrdfInFlight = true;
-    const seq = _replayUrdfSeq;
-    try {
-      const r = await apiGet("/api/replay_scene_frame?frame=" + i);
-      if (seq !== _replayUrdfSeq) return;
-      if (r.available && window.Scene3D) {
-        Scene3D.applyTransforms({ arms: r.arms });
-        replayUrdfAppliedFrame = i;
-      }
-    } catch (e) { /* transient */ }
-    finally {
-      if (seq !== _replayUrdfSeq) return;
+    const requestSeq = _replayUrdfSeq;
+    loadReplayTransformChunk(replayLoadSeq, start, count).then((loaded) => {
+      if (requestSeq !== _replayUrdfSeq) return;
       replayUrdfInFlight = false;
+      if (!loaded || !LIVE.replayMode) return;
+      replaySetUrdfFrame(numericFrame);
       const pending = replayUrdfPendingFrame;
       replayUrdfPendingFrame = null;
-      if (pending !== null && pending !== replayUrdfAppliedFrame && LIVE.replayMode) {
-        replaySetUrdfFrame(pending);
-      }
-    }
+      if (pending !== null && pending !== replayUrdfAppliedFrame) replaySetUrdfFrame(pending);
+    });
   }
 
 function exitReplayMode() {
@@ -738,10 +808,8 @@ function exitReplayMode() {
     replayLoadedDatasetDir = "";
     replayLoadedEpisodeId = 0;
     replayLoadedVideoKeys = {};
-    REPLAY_XF = null; REPLAY_XF_NG = 0;
-    REPLAY_XF_LOADING = false;
-    replayTransformsPromise = null;
-    REPLAY_XF_PARTS = null; REPLAY_XF_GEOMS = null; _lastReplayChartDraw = 0;
+    resetReplayTransformChunks();
+    _lastReplayChartDraw = 0;
     resetReplayUrdfRequests();
     LIVE.playTime = [];
     resetReplaySyncMetrics();
@@ -782,24 +850,43 @@ function replayToggle() { LIVE.playing ? replayStop() : replayPlay(); }
 
 function syncReplayRunButtons() { if (S.STATUS) applyRunControlStatus(RUN_CONTROLS.replay, S.STATUS); }
 
-function replayPlay() {
+async function replayPlay() {
     if (!LIVE.replayMode || LIVE.n === 0) return;
     if (LIVE.replayLoading) return;
     if (LIVE.cursor >= LIVE.n - 1) seekReplay(0);
+    const loadSeq = replayLoadSeq;
+    LIVE.replayLoading = true;
+    updateScrub();
+    const [videosOk, transformsOk] = await Promise.all([
+      waitForStageVideosReady(),
+      loadReplayTransformChunk(loadSeq, ...replayTransformRange(LIVE.cursor)),
+    ]);
+    if (loadSeq !== replayLoadSeq || !LIVE.replayMode) {
+      if (loadSeq === replayLoadSeq) LIVE.replayLoading = false;
+      return;
+    }
+    if (!videosOk || !transformsOk) {
+      LIVE.replayLoading = false;
+      LIVE.replayError = !videosOk
+        ? "one or more replay cameras failed to load"
+        : "replay URDF transforms unavailable";
+      updateScrub();
+      return;
+    }
+    LIVE.replayLoading = false;
+    updateScrub();
     LIVE.playing = true;
     replayLastRafAt = 0;
     clientTrace("review.play", { episode: replayLoadedEpisodeId, cursor: LIVE.cursor, frames: LIVE.n });
     const btn = $("scrub-play"); if (btn) btn.textContent = "⏸";
     syncReplayRunButtons();
-    playStageVideos();
-    if (!REPLAY_XF && !REPLAY_XF_LOADING) {
-      loadReplayTransforms(replayLoadSeq).then(() => {
-        if (!LIVE.replayMode || !LIVE.playing) return;
-        replaySetUrdfFrame(LIVE.cursorFrac != null ? LIVE.cursorFrac : LIVE.cursor);
-      });
-    }
+    const videos = replayVideos();
+    pauseStageVideos();
+    await alignStageVideos(LIVE.cursor);
     const playT0 = replayTimeAtFrame(LIVE.cursor);
     const wall0 = performance.now();
+    await Promise.all(videos.map((video) => video.play().catch(() => null)));
+    await waitForBrowserPaint();
     const frame = () => {
       if (!LIVE.playing) return;
       const now = performance.now();
@@ -809,23 +896,12 @@ function replayPlay() {
         LIVE.replaySync.maxFrameGapMs = Math.max(LIVE.replaySync.maxFrameGapMs, gapMs);
       }
       replayLastRafAt = now;
-      const master = replayMasterVideo();
-      if (master && (master.readyState < 3 || (master.paused && !master.ended))) {
-        setStageVideoLoading(true, "buffering video");
-        LIVE.raf = requestAnimationFrame(frame);
-        return;
-      }
-      let targetTime;
-      if (master) {
-        setStageVideoLoading(false, "");
-        targetTime = master.currentTime || 0;
-      } else {
-        targetTime = playT0 + (performance.now() - wall0) / 1000;
-      }
+      setStageVideoLoading(false, "");
+      const targetTime = playT0 + (performance.now() - wall0) / 1000;
       const cursor = LIVE.cursorFrac != null ? LIVE.cursorFrac : LIVE.cursor;
       const framePos = Math.max(cursor, replayFrameAtTime(targetTime));
       setReplayCursorFrame(framePos, false);
-      syncReplayVideos(framePos, master);
+      syncReplayVideos(framePos, null);
       recordReplaySync(framePos);
       if (framePos >= LIVE.n - 1) { replayStop(); return; }
       LIVE.raf = requestAnimationFrame(frame);
@@ -836,7 +912,6 @@ function replayPlay() {
 function replayStop() {
     const wasPlaying = LIVE.playing;
     LIVE.playing = false;
-    if (LIVE.raf) { cancelAnimationFrame(LIVE.raf); LIVE.raf = null; }
     const btn = $("scrub-play"); if (btn) btn.textContent = "▶";
     syncReplayRunButtons();
     pauseStageVideos();

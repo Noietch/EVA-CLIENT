@@ -24,6 +24,7 @@ import re
 import subprocess
 import threading
 import time
+from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -75,6 +76,20 @@ _VIDEO_POSTER_LOCK = threading.Lock()
 _TRANSFORM_EXECUTOR: concurrent.futures.ProcessPoolExecutor | None = None
 _TRANSFORM_EXECUTOR_LOCK = threading.Lock()
 _TRACE_EVENT_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,96}$")
+_REVIEW_DATA_CACHE_MAX = 8
+_REVIEW_DATA_CACHE_LOCK = threading.RLock()
+
+
+@dataclasses.dataclass(frozen=True)
+class _CachedReviewEpisode:
+    series: dict
+    video_keys: dict[str, str]
+    scene_qpos: np.ndarray
+    fps: int
+    task: str
+
+
+_REVIEW_DATA_CACHE: OrderedDict[tuple[str, int], _CachedReviewEpisode] = OrderedDict()
 
 
 def _trace_json(value: Any, limit: int = 1600) -> str:
@@ -398,6 +413,51 @@ def _open_review_episode(
         DatasetTransport(review_config, runtime.robot, dataset_dir, episode_index),
         video_keys,
     )
+
+
+def _cached_review_episode(
+    ctx: ConsoleContext,
+    dataset_dir: str | Path,
+    episode_index: int,
+) -> _CachedReviewEpisode:
+    """Read one stateless review episode once and cache its non-video data.
+
+    Args:
+        ctx: Active console context supplying robot and dataset key configuration.
+        dataset_dir: Resolved LeRobot dataset directory.
+        episode_index: Zero-based saved episode index.
+
+    Returns:
+        Cached state/action series, camera mapping, and scene qpos rows.
+    """
+    key = (str(Path(dataset_dir).resolve()), int(episode_index))
+    with _REVIEW_DATA_CACHE_LOCK:
+        cached = _REVIEW_DATA_CACHE.get(key)
+        if cached is not None:
+            _REVIEW_DATA_CACHE.move_to_end(key)
+            return cached
+
+    source, video_keys = _open_review_episode(ctx, dataset_dir, episode_index)
+    try:
+        series = source.series()
+        scene_qpos = np.asarray(
+            [source.get_scene_qpos(index) for index in range(source.n_steps)],
+            dtype=np.float32,
+        )
+    finally:
+        source.close()
+    cached = _CachedReviewEpisode(
+        series, dict(video_keys), scene_qpos, source.fps, source.current_task
+    )
+    with _REVIEW_DATA_CACHE_LOCK:
+        existing = _REVIEW_DATA_CACHE.get(key)
+        if existing is not None:
+            _REVIEW_DATA_CACHE.move_to_end(key)
+            return existing
+        _REVIEW_DATA_CACHE[key] = cached
+        while len(_REVIEW_DATA_CACHE) > _REVIEW_DATA_CACHE_MAX:
+            _REVIEW_DATA_CACHE.popitem(last=False)
+    return cached
 
 
 def _ensure_ckpt_order(config: ConfigDict, runtime: RuntimeState) -> None:
@@ -1192,20 +1252,16 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         dataset_dir = _resolve_dataset_dir(str(body.get("dataset_dir", "")).strip())
         episode_index = int(body.get("episode", 0))
         try:
-            source, video_keys = _open_review_episode(self.ctx, dataset_dir, episode_index)
-            try:
-                series = source.series()
-                payload = {
-                    "ok": True,
-                    "episode": episode_index,
-                    "frames": source.n_steps,
-                    "fps": source.fps,
-                    "task": source.current_task,
-                    "video_keys": video_keys,
-                    **series,
-                }
-            finally:
-                source.close()
+            cached = _cached_review_episode(self.ctx, dataset_dir, episode_index)
+            payload = {
+                "ok": True,
+                "episode": episode_index,
+                "frames": len(cached.scene_qpos),
+                "fps": cached.fps,
+                "task": cached.task,
+                "video_keys": cached.video_keys,
+                **cached.series,
+            }
         except Exception as error:
             self._send_json(404, {"ok": False, "error": str(error)})
             return
@@ -1519,6 +1575,31 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         arms = ctx.scene.transforms(qpos)  # type: ignore[attr-defined]
         self._send_json(200, {"available": True, "arms": arms})
 
+    def _transform_range(self) -> tuple[int, int] | None:
+        start = self._query_int("start", -1)
+        count = self._query_int("count", -1)
+        if start < 0 and count < 0:
+            return None
+        if start < 0 or count <= 0:
+            self._send_json(400, {"available": False, "error": "invalid transform range"})
+            return (-1, -1)
+        return start, count
+
+    def _send_transform_blob(self, raw: bytes, start: int, count: int, total: int) -> None:
+        use_gzip = "gzip" in self.headers.get("Accept-Encoding", "").lower()
+        body = gzip.compress(raw) if use_gzip else raw
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("X-EVA-Transform-Start", str(start))
+        self.send_header("X-EVA-Transform-Count", str(count))
+        self.send_header("X-EVA-Transform-Total", str(total))
+        self.send_header("Cache-Control", "no-store")
+        if use_gzip:
+            self.send_header("Content-Encoding", "gzip")
+        self.end_headers()
+        self.wfile.write(body)
+
     def _get_replay_transforms(self) -> None:
         # Whole-episode URDF world transforms in one binary blob, so the console can
         # play a replay locally (one fetch + local frame cursor) instead of an FK +
@@ -1532,6 +1613,32 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         n = int(getattr(replay, "n_steps", 0) or 0)
         if n <= 0:
             self._send_json(200, {"available": False})
+            return
+        transform_range = self._transform_range()
+        if transform_range == (-1, -1):
+            return
+        if transform_range is not None:
+            start, count = transform_range
+            end = min(n, start + count)
+            if start >= n:
+                self._send_json(404, {"available": False, "error": "transform frame out of range"})
+                return
+            seq = np.stack(
+                [
+                    np.asarray(replay.get_scene_qpos(index), dtype=np.float32)  # type: ignore[attr-defined]
+                    for index in range(start, end)
+                ]
+            )
+            effective = ctx.runtime.active_config or ctx.config
+            raw = _compute_transform_blob(
+                scene,
+                seq,
+                str(effective.robot.type),
+                effective.robot.gripper_open,
+                effective.robot.gripper_close,
+                ctx.scene_batch_loading,
+            )
+            self._send_transform_blob(raw, start, end - start, n)
             return
         key = (id(scene), id(replay), int(getattr(replay, "episode_id", -1)), n)
         with type(self)._xf_lock:
@@ -1555,15 +1662,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                 if len(cache) >= 2:
                     cache.pop(next(iter(cache)))
                 cache[key] = entry
-        use_gzip = "gzip" in self.headers.get("Accept-Encoding", "").lower()
-        body = entry[1] if use_gzip else entry[0]
-        self.send_response(200)
-        self.send_header("Content-Type", "application/octet-stream")
-        self.send_header("Content-Length", str(len(body)))
-        if use_gzip:
-            self.send_header("Content-Encoding", "gzip")
-        self.end_headers()
-        self.wfile.write(body)
+        self._send_transform_blob(entry[0], 0, n, n)
 
     def _get_review_transforms(self) -> None:
         dataset_dir = _resolve_dataset_dir(self._query_str("dataset_dir"))
@@ -1573,50 +1672,55 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             self._send_json(404, {"ok": False, "error": "review transforms unavailable"})
             return
         try:
-            source, _ = _open_review_episode(self.ctx, dataset_dir, episode_index)
-            try:
-                n = source.n_steps
-                if n <= 0:
-                    self._send_json(404, {"ok": False, "error": "episode has no frames"})
+            cached = _cached_review_episode(self.ctx, dataset_dir, episode_index)
+            n = len(cached.scene_qpos)
+            if n <= 0:
+                self._send_json(404, {"ok": False, "error": "episode has no frames"})
+                return
+            transform_range = self._transform_range()
+            if transform_range == (-1, -1):
+                return
+            if transform_range is not None:
+                start, count = transform_range
+                end = min(n, start + count)
+                if start >= n:
+                    self._send_json(
+                        404, {"available": False, "error": "transform frame out of range"}
+                    )
                     return
-                key = (id(scene), str(Path(dataset_dir).resolve()), episode_index, n)
-                with type(self)._xf_lock:
-                    entry = type(self)._xf_cache.get(key)
-                    if entry is None:
-                        qpos = np.stack(
-                            [
-                                np.asarray(source.get_scene_qpos(i), dtype=np.float32)
-                                for i in range(n)
-                            ]
-                        )
-                        effective = self.ctx.runtime.active_config or self.ctx.config
-                        raw = _compute_transform_blob(
-                            scene,
-                            qpos,
-                            str(effective.robot.type),
-                            effective.robot.gripper_open,
-                            effective.robot.gripper_close,
-                            self.ctx.scene_batch_loading,
-                        )
-                        entry = (raw, gzip.compress(raw))
-                        if len(type(self)._xf_cache) >= 4:
-                            type(self)._xf_cache.pop(next(iter(type(self)._xf_cache)))
-                        type(self)._xf_cache[key] = entry
-            finally:
-                source.close()
+                effective = self.ctx.runtime.active_config or self.ctx.config
+                raw = _compute_transform_blob(
+                    scene,
+                    cached.scene_qpos[start:end],
+                    str(effective.robot.type),
+                    effective.robot.gripper_open,
+                    effective.robot.gripper_close,
+                    self.ctx.scene_batch_loading,
+                )
+                self._send_transform_blob(raw, start, end - start, n)
+                return
+            key = (id(scene), str(Path(dataset_dir).resolve()), episode_index, n)
+            with type(self)._xf_lock:
+                cache = type(self)._xf_cache
+                entry = cache.get(key)
+                if entry is None:
+                    effective = self.ctx.runtime.active_config or self.ctx.config
+                    raw = _compute_transform_blob(
+                        scene,
+                        cached.scene_qpos,
+                        str(effective.robot.type),
+                        effective.robot.gripper_open,
+                        effective.robot.gripper_close,
+                        self.ctx.scene_batch_loading,
+                    )
+                    entry = (raw, gzip.compress(raw))
+                    if len(cache) >= 4:
+                        cache.pop(next(iter(cache)))
+                    cache[key] = entry
         except Exception as error:
             self._send_json(404, {"ok": False, "error": str(error)})
             return
-
-        use_gzip = "gzip" in self.headers.get("Accept-Encoding", "").lower()
-        body = entry[1] if use_gzip else entry[0]
-        self.send_response(200)
-        self.send_header("Content-Type", "application/octet-stream")
-        self.send_header("Content-Length", str(len(body)))
-        if use_gzip:
-            self.send_header("Content-Encoding", "gzip")
-        self.end_headers()
-        self.wfile.write(body)
+        self._send_transform_blob(entry[0], 0, n, n)
 
     def _get_replay_video(self) -> None:
         # Stream the loaded replay dataset's recorded mp4 for one camera (HTTP Range),
@@ -1686,19 +1790,24 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         self._point_preview_for_request()
         ep = self._query_int("episode_index", -1)
         preview = self.ctx.preview
-        raw = preview.transforms_blob(ep) if (preview and ep >= 0) else None
-        if raw is None:
-            self._send_json(200, {"available": False})
+        transform_range = self._transform_range()
+        if transform_range == (-1, -1):
             return
-        use_gzip = "gzip" in self.headers.get("Accept-Encoding", "").lower()
-        body = gzip.compress(raw) if use_gzip else raw
-        self.send_response(200)
-        self.send_header("Content-Type", "application/octet-stream")
-        self.send_header("Content-Length", str(len(body)))
-        if use_gzip:
-            self.send_header("Content-Encoding", "gzip")
-        self.end_headers()
-        self.wfile.write(body)
+        start = count = None
+        if transform_range is not None:
+            start, count = transform_range
+        raw = (
+            preview.transforms_blob(ep, start=start, count=count)
+            if (preview and ep >= 0)
+            else None
+        )
+        if raw is None:
+            self._send_json(404, {"available": False})
+            return
+        total = len(preview.series(ep)["state"]) if preview and ep >= 0 else 0
+        actual_start = 0 if start is None else start
+        actual_count = total - actual_start if count is None else min(count, total - actual_start)
+        self._send_transform_blob(raw, actual_start, actual_count, total)
 
     def _get_episode_video(self) -> None:
         self._point_preview_for_request()

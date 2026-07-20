@@ -9,9 +9,33 @@ let seriesPolling = false;
 let lastQueuedReplayFrame = -1;
 let replayRequestId = 0;
 let rlReplayRequestPending = false;
+let rlCriticInFlight = false;
+let rlCriticPendingFrame = null;
+let rlCriticGeneration = 0;
 let rlSetupTimer = null;
 let rlSetupRequestPending = false;
 let rlLiveActionSince = 0;
+let rlSelectionChain = Promise.resolve();
+let rlSelectionGeneration = 0;
+
+function queueRlSelection(path, body) {
+  const generation = ++rlSelectionGeneration;
+  rlSelectionChain = rlSelectionChain
+    .catch(() => {})
+    .then(() => apiPost(path, body))
+    .then((response) => {
+      if (!response || response.ok === false) {
+        throw new Error((response && response.error) || `${path} failed`);
+      }
+      if (generation === rlSelectionGeneration) scheduleRlSetup();
+    })
+    .catch((error) => {
+      if (generation !== rlSelectionGeneration) return;
+      S.STATUS.last_error = String(error);
+      renderRlStatus(S.STATUS);
+    });
+  return rlSelectionChain;
+}
 
 function requestRlSetup() {
   if (rlSetupRequestPending) return;
@@ -103,8 +127,7 @@ function renderRlConfig() {
     task.classList.toggle("has-value", !!task.value);
     syncTaskChip(task);
     S.STATUS.last_error = "";
-    apiPost("/api/rl/select_task", { task: task.value });
-    scheduleRlSetup();
+    queueRlSelection("/api/rl/select_task", { task: task.value });
     updateGuide();
   };
   syncTaskChip(task);
@@ -115,8 +138,7 @@ function renderRlConfig() {
     S.rlPolicy = policy.value;
     policy.classList.toggle("has-value", !!policy.value);
     S.STATUS.last_error = "";
-    apiPost("/api/rl/select_policy", { slot: Number(policy.value) });
-    scheduleRlSetup();
+    queueRlSelection("/api/rl/select_policy", { slot: Number(policy.value) });
     updateGuide();
   };
 
@@ -302,16 +324,60 @@ function clearRlCriticSeries() {
   drawLiveCharts();
 }
 
+function clearRlCriticQueue() {
+  rlCriticGeneration += 1;
+  rlCriticPendingFrame = null;
+}
+
+function flushRlCriticQueue() {
+  if (rlCriticInFlight || rlCriticPendingFrame == null) return;
+  const generation = rlCriticGeneration;
+  const frame = rlCriticPendingFrame;
+  rlCriticPendingFrame = null;
+  rlCriticInFlight = true;
+  fetch("/api/rl/replay_critic", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ frame }),
+  })
+    .then(async (response) => {
+      const payload = await response.json();
+      if (!response.ok || payload.ok === false) {
+        clientTrace("rl.replay_critic.error", { frame, error: payload.error || response.status });
+      }
+    })
+    .catch((error) => clientTrace("rl.replay_critic.error", { frame, error: String(error) }))
+    .finally(() => {
+      rlCriticInFlight = false;
+      if (generation === rlCriticGeneration) flushRlCriticQueue();
+    });
+}
+
+async function postRlReplay(path, body) {
+  try {
+    const response = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const payload = await response.json();
+    return response.ok ? payload : { ok: false, error: payload.error || response.status };
+  } catch (error) {
+    return { ok: false, error: String(error) };
+  }
+}
+
 async function replaySelectedEpisode() {
   if (selectedEpisode == null) return;
   const requestId = ++replayRequestId;
   rlReplayRequestPending = true;
+  clearRlCriticQueue();
   if (LIVE.replayMode && LIVE.replayOwner === "rl") exitReplayMode();
   clearRlCriticSeries();
   try {
     const rollout = (S.STATUS && S.STATUS.rollout) || {};
     lastQueuedReplayFrame = -1;
-    const response = await apiPost("/api/rl/review_episode", {
+    const response = await postRlReplay("/api/rl/review_episode", {
       dataset_dir: rollout.dataset_dir || "",
       episode: selectedEpisode,
     });
@@ -458,7 +524,8 @@ function queueReplayCritic(frame) {
   const index = Math.max(0, Math.round(Number(frame) || 0));
   if (index === lastQueuedReplayFrame) return;
   lastQueuedReplayFrame = index;
-  apiPost("/api/rl/replay_critic", { frame: index });
+  rlCriticPendingFrame = index;
+  flushRlCriticQueue();
 }
 
 window.addEventListener("eva:replay-frame", (event) => {
