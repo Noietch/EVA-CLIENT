@@ -13,6 +13,7 @@ Every run — teleop capture from **COLLECT** or model rollout from **DEBUG** /
     ├── info.json
     ├── episodes.jsonl                         # per-episode length, task, quality flag
     ├── episodes_stats.jsonl
+    ├── state.json                            # robot + per-episode simulator rebuild state
     ├── tasks.jsonl
     └── stats.json                             # per-feature min/max/mean/std
 ```
@@ -26,3 +27,7 @@ issues recorded in `episodes.jsonl`. Eval trials save on STOP; milestone scores
 live in dataset metadata. Re-running the same eval prompt/trial overwrites that
 episode in place — teleop always appends. A sample dataset lives at
 `../examples/agilex_dataset/`.
+
+Simulator-backed recordings additionally put `robot_name`, `task_name`, layout
+`split`, `scene_index`, and `seed` in `meta/state.json`, so offline renderers can
+rebuild an episode from only the dataset path and episode index.

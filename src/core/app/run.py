@@ -82,9 +82,10 @@ from core.app.state import (
     set_status,
 )
 from core.config import ConfigDict
-from core.registry import FUNCTIONS, ROBOT_REGISTRY
+from core.registry import FUNCTIONS
 from core.utils.paths import resolve_output_dir
 from core.utils.ssh_forward import free_local_ports, stop_ssh_forward
+from robots import build_robot
 from transport.base import build_transport
 
 logger = logging.getLogger(__name__)
@@ -985,7 +986,7 @@ def run(
     control channel (forced on), and status is surfaced via structured logs + a
     periodic heartbeat — for low-power / simulator-driven evaluation.
     """
-    robot = ROBOT_REGISTRY.build(config.robot.type)
+    robot = build_robot(config)
     if config.robot.initial_qpos is not None:
         override = np.asarray(config.robot.initial_qpos, dtype=np.float32)
         if override.shape != robot.initial_qpos.shape:

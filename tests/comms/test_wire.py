@@ -122,6 +122,11 @@ def test_observation_roundtrip_preserves_images_state_and_timestamp():
         state=state,
         frame_id=42,
         success=True,
+        scene_index=3,
+        seed=7,
+        task_name="pick_and_place",
+        robot_name="piper",
+        split="train",
     )
 
     back = unpack_observation(pack_observation(obs))
@@ -129,6 +134,11 @@ def test_observation_roundtrip_preserves_images_state_and_timestamp():
     assert back.t == 123.456
     assert back.frame_id == 42
     assert back.success is True
+    assert back.scene_index == 3
+    assert back.seed == 7
+    assert back.task_name == "pick_and_place"
+    assert back.robot_name == "piper"
+    assert back.split == "train"
     assert set(back.images) == set(images)
     for key, img in images.items():
         np.testing.assert_array_equal(back.images[key], img)

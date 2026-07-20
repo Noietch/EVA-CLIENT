@@ -35,7 +35,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from core.config import resolve_video_key
-from core.recorder.lerobot_meta import build_info, history_row
+from core.recorder.collection_alignment import align_collection_samples
+from core.recorder.lerobot_meta import build_info, build_state, history_row
 from core.types import (
     CollectionRawBatch,
     CollectionRawSample,
@@ -43,7 +44,6 @@ from core.types import (
     RolloutInterventionSegment,
 )
 from core.utils.images import resize_direct
-from core.recorder.collection_alignment import align_collection_samples
 
 if TYPE_CHECKING:
     from core.config import ConfigDict
@@ -1470,6 +1470,8 @@ class EpisodeLogger:
             info["eval"] = self._eval_info(episodes)
         with self._meta_path("info.json").open("w") as f:
             json.dump(info, f, indent=2, ensure_ascii=False)
+        with self._meta_path("state.json").open("w") as f:
+            json.dump(build_state(self._robot.name, episodes), f, indent=2, ensure_ascii=False)
 
     def _eval_info(self, episodes: list[dict[str, Any]]) -> dict[str, Any]:
         """The info.json ``eval`` section: which keys carry scoring + how many are scored.

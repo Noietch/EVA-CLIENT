@@ -394,6 +394,13 @@ def test_collection_timestamp_is_ideal_grid_capture_time_keeps_raw(tmp_path):
 
     raw = [73529.6, 73529.7, 73529.8, 73529.9]
     logger.start_episode("t")
+    logger.set_episode_meta(
+        robot_name="piper",
+        task_name="pick_and_place",
+        split="train",
+        scene_index=2,
+        seed=3,
+    )
     logger.ingest_collection_snapshot(
         _collection_raw_snapshot(
             raw[-1],
@@ -408,6 +415,21 @@ def test_collection_timestamp_is_ideal_grid_capture_time_keeps_raw(tmp_path):
     expected = [i / 10.0 for i in range(len(raw))]
     np.testing.assert_allclose(timestamps, expected, atol=1e-4)
     np.testing.assert_allclose(table.column("capture_time").to_pylist(), raw)
+    state = json.loads((task_dir / "meta" / "state.json").read_text())
+    assert state == {
+        "format_version": 1,
+        "robot_type": "fake_arm",
+        "episodes": [
+            {
+                "episode_index": 0,
+                "robot_name": "piper",
+                "task_name": "pick_and_place",
+                "split": "train",
+                "scene_index": 2,
+                "seed": 3,
+            }
+        ],
+    }
 
 
 def test_collection_raw_batches_align_to_fixed_grid_before_save(tmp_path):
@@ -799,6 +821,96 @@ def test_collection_save_error_reports_missing_required_stream(tmp_path):
 
     with pytest.raises(ValueError, match="missing_vector_stream.*action_qpos:arm"):
         logger.end_episode()
+
+
+def test_collection_save_worker_derives_missing_eef_from_aligned_qpos(tmp_path):
+    class _FkSolver:
+        def fk_chunk(self, qpos_chunk):
+            qpos = np.asarray(qpos_chunk, dtype=np.float32)
+            eef = np.zeros((len(qpos), 16), dtype=np.float32)
+            for arm_index in range(2):
+                qpos_offset = arm_index * 2
+                eef_offset = arm_index * 8
+                eef[:, eef_offset] = qpos[:, qpos_offset]
+                eef[:, eef_offset + 3] = 1.0
+                eef[:, eef_offset + 7] = qpos[:, qpos_offset + 1]
+            return eef
+
+        def close(self):
+            return None
+
+    robot = Robot(
+        name="fake_dual_arm",
+        actuator_groups=(
+            ActuatorGroup("left_arm", 2, ("joint", "gripper"), gripper_index=1),
+            ActuatorGroup("right_arm", 2, ("joint", "gripper"), gripper_index=1),
+        ),
+        initial_qpos=np.zeros(4, dtype=np.float32),
+        observation_schema=ObservationSchema(
+            cameras=(CameraSpec("front", "cam_high"),),
+            state_composition=("left_arm", "right_arm"),
+        ),
+    )
+    robot.build_kinematics = lambda **_kwargs: _FkSolver()
+    logger = EpisodeLogger(
+        tmp_path,
+        robot,
+        fps=10,
+        dataset_keys=ConfigDict(video_keys={}),
+        collection=ConfigDict(
+            schema=ConfigDict(
+                robot_type="fake_dual_arm",
+                min_episode_frames=1,
+                arms={"left_arm": "left", "right_arm": "right"},
+                cameras={"cam_high": "observation.images.cam_high"},
+                columns={
+                    "qpos": "observation.qpos",
+                    "eef": "observation.eef",
+                    "action_qpos": "action.qpos",
+                    "action_eef": "action.eef",
+                },
+            ),
+        ),
+    )
+    logger._save_video = False
+    timestamps = (1.0, 1.1, 1.2)
+    states = np.asarray(
+        [[0.0, 0.1, 0.2, 0.3], [0.4, 0.5, 0.6, 0.7], [0.8, 0.9, 1.0, 1.1]],
+        dtype=np.float32,
+    )
+    actions = states + 0.05
+    batch = CollectionRawBatch(
+        images={
+            "cam_high": [
+                CollectionRawSample(timestamp, np.zeros((4, 4, 3), dtype=np.uint8))
+                for timestamp in timestamps
+            ]
+        },
+        vectors={
+            "state_qpos": [
+                CollectionRawSample(timestamp, state)
+                for timestamp, state in zip(timestamps, states, strict=True)
+            ],
+            "action_qpos": [
+                CollectionRawSample(timestamp, action)
+                for timestamp, action in zip(timestamps, actions, strict=True)
+            ],
+        },
+    )
+
+    logger.start_episode("t")
+    logger.ingest_collection_snapshot(
+        RawCollectionSnapshot(timestamp=timestamps[-1], decode_raw=lambda: batch)
+    )
+    assert logger.end_episode()
+
+    table = pq.read_table(_collection_task_dir(tmp_path) / "data/chunk-000/episode_000000.parquet")
+    state_eef = np.asarray(table.column("observation.eef").to_pylist())
+    action_eef = np.asarray(table.column("action.eef").to_pylist())
+    expected_state_eef = _FkSolver().fk_chunk(states)
+    expected_action_eef = _FkSolver().fk_chunk(actions)
+    np.testing.assert_allclose(state_eef, expected_state_eef)
+    np.testing.assert_allclose(action_eef, expected_action_eef)
 
 
 def test_collection_flags_frame_count_mismatch_when_camera_frame_dropped(tmp_path):

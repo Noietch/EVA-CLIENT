@@ -18,6 +18,7 @@ in via _base_.
 robot = dict(
     type="agilex_piper",
     initial_qpos=None,  # None -> use the robot zoo's bundled initial_qpos
+    extra_cameras={},
     eef_reference_frame="base_link",
     gripper_threshold=0.5,
     gripper_open=1.0,

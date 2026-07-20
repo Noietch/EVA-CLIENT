@@ -32,7 +32,7 @@ from core.recorder.episode import (
     _StatAccumulator,
     _to_rgb_uint8,
 )
-from core.recorder.lerobot_meta import build_info
+from core.recorder.lerobot_meta import build_info, build_state
 from core.types import CollectionRawBatch, Observation
 from core.utils.images import resize_direct
 
@@ -244,20 +244,68 @@ class CollectionEpisodeWriter:
 
     def _align_raw_records(self) -> None:
         self._records = []
-        fields = tuple(_COLUMN_TO_FIELD[column] for column in self._schema.columns)
+        configured_fields = tuple(_COLUMN_TO_FIELD[column] for column in self._schema.columns)
+        fields = []
+        derived_eef = []
+        for field in configured_fields:
+            if field in _EEF_FIELDS and not self._has_raw_vector_field(field):
+                derived_eef.append(field)
+                dependency = "state_qpos" if field == "state_eef" else "action_qpos"
+                if dependency not in fields:
+                    fields.append(dependency)
+            elif field not in fields:
+                fields.append(field)
         frames, report = align_collection_samples(
             self._raw_batch,
             robot=self._logger._robot,
             camera_keys=tuple(self._schema.cameras.keys()),
-            vector_fields=fields,
+            vector_fields=tuple(fields),
             fps=float(self._logger._fps),
             image_skew_sec=self._image_skew_tolerance_sec(),
         )
         self._alignment_report = report
         for issue in report.issues:
             self._add_issue(issue.code, issue.detail)
+        self._fill_fk_eef(frames, tuple(derived_eef))
         for frame in frames:
             self._append_aligned_frame(frame)
+
+    def _has_raw_vector_field(self, field: str) -> bool:
+        if self._raw_batch.vectors.get(field):
+            return True
+        groups = (
+            self._logger._robot.arm_groups
+            if field in _EEF_FIELDS
+            else self._logger._robot.actuator_groups
+        )
+        return all(self._raw_batch.vectors.get(f"{field}:{group.name}") for group in groups)
+
+    def _fill_fk_eef(self, frames: list[Observation], fields: tuple[str, ...]) -> None:
+        if not frames or not fields:
+            return
+        robot = self._logger._robot
+        solver = robot.build_kinematics(
+            initial_qpos_groups=robot.initial_qpos_by_group(),
+            dt=1.0 / float(self._logger._fps),
+        )
+        if solver is None:
+            raise ValueError(
+                f"collection requires {fields} but robot {robot.name!r} has no FK solver"
+            )
+        try:
+            if "state_eef" in fields:
+                state_eef = solver.fk_chunk(np.stack([frame.state_qpos for frame in frames]))
+                for frame, value in zip(frames, state_eef, strict=True):
+                    frame.state_eef = value
+            if "action_eef" in fields:
+                if any(frame.action_qpos is None for frame in frames):
+                    raise ValueError("cannot derive action_eef without aligned action_qpos")
+                action_eef = solver.fk_chunk(np.stack([frame.action_qpos for frame in frames]))
+                for frame, value in zip(frames, action_eef, strict=True):
+                    frame.action_eef = value
+        finally:
+            solver.close()
+        logger.info("Derived %s from aligned QPos with FK", ", ".join(fields))
 
     def expected_dim(self, field: str) -> int:
         """Expected vector length for a collection field (joints / eef).
@@ -598,8 +646,9 @@ class CollectionEpisodeWriter:
         # measured (jittery) average — LeRobot validates timestamp[i] == i/fps.
         fps = float(self._logger._fps)
         total_tasks = len(self._logger._load_existing_tasks(dataset_dir))
+        robot_type = self._schema.robot_type or self._logger._robot.name
         info = build_info(
-            robot_type=self._schema.robot_type or self._logger._robot.name,
+            robot_type=robot_type,
             total_episodes=total_episodes,
             total_frames=total_frames,
             total_tasks=total_tasks,
@@ -609,6 +658,8 @@ class CollectionEpisodeWriter:
         )
         with self._logger._meta_path("info.json", dataset_dir).open("w") as f:
             json.dump(info, f, indent=2, ensure_ascii=False)
+        with self._logger._meta_path("state.json", dataset_dir).open("w") as f:
+            json.dump(build_state(robot_type, episodes), f, indent=2, ensure_ascii=False)
 
     def _build_features(self, fps: float) -> dict[str, Any]:
         features: dict[str, Any] = {}

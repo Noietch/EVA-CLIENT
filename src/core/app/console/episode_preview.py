@@ -19,7 +19,7 @@ import numpy as np
 import robots  # noqa: F401  (import side effect registers robots in ROBOT_REGISTRY)
 from core.config import ConfigDict
 from core.recorder.episode import EpisodeLogger
-from core.registry import ROBOT_REGISTRY
+from robots import build_robot
 
 if TYPE_CHECKING:
     from robots.utils import UrdfScene
@@ -80,7 +80,7 @@ class EpisodePreview:
     def __init__(self, config: ConfigDict, results_dir: Path) -> None:
         self._config = config
         self._dataset_root = results_dir / "episodes"
-        self._robot = ROBOT_REGISTRY.build(config.robot.type)
+        self._robot = build_robot(config)
         self._reader: EpisodeLogger | None = None
         self._scene: UrdfScene | None = None
         self._scene_tried = False

@@ -20,3 +20,4 @@ example/r5_orbbec/thirdparty/
 *.so
 logs/
 Log/
+temp/

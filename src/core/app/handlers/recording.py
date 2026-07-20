@@ -652,8 +652,8 @@ def collect_stop_teleop(config: ConfigDict, runtime: RuntimeState, session: Sess
 def _stamp_scene_meta(runtime: RuntimeState) -> None:
     """Attach simulator scene metadata to the current episode for offline scene rebuild.
 
-    Only simulator nodes publish scene_index/seed/task_name; real-robot transports omit
-    them, so this is a no-op when the transport exposes no scene status.
+    Only simulator nodes publish reconstruction metadata; real-robot transports omit
+    it, so this is a no-op when the transport exposes no scene status.
     """
     get_status = getattr(runtime.transport, "get_task_status", None)
     if get_status is None:
@@ -661,7 +661,7 @@ def _stamp_scene_meta(runtime: RuntimeState) -> None:
     status = get_status()
     scene_fields = {
         key: status[key]
-        for key in ("scene_index", "seed", "task_name")
+        for key in ("scene_index", "seed", "task_name", "robot_name", "split")
         if status.get(key) is not None
     }
     if scene_fields:

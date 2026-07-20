@@ -8,6 +8,9 @@ subpackage below triggers its registration.
 
 from __future__ import annotations
 
+from core.config import ConfigDict
+from core.registry import ROBOT_REGISTRY
+from robots.base import CameraSpec, ObservationSchema, Robot
 from robots.zoo import (
     agibot_g2,  # noqa: F401
     agilex_piper,  # noqa: F401
@@ -17,3 +20,19 @@ from robots.zoo import (
     r1_lite,  # noqa: F401
     ur5e,  # noqa: F401
 )
+
+
+def build_robot(config: ConfigDict) -> Robot:
+    """Build the configured robot and append deployment-specific cameras."""
+    robot = ROBOT_REGISTRY.build(config.robot.type)
+    extra_cameras = config.robot.extra_cameras
+    if extra_cameras:
+        robot.observation_schema = ObservationSchema(
+            cameras=robot.observation_schema.cameras
+            + tuple(CameraSpec(name, key) for name, key in extra_cameras.items()),
+            state_composition=robot.observation_schema.state_composition,
+        )
+    return robot
+
+
+__all__ = ["build_robot"]

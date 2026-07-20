@@ -14,6 +14,7 @@ _CODEBASE_VERSION = "v2.1"
 _CHUNKS_SIZE = 1000
 _DATA_PATH_TPL = "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet"
 _VIDEO_PATH_TPL = "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4"
+_STATE_FIELDS = ("robot_name", "task_name", "split", "scene_index", "seed")
 
 
 def build_info(
@@ -68,4 +69,26 @@ def history_row(row: dict[str, Any], fallback_index: int) -> dict[str, Any]:
         "qc_note": row.get("qc_note", ""),
         "quality_issues": [] if quality_issues is None else quality_issues,
         "error": "",
+    }
+
+
+def build_state(robot_type: str, episodes: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build simulator reconstruction metadata alongside a LeRobot v2.1 dataset.
+
+    Args:
+        robot_type: EVAClient robot identifier used when an episode has no simulator name.
+        episodes: Rows from ``meta/episodes.jsonl``.
+
+    Returns:
+        Dataset-level robot identity and per-episode reconstruction fields.
+    """
+    episode_states = []
+    for row in episodes:
+        state = {"episode_index": int(row["episode_index"])}
+        state.update({key: row[key] for key in _STATE_FIELDS if row.get(key) is not None})
+        episode_states.append(state)
+    return {
+        "format_version": 1,
+        "robot_type": robot_type,
+        "episodes": episode_states,
     }

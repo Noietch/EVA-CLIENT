@@ -63,6 +63,8 @@ class WireObservation:
         scene_index: optional simulator scene index for offline scene rebuild.
         seed: optional simulator placement-jitter seed for offline scene rebuild.
         task_name: optional simulator task behavior name for offline scene rebuild.
+        robot_name: optional simulator robot registry name for offline scene rebuild.
+        split: optional simulator layout split for offline scene rebuild.
     """
 
     t: float
@@ -76,6 +78,8 @@ class WireObservation:
     scene_index: int | None = None
     seed: int | None = None
     task_name: str | None = None
+    robot_name: str | None = None
+    split: str | None = None
 
 
 @dataclasses.dataclass
@@ -126,6 +130,10 @@ def pack_observation(obs: WireObservation) -> bytes:
         payload["seed"] = int(obs.seed)
     if obs.task_name is not None:
         payload["task_name"] = str(obs.task_name)
+    if obs.robot_name is not None:
+        payload["robot_name"] = str(obs.robot_name)
+    if obs.split is not None:
+        payload["split"] = str(obs.split)
     return _PACKER.pack(payload)
 
 
@@ -157,6 +165,8 @@ def unpack_observation(payload: bytes) -> WireObservation:
         scene_index=None if "scene_index" not in raw else int(raw["scene_index"]),
         seed=None if "seed" not in raw else int(raw["seed"]),
         task_name=None if "task_name" not in raw else str(raw["task_name"]),
+        robot_name=None if "robot_name" not in raw else str(raw["robot_name"]),
+        split=None if "split" not in raw else str(raw["split"]),
     )
 
 
@@ -376,6 +386,8 @@ class _ObservationReader:
             "scene_index": None if wire_obs is None else wire_obs.scene_index,
             "seed": None if wire_obs is None else wire_obs.seed,
             "task_name": None if wire_obs is None else wire_obs.task_name,
+            "robot_name": None if wire_obs is None else wire_obs.robot_name,
+            "split": None if wire_obs is None else wire_obs.split,
         }
 
     def get_camera_frame(self, key: str) -> np.ndarray | None:
