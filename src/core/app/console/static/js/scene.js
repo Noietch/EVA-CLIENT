@@ -231,13 +231,21 @@ const Scene3D = (() => {
     }
   }
 
-  function setMeshTarget(mesh) {
+  function setMeshTarget(mesh, immediate = false) {
     const u = ensureMeshTarget(mesh);
     _m4.decompose(u.tPos, u.tQuat, u.tScale);
-    seedMeshTarget(mesh, u);
+    if (immediate) {
+      mesh.position.copy(u.tPos);
+      mesh.quaternion.copy(u.tQuat);
+      mesh.scale.copy(u.tScale);
+      mesh.matrix.compose(mesh.position, mesh.quaternion, mesh.scale);
+      mesh.matrixWorldNeedsUpdate = true;
+    } else {
+      seedMeshTarget(mesh, u);
+    }
   }
 
-  function setMeshInterpolatedTarget(mesh, floats, o0, o1, a) {
+  function setMeshInterpolatedTarget(mesh, floats, o0, o1, a, immediate = false) {
     const u = ensureMeshTarget(mesh);
     matrixFromFloats(_m4, floats, o0);
     matrixFromFloats(_m4Next, floats, o1);
@@ -246,7 +254,15 @@ const Scene3D = (() => {
     u.tPos.copy(_p0).lerp(_p1, a);
     u.tQuat.copy(_q0).slerp(_q1, a);
     u.tScale.copy(_s0).lerp(_s1, a);
-    seedMeshTarget(mesh, u);
+    if (immediate) {
+      mesh.position.copy(u.tPos);
+      mesh.quaternion.copy(u.tQuat);
+      mesh.scale.copy(u.tScale);
+      mesh.matrix.compose(mesh.position, mesh.quaternion, mesh.scale);
+      mesh.matrixWorldNeedsUpdate = true;
+    } else {
+      seedMeshTarget(mesh, u);
+    }
   }
 
   function applyLayer(layer, arms) {
@@ -265,7 +281,7 @@ const Scene3D = (() => {
     }
   }
 
-  function applyTransformFrame(parts, geoms, floats, nGeoms, frameIndex) {
+  function applyTransformFrame(parts, geoms, floats, nGeoms, frameIndex, immediate = false) {
     if (!ready) return;
     if (!nGeoms) return;
     const nFrames = Math.floor(floats.length / (nGeoms * 16));
@@ -281,10 +297,10 @@ const Scene3D = (() => {
       const mesh = armMeshes[geoms[g]]; if (!mesh) continue;
       const o0 = base0 + g * 16;
       if (a > 1e-6 && frame1 !== frame0) {
-        setMeshInterpolatedTarget(mesh, floats, o0, base1 + g * 16, a);
+        setMeshInterpolatedTarget(mesh, floats, o0, base1 + g * 16, a, immediate);
       } else {
         matrixFromFloats(_m4, floats, o0);
-        setMeshTarget(mesh);
+        setMeshTarget(mesh, immediate);
       }
     }
     if (!_framed) { _framed = true; requestAnimationFrame(fitCameraToArm); }
@@ -372,7 +388,13 @@ const ReplayScene = (() => {
   let renderer, scene, camera, controls, canvas;
   const meshes = {};
   let armNames = [], ready = false, loading = false;
-  let xfKey = "", xfParts = null, xfGeoms = null, xfFloats = null, xfNGeoms = 0, xfLoading = null;
+  const INITIAL_CHUNK_FRAMES = 30;
+  const TRANSFORM_CHUNK_FRAMES = 60;
+  let xfKey = "";
+  let xfGeneration = 0;
+  let xfTotal = 0;
+  let xfChunks = new Map();
+  let xfLoads = new Map();
   const _m4Next = new THREE.Matrix4();
   const _rp0 = new THREE.Vector3(), _rp1 = new THREE.Vector3();
   const _rq0 = new THREE.Quaternion(), _rq1 = new THREE.Quaternion();
@@ -479,26 +501,70 @@ const ReplayScene = (() => {
     return String(model || "") + "|" + String(episodeIndex);
   }
 
-  function parseTransformBlob(buf) {
+  function transformRange(frame) {
+    const index = Math.max(0, Math.floor(Number(frame) || 0));
+    if (index < INITIAL_CHUNK_FRAMES) return [0, INITIAL_CHUNK_FRAMES];
+    const start = INITIAL_CHUNK_FRAMES
+      + Math.floor((index - INITIAL_CHUNK_FRAMES) / TRANSFORM_CHUNK_FRAMES)
+        * TRANSFORM_CHUNK_FRAMES;
+    return [start, TRANSFORM_CHUNK_FRAMES];
+  }
+
+  function parseTransformBlob(buf, start) {
     const view = new DataView(buf);
     const magic = Array.from({ length: 8 }, (_, i) => String.fromCharCode(view.getUint8(i))).join("");
-    if (magic !== "EVAXFRM1") return false;
+    if (magic !== "EVAXFRM1") throw new Error("bad transform magic");
     const nFrames = view.getUint32(8, true);
     const nGeoms = view.getUint32(12, true);
     const hdrLen = view.getUint32(16, true);
     const keys = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 20, hdrLen)));
     const floats = new Float32Array(buf.slice(20 + hdrLen));
-    if (floats.length !== nFrames * nGeoms * 16) return false;
-    xfParts = [];
-    xfGeoms = [];
+    if (floats.length !== nFrames * nGeoms * 16) throw new Error("bad transform length");
+    const parts = [];
+    const geoms = [];
     keys.forEach((key) => {
       const slash = key.indexOf("/");
-      xfParts.push(key.slice(0, slash));
-      xfGeoms.push(key.slice(slash + 1));
+      parts.push(key.slice(0, slash));
+      geoms.push(key.slice(slash + 1));
     });
-    xfFloats = floats;
-    xfNGeoms = nGeoms;
-    return true;
+    return { start, nFrames, nGeoms, parts, geoms, floats };
+  }
+
+  function resetTransformChunks(key) {
+    if (xfKey === key) return;
+    xfKey = key;
+    xfGeneration += 1;
+    xfTotal = 0;
+    xfChunks = new Map();
+    xfLoads = new Map();
+    window.__evaResultUrdfAppliedFrame = null;
+  }
+
+  async function loadChunk(key, start, count) {
+    const rangeKey = `${key}:${start}:${count}`;
+    if (xfChunks.has(rangeKey)) return true;
+    const pending = xfLoads.get(rangeKey);
+    if (pending) return pending;
+    const generation = xfGeneration;
+    const mq = key.split("|", 1)[0] ? "&model=" + encodeURIComponent(key.split("|", 1)[0]) : "";
+    const promise = fetch(
+      "/api/episode_transforms?episode_index="
+      + encodeURIComponent(key.split("|").pop()) + mq
+      + `&start=${start}&count=${count}`,
+    ).then(async (resp) => {
+      if (!resp.ok) throw new Error(`transform HTTP ${resp.status}`);
+      const actualStart = Number(resp.headers.get("X-EVA-Transform-Start")) || start;
+      const total = Number(resp.headers.get("X-EVA-Transform-Total")) || 0;
+      const chunk = parseTransformBlob(await resp.arrayBuffer(), actualStart);
+      if (generation !== xfGeneration || key !== xfKey) return false;
+      xfTotal = total;
+      xfChunks.set(rangeKey, chunk);
+      return true;
+    }).catch(() => false).finally(() => {
+      xfLoads.delete(rangeKey);
+    });
+    xfLoads.set(rangeKey, promise);
+    return promise;
   }
 
   async function loadEpisode(episodeIndex, model) {
@@ -507,42 +573,30 @@ const ReplayScene = (() => {
     if (empty) empty.style.display = ok ? "none" : "flex";
     if (!ok) return false;
     const key = transformKey(episodeIndex, model);
-    if (xfKey === key && xfFloats) return true;
-    if (xfLoading && xfLoading.key === key) return xfLoading.promise;
-    const mq = model ? "&model=" + encodeURIComponent(model) : "";
-    const promise = fetch("/api/episode_transforms?episode_index=" + episodeIndex + mq)
-      .then(async (resp) => {
-        const ctype = resp.headers.get("Content-Type") || "";
-        if (!resp.ok || ctype.indexOf("octet-stream") < 0) return false;
-        if (!parseTransformBlob(await resp.arrayBuffer())) return false;
-        xfKey = key;
-        return true;
-      })
-      .catch(() => false)
-      .finally(() => {
-        if (xfLoading && xfLoading.key === key) xfLoading = null;
-      });
-    xfLoading = { key, promise };
-    return promise;
+    resetTransformChunks(key);
+    return loadChunk(key, 0, INITIAL_CHUNK_FRAMES);
   }
 
   function applyTransformFrame(frameIndex) {
-    if (!ready || !xfFloats || !xfParts || !xfGeoms || !xfNGeoms) return false;
-    const nFrames = Math.floor(xfFloats.length / (xfNGeoms * 16));
-    if (!nFrames) return false;
-    const frame = Math.max(0, Math.min(Number(frameIndex) || 0, nFrames - 1));
-    const frame0 = Math.floor(frame);
-    const frame1 = Math.min(frame0 + 1, nFrames - 1);
-    const a = frame - frame0;
-    const base0 = frame0 * xfNGeoms * 16;
-    const base1 = frame1 * xfNGeoms * 16;
-    for (let g = 0; g < xfNGeoms; g++) {
-      const armMeshes = meshes[xfParts[g]]; if (!armMeshes) continue;
-      const mesh = armMeshes[xfGeoms[g]]; if (!mesh) continue;
+    if (!ready) return false;
+    const frame = Math.max(0, Number(frameIndex) || 0);
+    const chunk = [...xfChunks.values()].find((candidate) => (
+      frame >= candidate.start && frame < candidate.start + candidate.nFrames
+    ));
+    if (!chunk) return false;
+    const frameLocal = frame - chunk.start;
+    const frame0 = Math.floor(frameLocal);
+    const frame1 = Math.min(frame0 + 1, chunk.nFrames - 1);
+    const a = frameLocal - frame0;
+    const base0 = frame0 * chunk.nGeoms * 16;
+    const base1 = frame1 * chunk.nGeoms * 16;
+    for (let g = 0; g < chunk.nGeoms; g++) {
+      const armMeshes = meshes[chunk.parts[g]]; if (!armMeshes) continue;
+      const mesh = armMeshes[chunk.geoms[g]]; if (!mesh) continue;
       const o0 = base0 + g * 16;
       if (a > 1e-6 && frame1 !== frame0) {
-        matrixFromFloats(_m4, xfFloats, o0);
-        matrixFromFloats(_m4Next, xfFloats, base1 + g * 16);
+        matrixFromFloats(_m4, chunk.floats, o0);
+        matrixFromFloats(_m4Next, chunk.floats, base1 + g * 16);
         _m4.decompose(_rp0, _rq0, _rs0);
         _m4Next.decompose(_rp1, _rq1, _rs1);
         _rp0.lerp(_rp1, a);
@@ -550,7 +604,7 @@ const ReplayScene = (() => {
         _rs0.lerp(_rs1, a);
         mesh.matrix.compose(_rp0, _rq0, _rs0);
       } else {
-        matrixFromFloats(_m4, xfFloats, o0);
+        matrixFromFloats(_m4, chunk.floats, o0);
         mesh.matrix.copy(_m4);
       }
       mesh.matrixWorldNeedsUpdate = true;
@@ -560,20 +614,21 @@ const ReplayScene = (() => {
 
   let _seq = 0;
   async function setFrame(episodeIndex, frame, model) {
-    if (xfKey === transformKey(episodeIndex, model) && applyTransformFrame(frame)) return;
-    if (await loadEpisode(episodeIndex, model)) {
-      applyTransformFrame(frame);
+    const key = transformKey(episodeIndex, model);
+    if (xfKey !== key) await loadEpisode(episodeIndex, model);
+    const generation = xfGeneration;
+    if (applyTransformFrame(frame)) {
+      window.__evaResultUrdfAppliedFrame = Number(frame);
+      const [start, count] = transformRange(frame);
+      const nextStart = start === 0 ? INITIAL_CHUNK_FRAMES : start + count;
+      if (nextStart < xfTotal) loadChunk(key, nextStart, TRANSFORM_CHUNK_FRAMES);
       return;
     }
-    const ok = await ensureLoaded();
-    const empty = document.getElementById("tp-urdf-empty");
-    if (empty) empty.style.display = ok ? "none" : "flex";
-    if (!ok) return;
-    const seq = ++_seq;
-    const mq = model ? "&model=" + encodeURIComponent(model) : "";
-    const r = await (await fetch("/api/replay_frame?episode_index=" + episodeIndex + "&frame=" + frame + mq)).json();
-    if (seq !== _seq) return;
-    if (r.available) apply(r.arms);
+    const [start, count] = transformRange(frame);
+    await loadChunk(key, start, count);
+    if (generation === xfGeneration && xfKey === key && applyTransformFrame(frame)) {
+      window.__evaResultUrdfAppliedFrame = Number(frame);
+    }
   }
   function resizeSoon() { if (ready) requestAnimationFrame(resize); }
   return { ensureLoaded, loadEpisode, setFrame, applyTransformFrame, resizeSoon };

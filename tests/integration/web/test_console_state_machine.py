@@ -788,8 +788,11 @@ def test_review_transforms_are_addressed_by_episode_without_runtime_mount(tmp_pa
     monkeypatch.setattr(handlers_utils, "_REPO_ROOT", repo_root)
 
     class _Scene:
+        def __init__(self):
+            self.calls = []
+
         def all_transforms_blob(self, qpos: np.ndarray) -> bytes:
-            assert qpos.shape[0] == 2
+            self.calls.append(qpos.copy())
             return b"EVAXFRM1" + qpos.astype(np.float32).tobytes()
 
     with serve_console(console_config(robot_type="ur5e")) as h:
@@ -833,7 +836,8 @@ def test_review_transforms_are_addressed_by_episode_without_runtime_mount(tmp_pa
         )
         sentinel_qpos = np.ones((1, dim), dtype=np.float32)
         h.runtime.collection_replay_qpos = sentinel_qpos
-        console_server.ConsoleRequestHandler.ctx.scene = _Scene()
+        scene = _Scene()
+        console_server.ConsoleRequestHandler.ctx.scene = scene
 
         query = urlencode({"dataset_dir": "work_dirs/review", "episode": 0})
         resp = h.get(f"/api/review_transforms?{query}")
@@ -843,6 +847,16 @@ def test_review_transforms_are_addressed_by_episode_without_runtime_mount(tmp_pa
         assert resp.raw[:8] == b"EVAXFRM1"
         assert h.runtime.collection_replay_qpos is sentinel_qpos
         assert h.runtime.replay_source is None
+
+        chunk_query = urlencode(
+            {"dataset_dir": "work_dirs/review", "episode": 0, "start": 1, "count": 1}
+        )
+        chunk = h.get(f"/api/review_transforms?{chunk_query}")
+        assert chunk.status == 200
+        assert chunk.headers["x-eva-transform-start"] == "1"
+        assert chunk.headers["x-eva-transform-count"] == "1"
+        assert chunk.headers["x-eva-transform-total"] == "2"
+        assert scene.calls[-1].shape[0] == 1
 
 
 def test_rollout_review_is_stateless_local_playback(tmp_path, monkeypatch):
