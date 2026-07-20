@@ -197,6 +197,9 @@ class CollectionEpisodeWriter:
 
     def _merge_raw_batch(self, batch: CollectionRawBatch) -> None:
         with self._state_lock:
+            self._raw_batch.image_streams_expected = (
+                self._raw_batch.image_streams_expected and batch.image_streams_expected
+            )
             if batch.start_time is not None:
                 self._raw_batch.start_time = (
                     batch.start_time
@@ -244,6 +247,12 @@ class CollectionEpisodeWriter:
 
     def _align_raw_records(self) -> None:
         self._records = []
+        state_only = self._is_state_only_episode()
+        if not self._raw_batch.image_streams_expected and not state_only:
+            self._add_issue(
+                "inconsistent_image_mode",
+                "episode contains both explicit state-only observations and camera images",
+            )
         configured_fields = tuple(_COLUMN_TO_FIELD[column] for column in self._schema.columns)
         fields = []
         derived_eef = []
@@ -258,7 +267,7 @@ class CollectionEpisodeWriter:
         frames, report = align_collection_samples(
             self._raw_batch,
             robot=self._logger._robot,
-            camera_keys=tuple(self._schema.cameras.keys()),
+            camera_keys=() if state_only else tuple(self._schema.cameras.keys()),
             vector_fields=tuple(fields),
             fps=float(self._logger._fps),
             image_skew_sec=self._image_skew_tolerance_sec(),
@@ -411,7 +420,8 @@ class CollectionEpisodeWriter:
         video_prepared = time.perf_counter()
         n_frames = len(self._records)
 
-        if self._logger._save_video:
+        state_only = self._is_state_only_episode()
+        if self._logger._save_video and not state_only:
             for video_key in self._schema.cameras.values():
                 got = len(videos.get(video_key, [])) if videos else 0
                 if got != n_frames:
@@ -453,6 +463,9 @@ class CollectionEpisodeWriter:
             "quality": "red" if self._quality_issues else "green",
             "quality_issues": [dataclasses.asdict(issue) for issue in self._quality_issues],
         }
+        if state_only:
+            row["state_only"] = True
+        row["video_keys"] = sorted(videos) if videos else []
         if collection_fps is not None:
             row["collection_fps"] = collection_fps
         if self._alignment_report is not None:
@@ -568,7 +581,7 @@ class CollectionEpisodeWriter:
         return int(h), int(w)
 
     def _snapshot_videos(self) -> dict[str, list[np.ndarray]] | None:
-        if not self._logger._save_video:
+        if not self._logger._save_video or self._is_state_only_episode():
             return None
         size = self._save_size()
         videos: dict[str, list[np.ndarray]] = {}
@@ -590,6 +603,8 @@ class CollectionEpisodeWriter:
         return videos or None
 
     def _check_images(self, record: Observation, frame_index: int) -> None:
+        if self._is_state_only_episode():
+            return
         size = self._save_size()
         for camera_key, video_key in self._schema.cameras.items():
             image = record.images.get(camera_key)
@@ -610,6 +625,11 @@ class CollectionEpisodeWriter:
                 self._image_shapes[video_key] = (
                     size if size is not None else (arr.shape[0], arr.shape[1])
                 )
+
+    def _is_state_only_episode(self) -> bool:
+        """True only when state-only was explicit and no image sample ever arrived."""
+        has_images = any(samples for samples in self._raw_batch.images.values())
+        return not self._raw_batch.image_streams_expected and not has_images
 
     def _clean_vector(self, field: str, value: np.ndarray | None, frame_index: int) -> np.ndarray:
         dim = self.expected_dim(field)
@@ -641,7 +661,11 @@ class CollectionEpisodeWriter:
         episodes = _read_jsonl(self._logger._meta_path("episodes.jsonl", dataset_dir))
         total_episodes = len(episodes)
         total_frames = sum(int(e.get("length", 0)) for e in episodes)
-        total_videos = total_episodes * len(self._schema.cameras) if self._logger._save_video else 0
+        episode_video_keys = [
+            self._episode_video_keys(dataset_dir, row) for row in episodes
+        ]
+        video_keys = self._common_video_keys(episode_video_keys)
+        total_videos = total_episodes * len(video_keys)
         # fps must equal the integer target used to synthesize timestamps, not the
         # measured (jittery) average — LeRobot validates timestamp[i] == i/fps.
         fps = float(self._logger._fps)
@@ -654,17 +678,57 @@ class CollectionEpisodeWriter:
             total_tasks=total_tasks,
             total_videos=total_videos,
             fps=fps,
-            features=self._build_features(fps),
+            features=self._build_features(fps, video_keys),
         )
         with self._logger._meta_path("info.json", dataset_dir).open("w") as f:
             json.dump(info, f, indent=2, ensure_ascii=False)
         with self._logger._meta_path("state.json", dataset_dir).open("w") as f:
             json.dump(build_state(robot_type, episodes), f, indent=2, ensure_ascii=False)
 
-    def _build_features(self, fps: float) -> dict[str, Any]:
+    def _episode_video_keys(
+        self, dataset_dir: Path, row: dict[str, Any]
+    ) -> tuple[str, ...]:
+        """Return recorded keys, probing disk for rows written by older clients."""
+        declared = row.get("video_keys")
+        if declared is not None:
+            return tuple(str(key) for key in declared)
+        episode_index = int(row.get("episode_index", -1))
+        if episode_index < 0:
+            return ()
+        return tuple(
+            video_key
+            for video_key in self._schema.cameras.values()
+            if (
+                dataset_dir
+                / "videos"
+                / "chunk-000"
+                / video_key
+                / f"episode_{episode_index:06d}.mp4"
+            ).exists()
+        )
+
+    def _common_video_keys(self, episode_keys: list[tuple[str, ...]]) -> set[str]:
+        """Dataset-level video schema: only keys present in every episode."""
+        if not episode_keys:
+            return set()
+        common = set(episode_keys[0])
+        for keys in episode_keys[1:]:
+            common.intersection_update(keys)
+        return common.intersection(self._schema.cameras.values())
+
+    def _build_features(
+        self, fps: float, video_keys: Iterable[str] | None = None
+    ) -> dict[str, Any]:
         features: dict[str, Any] = {}
+        available_video_keys = (
+            set(self._schema.cameras.values())
+            if video_keys is None
+            else set(video_keys)
+        )
         if self._logger._save_video:
             for video_key in self._schema.cameras.values():
+                if video_key not in available_video_keys:
+                    continue
                 h, w = self._image_shapes.get(video_key, (480, 640))
                 features[video_key] = {
                     "dtype": "video",

@@ -73,7 +73,7 @@ def test_transport_registry_only_exposes_supported_backends():
 def test_load_deploy_config_resolves_spaces_and_defaults():
     cfg = load_config(_CONFIGS_DIR / "01_deploy" / "dual_agilex_piper" / "openpi_qpos.py")
     assert cfg.robot.type == "agilex_piper"
-    assert cfg.policy.type == "openpi_rtc"
+    assert cfg.policy.type == "openpi"
     assert cfg.policy.backend_options["latency_k"] == 4
     assert cfg.inference_cfg.publish_rate > 0
     assert cfg.manual_cfg.publish_rate == 15

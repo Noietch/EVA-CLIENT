@@ -78,6 +78,10 @@ class CollectionRawBatch:
     vectors: dict[str, list[CollectionRawSample]] = dataclasses.field(default_factory=dict)
     start_time: float | None = None
     end_time: float | None = None
+    # False when a producer explicitly emits a state-only sample (for example EVA
+    # Sim ``--skip-render``). Episode writers only accept state-only mode when no
+    # image sample arrived at all; mixed state-only/image episodes are QC failures.
+    image_streams_expected: bool = True
 
 
 @dataclasses.dataclass

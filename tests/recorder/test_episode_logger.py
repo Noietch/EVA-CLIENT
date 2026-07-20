@@ -417,7 +417,7 @@ def test_collection_timestamp_is_ideal_grid_capture_time_keeps_raw(tmp_path):
     np.testing.assert_allclose(table.column("capture_time").to_pylist(), raw)
     state = json.loads((task_dir / "meta" / "state.json").read_text())
     assert state == {
-        "format_version": 1,
+        "format_version": 2,
         "robot_type": "fake_arm",
         "episodes": [
             {
@@ -821,6 +821,239 @@ def test_collection_save_error_reports_missing_required_stream(tmp_path):
 
     with pytest.raises(ValueError, match="missing_vector_stream.*action_qpos:arm"):
         logger.end_episode()
+
+
+def test_collection_state_only_episode_saves_green_without_videos(tmp_path):
+    logger = _collection_logger(tmp_path, save_video=True)
+    timestamps = (1.0, 1.1, 1.2)
+    qpos = np.zeros(_DIM, dtype=np.float32)
+    batch = CollectionRawBatch(
+        images={},
+        vectors={
+            "state_qpos": [CollectionRawSample(ts, qpos) for ts in timestamps],
+            "action_qpos": [CollectionRawSample(ts, qpos) for ts in timestamps],
+        },
+        image_streams_expected=False,
+    )
+
+    logger.start_episode("t")
+    logger.ingest_collection_snapshot(
+        RawCollectionSnapshot(timestamp=timestamps[-1], decode_raw=lambda: batch)
+    )
+
+    assert logger.end_episode()
+    task_dir = _collection_task_dir(tmp_path)
+    episode = _read_jsonl(task_dir / "meta" / "episodes.jsonl")[0]
+    info = json.loads((task_dir / "meta" / "info.json").read_text())
+
+    assert episode["quality"] == "green"
+    assert episode["quality_issues"] == []
+    assert episode["state_only"] is True
+    assert not (task_dir / "videos").exists()
+    assert info["total_videos"] == 0
+    assert "observation.images.cam_high" not in info["features"]
+    assert logger.status_snapshot("t")["episodes"][0]["state_only"] is True
+
+
+def test_collection_still_rejects_unexpected_empty_camera_stream(tmp_path):
+    logger = _collection_logger(tmp_path)
+    qpos = np.zeros(_DIM, dtype=np.float32)
+    batch = CollectionRawBatch(
+        images={},
+        vectors={
+            "state_qpos": [CollectionRawSample(1.0, qpos)],
+            "action_qpos": [CollectionRawSample(1.0, qpos)],
+        },
+    )
+
+    logger.start_episode("t")
+    logger.ingest_collection_snapshot(
+        RawCollectionSnapshot(timestamp=1.0, decode_raw=lambda: batch)
+    )
+
+    with pytest.raises(ValueError, match="missing_image_stream"):
+        logger.end_episode()
+
+
+def test_collection_mixed_state_only_and_image_stream_is_red_and_keeps_video(
+    tmp_path, monkeypatch
+):
+    class _Writer:
+        def append_data(self, _frame: np.ndarray) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(episode_module.imageio, "get_writer", lambda *a, **k: _Writer())
+    logger = _collection_logger(tmp_path, save_video=True)
+    qpos = np.zeros(_DIM, dtype=np.float32)
+    state_only = CollectionRawBatch(
+        images={},
+        vectors={
+            "state_qpos": [CollectionRawSample(1.0, qpos)],
+            "action_qpos": [CollectionRawSample(1.0, qpos)],
+        },
+        image_streams_expected=False,
+    )
+    rendered = CollectionRawBatch(
+        images={
+            "cam_high": [
+                CollectionRawSample(1.1, np.zeros((8, 8, 3), dtype=np.uint8))
+            ]
+        },
+        vectors={
+            "state_qpos": [CollectionRawSample(1.1, qpos)],
+            "action_qpos": [CollectionRawSample(1.1, qpos)],
+        },
+    )
+
+    logger.start_episode("t")
+    logger.ingest_collection_snapshot(
+        RawCollectionSnapshot(timestamp=1.0, decode_raw=lambda: state_only)
+    )
+    logger.ingest_collection_snapshot(
+        RawCollectionSnapshot(timestamp=1.1, decode_raw=lambda: rendered)
+    )
+    assert logger.end_episode()
+
+    episode = _read_jsonl(_collection_task_dir(tmp_path) / "meta" / "episodes.jsonl")[0]
+    assert episode["quality"] == "red"
+    assert "state_only" not in episode
+    assert episode["video_keys"] == ["observation.images.cam_high"]
+    assert "inconsistent_image_mode" in {
+        issue["code"] for issue in episode["quality_issues"]
+    }
+
+
+def test_collection_mixed_episode_availability_uses_common_video_schema(
+    tmp_path, monkeypatch
+):
+    class _Writer:
+        def append_data(self, _frame: np.ndarray) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(episode_module.imageio, "get_writer", lambda *a, **k: _Writer())
+    logger = _collection_logger(tmp_path, save_video=True)
+    qpos = np.zeros(_DIM, dtype=np.float32)
+    batches = (
+        CollectionRawBatch(
+            images={},
+            vectors={
+                "state_qpos": [CollectionRawSample(1.0, qpos)],
+                "action_qpos": [CollectionRawSample(1.0, qpos)],
+            },
+            image_streams_expected=False,
+        ),
+        CollectionRawBatch(
+            images={
+                "cam_high": [
+                    CollectionRawSample(2.0, np.zeros((8, 8, 3), dtype=np.uint8))
+                ]
+            },
+            vectors={
+                "state_qpos": [CollectionRawSample(2.0, qpos)],
+                "action_qpos": [CollectionRawSample(2.0, qpos)],
+            },
+        ),
+    )
+
+    for batch in batches:
+        logger.start_episode("t")
+        timestamp = batch.vectors["state_qpos"][0].timestamp
+        logger.ingest_collection_snapshot(
+            RawCollectionSnapshot(
+                timestamp=timestamp,
+                decode_raw=lambda batch=batch: batch,
+            )
+        )
+        assert logger.end_episode()
+
+    task_dir = _collection_task_dir(tmp_path)
+    rows = _read_jsonl(task_dir / "meta" / "episodes.jsonl")
+    info = json.loads((task_dir / "meta" / "info.json").read_text())
+    assert [row["video_keys"] for row in rows] == [[], ["observation.images.cam_high"]]
+    assert info["total_videos"] == 0
+    assert "observation.images.cam_high" not in info["features"]
+
+
+def test_raw_state_only_episode_saves_green_without_videos(tmp_path):
+    logger = _logger(tmp_path, fps=10)
+    qpos = np.zeros(_DIM, dtype=np.float32)
+
+    def snapshot(timestamp: float) -> RawCollectionSnapshot:
+        return RawCollectionSnapshot(
+            timestamp=timestamp,
+            decode_raw=lambda: CollectionRawBatch(
+                images={},
+                vectors={"state_qpos": [CollectionRawSample(timestamp, qpos)]},
+                image_streams_expected=False,
+            ),
+        )
+
+    logger.start_episode("t")
+    for timestamp in (1.0, 1.1, 1.2):
+        logger.ingest_raw_episode_snapshot(snapshot(timestamp), qpos)
+    assert logger.end_episode()
+    logger.finalize()
+
+    episode = _read_jsonl(tmp_path / "meta" / "episodes.jsonl")[0]
+    info = json.loads((tmp_path / "meta" / "info.json").read_text())
+    assert episode["quality"] == "green"
+    assert episode["state_only"] is True
+    assert not (tmp_path / "videos").exists()
+    assert info["total_videos"] == 0
+    assert "observation.images.cam_high" not in info["features"]
+
+
+def test_raw_mixed_state_only_and_image_stream_is_not_marked_state_only(
+    tmp_path, monkeypatch
+):
+    class _Writer:
+        def append_data(self, _frame: np.ndarray) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(episode_module.imageio, "get_writer", lambda *a, **k: _Writer())
+    logger = _logger(tmp_path, fps=10)
+    qpos = np.zeros(_DIM, dtype=np.float32)
+
+    def snapshot(timestamp: float, with_image: bool) -> RawCollectionSnapshot:
+        return RawCollectionSnapshot(
+            timestamp=timestamp,
+            decode_raw=lambda: CollectionRawBatch(
+                images=(
+                    {
+                        "cam_high": [
+                            CollectionRawSample(
+                                timestamp, np.zeros((8, 8, 3), dtype=np.uint8)
+                            )
+                        ]
+                    }
+                    if with_image
+                    else {}
+                ),
+                vectors={"state_qpos": [CollectionRawSample(timestamp, qpos)]},
+                image_streams_expected=with_image,
+            ),
+        )
+
+    logger.start_episode("t")
+    logger.ingest_raw_episode_snapshot(snapshot(1.0, False), qpos)
+    logger.ingest_raw_episode_snapshot(snapshot(1.1, True), qpos)
+    assert logger.end_episode()
+
+    episode = _read_jsonl(tmp_path / "meta" / "episodes.jsonl")[0]
+    assert episode["quality"] == "red"
+    assert "state_only" not in episode
+    assert "inconsistent_image_mode" in {
+        issue["code"] for issue in episode["quality_issues"]
+    }
 
 
 def test_collection_save_worker_derives_missing_eef_from_aligned_qpos(tmp_path):

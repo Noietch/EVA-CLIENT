@@ -129,6 +129,10 @@ def test_observation_roundtrip_preserves_images_state_and_timestamp():
         task_name="pick_and_place",
         robot_name="piper",
         split="train",
+        scene_state={
+            "objects": [{"asset_id": "banana", "position": [0.0, 0.1, 0.2]}],
+            "robot_base": {"left_arm": [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]},
+        },
     )
 
     back = unpack_observation(pack_observation(obs))
@@ -141,6 +145,7 @@ def test_observation_roundtrip_preserves_images_state_and_timestamp():
     assert back.task_name == "pick_and_place"
     assert back.robot_name == "piper"
     assert back.split == "train"
+    assert back.scene_state == obs.scene_state
     assert back.camera_resolution == (224, 224)
     assert set(back.images) == set(images)
     for key, img in images.items():
@@ -255,6 +260,7 @@ def test_state_only_raw_collection_keeps_camera_streams_empty():
     batch = snapshot.decode_raw()
 
     assert batch.images == {}
+    assert batch.image_streams_expected is False
 
 
 def test_zmq_collection_reader_preserves_backlog_order():

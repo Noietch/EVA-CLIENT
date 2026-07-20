@@ -113,6 +113,28 @@ class LeRobotDatasetIO:
                 rows[int(rec["episode_index"])] = rec
         return rows
 
+    def episode_video_keys(self, episode_id: int) -> tuple[str, ...]:
+        """Video feature keys declared for one episode by EVA recorders.
+
+        New datasets keep per-episode availability here so a dataset may retain
+        rendered sidecars while exposing only common video features globally.
+        Legacy datasets fall back to the video features in ``info.json``.
+        """
+        row = self._episode_rows_by_index().get(episode_id, {})
+        declared = row.get("video_keys")
+        if declared is not None:
+            return tuple(str(key) for key in declared)
+        info_path = self.root / "meta" / "info.json"
+        if not info_path.exists():
+            return ()
+        with info_path.open() as f:
+            features = json.load(f).get("features", {})
+        return tuple(
+            str(key)
+            for key, feature in features.items()
+            if feature.get("dtype") == "video"
+        )
+
     def episode_file_stem(self, episode_id: int) -> str:
         row = self._episode_rows_by_index().get(episode_id, {})
         stem = row.get("file_stem")

@@ -692,6 +692,9 @@ class EpisodeLogger:
         target: CollectionRawBatch,
         batch: CollectionRawBatch,
     ) -> None:
+        target.image_streams_expected = (
+            target.image_streams_expected and batch.image_streams_expected
+        )
         if batch.start_time is not None:
             target.start_time = (
                 batch.start_time
@@ -803,6 +806,7 @@ class EpisodeLogger:
             },
             start_time=batch.start_time,
             end_time=batch.end_time,
+            image_streams_expected=batch.image_streams_expected,
         )
 
     def _raw_episode_vector_fields(self, batch: CollectionRawBatch) -> tuple[str, ...]:
@@ -866,6 +870,16 @@ class EpisodeLogger:
         issues = [
             QualityIssue("red", issue.code, issue.detail) for issue in report.issues
         ]
+        has_images = any(samples for samples in payload.raw_batch.images.values())
+        state_only = not payload.raw_batch.image_streams_expected and not has_images
+        if not payload.raw_batch.image_streams_expected and has_images:
+            issues.append(
+                QualityIssue(
+                    "red",
+                    "inconsistent_image_mode",
+                    "episode contains both explicit state-only observations and camera images",
+                )
+            )
         labels = self._labels_for_aligned_frames(frames, payload.frame_labels)
         n_frames = len(frames)
         global_index = job.global_index
@@ -930,6 +944,9 @@ class EpisodeLogger:
             "alignment_image_max_skew_sec": report.image_max_skew,
             "alignment_image_stream_stats": report.image_stream_stats,
         }
+        if state_only:
+            row["state_only"] = True
+        row["video_keys"] = sorted(videos) if videos else []
         episode_fps = self._raw_episode_average_fps(payload.raw_batch)
         if episode_fps is not None:
             row["episode_fps"] = episode_fps
@@ -1304,6 +1321,7 @@ class EpisodeLogger:
             "length": int(row.get("length", len(job.steps))),
             "status": job.status,
             "quality": row.get("quality", "green"),
+            "state_only": bool(row.get("state_only", False)),
             "qc_verdict": row.get("qc_verdict", ""),
             "qc_note": row.get("qc_note", ""),
             "quality_issues": row.get("quality_issues", []),
@@ -1453,7 +1471,9 @@ class EpisodeLogger:
         episodes = _read_jsonl(self._meta_path("episodes.jsonl"))
         total_episodes = len(episodes)
         total_frames = sum(int(e.get("length", 0)) for e in episodes)
-        total_videos = total_episodes * len(self._camera_keys) if self._save_video else 0
+        episode_video_keys = [self._episode_video_keys(row) for row in episodes]
+        video_keys = self._common_video_keys(episode_video_keys)
+        total_videos = total_episodes * len(video_keys)
         # fps must equal the integer target used to synthesize timestamps, not the
         # measured (jittery) average — LeRobot validates timestamp[i] == i/fps.
         fps = float(self._fps)
@@ -1464,7 +1484,7 @@ class EpisodeLogger:
             total_tasks=len(self._task_to_index),
             total_videos=total_videos,
             fps=fps,
-            features=self._build_features(fps),
+            features=self._build_features(fps, video_keys),
         )
         if self._eval_mode:
             info["eval"] = self._eval_info(episodes)
@@ -1472,6 +1492,30 @@ class EpisodeLogger:
             json.dump(info, f, indent=2, ensure_ascii=False)
         with self._meta_path("state.json").open("w") as f:
             json.dump(build_state(self._robot.name, episodes), f, indent=2, ensure_ascii=False)
+
+    def _episode_video_keys(self, row: dict[str, Any]) -> tuple[str, ...]:
+        """Return recorded keys, probing disk for rows written by older clients."""
+        declared = row.get("video_keys")
+        if declared is not None:
+            return tuple(str(key) for key in declared)
+        episode_index = int(row.get("episode_index", -1))
+        if episode_index < 0:
+            return ()
+        keys = []
+        for cam_key in self._camera_keys:
+            video_key = resolve_video_key(self._keys, cam_key)
+            if video_key is not None and self._video_path(episode_index, cam_key).exists():
+                keys.append(video_key)
+        return tuple(keys)
+
+    def _common_video_keys(self, episode_keys: list[tuple[str, ...]]) -> set[str]:
+        """Dataset-level video schema: only keys present in every episode."""
+        if not episode_keys:
+            return set()
+        common = set(episode_keys[0])
+        for keys in episode_keys[1:]:
+            common.intersection_update(keys)
+        return common
 
     def _eval_info(self, episodes: list[dict[str, Any]]) -> dict[str, Any]:
         """The info.json ``eval`` section: which keys carry scoring + how many are scored.
@@ -1487,13 +1531,18 @@ class EpisodeLogger:
             "scored_episodes": len(scored),
         }
 
-    def _build_features(self, fps: float) -> dict[str, Any]:
+    def _build_features(
+        self, fps: float, video_keys: set[str] | None = None
+    ) -> dict[str, Any]:
         h, w = self._infer_image_shape()
         features: dict[str, Any] = {}
+        available_video_keys = video_keys
         if self._save_video:
             for cam_key in self._camera_keys:
                 video_key = resolve_video_key(self._keys, cam_key)
                 if video_key is None:
+                    continue
+                if available_video_keys is not None and video_key not in available_video_keys:
                     continue
                 features[video_key] = {
                     "dtype": "video",

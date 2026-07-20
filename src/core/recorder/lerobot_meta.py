@@ -14,7 +14,7 @@ _CODEBASE_VERSION = "v2.1"
 _CHUNKS_SIZE = 1000
 _DATA_PATH_TPL = "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet"
 _VIDEO_PATH_TPL = "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4"
-_STATE_FIELDS = ("robot_name", "task_name", "split", "scene_index", "scene")
+_STATE_FIELDS = ("robot_name", "task_name", "split", "scene_index", "seed", "scene")
 
 
 def build_info(
@@ -65,6 +65,7 @@ def history_row(row: dict[str, Any], fallback_index: int) -> dict[str, Any]:
         "length": int(row.get("length", 0)),
         "status": "saved",
         "quality": row.get("quality", "green"),
+        "state_only": bool(row.get("state_only", False)),
         "qc_verdict": row.get("qc_verdict", ""),
         "qc_note": row.get("qc_note", ""),
         "quality_issues": [] if quality_issues is None else quality_issues,

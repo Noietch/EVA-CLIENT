@@ -344,7 +344,7 @@ def test_saved_collect_episode_is_gray_until_manual_qc():
 
     assert 'if (item.qc_verdict === "pass") return "cq-ok";' in body
     assert 'if (item.qc_verdict === "fail") return "cq-fail";' in body
-    assert 'item.quality === "green"' not in body
+    assert 'item.state_only && item.quality === "green"' in body
     assert 'if (item.quality === "red") return "cq-fail";' in body
     assert 'if (savedEpisodeId(item) != null' not in body
     assert body.rstrip().endswith('return "cq-queued";\n  }')

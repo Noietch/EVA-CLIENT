@@ -42,6 +42,7 @@ function collectTone(item) {
     if (item.qc_verdict === "pass") return "cq-ok";
     if (item.qc_verdict === "fail") return "cq-fail";
     if (item.quality === "red") return "cq-fail";
+    if (item.state_only && item.quality === "green") return "cq-ok";
     return "cq-queued";
   }
 

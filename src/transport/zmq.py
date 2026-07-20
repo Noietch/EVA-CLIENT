@@ -563,7 +563,12 @@ class _ObservationReader:
         wire_obs = unpack_observation(payload)
 
         def decode_raw(wire_obs: WireObservation = wire_obs) -> CollectionRawBatch:
-            batch = CollectionRawBatch()
+            # EVA Sim --skip-render publishes no images but does include the intended
+            # camera resolution so the live console can show black placeholders. Keep
+            # saved raw streams empty and mark that omission as intentional; an empty
+            # image mapping without this marker remains a real missing-camera error.
+            state_only = not wire_obs.images and wire_obs.camera_resolution is not None
+            batch = CollectionRawBatch(image_streams_expected=not state_only)
             for key, image in wire_obs.images.items():
                 batch.images.setdefault(key, []).append(
                     CollectionRawSample(timestamp=wire_obs.t, value=np.asarray(image))

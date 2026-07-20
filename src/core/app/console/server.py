@@ -814,11 +814,15 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         dataset_dir = _resolve_dataset_dir(str(body.get("dataset_dir", "")).strip())
         episode_index = int(body.get("episode", 0))
         try:
-            inferred = LeRobotDatasetIO(dataset_dir).infer_keys()
+            dataset_io = LeRobotDatasetIO(dataset_dir)
+            inferred = dataset_io.infer_keys()
             state_key = (inferred.get("state") or {}).get("default") or "observations.state.qpos"
             action_key = (inferred.get("action") or {}).get("default") or "action"
             image = inferred.get("image") or {}
-            candidates = image.get("candidates") or []
+            candidates = list(image.get("candidates") or [])
+            for video_key in dataset_io.episode_video_keys(episode_index):
+                if video_key not in candidates:
+                    candidates.append(video_key)
             video_keys: dict[str, str] = {}
             for camera in runtime.robot.observation_schema.cameras:
                 cam_key = camera.observation_key
@@ -829,6 +833,12 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                 video_keys[runtime.robot.observation_schema.cameras[0].observation_key] = str(
                     image["default"]
                 )
+            available_videos = dataset_io.episode_video_paths(episode_index, video_keys)
+            video_keys = {
+                cam_key: video_key
+                for cam_key, video_key in video_keys.items()
+                if cam_key in available_videos
+            }
             import copy
             review_config = copy.deepcopy(config)
             review_config.transport.dataset_dir = dataset_dir
@@ -844,6 +854,14 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             )
             fps = source.fps
             task = source.current_task
+            # Dataset metadata may describe cameras while a state-only episode has no
+            # videos directory. Only ask the browser to mount files that exist for the
+            # selected episode; trajectory/3D review remains fully available without them.
+            video_keys = {
+                cam_key: video_keys[cam_key]
+                for cam_key in source.available_camera_keys()
+                if cam_key in video_keys
+            }
             source.close()
         except Exception as error:
             self._send_json(404, {"ok": False, "error": str(error)})

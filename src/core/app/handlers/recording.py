@@ -668,7 +668,7 @@ def _stamp_scene_meta(
     status = get_status()
     scene_fields = {
         key: status[key]
-        for key in ("scene_index", "task_name", "robot_name", "split")
+        for key in ("scene_index", "seed", "task_name", "robot_name", "split")
         if status.get(key) is not None
     }
     if status.get("scene_state") is not None:

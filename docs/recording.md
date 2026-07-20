@@ -32,5 +32,11 @@ Simulator-backed recordings additionally put `robot_name`, `task_name`, layout
 `split`, `scene_index`, and a concrete `scene` in `meta/state.json`. The scene includes
 each object's `asset_path`, initial `position`, `quaternion_wxyz`, and physical role,
 plus resolved robot and camera poses. Rendering no longer depends on replaying a
-placement seed against mutable task-layout code. This is state format v2;
-`dataset_render.py` requires the concrete scene and has no seed-based fallback.
+placement seed against mutable task-layout code. This is state format v2; a recorded
+`seed` is retained only as a compatibility fallback for older datasets and simulators.
+
+EVA Sim `--skip-render` episodes are recorded as state-only datasets: Parquet and
+metadata are written normally, `videos/` is omitted, and the automatic quality result
+is green. A dataset exposes only camera features present in every episode; extra
+per-episode videos remain available to the console through `episodes.jsonl`. Mixing
+state-only and rendered observations inside one episode is a QC failure.

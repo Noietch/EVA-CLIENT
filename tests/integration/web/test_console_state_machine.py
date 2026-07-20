@@ -424,6 +424,7 @@ def test_review_episode_loads_selected_dataset_without_replay_source(tmp_path, m
         assert resp.status == 200
         assert resp.json["ok"] is True
         assert resp.json["frames"] == 2
+        assert resp.json["video_keys"] == {}
         assert h.runtime.collection_replay_episode == 0
         assert h.runtime.collection_replay_qpos is not None
         assert h.runtime.collection_replay_qpos.shape[0] == 2
@@ -1122,7 +1123,11 @@ def test_eval_start_runs_setup_when_not_warmed(monkeypatch):
         return True
 
     monkeypatch.setattr(app, "run_setup", _fake_setup)
-    monkeypatch.setattr(app, "_dispatch_run", lambda *a: setattr(a[2], "status", SessionStatus.RUNNING))
+    monkeypatch.setattr(
+        app,
+        "_dispatch_run",
+        lambda *a: setattr(a[2], "status", SessionStatus.RUNNING),
+    )
 
     runtime = SimpleNamespace(
         web_phase="ready",
@@ -1151,7 +1156,11 @@ def test_eval_start_binds_cell_prompt_before_task_gate(monkeypatch):
         return True
 
     monkeypatch.setattr(app, "run_setup", _fake_setup)
-    monkeypatch.setattr(app, "_dispatch_run", lambda *a: setattr(a[2], "status", SessionStatus.RUNNING))
+    monkeypatch.setattr(
+        app,
+        "_dispatch_run",
+        lambda *a: setattr(a[2], "status", SessionStatus.RUNNING),
+    )
 
     runtime = SimpleNamespace(
         web_phase="ready",

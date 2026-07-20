@@ -7,6 +7,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from core.config import ConfigDict
+from core.utils.lerobot import LeRobotDatasetIO
 from robots.base import (
     ActuatorGroup,
     CameraSpec,
@@ -125,6 +126,25 @@ def _dataset_config() -> ConfigDict:
             video_keys={},
         ),
     ))
+
+
+def test_episode_video_keys_override_dataset_level_features(tmp_path):
+    meta = tmp_path / "meta"
+    meta.mkdir()
+    (meta / "info.json").write_text(json.dumps({"features": {}}))
+    (meta / "episodes.jsonl").write_text(
+        json.dumps(
+            {
+                "episode_index": 0,
+                "video_keys": ["observation.images.cam_high"],
+            }
+        )
+        + "\n"
+    )
+
+    assert LeRobotDatasetIO(tmp_path).episode_video_keys(0) == (
+        "observation.images.cam_high",
+    )
 
 
 def test_dataset_transport_deterministic_replay_from_parquet(tmp_path):
