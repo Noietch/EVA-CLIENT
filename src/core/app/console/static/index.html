@@ -31,7 +31,6 @@
     <button class="tab" data-tab="rl"><span class="idx">05</span> RL</button>
     <button class="tab" data-tab="eval"><span class="idx">06</span> EVAL</button>
     <button class="tab" data-tab="result"><span class="idx">07</span> RESULT</button>
-    <button class="tab" data-tab="calibrate"><span class="idx">08</span> CALIBRATE</button>
   </div>
 
   <!-- ============ onboarding guide bar ============ -->
@@ -129,13 +128,6 @@
             <div id="tune-strategy-args"></div>
             <button class="btn primary full" id="b-tune-apply" style="margin-top:6px">APPLY ⤓</button>
             <div class="tune-status" id="tune-status"></div>
-          </div>
-        </div>
-
-        <div class="panel" id="panel-cameras">
-          <div class="panel-h">CAMERAS <button class="btn" id="b-calib-reload" style="margin-left:auto;padding:2px 8px;font-size:10px">RELOAD ↻</button></div>
-          <div class="card">
-            <div id="cameras-list" class="cameras-list"><div class="lock-note">no calibration loaded</div></div>
           </div>
         </div>
       </div>
@@ -265,8 +257,6 @@
         </div>
       </div>
     </div>
-
-    <!-- ---- CALIBRATE placeholder removed; wired into MANUAL left column ---- -->
 
     <!-- shared big-chart modal: opened from either chart's expand button -->
     <div class="chart-modal" id="chart-modal">
@@ -600,102 +590,6 @@
           <div class="rv-replay-empty" id="rv-replay-empty">Expand a model and task, then select a trial to replay</div>
         </div>
       </div>
-    </div>
-
-    <!-- ---- CALIBRATE ---- -->
-    <div class="view" id="view-calibrate">
-      <div class="col col-control" id="calibrate-control-col">
-        <!-- Mode + guidance bar -->
-        <div class="panel" id="calib-panel-mode">
-          <div class="panel-h">MODE
-            <button class="btn" id="b-cal-estop" style="margin-left:auto;color:var(--danger);border-color:var(--danger);padding:2px 10px;font-weight:700">E-STOP ■</button>
-          </div>
-          <div class="card">
-            <div class="row-2" id="cal-mode-list">
-              <button class="btn primary" id="b-cal-mode-sim" data-mode="sim">SIM ▶</button>
-              <button class="btn" id="b-cal-mode-real" data-mode="real">REAL</button>
-            </div>
-            <div class="cal-guidance lock-note" id="cal-guidance">Step 1 · print a ChArUco board</div>
-          </div>
-        </div>
-
-        <div class="panel" id="calib-panel-board" data-st="active">
-          <div class="panel-h"><span class="step-badge">1</span>BOARD</div>
-          <div class="card">
-            <div class="tune-row"><span>dictionary</span><select id="cal-board-dict"></select></div>
-            <div class="tune-row"><span>columns</span><input type="number" id="cal-board-cols" min="2" step="1" value="5"></div>
-            <div class="tune-row"><span>rows</span><input type="number" id="cal-board-rows" min="2" step="1" value="7"></div>
-            <div class="tune-row"><span>square (m)</span><input type="number" id="cal-board-square" min="0.001" step="0.001" value="0.030"></div>
-            <div class="tune-row"><span>marker (m)</span><input type="number" id="cal-board-marker" min="0.001" step="0.001" value="0.023"></div>
-            <div class="row-2" style="margin-top:6px">
-              <button class="btn primary full" id="b-cal-board-apply">APPLY ⤓</button>
-              <a class="btn full" id="b-cal-print-board" href="/api/calibrate/print_board?paper=a4" target="_blank" download>PRINT PDF ↓</a>
-            </div>
-          </div>
-        </div>
-
-        <div class="panel" id="calib-panel-cameras" data-st="disabled">
-          <div class="panel-h"><span class="step-badge">2</span>CAMERAS</div>
-          <div class="card">
-            <div id="cal-cam-list" class="cal-cam-list"><div class="lock-note">START session to enumerate cameras</div></div>
-          </div>
-        </div>
-
-        <div class="panel" id="calib-panel-poses" data-st="disabled">
-          <div class="panel-h"><span class="step-badge">3</span>POSES <span class="n" id="cal-poses-badge"></span></div>
-          <div class="card">
-            <div class="row-2">
-              <button class="btn primary full" id="b-cal-start">START ▶</button>
-              <button class="btn full" id="b-cal-reset">RESET ⟲</button>
-            </div>
-            <div class="cal-active-cam-row" style="margin-top:8px">
-              <span>target camera</span>
-              <select id="cal-active-cam" disabled></select>
-            </div>
-            <div id="cal-pose-list" class="cal-pose-list"></div>
-            <div class="row-2">
-              <button class="btn full" id="b-cal-add-current">+ ADD FROM CURRENT</button>
-              <button class="btn primary full" id="b-cal-capture" disabled>CAPTURE ●</button>
-            </div>
-            <div class="cal-status" id="cal-capture-status"></div>
-            <div class="cal-thumb-row" id="cal-thumbs"></div>
-            <!-- Pose editor (revealed when EDIT clicked) -->
-            <div id="cal-pose-editor" class="cal-pose-editor" style="display:none">
-              <div class="cal-sub-h">EDIT pose <span id="cal-edit-idx"></span></div>
-              <div id="cal-joint-sliders"></div>
-              <div class="row-2">
-                <button class="btn primary full" id="b-cal-pose-save">SAVE POSE</button>
-                <button class="btn full" id="b-cal-pose-cancel">CANCEL</button>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div class="panel" id="calib-panel-solve" data-st="disabled">
-          <div class="panel-h"><span class="step-badge">4</span>SOLVE</div>
-          <div class="card">
-            <div class="tune-row"><span>hand-eye</span><select id="cal-hand-eye-method" disabled>
-              <option value="TSAI">TSAI</option>
-              <option value="PARK">PARK</option>
-              <option value="HORAUD">HORAUD</option>
-              <option value="ANDREFF">ANDREFF</option>
-              <option value="DANIILIDIS">DANIILIDIS</option>
-            </select></div>
-            <button class="btn primary full" id="b-cal-solve" disabled>SOLVE ↻</button>
-            <div class="cal-outputs" id="cal-outputs"></div>
-          </div>
-        </div>
-
-        <div class="panel" id="calib-panel-save" data-st="disabled">
-          <div class="panel-h"><span class="step-badge">5</span>SAVE</div>
-          <div class="card">
-            <button class="btn primary full" id="b-cal-save" disabled>SAVE ✓</button>
-            <div class="cal-status" id="cal-save-status"></div>
-            <div class="lock-note" id="cal-save-path"></div>
-          </div>
-        </div>
-      </div>
-      <!-- Right side: #stage is reparented here by relocateCanvas() -->
     </div>
 
     <!-- shared trial replay (RESULT tab): docked into #rv-detail-replay by relocateTrialPop(),

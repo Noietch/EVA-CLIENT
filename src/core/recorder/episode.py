@@ -26,7 +26,6 @@ import json
 import logging
 import threading
 import time
-from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -201,7 +200,6 @@ class EpisodeLogger:
         eval_mode: bool = False,
         save_image_height: int | None = None,
         save_image_width: int | None = None,
-        on_collection_frame: Callable[[Observation], None] | None = None,
         recording_space: str = "qpos",
         gripper_open: float | None = None,
         gripper_close: float | None = None,
@@ -214,7 +212,6 @@ class EpisodeLogger:
         self._keys = dataset_keys
         self._convert_bgr_to_rgb = convert_bgr_to_rgb
         self._collection = collection
-        self._on_collection_frame = on_collection_frame
         if recording_space not in {"qpos", "eef"}:
             raise ValueError(f"unsupported recording space: {recording_space}")
         self._recording_space = recording_space

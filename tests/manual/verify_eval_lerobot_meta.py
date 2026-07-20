@@ -48,6 +48,8 @@ def main() -> int:
         log_dir=ds,
         robot=robot,
         fps=cfg.log.fps,
+        save_video=False,
+        save_debug=False,
         dataset_keys=cfg.transport.dataset_keys,
         convert_bgr_to_rgb=cfg.transport.convert_bgr_to_rgb,
         async_save=False,

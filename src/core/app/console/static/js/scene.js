@@ -19,8 +19,6 @@ const Scene3D = (() => {
   let armNames = [];
   let ready = false;
   let ghostVisible = false;
-  let frustaGroup = null;
-  const frustaByName = {};
 
   function init() {
     renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
@@ -54,11 +52,6 @@ const Scene3D = (() => {
     scene.add(grid);
     // world axes accent
     const axes = new THREE.AxesHelper(0.12); scene.add(axes);
-
-    // Camera frusta live in their own group so we can wipe+redraw on every
-    // /api/calibration refresh without touching URDF meshes.
-    frustaGroup = new THREE.Group();
-    scene.add(frustaGroup);
 
     resize();
     window.addEventListener("resize", resize);
@@ -367,78 +360,8 @@ const Scene3D = (() => {
     }
   }
 
-  function setCameraFrusta(cams) {
-    // cams = { name: { calibrated, K, dist, attach_link, T_cam_link, image_size } }
-    if (!frustaGroup) return;
-    for (const name in frustaByName) {
-      frustaGroup.remove(frustaByName[name]);
-      frustaByName[name].geometry.dispose();
-      frustaByName[name].material.dispose();
-    }
-    for (const k of Object.keys(frustaByName)) delete frustaByName[k];
-    if (!cams || typeof cams !== "object") return;
-    const SCALE = 0.10;  // meters: apex-to-image-plane depth
-    for (const name of Object.keys(cams)) {
-      const c = cams[name];
-      if (!c || !c.calibrated || !Array.isArray(c.K)) continue;
-      const fx = c.K[0][0] || 1, fy = c.K[1][1] || fx;
-      const cx = c.K[0][2] || 0, cy = c.K[1][2] || 0;
-      const size = c.image_size || [Math.max(2 * cx, 1), Math.max(2 * cy, 1)];
-      const w = size[0], h = size[1];
-      const z = SCALE;
-      const x0 = z * (0 - cx) / fx, x1 = z * (w - cx) / fx;
-      const y0 = z * (0 - cy) / fy, y1 = z * (h - cy) / fy;
-      const corners = [
-        new THREE.Vector3(x0, y0, z), new THREE.Vector3(x1, y0, z),
-        new THREE.Vector3(x1, y1, z), new THREE.Vector3(x0, y1, z),
-      ];
-      const apex = new THREE.Vector3(0, 0, 0);
-      const geo = new THREE.BufferGeometry();
-      const verts = [];
-      for (const cc of corners) verts.push(apex.x, apex.y, apex.z, cc.x, cc.y, cc.z);
-      for (let i = 0; i < 4; i++) {
-        const a = corners[i], b = corners[(i + 1) % 4];
-        verts.push(a.x, a.y, a.z, b.x, b.y, b.z);
-      }
-      geo.setAttribute("position", new THREE.Float32BufferAttribute(verts, 3));
-      const mat = new THREE.LineBasicMaterial({ color: 0xE8590C });  // --signal
-      const lines = new THREE.LineSegments(geo, mat);
-      if (Array.isArray(c.T_cam_link) && c.T_cam_link.length === 4) {
-        const T = c.T_cam_link;
-        const m = new THREE.Matrix4();
-        m.set(
-          T[0][0], T[0][1], T[0][2], T[0][3],
-          T[1][0], T[1][1], T[1][2], T[1][3],
-          T[2][0], T[2][1], T[2][2], T[2][3],
-          T[3][0], T[3][1], T[3][2], T[3][3],
-        );
-        lines.applyMatrix4(m);
-      }
-      frustaByName[name] = lines;
-      frustaGroup.add(lines);
-    }
-  }
-
-  // Fetch FK transforms for an arbitrary qpos and show them as a ghost URDF.
-  // Used by the CALIBRATE tab to preview target calibration poses (SIM mode).
-  async function setPreviewQpos(qpos) {
-    if (!Array.isArray(qpos) && !ArrayBuffer.isView(qpos)) return;
-    try {
-      const resp = await fetch("/api/calibrate/preview", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ qpos: Array.from(qpos) }),
-      });
-      if (!resp.ok) return;
-      const payload = await resp.json();
-      if (payload && payload.arms) {
-        applyTransforms({ ghost: payload.arms });
-      }
-    } catch (e) { /* silent — ghost stays where it was */ }
-  }
-
   boot3D();
-  return { applyTransforms, applyTransformFrame, resize, setCameraFrusta, setPreviewQpos };
+  return { applyTransforms, applyTransformFrame, resize };
 })();
 window.Scene3D = Scene3D;
 
