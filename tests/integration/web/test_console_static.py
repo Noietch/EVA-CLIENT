@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from core.app.console.server import ConsoleRequestHandler
+
 STATIC_DIR = Path(__file__).resolve().parents[3] / "src" / "core" / "app" / "console" / "static"
 
 
@@ -460,6 +462,22 @@ def test_operator_action_api_is_wired():
 
     assert '"/api/operator_action": ConsoleRequestHandler._post_operator_action' in server_source
     assert 'self._enqueue_ok(f"web:operator_action:{intent}:ui")' in server_source
+    assert 'self._enqueue_ok(f"web:operator_button:{button}:hardware")' in server_source
+
+
+def test_operator_action_api_accepts_an_external_hardware_button():
+    commands = []
+
+    class _Handler:
+        def _enqueue_ok(self, command: str) -> None:
+            commands.append(command)
+
+        def _send_json(self, *_args) -> None:
+            raise AssertionError("valid hardware button should be accepted")
+
+    ConsoleRequestHandler._post_operator_action(_Handler(), {"button": "X"})
+
+    assert commands == ["web:operator_button:x:hardware"]
 
 
 def test_collect_and_rollout_controls_use_operator_action():

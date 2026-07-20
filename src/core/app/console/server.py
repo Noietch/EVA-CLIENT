@@ -1397,10 +1397,14 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
 
     def _post_operator_action(self, body: dict) -> None:
         intent = str(body.get("intent", "")).strip().lower()
-        if intent not in {"start", "accept", "cancel"}:
-            self._send_json(400, {"ok": False, "error": f"unsupported operator intent: {intent}"})
+        if intent in {"start", "accept", "cancel"}:
+            self._enqueue_ok(f"web:operator_action:{intent}:ui")
             return
-        self._enqueue_ok(f"web:operator_action:{intent}:ui")
+        button = str(body.get("button", "")).strip().lower()
+        if button:
+            self._enqueue_ok(f"web:operator_button:{button}:hardware")
+            return
+        self._send_json(400, {"ok": False, "error": f"unsupported operator intent: {intent}"})
 
     def _post_manual_qpos(self, body: dict) -> None:
         qpos = body.get("qpos", [])
