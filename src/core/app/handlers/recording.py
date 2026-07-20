@@ -214,9 +214,15 @@ def maybe_build_episode_logger(config: ConfigDict, runtime: RuntimeState) -> Non
     )
 
 
-def rollout_save_log_dir(config: ConfigDict) -> Path:
+def _rollout_storage(config: ConfigDict, runtime: RuntimeState | None = None) -> ConfigDict:
+    if runtime is not None and runtime.rl_active and config.rl is not None:
+        return config.rl.data.storage
+    return config.rollout.storage
+
+
+def rollout_save_log_dir(config: ConfigDict, runtime: RuntimeState | None = None) -> Path:
     """Return the rollout save dataset dir, separate from collection/eval datasets."""
-    storage = config.rollout.storage
+    storage = _rollout_storage(config, runtime)
     if storage.log_dir:
         return _resolve_runtime_path(storage.log_dir)
     return _resolve_runtime_path(
@@ -466,12 +472,12 @@ def _rollout_intervention_save_status(runtime: RuntimeState) -> dict[str, Any]:
 
 def rollout_save_status(config: ConfigDict, runtime: RuntimeState) -> dict[str, Any]:
     """Return queue/progress state for the rollout save panel."""
-    dataset_path = rollout_save_log_dir(config)
+    dataset_path = rollout_save_log_dir(config, runtime)
     dataset_dir = str(dataset_path)
     saved_history = _load_saved_episode_history(dataset_path)
     logger_obj = runtime.rollout_episode_logger
-    storage = config.rollout.storage
-    if not storage.enabled:
+    storage = _rollout_storage(config, runtime)
+    if not bool(storage.get("enabled", True)):
         return {
             "enabled": False,
             "dataset_dir": dataset_dir,

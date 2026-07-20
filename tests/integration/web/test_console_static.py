@@ -989,7 +989,7 @@ def test_live_views_hide_charts_and_collect_review_reveals_them():
     assert "loop(pollLiveSeries, 200);" not in html
 
 
-def test_rl_workspace_has_eval_style_workflow_and_read_only_data_config():
+def test_rl_workspace_has_eval_style_workflow_and_hides_data_config():
     html = console_source()
 
     for panel in (
@@ -1004,11 +1004,13 @@ def test_rl_workspace_has_eval_style_workflow_and_read_only_data_config():
         assert f'id="{panel}"' in html
     assert 'id="rl-policy-list"' in html
     assert 'id="rl-critic-list"' in html
+    assert 'id="rl-critic-choice" style="display:none"' in html
     assert '<option value="lerobot" selected>LeRobot</option>' in html
     assert '<option value="transition" disabled>Transition · backend later</option>' in html
     for control in (
         "rl-b-setup",
         "rl-b-run",
+        "rl-b-reset",
         "rl-b-intervene",
         "rl-b-accept",
         "rl-b-abandon",
@@ -1017,6 +1019,7 @@ def test_rl_workspace_has_eval_style_workflow_and_read_only_data_config():
     ):
         assert f'id="{control}"' in html
     assert 'apiPost("/api/rl/setup")' in html
+    assert 'apiPost("/api/rl/reset")' in html
     assert 'apiPost("/api/rl/replay_critic"' in html
     assert '!rollout.save_ready || intervention' in html
     assert '!rollout.save_ready || !hasFrames' not in html
@@ -1024,6 +1027,29 @@ def test_rl_workspace_has_eval_style_workflow_and_read_only_data_config():
     assert 'id="rl-save-expand"' in html
     assert 'id="rl-save-list"' in html
     assert 'rl-save-tiles .collect-tile::after' not in html
+    assert 'CRITIC · OPTIONAL' in html
+    assert 'Select task and Policy; Critic is optional' in html
+    assert 'const selected = !!S.rlTask && S.rlPolicy !== "";' in html
+    assert 'ROBOT + POLICY READY · CRITIC OPTIONAL' in html
+    assert 'const setupError = status.last_error || status.policy_error;' in html
+    assert 'POLICY OFFLINE · SETUP REQUIRED' in html
+    assert 'retry.style.display = setupError && !setup ? "" : "none";' in html
+    assert 'Select <b>task and Policy</b>' in html
+    assert 'SETUP starts <b>automatically</b>' in html
+    assert 'Select <b>task, Policy, and Critic</b>' not in html
+    assert 'LIVE.replayOwner !== "rl" || !S.STATUS.rl?.critic_connected' in html
+    assert 'id="rl-auto-setup-msg"' in html
+    assert 'id="rl-panel-data" data-st="done" hidden' in html
+    assert 'id="rl-control-source-value">IDLE</span>' in html
+    assert ".rl-source-value::before" in html
+    assert "#rl-stage-col {\n    min-height: 0; overflow: hidden;" in html
+    assert "#view-rl .stage.rl-replay .stage-charts" in html
+    assert 'scheduleRlSetup();' in html
+    assert 'else S.rlCritic = "";' in html
+    assert 'criticChoice.style.display = setup ? "" : "none";' in html
+    assert 'stage.classList.toggle("rl-critic-active", !!S.rlCritic && !!rl.active);' in html
+    assert '$("gb-step").textContent = `STEP ${guideStep}/4`;' in html
+    assert html.index('id="rl-panel-gripper"') < html.index('id="rl-panel-saved"')
 
 
 def test_rl_stage_has_prominent_critic_curve_and_control_source_legend():
@@ -1034,6 +1060,10 @@ def test_rl_stage_has_prominent_critic_curve_and_control_source_legend():
     assert 'id="critic-latest"' in html
     assert 'openChartModal("c")' in html
     assert 'class="control-legend"' in html
+    assert 'class="critic-source-legend"' in html
+    assert 'LIVE.criticSource' in html
+    assert 'drawSourceBands(ctx, ts, source' in html
+    assert 'data-source="intervention"' in html
     assert "--policy:   #2563EB" in html
     assert "--intervention: #FF4D00" in html
 
@@ -1052,6 +1082,17 @@ def test_rl_saved_episode_click_switches_replay_immediately_and_latest_wins():
     assert "const loadSeq = ++replayLoadSeq;" in html
     assert "replayStop();" in html
     assert "S.replayLoadPending = true;" in html
+    assert "let rlReplayRequestPending = false;" in html
+    assert "clearRlCriticSeries();" in html
+    assert "seriesPolling || rlReplayRequestPending" in html
+
+
+def test_rl_replay_disables_manual_scrub_when_critic_is_selected():
+    html = console_source()
+
+    assert "function rlReplayScrubLocked()" in html
+    assert "range.disabled = LIVE.replayLoading || LIVE.n === 0 || rlReplayScrubLocked();" in html
+    assert "if (rlReplayScrubLocked()) return;" in html
 
 
 def test_replay_exposes_three_video_and_urdf_sync_metrics():
@@ -1071,8 +1112,13 @@ def test_live_charts_bound_draw_work_to_canvas_resolution():
     assert "for (const i of indices)" in html
     assert "indices.forEach((i, point)" in html
     assert 'else if (tab === "rl") host = $("rl-stage-col");' in html
-    assert 'criticCursor, ["#1F1E1C"]' in html
+    assert 'criticCursor, ["#E8590C"]' in html
+    assert "criticGeneration" in html
+    assert "if (criticGeneration !== LIVE.criticGeneration) return;" in html
+    assert 'ctx.fillText(`${(elapsed * ratio).toFixed(1)}s`' in html
     assert ".stage-critic {\n    display: none; flex: 0 0 190px; min-height: 190px;\n  }" in html
+    assert ".stage.rl-live .stage-charts" in html
+    assert "stage.classList.toggle(\"rl-live\"" in html
 
 
 def test_replay_charts_use_series_dimension_names():

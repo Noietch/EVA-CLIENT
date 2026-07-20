@@ -1,25 +1,42 @@
+# Agent, IDE, and local workspace metadata.
+.agents/
 .claude/
-.omx/
+.codex/
 .omc/
-.venv/
+.omx/
 .vscode/
+
+# Python environments, caches, and type-checker output.
+.venv/
 __pycache__/
 .pytest_cache/
 .ruff_cache/
 .pyright/
+*.egg-info/
+
+# Build artifacts and generated dependency locks.
 dist/
 build/
-*.egg-info/
 uv.lock
-work_dirs/*
-upload_parallel*.sh
-datasets
-work_dirs
-.DS_Store
-example/r5_orbbec/thirdparty/
-*.so
+
+# Runtime datasets, logs, and generated work directories.
+datasets/
+work_dirs/
 logs/
 Log/
-configs/01_deploy/r1lite/openpi_qpos.local.py
-configs/02_collection/r1lite_task1.py
-configs/02_collection/r1lite_task2.py
+
+# Local helper directory (new files are ignored; existing tracked files stay tracked).
+tools/
+
+# Native libraries and bundled external dependencies.
+upload_parallel*.sh
+*.so
+example/r5_orbbec/thirdparty/
+
+# OS-generated files.
+.DS_Store
+
+# Machine-local deploy, collection, and RL configuration overrides.
+configs/01_deploy/*/*.local.py
+configs/02_collection/*.local.py
+configs/04_rl/*.local.py

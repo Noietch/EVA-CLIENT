@@ -370,28 +370,29 @@ function updateGuide() {
     if (S.ACTIVE_TAB === "rl") {
       const hasTask = !!$("rl-task-list").value;
       const hasPolicy = !!$("rl-policy-list").value;
-      const hasCritic = !!$("rl-critic-list").value;
-      const rl = s.rl || {};
-      const setup = !!s.is_setup_done && !!rl.critic_connected;
+      const setup = !!s.is_setup_done && !!s.policy_connected;
       const running = s.session_status === "running";
       const intervention = !!s.rollout_intervention_active;
       const saved = !!(s.rollout && (s.rollout.episodes || []).length);
       setPanel("rl-panel-task", hasTask ? "done" : "active");
-      setPanel("rl-panel-models", hasPolicy && hasCritic ? "done" : (hasTask ? "active" : "pending"));
+      setPanel("rl-panel-models", hasPolicy ? "done" : (hasTask ? "active" : "pending"));
       setPanel("rl-panel-data", "done");
-      setPanel("rl-panel-setup", s.last_error && !setup ? "error" : (setup ? "done" : (hasTask && hasPolicy && hasCritic ? "active" : "pending")));
+      setPanel("rl-panel-setup", s.last_error && !setup ? "error" : (setup ? "done" : (hasTask && hasPolicy ? "active" : "pending")));
       setPanel("rl-panel-rollout", setup ? (running || intervention ? "active" : "done") : "pending");
       setPanel("rl-panel-saved", saved ? "done" : (setup ? "active" : "pending"));
       setPanel("rl-panel-gripper", setup ? "done" : "pending");
       const bar = $("guidebar");
       if (bar) bar.classList.toggle("done", saved && !running && !intervention);
-      $("gb-step").textContent = intervention ? "HIL" : (running ? "ROLLOUT" : "RL");
-      if (!hasTask || !hasPolicy || !hasCritic) {
-        $("gb-msg").innerHTML = "Select <b>task, Policy, and Critic</b>";
-        $("gb-hint").textContent = "The RL mode and inference strategy come from config";
+      const guideStep = !hasTask || !hasPolicy ? 1 : (!setup ? 2 : (running || intervention ? 4 : 3));
+      $("gb-step").textContent = `STEP ${guideStep}/4`;
+      if (!hasTask || !hasPolicy) {
+        $("gb-msg").innerHTML = "Select <b>task and Policy</b>";
+        $("gb-hint").textContent = "Critic is optional and adds value telemetry when available";
       } else if (!setup) {
-        $("gb-msg").innerHTML = "Run <b>SETUP</b> to connect both models";
-        $("gb-hint").textContent = s.last_error || "Policy and Critic are independent connections";
+        $("gb-msg").innerHTML = s.setup_stage
+          ? `SETUP · <b>${String(s.setup_stage).toUpperCase()}</b>`
+          : "SETUP starts <b>automatically</b>";
+        $("gb-hint").textContent = s.last_error || "Critic is optional";
       } else if (intervention) {
         $("gb-msg").innerHTML = "HIL intervention is <b>recording</b>";
         $("gb-hint").textContent = "ACCEPT resumes rollout; ABANDON rolls the segment back";

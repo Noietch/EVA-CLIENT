@@ -79,6 +79,7 @@ from core.app.operator_control import (
 )
 from core.app.rl import (
     build_rl_active_config,
+    close_rl_critic,
     close_rl_workspace,
     connect_rl_critic,
     reset_rl_series,
@@ -255,6 +256,13 @@ def _select_only_inference_strategy_if_needed(
     return True
 
 
+def _queue_rl_setup_after_reset(runtime: RuntimeState) -> None:
+    if not runtime.rl_active or runtime.rl_selected_policy_slot is None or is_replay(runtime):
+        return
+    assert runtime.command_queue is not None
+    runtime.command_queue.put("web:rl_setup")
+
+
 def _handle_web_command(
     command: str,
     config: ConfigDict,
@@ -348,6 +356,8 @@ def _handle_web_command(
         session.selected_task = arg
         session.last_error = ""
         reset_session_progress(session)
+        runtime.rl_selected_critic_slot = None
+        close_rl_critic(runtime)
         return
 
     if verb == "rl_select_policy":
@@ -359,6 +369,8 @@ def _handle_web_command(
         runtime.rl_selected_policy_slot = slot
         session.is_setup_done = False
         session.last_error = ""
+        runtime.rl_selected_critic_slot = None
+        close_rl_critic(runtime)
         return
 
     if verb == "rl_select_critic":
@@ -367,19 +379,25 @@ def _handle_web_command(
         if rl_cfg is None or slot < 0 or slot >= len(rl_cfg.critics):
             session.last_error = f"RL critic slot is out of range: {slot}"
             return
+        if not session.is_setup_done or runtime.active_config is None:
+            session.last_error = "RL Critic can only be selected after setup"
+            return
         runtime.rl_selected_critic_slot = slot
-        session.is_setup_done = False
+        if not connect_rl_critic(runtime.active_config, runtime, slot):
+            logger.warning("RL Critic unavailable; continuing without Critic telemetry")
         session.last_error = ""
         return
 
     if verb == "rl_setup":
         policy_slot = runtime.rl_selected_policy_slot
-        critic_slot = runtime.rl_selected_critic_slot
         if not runtime.rl_active:
             session.last_error = "RL tab is not active"
             return
-        if session.selected_task is None or policy_slot is None or critic_slot is None:
-            session.last_error = "Select an RL task, Policy, and Critic before setup"
+        if session.selected_task is None or policy_slot is None:
+            session.last_error = "Select an RL task and Policy before setup"
+            return
+        if session.is_setup_done and runtime.policy is not None:
+            logger.info("[RL_SETUP] already complete; ignoring duplicate setup request")
             return
         active = build_rl_active_config(config, policy_slot)
         runtime.active_config = active
@@ -394,9 +412,6 @@ def _handle_web_command(
         select_inference_strategy(strategy, config, runtime, session)
         if not connect_policy(config, runtime, session, force_reconnect=True):
             session.last_error = runtime.last_policy_error
-            return
-        if not connect_rl_critic(config, runtime, critic_slot):
-            session.last_error = runtime.rl_critic_error
             return
         run_setup(config, runtime, session, fail_fast=True)
         return
@@ -773,11 +788,20 @@ def _handle_web_command(
         return
 
     if verb == "console_reset":
+        if getattr(runtime, "rollout_intervention_active", False):
+            session.last_error = "Continue or abandon the active intervention before reset"
+            logger.warning("Ignored reset during active rollout intervention")
+            return
         stop_rollout_intervention(config, runtime, session, required=False)
         discard_rollout_intervention_segment(runtime)
         if not is_replay(runtime) and session.mode in (SessionMode.REAL, SessionMode.SIM):
             discard_rollout_episode(runtime)
+        if runtime.rl_active:
+            reset_rl_series(runtime)
+            runtime.rl_selected_critic_slot = None
+            close_rl_critic(runtime)
         run_reset(config, runtime, session)
+        _queue_rl_setup_after_reset(runtime)
         return
 
     if verb == "rollout_save":
@@ -791,7 +815,11 @@ def _handle_web_command(
             _dispatch_halt(config, runtime, session)
             mark_rollout_save_ready(runtime, "save")
         if save_rollout_episode(runtime, session):
+            if runtime.rl_active:
+                runtime.rl_selected_critic_slot = None
+                close_rl_critic(runtime)
             run_reset(config, runtime, session)
+            _queue_rl_setup_after_reset(runtime)
         return
 
     if verb == "rollout_stop":
@@ -1154,6 +1182,7 @@ def run(
 
     gc.callbacks.append(log_gc_timing)
     last_running_tick: float | None = None
+    rl_critic_sync_waiting = False
     try:
         while session.status is not SessionStatus.EXIT and not transport.is_shutdown():
             # Multi-ckpt: a switch_ckpt swaps in the active ckpt's full config.
@@ -1203,12 +1232,32 @@ def run(
                     segment = runtime.rollout_intervention_active_segment
                     assert segment is not None and segment.frames
                     frame = segment.frames[-1]
-                    observation = build_policy_observation(
-                        frame,
-                        session.selected_task or "",
-                        effective,
-                        runtime,
-                    )
+                    critic_frame = frame
+                    required_camera_keys = {
+                        camera.observation_key
+                        for camera in runtime.robot.observation_schema.cameras
+                    }
+                    if not required_camera_keys.issubset(frame.images):
+                        critic_frame = runtime.transport.get_frame()
+                        if critic_frame is None or not required_camera_keys.issubset(
+                            critic_frame.images
+                        ):
+                            if not rl_critic_sync_waiting:
+                                logger.warning(
+                                    "[RL_CRITIC] waiting for synchronized intervention "
+                                    "observation with cameras=%s",
+                                    sorted(required_camera_keys),
+                                )
+                            rl_critic_sync_waiting = True
+                            critic_frame = None
+                        else:
+                            if rl_critic_sync_waiting:
+                                logger.info(
+                                    "[RL_CRITIC] synchronized intervention observation resumed"
+                                )
+                            rl_critic_sync_waiting = False
+                    else:
+                        rl_critic_sync_waiting = False
                     action = (
                         frame.action_eef
                         if effective.inference_cfg.action_space.is_eef()
@@ -1216,13 +1265,20 @@ def run(
                     )
                     if action is None:
                         raise ValueError("Intervention frame is missing the configured action")
-                    submit_rl_critic(
-                        runtime,
-                        observation,
-                        np.asarray(action, dtype=np.float32)[None, :],
-                        "intervention",
-                        timestamp=frame.timestamp,
-                    )
+                    if critic_frame is not None:
+                        observation = build_policy_observation(
+                            critic_frame,
+                            session.selected_task or "",
+                            effective,
+                            runtime,
+                        )
+                        submit_rl_critic(
+                            runtime,
+                            observation,
+                            np.asarray(action, dtype=np.float32)[None, :],
+                            "intervention",
+                            timestamp=frame.timestamp,
+                        )
 
             if session.mode is SessionMode.COLLECT and session.status is SessionStatus.RUNNING:
                 collect_step(effective, runtime)

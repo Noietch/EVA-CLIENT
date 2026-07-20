@@ -486,9 +486,9 @@ class DatasetTransport(TransportBridge):
             dataset lacks are filled with black frames) and the recorded state
             [state_dim] float32, or None if shut down or past the last frame.
         """
-        if self._shutdown.is_set():
-            return None
         with self._lock:
+            if self._shutdown.is_set():
+                return None
             idx = self._frame_index
             if idx >= self._n_steps:
                 return None
@@ -533,9 +533,9 @@ class DatasetTransport(TransportBridge):
             BGR uint8 array [H, W, 3], or None if the camera/frame is unavailable.
             The returned array is read-only (caller must not mutate it).
         """
-        if self._shutdown.is_set():
-            return None
         with self._lock:
+            if self._shutdown.is_set():
+                return None
             idx = self._frame_index
             if idx >= self._n_steps:
                 return None
@@ -588,9 +588,10 @@ class DatasetTransport(TransportBridge):
     def close(self) -> None:
         """Mark shut down and release all per-camera video captures."""
         self._shutdown.set()
-        for cap in self._caps.values():
-            cap.release()
-        self._caps.clear()
+        with self._lock:
+            for cap in self._caps.values():
+                cap.release()
+            self._caps.clear()
         logger.debug("Dataset transport closed")
 
     def is_shutdown(self) -> bool:

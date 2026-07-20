@@ -401,6 +401,7 @@ function showReviewError(kind, message) {
 function returnReviewToLive() {
     S.collectReplayEpisode = null;
     S.rolloutSaveEpisode = null;
+    S.rlQcEpisode = null;
     clearReviewPlayback();
     exitReplayMode();
     refreshCameraStreams();

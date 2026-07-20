@@ -242,6 +242,8 @@ function installReplaySeries(series) {
     LIVE.interventionSegmentIndex = series.intervention_segment_index || [];
     LIVE.criticTimestamp = [];
     LIVE.criticValue = [];
+    LIVE.criticSource = [];
+    LIVE.criticGeneration += 1;
     LIVE.n = LIVE.state.length;
     LIVE.playTime = buildReplayPlayTimeline(LIVE.timestamp, LIVE.n);
     LIVE.dimsOnA = {};

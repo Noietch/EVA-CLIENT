@@ -73,13 +73,54 @@ def test_rl_config_exposes_preview_models_and_lerobot_storage():
     cfg = load_config(_CONFIGS_DIR / "04_rl" / "r1lite_rl.py")
 
     assert cfg.rl.cli_mode == "real"
-    assert cfg.rl.inference_strategy == "rtc"
+    assert cfg.rl.inference_strategy == "async"
     assert cfg.rl.data.format == "lerobot"
     assert cfg.rl.policies[0].name == "r1lite_openpi_qpos"
     assert cfg.rl.policies[0].config.policy.type == "openpi"
     assert cfg.rl.policies[0].config.policy.host == "127.0.0.1"
     assert cfg.rl.policies[0].config.policy.port == 9000
     assert cfg.rl.critics[0].name == "r1lite_critic"
+
+
+@pytest.mark.parametrize(
+    ("filename", "robot_type"),
+    [
+        ("agibot_g2_rl.py", "agibot_g2"),
+        ("arx_r5_rl.py", "arx_r5"),
+        ("dual_agilex_piper_rl.py", "agilex_piper"),
+        ("dual_franka_rl.py", "dual_franka"),
+        ("r1lite_rl.py", "r1_lite"),
+        ("ur5e_rl.py", "ur5e"),
+    ],
+)
+def test_all_robot_rl_templates_load(filename: str, robot_type: str):
+    cfg = load_config(_CONFIGS_DIR / "04_rl" / filename)
+
+    assert cfg.robot.type == robot_type
+    assert cfg.rl.policies[0].config.robot.type == robot_type
+    assert cfg.rl.inference_strategy == "async"
+    assert cfg.rl.critics[0].type == "websocket"
+    assert cfg.rl.data.format == "lerobot"
+    assert cfg.rl.intervention.control_mode == "relative"
+
+
+def test_rl_local_config_pattern_is_ignored():
+    gitignore = (_CONFIGS_DIR.parent / ".gitignore").read_text(encoding="utf-8")
+
+    assert "configs/01_deploy/*/*.local.py" in gitignore
+    assert "configs/04_rl/*.local.py" in gitignore
+
+
+def test_r1lite_local_rl_config_loads_when_present():
+    path = _CONFIGS_DIR / "04_rl" / "r1lite_rl.local.py"
+    if not path.exists():
+        pytest.skip("machine-local RL config is not checked into the repository")
+
+    cfg = load_config(path)
+
+    assert cfg.rl.cli_mode == "real"
+    assert cfg.rl.inference_strategy == "async"
+    assert cfg.rl.policies[0].config.robot.gripper_threshold == 50.0
 
 
 def test_rl_config_rejects_unimplemented_transition_storage(tmp_path):
