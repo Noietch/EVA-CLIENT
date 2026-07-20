@@ -40,6 +40,7 @@ def _build_zmq_transport_with_fake_readers(monkeypatch):
             _zmq_mod,
             preserve_collection_backlog=False,
         ) -> None:
+            self.preserve_collection_backlog = preserve_collection_backlog
             self.frame = None
             self.collection_frame = None
             self.qpos = None
@@ -120,6 +121,7 @@ def test_observation_roundtrip_preserves_images_state_and_timestamp():
         t=123.456,
         images=images,
         state=state,
+        camera_resolution=(224, 224),
         frame_id=42,
         success=True,
         scene_index=3,
@@ -139,6 +141,7 @@ def test_observation_roundtrip_preserves_images_state_and_timestamp():
     assert back.task_name == "pick_and_place"
     assert back.robot_name == "piper"
     assert back.split == "train"
+    assert back.camera_resolution == (224, 224)
     assert set(back.images) == set(images)
     for key, img in images.items():
         np.testing.assert_array_equal(back.images[key], img)
@@ -201,6 +204,57 @@ def test_wire_observation_converts_to_collection_frame_by_robot_group_order():
     np.testing.assert_allclose(frame.state_eef, np.concatenate([left_eef, right_eef]))
     np.testing.assert_allclose(frame.action_qpos, action_qpos)
     np.testing.assert_allclose(frame.action_eef, action_eef)
+
+
+def test_state_only_observation_materializes_black_camera_frames():
+    robot = ROBOT_REGISTRY.build("agilex_piper")
+    reader = object.__new__(_ObservationReader)
+    reader._robot = robot
+    reader._disabled_cameras = set()
+    reader._disabled_groups = set()
+    reader._group_initial_qpos = {}
+    reader._black_image_cache = {}
+    wire_obs = WireObservation(
+        t=3.0,
+        images={},
+        state={
+            group.name: np.zeros(group.dof, dtype=np.float32)
+            for group in robot.actuator_groups
+        },
+        camera_resolution=(12, 16),
+    )
+
+    reader._drain_latest = lambda: wire_obs
+    frame = reader.get_frame()
+
+    assert frame is not None
+    assert set(frame.images) == {"cam_high", "cam_left_wrist", "cam_right_wrist"}
+    assert all(image.shape == (12, 16, 3) for image in frame.images.values())
+    assert all(not np.any(image) for image in frame.images.values())
+
+
+def test_state_only_raw_collection_keeps_camera_streams_empty():
+    robot = ROBOT_REGISTRY.build("agilex_piper")
+    wire_obs = WireObservation(
+        t=3.0,
+        images={},
+        state={
+            group.name: np.zeros(group.dof, dtype=np.float32)
+            for group in robot.actuator_groups
+        },
+        camera_resolution=(12, 16),
+    )
+    reader = object.__new__(_ObservationReader)
+    reader._robot = robot
+    reader._disabled_cameras = set()
+    reader._black_image_cache = {}
+    reader._drain_raw_collection = lambda: pack_observation(wire_obs)
+
+    snapshot = reader.acquire_collection_raw()
+    assert snapshot is not None
+    batch = snapshot.decode_raw()
+
+    assert batch.images == {}
 
 
 def test_zmq_collection_reader_preserves_backlog_order():
@@ -505,6 +559,53 @@ def test_zmq_transport_uses_separate_internal_readers(monkeypatch):
     assert readers[0].calls == ["frame"]
     assert readers[1].calls == ["collection"]
     assert readers[2].calls == ["qpos"]
+    assert [reader.preserve_collection_backlog for reader in readers] == [False, True, False]
+
+
+def test_zmq_reader_conflates_latest_frames_but_preserves_collection_backlog():
+    class _Socket:
+        def __init__(self) -> None:
+            self.options = []
+
+        def setsockopt(self, option, value) -> None:
+            self.options.append((option, value))
+
+        def connect(self, _endpoint) -> None:
+            return None
+
+    class _Context:
+        def __init__(self) -> None:
+            self.sockets = []
+
+        def socket(self, _kind):
+            socket = _Socket()
+            self.sockets.append(socket)
+            return socket
+
+    context = _Context()
+    fake_zmq = types.SimpleNamespace(
+        SUB=1,
+        CONFLATE=2,
+        SUBSCRIBE=3,
+        RCVTIMEO=4,
+        Context=types.SimpleNamespace(instance=lambda: context),
+    )
+    config = types.SimpleNamespace(
+        transport=types.SimpleNamespace(
+            sub_endpoint="tcp://127.0.0.1:5555",
+            disabled_cameras=[],
+            disabled_groups=[],
+        )
+    )
+    robot = ROBOT_REGISTRY.build("agilex_piper")
+
+    _ObservationReader(cast(ConfigDict, config), robot, fake_zmq)
+    _ObservationReader(
+        cast(ConfigDict, config), robot, fake_zmq, preserve_collection_backlog=True
+    )
+
+    assert (fake_zmq.CONFLATE, 1) in context.sockets[0].options
+    assert (fake_zmq.CONFLATE, 1) not in context.sockets[1].options
 
 
 def test_zmq_transport_reports_freshest_reader_and_closes_all_readers(monkeypatch):

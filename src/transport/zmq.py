@@ -65,6 +65,7 @@ class WireObservation:
         task_name: optional simulator task behavior name for offline scene rebuild.
         robot_name: optional simulator robot registry name for offline scene rebuild.
         split: optional simulator layout split for offline scene rebuild.
+        camera_resolution: Optional state-only camera placeholder size as (height, width).
     """
 
     t: float
@@ -80,6 +81,7 @@ class WireObservation:
     task_name: str | None = None
     robot_name: str | None = None
     split: str | None = None
+    camera_resolution: tuple[int, int] | None = None
 
 
 @dataclasses.dataclass
@@ -134,6 +136,8 @@ def pack_observation(obs: WireObservation) -> bytes:
         payload["robot_name"] = str(obs.robot_name)
     if obs.split is not None:
         payload["split"] = str(obs.split)
+    if obs.camera_resolution is not None:
+        payload["camera_resolution"] = list(obs.camera_resolution)
     return _PACKER.pack(payload)
 
 
@@ -167,6 +171,11 @@ def unpack_observation(payload: bytes) -> WireObservation:
         task_name=None if "task_name" not in raw else str(raw["task_name"]),
         robot_name=None if "robot_name" not in raw else str(raw["robot_name"]),
         split=None if "split" not in raw else str(raw["split"]),
+        camera_resolution=(
+            None
+            if "camera_resolution" not in raw
+            else (int(raw["camera_resolution"][0]), int(raw["camera_resolution"][1]))
+        ),
     )
 
 
@@ -215,6 +224,7 @@ class _ObservationReader:
         self._zmq = zmq_mod
         self._latest: WireObservation | None = None
         self._latest_images: dict[str, np.ndarray] = {}
+        self._black_image_cache: dict[tuple[int, int], np.ndarray] = {}
         self._preserve_collection_backlog = preserve_collection_backlog
         self._collection_queue: collections.deque[WireObservation] = collections.deque()
         self._raw_collection_queue: collections.deque[bytes] = collections.deque()
@@ -237,9 +247,25 @@ class _ObservationReader:
 
         ctx = zmq_mod.Context.instance()
         self._sub = ctx.socket(zmq_mod.SUB)
-        self._sub.connect(config.transport.sub_endpoint)
+        if not preserve_collection_backlog:
+            self._sub.setsockopt(zmq_mod.CONFLATE, 1)
         self._sub.setsockopt(zmq_mod.SUBSCRIBE, b"")
         self._sub.setsockopt(zmq_mod.RCVTIMEO, 0)  # non-blocking drain
+        self._sub.connect(config.transport.sub_endpoint)
+
+    def _observation_images(self, wire_obs: WireObservation) -> dict[str, np.ndarray]:
+        images = {key: np.asarray(image) for key, image in wire_obs.images.items()}
+        if images or wire_obs.camera_resolution is None:
+            return images
+        resolution = wire_obs.camera_resolution
+        if resolution not in self._black_image_cache:
+            self._black_image_cache[resolution] = np.zeros((*resolution, 3), dtype=np.uint8)
+        black = self._black_image_cache[resolution]
+        return {
+            camera.observation_key: black
+            for camera in self._robot.observation_schema.cameras
+            if camera.observation_key not in self._disabled_cameras
+        }
 
     def _drain_latest(self) -> WireObservation | None:
         """Pop all queued SUB messages, keeping only the newest by timestamp."""
@@ -253,8 +279,9 @@ class _ObservationReader:
                     break
                 got_message = True
                 obs = unpack_observation(payload)
-                self._image_rate.mark_many(obs.images.keys(), obs.t)
-                self._cache_images_locked(obs)
+                images = self._observation_images(obs)
+                self._image_rate.mark_many(images.keys(), obs.t)
+                self._cache_images_locked(images)
                 if newest is None or obs.t >= newest.t:
                     newest = obs
             if got_message:
@@ -272,8 +299,9 @@ class _ObservationReader:
                     break
                 got_message = True
                 obs = unpack_observation(payload)
-                self._image_rate.mark_many(obs.images.keys(), obs.t)
-                self._cache_images_locked(obs)
+                images = self._observation_images(obs)
+                self._image_rate.mark_many(images.keys(), obs.t)
+                self._cache_images_locked(images)
                 self._collection_queue.append(obs)
                 if self._latest is None or obs.t >= self._latest.t:
                     self._latest = obs
@@ -337,11 +365,12 @@ class _ObservationReader:
         if wire_obs is None:
             return None
 
+        wire_images = self._observation_images(wire_obs)
         images: dict[str, np.ndarray] = {}
         for camera in self._robot.observation_schema.cameras:
             if camera.observation_key in self._disabled_cameras:
                 continue
-            image = wire_obs.images.get(camera.observation_key)
+            image = wire_images.get(camera.observation_key)
             if image is None:
                 return None
             images[camera.observation_key] = np.asarray(image)
@@ -420,10 +449,10 @@ class _ObservationReader:
 
     def _cache_images(self, wire_obs: WireObservation) -> None:
         with self._lock:
-            self._cache_images_locked(wire_obs)
+            self._cache_images_locked(self._observation_images(wire_obs))
 
-    def _cache_images_locked(self, wire_obs: WireObservation) -> None:
-        for key, image in wire_obs.images.items():
+    def _cache_images_locked(self, images: dict[str, np.ndarray]) -> None:
+        for key, image in images.items():
             if key not in self._disabled_cameras:
                 self._latest_images[key] = np.asarray(image)
 
@@ -470,7 +499,7 @@ class _ObservationReader:
                 "wire observation is missing required joint state for an actuator group"
             )
         return Observation(
-            images={k: np.asarray(v) for k, v in wire_obs.images.items()},
+            images={key: np.asarray(image) for key, image in wire_obs.images.items()},
             state_qpos=state_qpos,
             state_eef=self._concat_group_fields(wire_obs.eef, self._robot.arm_groups),
             action_qpos=wire_obs.action,
@@ -598,7 +627,9 @@ class ZmqTransport(TransportBridge):
         self._zmq = zmq
 
         self._reader = _ObservationReader(config, robot, zmq)
-        self._collection_reader = _ObservationReader(config, robot, zmq)
+        self._collection_reader = _ObservationReader(
+            config, robot, zmq, preserve_collection_backlog=True
+        )
         self._qpos_reader = _ObservationReader(config, robot, zmq)
         self._extra_readers: list[_ObservationReader] = []
 
