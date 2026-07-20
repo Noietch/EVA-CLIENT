@@ -65,6 +65,7 @@ class WireObservation:
         task_name: optional simulator task behavior name for offline scene rebuild.
         robot_name: optional simulator robot registry name for offline scene rebuild.
         split: optional simulator layout split for offline scene rebuild.
+        scene_state: optional concrete assets and initial scene poses for offline rebuild.
         camera_resolution: Optional state-only camera placeholder size as (height, width).
     """
 
@@ -81,6 +82,7 @@ class WireObservation:
     task_name: str | None = None
     robot_name: str | None = None
     split: str | None = None
+    scene_state: dict[str, object] | None = None
     camera_resolution: tuple[int, int] | None = None
 
 
@@ -136,6 +138,8 @@ def pack_observation(obs: WireObservation) -> bytes:
         payload["robot_name"] = str(obs.robot_name)
     if obs.split is not None:
         payload["split"] = str(obs.split)
+    if obs.scene_state is not None:
+        payload["scene_state"] = obs.scene_state
     if obs.camera_resolution is not None:
         payload["camera_resolution"] = list(obs.camera_resolution)
     return _PACKER.pack(payload)
@@ -171,6 +175,7 @@ def unpack_observation(payload: bytes) -> WireObservation:
         task_name=None if "task_name" not in raw else str(raw["task_name"]),
         robot_name=None if "robot_name" not in raw else str(raw["robot_name"]),
         split=None if "split" not in raw else str(raw["split"]),
+        scene_state=None if "scene_state" not in raw else dict(raw["scene_state"]),
         camera_resolution=(
             None
             if "camera_resolution" not in raw
@@ -406,7 +411,7 @@ class _ObservationReader:
             success=wire_obs.success,
         )
 
-    def get_task_status(self) -> dict[str, int | bool | str | None]:
+    def get_task_status(self) -> dict[str, object]:
         """Return optional simulator frame, success, and scene fields from the latest frame."""
         wire_obs = self._drain_latest()
         return {
@@ -417,6 +422,7 @@ class _ObservationReader:
             "task_name": None if wire_obs is None else wire_obs.task_name,
             "robot_name": None if wire_obs is None else wire_obs.robot_name,
             "split": None if wire_obs is None else wire_obs.split,
+            "scene_state": None if wire_obs is None else wire_obs.scene_state,
         }
 
     def get_camera_frame(self, key: str) -> np.ndarray | None:
@@ -664,7 +670,7 @@ class ZmqTransport(TransportBridge):
         """Latest joint state [qpos_dim] float32 from the dedicated qpos reader."""
         return self._qpos_reader.get_latest_qpos()
 
-    def get_task_status(self) -> dict[str, int | bool | str | None]:
+    def get_task_status(self) -> dict[str, object]:
         """Latest optional simulator frame, task-success, and scene fields."""
         return self._qpos_reader.get_task_status()
 

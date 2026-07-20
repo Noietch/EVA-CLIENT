@@ -223,6 +223,7 @@ def begin_rollout_save_episode(
     runtime.rollout_intervention_segments = []
     runtime.rollout_intervention_next_segment_index = 0
     logger_obj.start_episode(task=format_task_label(session.selected_task))
+    _stamp_scene_meta(runtime, logger_obj)
 
 
 def mark_rollout_save_ready(runtime: RuntimeState, reason: str) -> None:
@@ -432,6 +433,7 @@ def start_episode(runtime: RuntimeState, session: SessionState) -> None:
     """Begin one episode = one inference run (status -> RUNNING)."""
     if runtime.episode_logger is not None:
         runtime.episode_logger.start_episode(task=format_task_label(session.selected_task))
+        _stamp_scene_meta(runtime, runtime.episode_logger)
 
 
 def end_episode(runtime: RuntimeState) -> None:
@@ -649,23 +651,30 @@ def collect_stop_teleop(config: ConfigDict, runtime: RuntimeState, session: Sess
     _ = config
 
 
-def _stamp_scene_meta(runtime: RuntimeState) -> None:
+def _stamp_scene_meta(
+    runtime: RuntimeState, episode_logger: EpisodeLogger | None = None
+) -> None:
     """Attach simulator scene metadata to the current episode for offline scene rebuild.
 
     Only simulator nodes publish reconstruction metadata; real-robot transports omit
     it, so this is a no-op when the transport exposes no scene status.
     """
+    logger_obj = runtime.episode_logger if episode_logger is None else episode_logger
+    if logger_obj is None:
+        return
     get_status = getattr(runtime.transport, "get_task_status", None)
     if get_status is None:
         return
     status = get_status()
     scene_fields = {
         key: status[key]
-        for key in ("scene_index", "seed", "task_name", "robot_name", "split")
+        for key in ("scene_index", "task_name", "robot_name", "split")
         if status.get(key) is not None
     }
+    if status.get("scene_state") is not None:
+        scene_fields["scene"] = status["scene_state"]
     if scene_fields:
-        runtime.episode_logger.set_episode_meta(**scene_fields)
+        logger_obj.set_episode_meta(**scene_fields)
 
 
 def collect_start(config: ConfigDict, runtime: RuntimeState, session: SessionState) -> bool:
@@ -697,6 +706,7 @@ def collect_start(config: ConfigDict, runtime: RuntimeState, session: SessionSta
         )
     else:
         runtime.episode_logger.start_episode(task=format_task_label(session.selected_collect_task))
+        _stamp_scene_meta(runtime)
     session.step_index = 0
     session.mode = SessionMode.COLLECT
     session.status = SessionStatus.RUNNING

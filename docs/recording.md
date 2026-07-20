@@ -29,5 +29,8 @@ episode in place — teleop always appends. A sample dataset lives at
 `../examples/agilex_dataset/`.
 
 Simulator-backed recordings additionally put `robot_name`, `task_name`, layout
-`split`, `scene_index`, and `seed` in `meta/state.json`, so offline renderers can
-rebuild an episode from only the dataset path and episode index.
+`split`, `scene_index`, and a concrete `scene` in `meta/state.json`. The scene includes
+each object's `asset_path`, initial `position`, `quaternion_wxyz`, and physical role,
+plus resolved robot and camera poses. Rendering no longer depends on replaying a
+placement seed against mutable task-layout code. This is state format v2;
+`dataset_render.py` requires the concrete scene and has no seed-based fallback.

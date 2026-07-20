@@ -14,7 +14,7 @@ _CODEBASE_VERSION = "v2.1"
 _CHUNKS_SIZE = 1000
 _DATA_PATH_TPL = "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet"
 _VIDEO_PATH_TPL = "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4"
-_STATE_FIELDS = ("robot_name", "task_name", "split", "scene_index", "seed")
+_STATE_FIELDS = ("robot_name", "task_name", "split", "scene_index", "scene")
 
 
 def build_info(
@@ -88,7 +88,7 @@ def build_state(robot_type: str, episodes: list[dict[str, Any]]) -> dict[str, An
         state.update({key: row[key] for key in _STATE_FIELDS if row.get(key) is not None})
         episode_states.append(state)
     return {
-        "format_version": 1,
+        "format_version": 2,
         "robot_type": robot_type,
         "episodes": episode_states,
     }
