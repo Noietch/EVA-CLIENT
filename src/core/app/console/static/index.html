@@ -213,7 +213,8 @@
 
         <div class="stage-chart stage-critic" id="stage-critic">
           <div class="chart-head">
-            <span class="chart-title">CRITIC VALUE <span class="chart-sub">time · value</span></span>
+            <span class="chart-title">CRITIC VALUE <span class="chart-sub">time (s) · value</span></span>
+            <span class="critic-source-legend"><i class="policy"></i>POLICY <i class="intervention"></i>INTERVENTION</span>
             <span class="critic-latest tnum" id="critic-latest">—</span>
             <button class="chart-expand" id="critic-expand" title="expand">⤢</button>
           </div>
@@ -284,13 +285,15 @@
           <div class="card">
             <div class="sub-h">POLICY <span class="model-link" id="rl-policy-link">NOT SELECTED</span></div>
             <select class="choice-select" id="rl-policy-list" aria-label="RL policy model"></select>
-            <div class="sub-h">CRITIC <span class="model-link" id="rl-critic-link">NOT SELECTED</span></div>
-            <select class="choice-select" id="rl-critic-list" aria-label="RL critic model"></select>
+            <div id="rl-critic-choice" style="display:none">
+              <div class="sub-h">CRITIC · OPTIONAL <span class="model-link" id="rl-critic-link">OPTIONAL · AFTER SETUP</span></div>
+              <select class="choice-select" id="rl-critic-list" aria-label="RL critic model"></select>
+            </div>
           </div>
         </div>
 
-        <div class="panel" id="rl-panel-data" data-st="done">
-          <div class="panel-h"><span class="step-badge">3</span>DATA CONFIG</div>
+        <div class="panel" id="rl-panel-data" data-st="done" hidden>
+          <div class="panel-h"><span class="step-badge">—</span>DATA CONFIG</div>
           <div class="card">
             <div class="sub-h">FORMAT</div>
             <select class="choice-select has-value" id="rl-data-format" disabled>
@@ -309,18 +312,29 @@
         </div>
 
         <div class="panel setup-panel" id="rl-panel-setup" data-st="pending">
-          <div class="panel-h"><span class="step-badge">4</span>SETUP</div>
+          <div class="panel-h"><span class="step-badge">3</span>SETUP</div>
           <div class="card">
             <div class="kv"><span class="k">mode</span><span class="v" id="rl-mode">—</span></div>
             <div class="kv"><span class="k">strategy</span><span class="v" id="rl-strategy">—</span></div>
-            <button class="btn primary full" id="rl-b-setup" disabled>SETUP ⚙</button>
-            <div class="lock-note" id="rl-setup-state">Select task, Policy, and Critic</div>
+            <div class="auto-setup" id="rl-auto-setup">
+              <div class="auto-setup-row">
+                <span class="auto-spinner"></span>
+                <span class="auto-setup-msg" id="rl-auto-setup-msg">SELECT TASK + POLICY</span>
+              </div>
+              <div class="auto-bar"><i></i></div>
+            </div>
+            <button class="btn primary full" id="rl-b-setup" disabled style="display:none">RETRY SETUP ↻</button>
+            <div class="lock-note" id="rl-setup-state">Select task and Policy; Critic is optional</div>
           </div>
         </div>
 
         <div class="panel" id="rl-panel-rollout" data-st="pending">
-          <div class="panel-h"><span class="step-badge">5</span>ROLLOUT + HIL</div>
+          <div class="panel-h"><span class="step-badge">4</span>ROLLOUT + HIL</div>
           <div class="card">
+            <div class="rl-source-readout" id="rl-control-source" data-source="idle">
+              <span class="rl-source-label">SOURCE</span>
+              <span class="rl-source-value" id="rl-control-source-value">IDLE</span>
+            </div>
             <label class="collect-arm-gate disabled" id="rl-hil-gate">
               <span class="collect-arm-text" id="rl-hil-label">HIL OFF</span>
               <input type="checkbox" id="rl-hil-enable" disabled aria-label="Enable RL HIL intervention">
@@ -328,6 +342,7 @@
             </label>
             <div class="btn-grid">
               <button class="btn primary full" id="rl-b-run" disabled><span class="rec-dot"></span><span id="rl-run-label">RUN ▶</span></button>
+              <button class="btn full" id="rl-b-reset" disabled>RESET ⟲</button>
               <button class="btn" id="rl-b-intervene" disabled>STOP / INTERVENE</button>
               <button class="btn" id="rl-b-accept" disabled>ACCEPT</button>
               <button class="btn danger full" id="rl-b-abandon" disabled>ABANDON</button>
@@ -336,11 +351,25 @@
           </div>
         </div>
 
+        <div class="panel" id="rl-panel-gripper" data-st="pending">
+          <div class="panel-h"><span class="step-badge">5</span>GRIPPER</div>
+          <div class="card"><div class="btn-grid" id="rl-gripper-buttons"></div><div class="step-state muted" id="rl-gripper-state">Available after setup</div></div>
+        </div>
+
         <div class="panel" id="rl-panel-saved" data-st="pending">
           <div class="panel-h"><span class="step-badge">6</span>SAVED DATA</div>
           <div class="card">
             <button class="btn primary full" id="rl-b-save" disabled>SAVE ROLLOUT</button>
             <button class="btn full" id="rl-b-replay" disabled style="margin-top:6px">REPLAY ▶</button>
+            <div class="qc-box" id="rl-qc-box" style="display:none">
+              <div class="qc-actions">
+                <button class="btn" id="rl-b-qc-pass">PASS ✓</button>
+                <button class="btn danger" id="rl-b-qc-fail">FAIL ✗</button>
+              </div>
+              <textarea id="rl-qc-note" class="review-note" rows="3" placeholder="QC note (optional)"></textarea>
+              <button class="btn full" id="rl-b-qc-note-save">SAVE NOTE</button>
+              <div class="qc-status" id="rl-qc-status"></div>
+            </div>
             <div class="kv"><span class="k">pipeline</span><span class="v sig" id="rl-save-pipeline" data-state="off">IDLE</span></div>
             <div class="collect-queue-head">
               <span><span id="rl-save-count">0/0</span> done</span>
@@ -356,10 +385,6 @@
           </div>
         </div>
 
-        <div class="panel" id="rl-panel-gripper" data-st="pending">
-          <div class="panel-h"><span class="step-badge">7</span>GRIPPER</div>
-          <div class="card"><div class="btn-grid" id="rl-gripper-buttons"></div><div class="step-state muted" id="rl-gripper-state">Available after setup</div></div>
-        </div>
       </div>
       <div class="col-canvas" id="rl-stage-col"></div>
     </div>

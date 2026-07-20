@@ -54,7 +54,21 @@ def connect_rl_critic(config: ConfigDict, runtime: RuntimeState, critic_slot: in
         runtime.rl_critic_error = str(error.__cause__ or error)
         return False
     runtime.rl_critic_runner = CriticRunner(client)
+    metadata = runtime.rl_critic_runner.status()["metadata"]
+    runtime.rl_critic_action_horizon = (
+        int(metadata["action_horizon"]) if "action_horizon" in metadata else None
+    )
     runtime.rl_critic_error = ""
+    if (
+        runtime.rl_pending_critic_observation is not None
+        and runtime.rl_pending_critic_action is not None
+    ):
+        runtime.rl_critic_runner.submit(
+            runtime.rl_pending_critic_observation,
+            _align_critic_actions(runtime, runtime.rl_pending_critic_action),
+            runtime.rl_pending_critic_timestamp or time.time(),
+            "policy",
+        )
     return True
 
 
@@ -62,6 +76,7 @@ def close_rl_critic(runtime: RuntimeState) -> None:
     """Close the active Critic runner and clear its connection state."""
     runner = runtime.rl_critic_runner
     runtime.rl_critic_runner = None
+    runtime.rl_critic_action_horizon = None
     if runner is not None:
         runner.close()
 
@@ -79,6 +94,9 @@ def close_rl_workspace(runtime: RuntimeState) -> None:
         runtime.rl_replay_episode_id = None
         runtime.rl_replay_timestamps = []
     runtime.rl_live_samples = []
+    runtime.rl_pending_critic_observation = None
+    runtime.rl_pending_critic_action = None
+    runtime.rl_pending_critic_timestamp = None
     runtime.rl_active = False
     runtime.rl_selected_policy_slot = None
     runtime.rl_selected_critic_slot = None
@@ -88,6 +106,9 @@ def close_rl_workspace(runtime: RuntimeState) -> None:
 def reset_rl_series(runtime: RuntimeState) -> None:
     """Clear rollout telemetry and begin a fresh Critic curve."""
     runtime.rl_live_samples = []
+    runtime.rl_pending_critic_observation = None
+    runtime.rl_pending_critic_action = None
+    runtime.rl_pending_critic_timestamp = None
     if runtime.rl_critic_runner is not None:
         runtime.rl_critic_runner.reset_series()
 
@@ -114,6 +135,36 @@ def record_rl_sample(
     )
 
 
+def build_rl_critic_observation(runtime: RuntimeState, observation: dict) -> dict:
+    """Flatten a policy observation into the LeRobot keys consumed by the Critic.
+
+    Args:
+        runtime: Active runtime carrying the robot camera schema.
+        observation: Nested policy observation with ``state`` and ``images`` fields.
+
+    Returns:
+        Flat mapping containing ``observations.state.qpos`` and
+        ``observation.images.<camera>`` entries for Critic preprocessing.
+    """
+    raw = dict(observation)
+    if "state" in observation:
+        raw["observations.state.qpos"] = observation["state"]
+    images = observation.get("images")
+    if isinstance(images, dict):
+        for camera in runtime.robot.observation_schema.cameras:
+            image = None
+            if camera.observation_key in images:
+                image = images[camera.observation_key]
+            elif camera.name in images:
+                image = images[camera.name]
+            if image is not None:
+                raw[f"observation.images.{camera.observation_key}"] = image
+        for key, image in images.items():
+            if key.startswith("observation.images."):
+                raw[key] = image
+    return raw
+
+
 def submit_rl_critic(
     runtime: RuntimeState,
     observation: dict,
@@ -122,14 +173,43 @@ def submit_rl_critic(
     timestamp: float | None = None,
 ) -> None:
     """Submit one ready observation/action pair without blocking its producer."""
-    if not runtime.rl_active or runtime.rl_critic_runner is None:
+    if not runtime.rl_active:
+        return
+    critic_observation = build_rl_critic_observation(runtime, observation)
+    critic_action = np.asarray(actions, dtype=np.float32).copy()
+    if runtime.rl_critic_runner is not None:
+        critic_action = _align_critic_actions(runtime, critic_action)
+    critic_timestamp = time.time() if timestamp is None else timestamp
+    runtime.rl_pending_critic_observation = critic_observation
+    runtime.rl_pending_critic_action = critic_action
+    runtime.rl_pending_critic_timestamp = critic_timestamp
+    if runtime.rl_critic_runner is None:
         return
     runtime.rl_critic_runner.submit(
-        observation,
-        actions,
-        time.time() if timestamp is None else timestamp,
+        critic_observation,
+        critic_action,
+        critic_timestamp,
         source,
     )
+
+
+def _align_critic_actions(runtime: RuntimeState, actions: np.ndarray) -> np.ndarray:
+    """Align an action sequence with the Critic server's declared horizon."""
+    horizon = runtime.rl_critic_action_horizon
+    if horizon is None:
+        return actions
+    if actions.ndim != 2:
+        raise ValueError(f"Critic actions must be 2D, got shape={actions.shape}")
+    if horizon <= 0:
+        raise ValueError(f"Critic action horizon must be positive, got {horizon}")
+    if actions.shape[0] == horizon:
+        return actions
+    if actions.shape[0] == 0:
+        raise ValueError("Critic actions cannot be empty")
+    if actions.shape[0] > horizon:
+        return actions[:horizon]
+    padding = np.repeat(actions[-1:, :], horizon - actions.shape[0], axis=0)
+    return np.concatenate((actions, padding), axis=0)
 
 
 def rl_live_series(runtime: RuntimeState, since: int, critic_since: int) -> dict:
@@ -156,6 +236,7 @@ def rl_live_series(runtime: RuntimeState, since: int, critic_since: int) -> dict
 
 __all__ = [
     "build_rl_active_config",
+    "build_rl_critic_observation",
     "close_rl_critic",
     "close_rl_workspace",
     "connect_rl_critic",

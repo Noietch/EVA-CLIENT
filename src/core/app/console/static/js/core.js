@@ -28,7 +28,7 @@ export const RUN_CONTROLS = {
 
 export const LIVE = {
   timestamp: [], playTime: [], action: [], state: [], n: 0,
-  criticTimestamp: [], criticValue: [],
+  criticTimestamp: [], criticValue: [], criticSource: [], criticGeneration: 0,
   controlSource: [], intervention: [], interventionSegmentIndex: [],
   actionNames: [], stateNames: [],
   dimsOnA: {}, dimsOnS: {}, dimsBuilt: false,
@@ -80,6 +80,7 @@ export const S = {
   rlTask: "",
   rlPolicy: "",
   rlCritic: "",
+  rlQcEpisode: null,
   rlSaveExpanded: false,
 };
 

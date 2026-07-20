@@ -43,7 +43,7 @@ from core.app.handlers import (
     rollout_save_status,
 )
 from core.app.handlers.io import load_replay_dataset
-from core.app.rl import rl_live_series
+from core.app.rl import build_rl_critic_observation, rl_live_series
 from core.app.state import (
     RuntimeState,
     SessionMode,
@@ -1954,24 +1954,33 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(400, {"ok": False, "error": "Replay frame is out of range"})
                 return
             metadata = runtime.policy_metadata or {}
-            horizon = max(1, int(metadata.get("chunk_size", 1)))
+            horizon = runtime.rl_critic_action_horizon or max(1, int(metadata.get("chunk_size", 1)))
             timestamp = runtime.rl_replay_timestamps[frame_index]
             config = runtime.active_config or self.ctx.config
+            replay_generation = runtime.rl_replay_generation
 
             def build_request() -> tuple[dict, np.ndarray]:
-                source.seek(frame_index)
-                frame = source.get_frame()
-                if frame is None:
-                    raise RuntimeError(f"RL replay frame is unavailable: {frame_index}")
-                observation = build_policy_observation(frame, source.current_task, config, runtime)
-                trajectory = source.get_action_trajectory()
-                actions = trajectory[frame_index : frame_index + horizon]
-                if len(actions) < horizon:
-                    actions = np.concatenate(
-                        [actions, np.repeat(trajectory[-1:], horizon - len(actions), axis=0)],
-                        axis=0,
+                with runtime.rl_replay_lock:
+                    if (
+                        replay_generation != runtime.rl_replay_generation
+                        or source is not runtime.rl_replay_source
+                    ):
+                        raise RuntimeError("RL replay episode changed before Critic frame decode")
+                    source.seek(frame_index)
+                    frame = source.get_frame()
+                    if frame is None:
+                        raise RuntimeError(f"RL replay frame is unavailable: {frame_index}")
+                    observation = build_policy_observation(
+                        frame, source.current_task, config, runtime
                     )
-                return observation, actions
+                    trajectory = source.get_action_trajectory()
+                    actions = trajectory[frame_index : frame_index + horizon]
+                    if len(actions) < horizon:
+                        actions = np.concatenate(
+                            [actions, np.repeat(trajectory[-1:], horizon - len(actions), axis=0)],
+                            axis=0,
+                        )
+                    return build_rl_critic_observation(runtime, observation), actions
 
         runner.submit_builder(build_request, timestamp, "replay")
         self._send_json(200, {"ok": True, "frame": frame_index})

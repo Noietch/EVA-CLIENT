@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 
 import numpy as np
 import pyarrow as pa
@@ -245,6 +246,54 @@ def test_dataset_transport_defers_video_decoder_until_frame_read(tmp_path, monke
     assert opened[0] == video_path
     assert frame is not None
     assert frame.shape == (4, 5, 3)
+
+
+def test_dataset_transport_close_waits_for_active_video_read(tmp_path, monkeypatch):
+    robot = _franka_like_robot()
+    states = np.zeros((3, 16), dtype=np.float32)
+    actions = np.zeros((3, 16), dtype=np.float32)
+    _write_lerobot_episode(tmp_path, states, actions)
+    video_path = (
+        tmp_path / "videos" / "chunk-000" / "observation.images.cam_high" / "episode_000000.mp4"
+    )
+    video_path.parent.mkdir(parents=True)
+    video_path.write_bytes(b"fake video")
+    config = _dataset_config()
+    config.transport.dataset_keys.video_keys = {
+        "cam_high": "observation.images.cam_high",
+    }
+    read_started = threading.Event()
+    allow_read = threading.Event()
+    released = threading.Event()
+
+    class BlockingFrameSource:
+        def __init__(self, _path):
+            pass
+
+        def read_at(self, _idx):
+            read_started.set()
+            assert allow_read.wait(timeout=2.0)
+            return np.zeros((4, 5, 3), dtype=np.uint8)
+
+        def release(self):
+            released.set()
+
+    monkeypatch.setattr("transport.dataset._FrameSource", BlockingFrameSource)
+    transport = DatasetTransport(config, robot, tmp_path)
+    reader = threading.Thread(target=transport.get_camera_frame, args=("cam_high",))
+    reader.start()
+    assert read_started.wait(timeout=1.0)
+
+    closer = threading.Thread(target=transport.close)
+    closer.start()
+
+    assert not released.wait(timeout=0.1)
+    allow_read.set()
+    reader.join(timeout=1.0)
+    closer.join(timeout=1.0)
+    assert not reader.is_alive()
+    assert not closer.is_alive()
+    assert released.is_set()
 
 
 def test_dataset_transport_publish_records_and_clamps(tmp_path):

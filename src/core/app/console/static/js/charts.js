@@ -53,7 +53,7 @@ function drawLiveCharts() {
     const critic = LIVE.criticValue.map((value) => [value]);
     const criticCursor = LIVE.criticValue.length ? LIVE.criticValue.length - 1 : null;
     drawSeriesChart(
-      $("chart-critic-cv"), critic, LIVE.criticTimestamp, { 0: true }, criticCursor, ["#1F1E1C"],
+      $("chart-critic-cv"), critic, LIVE.criticTimestamp, { 0: true }, criticCursor, ["#E8590C"], LIVE.criticSource,
     );
     const latest = $("critic-latest");
     if (latest) {
@@ -71,7 +71,8 @@ function drawLiveCharts() {
         isCritic ? LIVE.criticTimestamp : ts,
         dimsOn,
         isCritic ? criticCursor : cursor,
-        isCritic ? ["#1F1E1C"] : RT_COLORS,
+        isCritic ? ["#E8590C"] : RT_COLORS,
+        isCritic ? LIVE.criticSource : null,
       );
     }
   }
@@ -140,6 +141,12 @@ function updateScrubText() {
     $("scrub-time").textContent = t.toFixed(1) + "s";
   }
 
+function rlReplayScrubLocked() {
+    const rl = (S.STATUS && S.STATUS.rl) || {};
+    return LIVE.replayMode && LIVE.replayOwner === "rl"
+      && (S.rlCritic !== "" || rl.selected_critic_slot != null);
+  }
+
 function updateScrub() {
     const range = $("scrub-range"), stateEl = $("scrub-state"), bar = $("stage-scrub");
     if (!range) return;
@@ -166,7 +173,7 @@ function updateScrub() {
     }
     const returnLive = $("review-return-live");
     if (returnLive) {
-      returnLive.style.display = ["collect", "rollout"].includes(LIVE.replayOwner) ? "" : "none";
+      returnLive.style.display = ["collect", "rollout", "rl"].includes(LIVE.replayOwner) ? "" : "none";
     }
     if (LIVE.replayMode) {
       bar.classList.remove("live");
@@ -174,8 +181,8 @@ function updateScrub() {
         ? `REVIEW · EPISODE ${S.collectReplayEpisode}`
         : (LIVE.replayOwner === "rollout"
             ? `REVIEW · EPISODE ${S.rolloutSaveEpisode}`
-            : "REPLAY");
-      range.disabled = LIVE.replayLoading || LIVE.n === 0;
+            : (LIVE.replayOwner === "rl" ? `REVIEW · EPISODE ${S.rlQcEpisode}` : "REPLAY"));
+      range.disabled = LIVE.replayLoading || LIVE.n === 0 || rlReplayScrubLocked();
       setScrubValue(LIVE.cursorFrac != null ? LIVE.cursorFrac : LIVE.cursor);
     } else if (LIVE.following) {
       bar.classList.add("live");
@@ -193,6 +200,7 @@ function updateScrub() {
   }
 
 function onScrubInput(v) {
+    if (rlReplayScrubLocked()) return;
     const i = Math.max(0, Math.min(Math.round(parseFloat(v) || 0), LIVE.n - 1));
     if (LIVE.replayMode) {
       if (LIVE.playing) replayStop();   // manual scrub takes over from the play clock
@@ -209,7 +217,8 @@ function resetLiveSeries() {
     LIVE.timestamp = []; LIVE.playTime = []; LIVE.action = []; LIVE.state = []; LIVE.n = 0;
     LIVE.actionNames = []; LIVE.stateNames = [];
     LIVE.controlSource = []; LIVE.intervention = []; LIVE.interventionSegmentIndex = [];
-    LIVE.criticTimestamp = []; LIVE.criticValue = [];
+    LIVE.criticTimestamp = []; LIVE.criticValue = []; LIVE.criticSource = [];
+    LIVE.criticGeneration += 1;
     LIVE.dimsOnA = {}; LIVE.dimsOnS = {}; LIVE.dimsBuilt = false;
     LIVE.following = true; LIVE.cursor = 0;
     renderLiveDims("chart-action-dims", 0, LIVE.dimsOnA, "a");
@@ -228,7 +237,7 @@ function timeAtIndex(ts, idx) {
     return t0 + (t1 - t0) * a;
   }
 
-function drawSeriesChart(cv, mat, ts, dimsOn, cursorIdx, colors = RT_COLORS) {
+function drawSeriesChart(cv, mat, ts, dimsOn, cursorIdx, colors = RT_COLORS, source = null) {
     const rect = cv.getBoundingClientRect();
     if (rect.width < 2 || rect.height < 2) return;
     const dpr = Math.min(window.devicePixelRatio, 2);
@@ -258,6 +267,19 @@ function drawSeriesChart(cv, mat, ts, dimsOn, cursorIdx, colors = RT_COLORS) {
     const Y = (v) => H - pad - (H - 2 * pad) * (v - lo) / (hi - lo);
     ctx.fillStyle = "rgba(0,0,0,0.45)"; ctx.font = "9px monospace";
     ctx.fillText(hi.toFixed(2), 2, pad + 4); ctx.fillText(lo.toFixed(2), 2, H - pad);
+    const elapsed = Math.max(0, t1 - t0);
+    ctx.save();
+    ctx.strokeStyle = "rgba(0,0,0,0.08)";
+    ctx.fillStyle = "rgba(0,0,0,0.45)";
+    ctx.font = "9px monospace";
+    ctx.textAlign = "center";
+    for (const ratio of [0, 0.5, 1]) {
+      const x = pad + (W - 2 * pad) * ratio;
+      ctx.beginPath(); ctx.moveTo(x, pad); ctx.lineTo(x, H - pad); ctx.stroke();
+      ctx.fillText(`${(elapsed * ratio).toFixed(1)}s`, x, H - 4);
+    }
+    ctx.restore();
+    drawSourceBands(ctx, ts, source, n, pad, W, H, t0, t1, X);
     ctx.save();
     ctx.globalAlpha = 0.6;           // soften the trace lines; legend chips stay vivid
     ctx.lineJoin = "round";
@@ -273,6 +295,27 @@ function drawSeriesChart(cv, mat, ts, dimsOn, cursorIdx, colors = RT_COLORS) {
     if (cursorIdx != null && cursorIdx >= 0 && cursorIdx < n) {
       const xc = X(timeAtIndex(ts, cursorIdx));
       ctx.strokeStyle = "rgba(0,0,0,0.5)"; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(xc, pad); ctx.lineTo(xc, H - pad); ctx.stroke();
+    }
+  }
+
+function drawSourceBands(ctx, ts, source, n, pad, W, H, t0, t1, X) {
+    if (!source || source.length !== n) return;
+    let start = 0;
+    let active = source[0];
+    for (let i = 1; i <= n; i++) {
+      const next = i < n ? source[i] : null;
+      if (i < n && next === active) continue;
+      const from = Number(ts[start]);
+      const to = i < n ? Number(ts[i]) : t1;
+      const color = active === "intervention"
+        ? "rgba(255, 77, 0, 0.10)"
+        : (active === "policy" ? "rgba(37, 99, 235, 0.07)" : "");
+      if (color && Number.isFinite(from) && Number.isFinite(to) && to >= from) {
+        ctx.fillStyle = color;
+        ctx.fillRect(X(from), pad, Math.max(0, X(to) - X(from)), H - 2 * pad);
+      }
+      start = i;
+      active = next;
     }
   }
 export { buildLiveDims, closeChartModal, drawLiveCharts, drawSeriesChart, liveDimsAll, onScrubInput, openChartModal, resetLiveSeries, updateScrub };

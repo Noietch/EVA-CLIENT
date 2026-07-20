@@ -34,6 +34,9 @@ function relocateCanvas(tab) {
       (tab === "collect" && LIVE.replayOwner === "collect") ||
       (tab === "debug" && LIVE.replayOwner === "rollout");
     stage.classList.toggle("no-series", !showSeries);
+    const rlReplay = tab === "rl" && LIVE.replayMode && LIVE.replayOwner === "rl";
+    stage.classList.toggle("rl-live", tab === "rl" && !rlReplay);
+    stage.classList.toggle("rl-replay", rlReplay);
     if (window.Scene3D && Scene3D.resize) requestAnimationFrame(() => Scene3D.resize());
     if (typeof drawLiveCharts === "function") requestAnimationFrame(() => drawLiveCharts());
   }

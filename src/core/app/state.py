@@ -281,7 +281,11 @@ class RuntimeState:
     rl_selected_policy_slot: int | None = None
     rl_selected_critic_slot: int | None = None
     rl_critic_runner: CriticRunner | None = None
+    rl_critic_action_horizon: int | None = None
     rl_critic_error: str = ""
+    rl_pending_critic_observation: dict | None = None
+    rl_pending_critic_action: np.ndarray | None = None
+    rl_pending_critic_timestamp: float | None = None
     rl_live_samples: list[tuple[float, np.ndarray, np.ndarray, str, int]] = (
         dataclasses.field(default_factory=list)
     )
