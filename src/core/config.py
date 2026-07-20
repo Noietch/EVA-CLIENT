@@ -63,8 +63,6 @@ def load_config(path: str | Path) -> ConfigDict:
     _normalize_eval_cfg(cfg)
     _normalize_rl_cfg(cfg)
     _coerce_spaces(cfg)
-    _coerce_calibration(cfg, p)
-    _coerce_calibration_poses(cfg)
     _apply_derived(cfg, p)
     _validate(cfg)
     _resolve_eval_checkpoints(cfg, p)
@@ -125,95 +123,6 @@ def _coerce_spaces(cfg: ConfigDict) -> None:
         icfg.obs_space = build_space(icfg.obs_space)
     if "action_space" in icfg:
         icfg.action_space = build_space(icfg.action_space)
-
-
-def _coerce_calibration(cfg: ConfigDict, path: Path) -> None:
-    """Materialize ``calibration.cameras`` into ``CameraCalibration`` instances.
-
-    Two sources compose deterministically: if ``calibration.results_path`` is set,
-    load that raiden-schema calibration_results.json first; then overlay the
-    inline ``calibration.cameras`` dict per-camera-name. Inline entries win field-
-    by-field, so an operator can pin one camera's ``attach_link`` without re-
-    stating K/dist. No-op when the config carries no ``calibration`` section.
-    """
-    calib = cfg.get("calibration")
-    if calib is None:
-        return
-    # Deferred import — same cycle-break trick as _coerce_spaces (build_space).
-    import json as _json
-
-    import numpy as np
-
-    from robots.base import CameraCalibration
-
-    merged: dict[str, dict] = {}
-    results_path = calib.get("results_path")
-    if results_path:
-        rp = Path(results_path).expanduser()
-        if not rp.is_absolute():
-            rp = (path.parent / rp).resolve()
-        if rp.exists():
-            raw = _json.loads(rp.read_text())
-            for name, entry in (raw.get("cameras") or {}).items():
-                merged[name] = dict(entry)
-    for name, entry in (calib.get("cameras") or {}).items():
-        merged.setdefault(name, {}).update(dict(entry))
-
-    def _to_np(value: object) -> np.ndarray | None:
-        if value is None:
-            return None
-        return np.asarray(value, dtype=np.float64)
-
-    coerced: dict[str, CameraCalibration] = {}
-    for name, entry in merged.items():
-        K = _to_np(entry.get("K"))
-        dist = _to_np(entry.get("dist"))
-        if K is None or dist is None:
-            raise ValueError(f"calibration.cameras.{name} missing required K/dist")
-        if K.shape != (3, 3):
-            raise ValueError(
-                f"calibration.cameras.{name}.K must be 3x3, got {K.shape}"
-            )
-        T = _to_np(entry.get("T_cam_link"))
-        if T is not None and T.shape != (4, 4):
-            raise ValueError(
-                f"calibration.cameras.{name}.T_cam_link must be 4x4, got {T.shape}"
-            )
-        size = entry.get("image_size")
-        coerced[name] = CameraCalibration(
-            name=name,
-            K=K,
-            dist=dist.reshape(-1),
-            attach_link=str(entry.get("attach_link") or ""),
-            T_cam_link=T,
-            image_size=(int(size[0]), int(size[1])) if size else None,
-        )
-    calib.cameras = coerced
-
-
-def _coerce_calibration_poses(cfg: ConfigDict) -> None:
-    """Convert ``calibration_poses`` list entries into numpy arrays.
-
-    Empty means "use the robot's default_calibration_poses() at runtime"; the
-    CALIBRATE session resolver handles that fallback. Anything else must be a
-    list of qpos vectors; we normalize to a tuple of float32 np.ndarrays.
-    """
-    import numpy as np
-
-    raw = cfg.get("calibration_poses")
-    if raw is None:
-        cfg.calibration_poses = ()
-        return
-    if not raw:
-        cfg.calibration_poses = ()
-        return
-    coerced: list[np.ndarray] = []
-    for i, entry in enumerate(raw):
-        arr = np.asarray(entry, dtype=np.float32).reshape(-1)
-        if arr.ndim != 1:
-            raise ValueError(f"calibration_poses[{i}] must be a 1-D qpos vector")
-        coerced.append(arr)
-    cfg.calibration_poses = tuple(coerced)
 
 
 def _apply_derived(cfg: ConfigDict, path: Path) -> None:

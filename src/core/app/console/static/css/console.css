@@ -176,12 +176,11 @@
   #view-rl      { grid-template-columns: 420px 1fr; gap: 0; }
   #view-replay  { grid-template-columns: 420px 1fr; gap: 0; }
   #view-manual  { grid-template-columns: 420px 1fr; gap: 0; }
-  #view-calibrate { grid-template-columns: 420px 1fr; gap: 0; }
   #collect-control-col { display: none; }
   #view-debug.collect-mode #debug-control-col { display: none; }
   #view-debug.collect-mode #collect-control-col { display: block; }
   @media (max-width: 1100px) {
-    #view-debug, #view-rl, #view-replay, #view-manual, #view-calibrate { grid-template-columns: 360px 1fr; }
+    #view-debug, #view-rl, #view-replay, #view-manual { grid-template-columns: 360px 1fr; }
   }
 
   .col { min-height: 0; overflow-y: auto; padding: 16px; }
@@ -1191,74 +1190,3 @@
   #eval-replay-col { min-height: 0; overflow-y: auto; padding: 12px; background: var(--surface-2);
     animation: fadeIn .6s ease .18s both; display: flex; flex-direction: column; }
   #eval-replay-col > .stage { flex: 1 1 auto; min-height: 0; padding: 0; }
-
-  /* ---- CALIBRATE workspace ---- */
-  #view-calibrate .panel[data-st="disabled"] { opacity: 0.55; pointer-events: none; }
-  #view-calibrate .panel[data-st="disabled"] input,
-  #view-calibrate .panel[data-st="disabled"] select,
-  #view-calibrate .panel[data-st="disabled"] button { pointer-events: none; }
-  #view-calibrate .panel[data-st="disabled"] .panel-h .step-badge { background: var(--rule); color: var(--ink-dim); }
-  #view-calibrate .panel[data-st="active"] .panel-h .step-badge { background: var(--signal); color: #fff; }
-  #view-calibrate .panel[data-st="done"] .panel-h .step-badge { background: var(--ok); color: #fff; }
-  #view-calibrate .panel[data-st="error"] .panel-h .step-badge { background: var(--danger); color: #fff; }
-  #view-calibrate .n { color: var(--signal); }
-  #calib-panel-mode .row-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
-  #calib-panel-mode .btn { padding: 8px; font-weight: 700; letter-spacing: 0.08em; }
-  #calib-panel-mode .btn.primary { background: var(--signal); color: #fff; }
-  #view-calibrate .cal-guidance { margin-top: 8px; font-size: 11px; }
-  #b-cal-print-board { display: inline-flex; align-items: center; justify-content: center; text-decoration: none; }
-  .cal-cam-list { display: flex; flex-direction: column; gap: 6px; }
-  .cal-cam-item { display: grid; grid-template-columns: 1fr auto; gap: 4px; padding: 6px 8px;
-    border: 1px solid var(--rule); border-radius: var(--radius-sm); background: var(--surface);
-    font-family: var(--mono); font-size: 11px; }
-  .cal-cam-item .cal-cam-title { font-weight: 600; letter-spacing: 0.05em; }
-  .cal-cam-item .cal-cam-attach { color: var(--ink-dim); font-size: 10px; }
-  .cal-source-radios { display: inline-flex; gap: 4px; font-size: 10px; }
-  .cal-source-radios label { padding: 2px 6px; border: 1px solid var(--rule);
-    border-radius: 999px; cursor: pointer; }
-  .cal-source-radios label.on { background: var(--signal); color: #fff; border-color: var(--signal); }
-  .cal-source-radios input { display: none; }
-  .cal-active-cam-row { display: grid; grid-template-columns: 1fr auto; gap: 6px; align-items: center;
-    font-family: var(--mono); font-size: 11px; }
-  .cal-active-cam-row select { padding: 4px 6px; }
-  .cal-status { margin-top: 6px; font-family: var(--mono); font-size: 11px; color: var(--ink-dim); }
-  .cal-status.ok { color: var(--ok); }
-  .cal-status.err { color: var(--danger); }
-  .cal-thumb-row { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 8px; }
-  .cal-thumb { width: 72px; border: 1px solid var(--rule); border-radius: var(--radius-sm); overflow: hidden; }
-  .cal-thumb img { width: 100%; display: block; }
-  .cal-outputs { margin-top: 8px; display: flex; flex-direction: column; gap: 6px;
-    font-family: var(--mono); font-size: 10px; }
-  .cal-outputs .cal-outrow { padding: 6px 8px; border: 1px solid var(--rule); border-radius: var(--radius-sm);
-    background: var(--surface); }
-  .cal-outputs .cal-outrow .cal-out-cam { font-weight: 600; letter-spacing: 0.06em; margin-bottom: 3px; }
-  .cal-outputs .cal-outrow .cal-out-line { color: var(--ink-dim); }
-  .cal-pose-list { margin-top: 8px; display: flex; flex-direction: column; gap: 4px;
-    font-family: var(--mono); font-size: 10px; max-height: 200px; overflow-y: auto; }
-  .cal-pose-row { display: grid; grid-template-columns: 24px 60px 1fr auto; gap: 4px; align-items: center;
-    padding: 4px 6px; border: 1px solid var(--rule); border-radius: var(--radius-sm); background: var(--surface); }
-  .cal-pose-row.selected { border-color: var(--signal); background: rgba(232,89,12,0.06); }
-  .cal-pose-row .cal-pose-idx { font-weight: 700; color: var(--ink-dim); }
-  .cal-pose-row .cal-pose-state { padding: 1px 6px; border-radius: 999px; font-size: 9px; }
-  .cal-pose-row .cal-pose-state.done { background: rgba(47,158,68,0.14); color: var(--ok); }
-  .cal-pose-row .cal-pose-state.todo { background: var(--rule); color: var(--ink-dim); }
-  .cal-pose-row .cal-pose-actions { display: inline-flex; gap: 3px; }
-  .cal-pose-row .cal-pose-actions button { padding: 2px 6px; font-size: 9px; }
-  .cal-pose-editor { margin-top: 8px; padding: 8px; border: 1px dashed var(--signal); border-radius: var(--radius-sm); }
-  .cal-pose-editor .cal-sub-h { font-family: var(--mono); font-size: 10px; letter-spacing: 0.08em; color: var(--ink-dim); margin-bottom: 6px; }
-  #cal-joint-sliders { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
-  #cal-joint-sliders .cal-slider-row { display: grid; grid-template-columns: 40px 1fr 50px; gap: 4px; align-items: center;
-    font-family: var(--mono); font-size: 10px; }
-  #cal-joint-sliders .cal-slider-row input[type=range] { width: 100%; }
-  .row-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
-
-  /* ---- CAMERAS panel ---- */
-  .cameras-list { display: flex; flex-direction: column; gap: 8px; font-family: var(--mono); font-size: 11px; }
-  .cameras-list .cam-row { display: grid; grid-template-columns: 1fr auto; gap: 6px; padding: 6px 8px;
-    border: 1px solid var(--rule); border-radius: var(--radius-sm); background: var(--surface); }
-  .cameras-list .cam-name { font-weight: 600; letter-spacing: 0.06em; color: var(--ink); }
-  .cameras-list .cam-meta { color: var(--ink-dim); font-size: 10px; }
-  .cameras-list .cam-badge { justify-self: end; align-self: center; padding: 2px 8px; border-radius: 999px;
-    font-size: 9px; letter-spacing: 0.08em; }
-  .cameras-list .cam-badge.ok   { background: rgba(47,158,68,0.14); color: var(--ok); }
-  .cameras-list .cam-badge.warn { background: rgba(224,49,49,0.10); color: var(--danger); }

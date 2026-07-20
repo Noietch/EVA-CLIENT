@@ -86,27 +86,3 @@ class AgilexPiper(Robot):
         return pyroki_arms(
             self.URDF, [{"joints": self.ARM_JOINTS, "eef_link": "gripper_base"}] * 2, **kwargs
         )
-
-    def default_calibration_poses(self) -> list[np.ndarray]:
-        """8 preset poses covering wide angle coverage for wrist-camera hand-eye.
-
-        Layout: [left_arm(7), right_arm(7)] = 14. Each qpos varies the "look
-        angle" of the wrist by rotating joint4 (wrist pitch) and joint5 (wrist
-        yaw) while keeping the arm forward-reachable and both grippers open.
-        """
-        base_l = [0.0, 0.6, -0.8, 0.0, 0.5, 0.0, 0.0]
-        base_r = [0.0, -0.6, 0.8, 0.0, -0.5, 0.0, 0.0]
-        variants = [
-            (0.0, 0.0), (0.4, 0.0), (-0.4, 0.0), (0.0, 0.4),
-            (0.0, -0.4), (0.4, 0.4), (-0.4, -0.4), (0.4, -0.4),
-        ]
-        poses: list[np.ndarray] = []
-        for dpitch, dyaw in variants:
-            left = base_l.copy()
-            left[3] += dpitch
-            left[4] += dyaw
-            right = base_r.copy()
-            right[3] -= dpitch
-            right[4] -= dyaw
-            poses.append(np.array(left + right, dtype=np.float32))
-        return poses
