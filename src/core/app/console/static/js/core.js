@@ -28,12 +28,18 @@ export const RUN_CONTROLS = {
 
 export const LIVE = {
   timestamp: [], playTime: [], action: [], state: [], n: 0,
+  criticTimestamp: [], criticValue: [],
   controlSource: [], intervention: [], interventionSegmentIndex: [],
   actionNames: [], stateNames: [],
   dimsOnA: {}, dimsOnS: {}, dimsBuilt: false,
   following: true, cursor: 0,
   replayMode: false, replayLoading: false, playing: false, raf: null, cursorFrac: null,
   replayOwner: "", replayError: "",
+  replaySync: {
+    samples: 0, videoSamples: 0, maxReadyVideos: 0, expectedVideos: 0,
+    maxVideoSkewSec: 0, maxUrdfFrameSkew: 0,
+    maxFrameGapMs: 0, lastFrameGapMs: 0, lastVideoSkewSec: 0, lastUrdfFrameSkew: 0,
+  },
 };
 
 export const RT_COLORS = ["#FF4D00", "#1F7A4D", "#2563EB", "#B0A14F", "#9B59B6", "#16A085", "#D08C60", "#5C8AC6", "#C0341E", "#6AA84F", "#A36B3E", "#7E8CE0", "#C9A227", "#46998A"];
@@ -71,6 +77,10 @@ export const S = {
   rolloutSaveEpisode: null,
   runToggleBusy: null,
   evalRunToggleBusy: null,
+  rlTask: "",
+  rlPolicy: "",
+  rlCritic: "",
+  rlSaveExpanded: false,
 };
 
 const CLIENT_TRACE_ID = (() => {

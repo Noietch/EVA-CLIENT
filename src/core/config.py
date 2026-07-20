@@ -61,12 +61,14 @@ def load_config(path: str | Path) -> ConfigDict:
     cfg = Config.fromfile(str(p)).to_dict()
     cfg = ConfigDict(cfg)
     _normalize_eval_cfg(cfg)
+    _normalize_rl_cfg(cfg)
     _coerce_spaces(cfg)
     _coerce_calibration(cfg, p)
     _coerce_calibration_poses(cfg)
     _apply_derived(cfg, p)
     _validate(cfg)
     _resolve_eval_checkpoints(cfg, p)
+    _resolve_rl_policies(cfg, p)
     return cfg
 
 
@@ -95,6 +97,15 @@ def _normalize_eval_cfg(cfg: ConfigDict) -> None:
         eval_cfg = None
     cfg.eval_cfg = eval_cfg
     cfg.eval = eval_cfg
+
+
+def _normalize_rl_cfg(cfg: ConfigDict) -> None:
+    """Expose the authored rl_cfg block through cfg.rl."""
+    rl_cfg = cfg.get("rl_cfg")
+    if rl_cfg == {}:
+        rl_cfg = None
+    cfg.rl_cfg = rl_cfg
+    cfg.rl = rl_cfg
 
 
 def _coerce_spaces(cfg: ConfigDict) -> None:
@@ -219,19 +230,22 @@ def _apply_derived(cfg: ConfigDict, path: Path) -> None:
 
 
 def _validate(cfg: ConfigDict) -> None:
-    """Strict checks: a config carrying collection.schema.columns must define the full schema."""
+    """Validate configured collection and RL storage contracts."""
     coll = cfg.get("collection") or {}
     schema = coll.get("schema") or {}
     columns = set(schema.get("columns") or {})
-    if not columns:
-        return
-    missing = sorted(set(_COLLECTION_REQUIRED_COLUMNS) - columns)
-    if missing:
-        raise ValueError(f"collection.schema.columns missing required keys: {missing}")
-    if not (schema.get("cameras") or {}):
-        raise ValueError("collection.schema.cameras must define at least one camera")
-    if not (schema.get("arms") or {}):
-        raise ValueError("collection.schema.arms must define at least one arm")
+    if columns:
+        missing = sorted(set(_COLLECTION_REQUIRED_COLUMNS) - columns)
+        if missing:
+            raise ValueError(f"collection.schema.columns missing required keys: {missing}")
+        if not (schema.get("cameras") or {}):
+            raise ValueError("collection.schema.cameras must define at least one camera")
+        if not (schema.get("arms") or {}):
+            raise ValueError("collection.schema.arms must define at least one arm")
+
+    rl_cfg = cfg.get("rl_cfg")
+    if rl_cfg and str(rl_cfg.data.format) != "lerobot":
+        raise ValueError("rl.data.format must be 'lerobot' in this version")
 
 
 def _resolve_eval_checkpoints(cfg: ConfigDict, path: Path) -> None:
@@ -263,6 +277,23 @@ def _resolve_eval_checkpoints(cfg: ConfigDict, path: Path) -> None:
         sub.policy.host = str(ckpt.get("host", "127.0.0.1"))
         sub.policy.port = int(ckpt["port"])
         ckpt["config"] = sub
+
+
+def _resolve_rl_policies(cfg: ConfigDict, path: Path) -> None:
+    """Load each RL policy choice into a full deploy ConfigDict."""
+    rl_cfg = cfg.get("rl_cfg")
+    if not rl_cfg:
+        return
+    for model in rl_cfg.policies:
+        ref = model.config
+        if isinstance(ref, ConfigDict):
+            continue
+        sub = load_config((path.parent / str(ref)).resolve())
+        if "host" in model:
+            sub.policy.host = str(model.host)
+        if "port" in model:
+            sub.policy.port = int(model.port)
+        model.config = sub
 
 
 __all__ = [

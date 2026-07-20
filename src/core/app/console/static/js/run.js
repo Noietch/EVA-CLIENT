@@ -4,7 +4,7 @@ import { $, LIVE, RUN_CONTROLS, S, apiPost } from "./core.js";
 import { updateScrub } from "./charts.js";
 import { collectEnabled, dotClass, renderCollect, renderRolloutSave, loadAnnotation } from "./collect.js";
 import { applyEvalStatus, evalCfg, evalEnabled } from "./eval.js";
-import { maybeSyncReplayPlayer, loadMountedReplaySeries } from "./replay.js";
+import { maybeSyncReplayPlayer, loadMountedReplaySeries, replayStop } from "./replay.js";
 
 // ===== run =====
 
@@ -129,7 +129,8 @@ function applyStatus(s) {
     // RUN follows the live tail; any other state unlocks the scrub bar for history
     // review. Re-entering RUN re-arms following and keeps accumulating. REPLAY owns
     // its own scrub clock (replayMode), so the live-follow toggle is bypassed there.
-    const isRunning = s.session_status === "running";
+    const isRunning = s.session_status === "running" ||
+      (S.ACTIVE_TAB === "rl" && !!s.rollout_intervention_active);
     if (!LIVE.replayMode) {
       if (isRunning && !LIVE.following) { LIVE.following = true; updateScrub(); }
       else if (!isRunning && LIVE.following) { LIVE.following = false; updateScrub(); }
@@ -140,7 +141,7 @@ function applyStatus(s) {
     // Policy link is only meaningful when inference is actually used (a strategy is
     // selected, or the EVAL tab is open). REPLAY/MANUAL/COLLECT never hit the policy
     // server, so the chip stays hidden there instead of showing a misleading DOWN.
-    const policyRelevant = !!s.selected_strategy || S.ACTIVE_TAB === "eval";
+    const policyRelevant = !!s.selected_strategy || ["eval", "rl"].includes(S.ACTIVE_TAB);
     const gbPolicy = $("gb-policy");
     if (gbPolicy) {
       gbPolicy.style.display = policyRelevant ? "" : "none";
@@ -366,6 +367,43 @@ function updateGuide() {
     // it on the MANUAL tab, so hide it everywhere else.
     const mConn = $("manual-conn");
     if (mConn && S.ACTIVE_TAB !== "manual") mConn.style.display = "none";
+    if (S.ACTIVE_TAB === "rl") {
+      const hasTask = !!$("rl-task-list").value;
+      const hasPolicy = !!$("rl-policy-list").value;
+      const hasCritic = !!$("rl-critic-list").value;
+      const rl = s.rl || {};
+      const setup = !!s.is_setup_done && !!rl.critic_connected;
+      const running = s.session_status === "running";
+      const intervention = !!s.rollout_intervention_active;
+      const saved = !!(s.rollout && (s.rollout.episodes || []).length);
+      setPanel("rl-panel-task", hasTask ? "done" : "active");
+      setPanel("rl-panel-models", hasPolicy && hasCritic ? "done" : (hasTask ? "active" : "pending"));
+      setPanel("rl-panel-data", "done");
+      setPanel("rl-panel-setup", s.last_error && !setup ? "error" : (setup ? "done" : (hasTask && hasPolicy && hasCritic ? "active" : "pending")));
+      setPanel("rl-panel-rollout", setup ? (running || intervention ? "active" : "done") : "pending");
+      setPanel("rl-panel-saved", saved ? "done" : (setup ? "active" : "pending"));
+      setPanel("rl-panel-gripper", setup ? "done" : "pending");
+      const bar = $("guidebar");
+      if (bar) bar.classList.toggle("done", saved && !running && !intervention);
+      $("gb-step").textContent = intervention ? "HIL" : (running ? "ROLLOUT" : "RL");
+      if (!hasTask || !hasPolicy || !hasCritic) {
+        $("gb-msg").innerHTML = "Select <b>task, Policy, and Critic</b>";
+        $("gb-hint").textContent = "The RL mode and inference strategy come from config";
+      } else if (!setup) {
+        $("gb-msg").innerHTML = "Run <b>SETUP</b> to connect both models";
+        $("gb-hint").textContent = s.last_error || "Policy and Critic are independent connections";
+      } else if (intervention) {
+        $("gb-msg").innerHTML = "HIL intervention is <b>recording</b>";
+        $("gb-hint").textContent = "ACCEPT resumes rollout; ABANDON rolls the segment back";
+      } else if (running) {
+        $("gb-msg").innerHTML = "Rollout is <b>running</b>";
+        $("gb-hint").textContent = "The Critic curve and rollout/intervention track update live";
+      } else {
+        $("gb-msg").innerHTML = saved ? "Saved episode is ready for <b>REPLAY</b>" : "Ready to <b>RUN</b>";
+        $("gb-hint").textContent = "Stop, save, then select an episode to replay";
+      }
+      return;
+    }
     if (S.ACTIVE_TAB === "collect") {
       const collect = s.collect || {};
       const enabled = collectEnabled();
@@ -685,6 +723,23 @@ function renderEvalGripper() {
     buildGripperCaps($("eval-gripper-buttons"));
   }
 
+function renderRlGripper(enabled) {
+    const host = $("rl-gripper-buttons");
+    const state = $("rl-gripper-state");
+    if (!host || !state) return;
+    if (!enabled) {
+      host.innerHTML = "";
+      host.dataset.ready = "";
+      state.style.display = "";
+      return;
+    }
+    if (host.dataset.ready !== "1") {
+      buildGripperCaps(host);
+      host.dataset.ready = "1";
+    }
+    state.style.display = "none";
+  }
+
 function renderConfig() {
     $("t-robot").textContent = S.CFG.robot_type || "—";
     renderGripperButtons();
@@ -839,6 +894,7 @@ function renderReplayConfig() {
       const loadVideoKeys = hasInspectedDir ? S.replayVideoKeys : {};
       S.replaySeriesKey = null;
       S.replayLoadPending = true;
+      replayStop();
       try {
         const load = await apiPost("/api/load_replay_dataset", {
           dataset_dir: dir,
@@ -1135,6 +1191,7 @@ export {
   applyRunControlStatus, applyStatus, mark, pauseSetup, replayIsLocalMode, resumeSetup,
   retrySetup, setPanel, startRunFromDebug, syncChip, uiMode, updateGuide,
   applyTune, applyManualTune, collectTaskValue, renderConfig, renderEvalGripper,
+  renderRlGripper,
   enterManualSim, manualConnect, manualDisconnect, manualDispatchToggle,
   renderManualConn, renderManualTarget,
 };

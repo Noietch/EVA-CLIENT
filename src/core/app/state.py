@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from tqdm import tqdm
 
     from core.app.collection_capture import CollectionCaptureRunner
+    from critic_client.runner import CriticRunner
     from transport.dataset import DatasetTransport
 
 logger = logging.getLogger(__name__)
@@ -276,6 +277,21 @@ class RuntimeState:
     rollout_exclusion_active: tuple[str, float] | None = None
     rollout_exclusions: list[tuple[str, float, float]] = dataclasses.field(default_factory=list)
     hil_control_mode: str = "absolute"
+    rl_active: bool = False
+    rl_selected_policy_slot: int | None = None
+    rl_selected_critic_slot: int | None = None
+    rl_critic_runner: CriticRunner | None = None
+    rl_critic_error: str = ""
+    rl_live_samples: list[tuple[float, np.ndarray, np.ndarray, str, int]] = (
+        dataclasses.field(default_factory=list)
+    )
+    rl_replay_source: DatasetTransport | None = None
+    rl_replay_sources: list[DatasetTransport] = dataclasses.field(default_factory=list)
+    rl_replay_lock: threading.Lock = dataclasses.field(default_factory=threading.Lock)
+    rl_replay_generation: int = 0
+    rl_replay_dataset_dir: str = ""
+    rl_replay_episode_id: int | None = None
+    rl_replay_timestamps: list[float] = dataclasses.field(default_factory=list)
     # EVAL-tab INIT panel: when init_qpos is set, the arm's reset target becomes this
     # recorded start pose instead of robot.initial_qpos (home). init_ready latches once
     # the operator clicks DONE, gating RUN until the arm is positioned + gripper set.

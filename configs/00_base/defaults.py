@@ -120,6 +120,10 @@ operator_control = dict(
 
 eval_cfg = {}  # Empty dict marks a non-eval config; eval configs fill this block.
 
+# RL workspace configuration. Empty keeps the RL tab unavailable; dedicated RL
+# launch configs provide tasks, policy/critic choices, and data settings.
+rl_cfg = {}
+
 # Camera calibration (optional). ``results_path`` points at a raiden-schema
 # calibration_results.json; ``cameras[name]`` overlays that (or stands alone) with
 # a dict of {K, dist, attach_link?, T_cam_link?, image_size?}. Empty -> no calibration.

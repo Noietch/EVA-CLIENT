@@ -4,6 +4,8 @@ import { $, LIVE, RUN_CONTROLS, S, apiGet, clientTrace, replaceCamStripContent }
 import { buildLiveDims, drawLiveCharts, resetLiveSeries, updateScrub } from "./charts.js";
 import { applyRunControlStatus, renderManualTarget, uiMode } from "./run.js";
 
+window.__evaReplaySync = LIVE.replaySync;
+
 // ===== replay =====
 
 let replayLoadedDatasetDir = "";
@@ -44,7 +46,51 @@ let realReplayLastVideoSync = 0;
 
 let replayLoadSeq = 0;
 
+let replayVideoAbortController = null;
+
+let replayLastRafAt = 0;
+
 let replayTransformsUrl = "/api/replay_transforms";
+
+function resetReplaySyncMetrics() {
+    const metrics = LIVE.replaySync;
+    metrics.samples = 0;
+    metrics.videoSamples = 0;
+    metrics.maxReadyVideos = 0;
+    metrics.expectedVideos = 0;
+    metrics.maxVideoSkewSec = 0;
+    metrics.maxUrdfFrameSkew = 0;
+    metrics.maxFrameGapMs = 0;
+    metrics.lastFrameGapMs = 0;
+    metrics.lastVideoSkewSec = 0;
+    metrics.lastUrdfFrameSkew = 0;
+    replayLastRafAt = 0;
+  }
+
+function recordReplaySync(frame) {
+    const targetTime = replayTimeAtFrame(frame);
+    if (!Number.isFinite(targetTime)) return;
+    const videos = replayVideos();
+    let maxVideoSkew = 0;
+    let videoSamples = 0;
+    videos.forEach((video) => {
+      if (video.error || video.readyState < 2 || !Number.isFinite(video.currentTime)) return;
+      maxVideoSkew = Math.max(maxVideoSkew, Math.abs(video.currentTime - targetTime));
+      videoSamples += 1;
+    });
+    const urdfSkew = replayUrdfAppliedFrame == null
+      ? 0
+      : Math.abs(Number(replayUrdfAppliedFrame) - Number(frame));
+    const metrics = LIVE.replaySync;
+    metrics.expectedVideos = videos.length;
+    metrics.maxReadyVideos = Math.max(metrics.maxReadyVideos, videoSamples);
+    metrics.samples += 1;
+    metrics.videoSamples += videoSamples;
+    metrics.lastVideoSkewSec = maxVideoSkew;
+    metrics.maxVideoSkewSec = Math.max(metrics.maxVideoSkewSec, maxVideoSkew);
+    metrics.lastUrdfFrameSkew = urdfSkew;
+    metrics.maxUrdfFrameSkew = Math.max(metrics.maxUrdfFrameSkew, urdfSkew);
+  }
 
 function replayFallbackDt() {
     const fps = Number(S.STATUS && S.STATUS.replay_fps) || REPLAY_DEFAULT_FPS;
@@ -151,6 +197,10 @@ function loadMountedReplaySeries(info) {
 
 async function loadReplaySeries() {
     const loadSeq = ++replayLoadSeq;
+    if (replayVideoAbortController) replayVideoAbortController.abort();
+    replayVideoAbortController = new AbortController();
+    replayStop();
+    resetReplaySyncMetrics();
     LIVE.replayOwner = "replay";
     LIVE.replayError = "";
     replayTransformsUrl = "/api/replay_transforms";
@@ -190,6 +240,8 @@ function installReplaySeries(series) {
     LIVE.controlSource = series.control_source || [];
     LIVE.intervention = series.intervention || [];
     LIVE.interventionSegmentIndex = series.intervention_segment_index || [];
+    LIVE.criticTimestamp = [];
+    LIVE.criticValue = [];
     LIVE.n = LIVE.state.length;
     LIVE.playTime = buildReplayPlayTimeline(LIVE.timestamp, LIVE.n);
     LIVE.dimsOnA = {};
@@ -277,6 +329,9 @@ async function loadReplayTransformsOperation(loadSeq) {
 
 async function loadReviewPlayback(info, owner) {
     const loadSeq = ++replayLoadSeq;
+    if (replayVideoAbortController) replayVideoAbortController.abort();
+    replayVideoAbortController = new AbortController();
+    replayStop();
     clientTrace("review.playback.begin", {
       episode: Number(info.episode || 0),
       dataset_dir: info.dataset_dir || "",
@@ -289,6 +344,7 @@ async function loadReviewPlayback(info, owner) {
     LIVE.replayMode = true;
     LIVE.replayLoading = true;
     LIVE.playing = false;
+    resetReplaySyncMetrics();
     replayLoadedDatasetDir = info.dataset_dir || "";
     replayLoadedEpisodeId = Number(info.episode || 0);
     replayLoadedVideoKeys = { ...(info.video_keys || {}) };
@@ -349,6 +405,7 @@ function replayApplyTransformFrame(frame) {
     const sceneReady = window.Scene3D && Scene3D.applyTransformFrame;
     if (!REPLAY_XF || !REPLAY_XF_PARTS || !REPLAY_XF_GEOMS || !sceneReady) return false;
     Scene3D.applyTransformFrame(REPLAY_XF_PARTS, REPLAY_XF_GEOMS, REPLAY_XF, REPLAY_XF_NG, frame);
+    replayUrdfAppliedFrame = Number(frame);
     return true;
   }
 
@@ -494,6 +551,7 @@ function ensureVideoSource(v) {
   }
 
 function waitForVideoReady(v) {
+    const signal = replayVideoAbortController ? replayVideoAbortController.signal : null;
     if (videoReady(v)) return Promise.resolve();
     return new Promise((resolve) => {
       let done = false;
@@ -503,8 +561,13 @@ function waitForVideoReady(v) {
         v.removeEventListener("canplay", finish);
         v.removeEventListener("canplaythrough", finish);
         v.removeEventListener("error", finish);
+        if (signal) signal.removeEventListener("abort", finish);
         resolve();
       };
+      if (signal) {
+        signal.addEventListener("abort", finish, { once: true });
+        if (signal.aborted) { finish(); return; }
+      }
       v.addEventListener("canplay", finish);
       v.addEventListener("canplaythrough", finish);
       v.addEventListener("error", finish);
@@ -521,15 +584,22 @@ function waitForBrowserPaint() {
   }
 
 async function waitForVideoPainted(v) {
+    const signal = replayVideoAbortController ? replayVideoAbortController.signal : null;
     if (v.error) return;
     await waitForVideoReady(v);
+    if (signal && signal.aborted) return;
     await new Promise((resolve) => {
       let done = false;
       const finish = () => {
         if (done) return;
         done = true;
+        if (signal) signal.removeEventListener("abort", finish);
         requestAnimationFrame(resolve);
       };
+      if (signal) {
+        signal.addEventListener("abort", finish, { once: true });
+        if (signal.aborted) { finish(); return; }
+      }
       if (!v.paused && typeof v.requestVideoFrameCallback === "function") {
         v.requestVideoFrameCallback(finish);
         return;
@@ -540,12 +610,14 @@ async function waitForVideoPainted(v) {
 
 async function waitForStageVideosReady() {
     const videos = replayVideos();
+    const signal = replayVideoAbortController ? replayVideoAbortController.signal : null;
     if (!videos.length) {
       clientTrace("review.videos.ready", { count: 0, errors: 0 });
       return;
     }
     setVideosLoading(videos, true, "loading video");
     await Promise.all(videos.map((v) => waitForVideoReady(v)));
+    if (signal && signal.aborted) return;
     clientTrace("review.videos.ready", {
       count: videos.length,
       errors: videos.filter((v) => !!v.error).length,
@@ -556,8 +628,10 @@ async function waitForStageVideosReady() {
 async function waitForStageVideosPainted() {
     const videos = replayVideos();
     if (!videos.length) return;
+    const signal = replayVideoAbortController ? replayVideoAbortController.signal : null;
     setVideosLoading(videos, true, "rendering video");
     await Promise.all(videos.map((v) => waitForVideoPainted(v)));
+    if (signal && signal.aborted) return;
     await waitForBrowserPaint();
     setVideosLoading(videos, false, "");
   }
@@ -649,6 +723,8 @@ async function requestReplayUrdfFrame(i) {
 
 function exitReplayMode() {
     replayLoadSeq += 1;
+    if (replayVideoAbortController) replayVideoAbortController.abort();
+    replayVideoAbortController = null;
     replayStop();
     stopRealReplayVisual();
     LIVE.replayMode = false;
@@ -666,6 +742,7 @@ function exitReplayMode() {
     REPLAY_XF_PARTS = null; REPLAY_XF_GEOMS = null; _lastReplayChartDraw = 0;
     resetReplayUrdfRequests();
     LIVE.playTime = [];
+    resetReplaySyncMetrics();
     // Drop the replay <video> elements so the live MJPEG strip rebuilds cleanly.
     replaceCamStripContent('<div class="cam-empty">awaiting frame…</div>');
     resetLiveSeries();
@@ -676,8 +753,12 @@ function seekReplay(i, syncVideos = true) {
     LIVE.cursorFrac = null;
     replaySetUrdfFrame(LIVE.cursor);
     if (syncVideos) syncReplayVideos(LIVE.cursor, null, true);
+    recordReplaySync(LIVE.cursor);
     updateScrub();
     drawReplayCharts();
+    window.dispatchEvent(new CustomEvent("eva:replay-frame", {
+      detail: { frame: LIVE.cursor, owner: LIVE.replayOwner },
+    }));
   }
 
 function setReplayCursorFrame(frame, syncVideos = false) {
@@ -687,8 +768,12 @@ function setReplayCursorFrame(frame, syncVideos = false) {
     LIVE.cursor = Math.max(0, Math.min(Math.floor(frac), LIVE.n - 1));
     replaySetUrdfFrame(frac);
     if (syncVideos) syncReplayVideos(frac, null, true);
+    recordReplaySync(frac);
     updateScrub();
     drawReplayCharts();
+    window.dispatchEvent(new CustomEvent("eva:replay-frame", {
+      detail: { frame: LIVE.cursor, owner: LIVE.replayOwner },
+    }));
   }
 
 function replayToggle() { LIVE.playing ? replayStop() : replayPlay(); }
@@ -700,6 +785,7 @@ function replayPlay() {
     if (LIVE.replayLoading) return;
     if (LIVE.cursor >= LIVE.n - 1) seekReplay(0);
     LIVE.playing = true;
+    replayLastRafAt = 0;
     clientTrace("review.play", { episode: replayLoadedEpisodeId, cursor: LIVE.cursor, frames: LIVE.n });
     const btn = $("scrub-play"); if (btn) btn.textContent = "⏸";
     syncReplayRunButtons();
@@ -714,6 +800,13 @@ function replayPlay() {
     const wall0 = performance.now();
     const frame = () => {
       if (!LIVE.playing) return;
+      const now = performance.now();
+      if (replayLastRafAt > 0) {
+        const gapMs = now - replayLastRafAt;
+        LIVE.replaySync.lastFrameGapMs = gapMs;
+        LIVE.replaySync.maxFrameGapMs = Math.max(LIVE.replaySync.maxFrameGapMs, gapMs);
+      }
+      replayLastRafAt = now;
       const master = replayMasterVideo();
       if (master && (master.readyState < 3 || (master.paused && !master.ended))) {
         setStageVideoLoading(true, "buffering video");
@@ -731,6 +824,7 @@ function replayPlay() {
       const framePos = Math.max(cursor, replayFrameAtTime(targetTime));
       setReplayCursorFrame(framePos, false);
       syncReplayVideos(framePos, master);
+      recordReplaySync(framePos);
       if (framePos >= LIVE.n - 1) { replayStop(); return; }
       LIVE.raf = requestAnimationFrame(frame);
     };

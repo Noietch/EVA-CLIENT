@@ -320,7 +320,7 @@ def test_replay_scrub_marks_rollout_intervention_ranges():
 
     assert "LIVE.intervention = series.intervention || [];" in html
     assert "function interventionTrackGradient()" in html
-    assert 'const color = active ? "var(--accent)" : "var(--rule-strong)";' in html
+    assert 'const color = active ? "var(--intervention)" : "var(--policy)";' in html
     assert 'range.classList.toggle("has-intervention", !!controlTrack);' in html
     assert 'LIVE.replayOwner = "rollout";' in html
     assert 'loadReviewPlayback({ ...r, dataset_dir: reviewDatasetDir }, "rollout")' in html
@@ -478,7 +478,7 @@ def test_replay_load_mounts_videos_from_load_response_without_status_poll():
     confirm_start = html.index("const confirm = async () => {")
     confirm_body = html[confirm_start : html.index("// QC deep-link", confirm_start)]
 
-    assert 'import { maybeSyncReplayPlayer, loadMountedReplaySeries } from "./replay.js";' in html
+    assert 'import { maybeSyncReplayPlayer, loadMountedReplaySeries, replayStop } from "./replay.js";' in html
     assert "const hasInspectedDir = replayInspectedDir === dir;" in confirm_body
     assert "const loadKeys = hasInspectedDir" in confirm_body
     assert "const loadVideoKeys = hasInspectedDir ? S.replayVideoKeys : {};" in confirm_body
@@ -778,20 +778,14 @@ def test_stopped_run_button_switches_to_continue_icon():
     assert ': (intervention ? "RESUME ▶" : (continueRun ? "CONTINUE ▶▶" : "RUN ▶"));' in html
 
 
-def test_rollout_intervention_abandon_controls_are_wired():
+def test_debug_rollout_intervention_controls_are_removed_for_rl_migration():
     html = console_source()
-    server_source = (
-        Path(__file__).resolve().parents[3] / "src" / "core" / "app" / "console" / "server.py"
-    ).read_text()
 
-    assert 'id="b-rollout-intervention-abandon"' in html
-    assert 'apiPost("/api/operator_action", { intent: "cancel" })' in html
-    assert (
-        '"/api/rollout_intervention_abandon": "web:rollout_intervention_abandon"' in server_source
-    )
-    assert '"/api/rollout_stop": "web:rollout_stop"' in server_source
-    assert "save_blocked_by_intervention" in html
-    assert "accepted_intervention_segments" in html
+    assert 'id="b-rollout-intervention-abandon"' not in html
+    assert 'id="rollout-save-panel"' not in html
+    assert 'id="view-rl"' in html
+    assert "STOP / INTERVENE" in html
+    assert ">ABANDON</button>" in html
 
 
 def test_hil_control_mode_is_config_only_not_wired():
@@ -806,22 +800,14 @@ def test_hil_control_mode_is_config_only_not_wired():
     assert '"/api/rollout_intervention_mode"' not in server_source
 
 
-def test_rollout_hil_enable_toggle_is_wired():
+def test_hil_toggle_is_wired_only_in_rl_workspace():
     html = console_source()
-    server_source = (
-        Path(__file__).resolve().parents[3] / "src" / "core" / "app" / "console" / "server.py"
-    ).read_text()
 
-    assert 'id="hil-intervention-enable"' in html
-    assert 'class="collect-arm-gate" title="Enable rollout HIL intervention"' in html
-    assert 'apiPost("/api/rollout_intervention_enabled"' in html
-    assert "rollout_intervention_enabled" in html
-    assert '"rollout_intervention_enabled": r.rollout_intervention_enabled' in server_source
-    assert '"hil_supported": hil_status.supported' in server_source
-    assert '"hil_error": hil_status.error' in server_source
-    assert '"HIL N/A"' in html
-    assert "rollout_intervention_config_enabled" not in server_source
-    assert '"/api/rollout_intervention_enabled"' in server_source
+    assert 'id="hil-intervention-enable"' not in html
+    assert 'aria-label="Enable RL HIL intervention"' in html
+    assert 'id="rl-hil-enable" disabled aria-label="Enable RL HIL intervention"' in html
+    assert 'apiPost("/api/rl/hil_enabled"' in html
+    assert 'class="rl-preview-banner"' not in html
 
 
 def test_operator_action_api_is_wired():
@@ -833,17 +819,14 @@ def test_operator_action_api_is_wired():
     assert 'self._enqueue_ok(f"web:operator_action:{intent}:ui")' in server_source
 
 
-def test_collect_uses_operator_action_and_rollout_save_uses_rollout_save_route():
+def test_collect_uses_operator_action_and_debug_has_no_rollout_save_handler():
     html = console_source()
 
     assert 'apiPost("/api/operator_action", { intent: "start" })' in html
     assert 'apiPost("/api/operator_action", { intent: "accept" })' in html
     assert 'apiPost("/api/operator_action", { intent: "cancel" })' in html
-    assert ('$("b-rollout-save").onclick = () => apiPost("/api/rollout_save");') in html
-    assert (
-        '$("b-rollout-intervention-abandon").onclick = () => '
-        'apiPost("/api/operator_action", { intent: "cancel" });'
-    ) in html
+    assert '$("b-rollout-save").onclick' not in html
+    assert '$("b-rollout-intervention-abandon").onclick' not in html
 
 
 def test_step_control_has_single_dynamic_instruction_line():
@@ -860,8 +843,10 @@ def test_tab_order_places_manual_and_collect_before_replay():
     manual = html.index('data-tab="manual"><span class="idx">02</span> MANUAL')
     collect = html.index('data-tab="collect"><span class="idx">03</span> COLLECT')
     replay = html.index('data-tab="replay"><span class="idx">04</span> REPLAY')
+    rl = html.index('data-tab="rl"><span class="idx">05</span> RL')
+    eval_tab = html.index('data-tab="eval"><span class="idx">06</span> EVAL')
 
-    assert debug < manual < collect < replay
+    assert debug < manual < collect < replay < rl < eval_tab
 
 
 def test_task_and_strategy_controls_are_dropdown_selects():
@@ -997,11 +982,97 @@ def test_live_views_hide_charts_and_collect_review_reveals_them():
     assert '<div class="stage no-series" id="stage">' in html
     assert ".stage.no-series .stage-charts" in html
     assert ".stage.no-series .stage-scrub" in html
-    assert 'const showSeries = tab === "replay" ||' in html
+    assert 'const showSeries = tab === "rl" || tab === "replay" ||' in html
     assert 'tab === "collect" && LIVE.replayOwner === "collect"' in html
     assert 'stage.classList.toggle("no-series", !showSeries);' in html
     assert 'if (LIVE.replayMode || S.ACTIVE_TAB !== "replay" || liveSeriesPolling) return;' in html
     assert "loop(pollLiveSeries, 200);" not in html
+
+
+def test_rl_workspace_has_eval_style_workflow_and_read_only_data_config():
+    html = console_source()
+
+    for panel in (
+        "rl-panel-task",
+        "rl-panel-models",
+        "rl-panel-data",
+        "rl-panel-setup",
+        "rl-panel-rollout",
+        "rl-panel-saved",
+        "rl-panel-gripper",
+    ):
+        assert f'id="{panel}"' in html
+    assert 'id="rl-policy-list"' in html
+    assert 'id="rl-critic-list"' in html
+    assert '<option value="lerobot" selected>LeRobot</option>' in html
+    assert '<option value="transition" disabled>Transition · backend later</option>' in html
+    for control in (
+        "rl-b-setup",
+        "rl-b-run",
+        "rl-b-intervene",
+        "rl-b-accept",
+        "rl-b-abandon",
+        "rl-b-save",
+        "rl-b-replay",
+    ):
+        assert f'id="{control}"' in html
+    assert 'apiPost("/api/rl/setup")' in html
+    assert 'apiPost("/api/rl/replay_critic"' in html
+    assert '!rollout.save_ready || intervention' in html
+    assert '!rollout.save_ready || !hasFrames' not in html
+    assert 'id="rl-save-count"' in html
+    assert 'id="rl-save-expand"' in html
+    assert 'id="rl-save-list"' in html
+    assert 'rl-save-tiles .collect-tile::after' not in html
+
+
+def test_rl_stage_has_prominent_critic_curve_and_control_source_legend():
+    html = console_source()
+
+    assert 'id="stage-critic"' in html
+    assert 'id="chart-critic-cv"' in html
+    assert 'id="critic-latest"' in html
+    assert 'openChartModal("c")' in html
+    assert 'class="control-legend"' in html
+    assert "--policy:   #2563EB" in html
+    assert "--intervention: #FF4D00" in html
+
+
+def test_rl_saved_episode_click_switches_replay_immediately_and_latest_wins():
+    html = console_source()
+
+    assert "let replayRequestId = 0;" in html
+    assert "function selectSavedEpisode(item, items)" in html
+    assert "replaySelectedEpisode();" in html
+    assert "if (LIVE.replayMode && LIVE.replayOwner === \"rl\") exitReplayMode();" in html
+    assert "requestId !== replayRequestId || S.ACTIVE_TAB !== \"rl\"" in html
+    assert "if (replayVideoAbortController) replayVideoAbortController.abort();" in html
+    assert "replayVideoAbortController = new AbortController();" in html
+    assert "async function loadReplaySeries()" in html
+    assert "const loadSeq = ++replayLoadSeq;" in html
+    assert "replayStop();" in html
+    assert "S.replayLoadPending = true;" in html
+
+
+def test_replay_exposes_three_video_and_urdf_sync_metrics():
+    html = console_source()
+
+    assert "window.__evaReplaySync = LIVE.replaySync;" in html
+    assert "maxVideoSkewSec" in html
+    assert "maxUrdfFrameSkew" in html
+    assert "maxFrameGapMs" in html
+    assert "recordReplaySync(frac);" in html
+
+
+def test_live_charts_bound_draw_work_to_canvas_resolution():
+    html = console_source()
+
+    assert "const maxDrawPoints = Math.max(64, Math.floor(W * 2));" in html
+    assert "for (const i of indices)" in html
+    assert "indices.forEach((i, point)" in html
+    assert 'else if (tab === "rl") host = $("rl-stage-col");' in html
+    assert 'criticCursor, ["#1F1E1C"]' in html
+    assert ".stage-critic {\n    display: none; flex: 0 0 190px; min-height: 190px;\n  }" in html
 
 
 def test_replay_charts_use_series_dimension_names():

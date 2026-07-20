@@ -37,11 +37,13 @@ from tqdm import tqdm
 from core.app.console.transform_worker import build_transform_blob
 from core.app.handlers import (
     _resolve_runtime_path,
+    build_policy_observation,
     eval_episode_dir,
     eval_model_name,
     rollout_save_status,
 )
 from core.app.handlers.io import load_replay_dataset
+from core.app.rl import rl_live_series
 from core.app.state import (
     RuntimeState,
     SessionMode,
@@ -486,6 +488,33 @@ def _serialize_eval(ctx: ConsoleContext) -> dict:
     }
 
 
+def _serialize_rl(ctx: ConsoleContext) -> dict:
+    """Return the configured RL workspace choices and storage contract."""
+    config = ctx.runtime.active_config or ctx.config
+    rl_cfg = config.rl
+    if rl_cfg is None:
+        return {"enabled": False}
+    return {
+        "enabled": True,
+        "backend_ready": True,
+        "cli_mode": str(rl_cfg.cli_mode),
+        "inference_strategy": str(rl_cfg.inference_strategy),
+        "tasks": [str(task) for task in rl_cfg.tasks],
+        "policies": [
+            {"slot": slot, "name": str(model.name)}
+            for slot, model in enumerate(rl_cfg.policies)
+        ],
+        "critics": [
+            {"slot": slot, "name": str(model.name), "type": str(model.type)}
+            for slot, model in enumerate(rl_cfg.critics)
+        ],
+        "data": {
+            "format": str(rl_cfg.data.format),
+            "dataset_dir": _resolve_dataset_dir(str(rl_cfg.data.storage.log_dir)),
+        },
+    }
+
+
 def _serialize_gripper_controls(ctx: ConsoleContext) -> list[dict[str, str]]:
     gripper_groups = [g for g in ctx.runtime.robot.actuator_groups if g.gripper_index is not None]
     if len(gripper_groups) == 0:
@@ -605,6 +634,7 @@ def _serialize_config(ctx: ConsoleContext) -> dict:
             ),
         },
         "eval": _serialize_eval(ctx),
+        "rl": _serialize_rl(ctx),
         "run_id": Path(ctx.output_dir).name,
     }
 
@@ -658,6 +688,20 @@ def _serialize_status(ctx: ConsoleContext) -> dict:
     else:
         transport_connected = bool(config.transport.type)
     image_min_hz = reader.image_min_hz()
+    critic_status = (
+        r.rl_critic_runner.status()
+        if r.rl_critic_runner is not None
+        else {
+            "connected": False,
+            "metadata": {},
+            "last_request_ms": 0.0,
+            "last_error": r.rl_critic_error,
+            "coalesced_requests": 0,
+            "samples": 0,
+        }
+    )
+    policy_samples = sum(1 for sample in r.rl_live_samples if sample[3] == "policy")
+    intervention_samples = len(r.rl_live_samples) - policy_samples
     return {
         "robot_type": config.robot.type,
         "transport_type": config.transport.type,
@@ -734,6 +778,20 @@ def _serialize_status(ctx: ConsoleContext) -> dict:
         "ckpt_label": ctx.ckpt_label(r.active_ckpt_slot),
         "clip_id": r.current_clip_id,
         "cell": r.current_cell,
+        "rl": {
+            "active": r.rl_active,
+            "selected_policy_slot": r.rl_selected_policy_slot,
+            "selected_critic_slot": r.rl_selected_critic_slot,
+            "critic_connected": critic_status["connected"],
+            "critic_metadata": critic_status["metadata"],
+            "critic_last_request_ms": critic_status["last_request_ms"],
+            "critic_error": critic_status["last_error"],
+            "coalesced_requests": critic_status["coalesced_requests"],
+            "critic_samples": critic_status["samples"],
+            "policy_samples": policy_samples,
+            "intervention_samples": intervention_samples,
+            "replay_episode": r.rl_replay_episode_id,
+        },
     }
 
 
@@ -1498,6 +1556,16 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         since = self._query_int("since", 0)
         self._send_json(200, _serialize_live_series(self.ctx, max(since, 0)))
 
+    def _get_rl_series(self) -> None:
+        if not self._require_rl_active():
+            return
+        since = self._query_int("since", 0)
+        critic_since = self._query_int("critic_since", 0)
+        self._send_json(
+            200,
+            rl_live_series(self.ctx.runtime, max(since, 0), max(critic_since, 0)),
+        )
+
     def _sync_preview_to_active_model(self) -> None:
         # Keep the preview pointed at the active model's dataset (it changes on ckpt
         # switch). The logger already roots there; mirror that path into the preview.
@@ -1909,6 +1977,146 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
     def _enqueue_ok(self, command: str) -> None:
         self._enqueue(command)
         self._send_json(200, {"ok": True})
+
+    def _require_rl_active(self) -> bool:
+        if self.ctx.active_tab == "rl":
+            return True
+        self._send_json(409, {"ok": False, "error": "RL tab is not active"})
+        return False
+
+    def _post_rl_select_task(self, body: dict) -> None:
+        if not self._require_rl_active():
+            return
+        self._enqueue_ok(f"web:rl_select_task:{body.get('task', '')}")
+
+    def _post_rl_select_policy(self, body: dict) -> None:
+        if not self._require_rl_active():
+            return
+        self._enqueue_ok(f"web:rl_select_policy:{int(body['slot'])}")
+
+    def _post_rl_select_critic(self, body: dict) -> None:
+        if not self._require_rl_active():
+            return
+        self._enqueue_ok(f"web:rl_select_critic:{int(body['slot'])}")
+
+    def _post_rl_command(self, command: str) -> None:
+        if not self._require_rl_active():
+            return
+        self._enqueue_ok(command)
+
+    def _post_rl_setup(self, _body: dict) -> None:
+        self._post_rl_command("web:rl_setup")
+
+    def _post_rl_run(self, _body: dict) -> None:
+        self._post_rl_command("web:run")
+
+    def _post_rl_intervene(self, _body: dict) -> None:
+        self._post_rl_command("web:halt")
+
+    def _post_rl_accept(self, _body: dict) -> None:
+        self._post_rl_command("web:run")
+
+    def _post_rl_abandon(self, _body: dict) -> None:
+        self._post_rl_command("web:rollout_intervention_abandon")
+
+    def _post_rl_hil_enabled(self, body: dict) -> None:
+        if not self._require_rl_active():
+            return
+        enabled = "1" if bool(body.get("enabled", False)) else "0"
+        self._enqueue_ok(f"web:rollout_intervention_enabled:{enabled}")
+
+    def _post_rl_save(self, _body: dict) -> None:
+        self._post_rl_command("web:rollout_save")
+
+    def _post_rl_reset(self, _body: dict) -> None:
+        self._post_rl_command("web:console_reset")
+
+    def _post_rl_review_episode(self, body: dict) -> None:
+        if not self._require_rl_active():
+            return
+        runtime = self.ctx.runtime
+        with runtime.rl_replay_lock:
+            runtime.rl_replay_generation += 1
+            request_generation = runtime.rl_replay_generation
+        dataset_dir = _resolve_dataset_dir(str(body.get("dataset_dir", "")).strip())
+        episode_index = int(body.get("episode", 0))
+        try:
+            source, video_keys = _open_review_episode(self.ctx, dataset_dir, episode_index)
+            series = source.series()
+        except Exception as error:
+            self._send_json(404, {"ok": False, "error": str(error)})
+            return
+        if source.n_steps <= 0:
+            source.close()
+            self._send_json(404, {"ok": False, "error": "episode has no frames"})
+            return
+        with runtime.rl_replay_lock:
+            if request_generation != runtime.rl_replay_generation:
+                source.close()
+                self._send_json(409, {"ok": False, "error": "Replay request superseded"})
+                return
+            old_sources = runtime.rl_replay_sources
+            runtime.rl_replay_sources = [source]
+            runtime.rl_replay_source = source
+            runtime.rl_replay_dataset_dir = dataset_dir
+            runtime.rl_replay_episode_id = episode_index
+            runtime.rl_replay_timestamps = [float(value) for value in series["timestamp"]]
+            if runtime.rl_critic_runner is not None:
+                runtime.rl_critic_runner.reset_series()
+        for old_source in old_sources:
+            old_source.close()
+        self._send_json(
+            200,
+            {
+                "ok": True,
+                "episode": episode_index,
+                "frames": source.n_steps,
+                "fps": source.fps,
+                "task": source.current_task,
+                "video_keys": video_keys,
+                **series,
+            },
+        )
+
+    def _post_rl_replay_critic(self, body: dict) -> None:
+        if not self._require_rl_active():
+            return
+        runtime = self.ctx.runtime
+        runner = runtime.rl_critic_runner
+        if runner is None:
+            self._send_json(409, {"ok": False, "error": "Critic is not connected"})
+            return
+        with runtime.rl_replay_lock:
+            source = runtime.rl_replay_source
+            if source is None:
+                self._send_json(409, {"ok": False, "error": "No RL replay episode is selected"})
+                return
+            frame_index = int(body["frame"])
+            if frame_index < 0 or frame_index >= source.n_steps:
+                self._send_json(400, {"ok": False, "error": "Replay frame is out of range"})
+                return
+            metadata = runtime.policy_metadata or {}
+            horizon = max(1, int(metadata.get("chunk_size", 1)))
+            timestamp = runtime.rl_replay_timestamps[frame_index]
+            config = runtime.active_config or self.ctx.config
+
+            def build_request() -> tuple[dict, np.ndarray]:
+                source.seek(frame_index)
+                frame = source.get_frame()
+                if frame is None:
+                    raise RuntimeError(f"RL replay frame is unavailable: {frame_index}")
+                observation = build_policy_observation(frame, source.current_task, config, runtime)
+                trajectory = source.get_action_trajectory()
+                actions = trajectory[frame_index : frame_index + horizon]
+                if len(actions) < horizon:
+                    actions = np.concatenate(
+                        [actions, np.repeat(trajectory[-1:], horizon - len(actions), axis=0)],
+                        axis=0,
+                    )
+                return observation, actions
+
+        runner.submit_builder(build_request, timestamp, "replay")
+        self._send_json(200, {"ok": True, "frame": frame_index})
 
     def _post_client_trace(self, body: dict) -> None:
         client_id = str(body.get("client_id", "unknown"))[:96]
@@ -2514,6 +2722,7 @@ _GET_ROUTES = {
     "/api/replay_video": ConsoleRequestHandler._get_replay_video,
     "/api/replay_poster": ConsoleRequestHandler._get_replay_poster,
     "/api/live_series": ConsoleRequestHandler._get_live_series,
+    "/api/rl/series": ConsoleRequestHandler._get_rl_series,
     "/api/replay_frame": ConsoleRequestHandler._get_replay_frame,
     "/api/episode_transforms": ConsoleRequestHandler._get_episode_transforms,
     "/api/episode_video": ConsoleRequestHandler._get_episode_video,
@@ -2548,6 +2757,19 @@ _POST_COMMANDS = {
 # response. Each handler owns its own _send_json. Values are unbound (self, body) methods.
 _POST_ROUTES = {
     "/api/client_trace": ConsoleRequestHandler._post_client_trace,
+    "/api/rl/select_task": ConsoleRequestHandler._post_rl_select_task,
+    "/api/rl/select_policy": ConsoleRequestHandler._post_rl_select_policy,
+    "/api/rl/select_critic": ConsoleRequestHandler._post_rl_select_critic,
+    "/api/rl/setup": ConsoleRequestHandler._post_rl_setup,
+    "/api/rl/run": ConsoleRequestHandler._post_rl_run,
+    "/api/rl/intervene": ConsoleRequestHandler._post_rl_intervene,
+    "/api/rl/accept": ConsoleRequestHandler._post_rl_accept,
+    "/api/rl/abandon": ConsoleRequestHandler._post_rl_abandon,
+    "/api/rl/hil_enabled": ConsoleRequestHandler._post_rl_hil_enabled,
+    "/api/rl/save": ConsoleRequestHandler._post_rl_save,
+    "/api/rl/reset": ConsoleRequestHandler._post_rl_reset,
+    "/api/rl/review_episode": ConsoleRequestHandler._post_rl_review_episode,
+    "/api/rl/replay_critic": ConsoleRequestHandler._post_rl_replay_critic,
     "/api/collect_replay": ConsoleRequestHandler._start_collection_replay,
     "/api/exit_collect_replay": ConsoleRequestHandler._post_exit_collection_replay,
     "/api/review_episode": ConsoleRequestHandler._post_review_episode,

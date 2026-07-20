@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from core.app import handlers
 from core.app.state import SessionStatus
+from core.config import ConfigDict
 
 
 def test_config_route_serves_static_frontend_inputs(console):
@@ -20,6 +21,31 @@ def test_config_route_serves_static_frontend_inputs(console):
     assert cfg["camera_keys"] == ["cam_high", "cam_left_wrist", "cam_right_wrist"]
     assert {s["key"] for s in cfg["strategies"]} == {"sync"}
     assert cfg["modes"] == ["real", "sim", "step", "manual"]
+    assert cfg["rl"] == {"enabled": False}
+
+
+def test_config_route_serves_rl_workspace_contract(console):
+    console.config.rl = ConfigDict(
+        cli_mode="real",
+        inference_strategy="rtc",
+        tasks=["pack the phone"],
+        policies=[ConfigDict(name="policy-a")],
+        critics=[ConfigDict(name="critic-a", type="websocket")],
+        data=ConfigDict(
+            format="lerobot",
+            storage=ConfigDict(log_dir="work_dirs/rl/test"),
+        ),
+    )
+
+    rl = console.get("/api/config").json["rl"]
+
+    assert rl["backend_ready"] is True
+    assert rl["cli_mode"] == "real"
+    assert rl["inference_strategy"] == "rtc"
+    assert rl["tasks"] == ["pack the phone"]
+    assert rl["policies"] == [{"slot": 0, "name": "policy-a"}]
+    assert rl["critics"] == [{"slot": 0, "name": "critic-a", "type": "websocket"}]
+    assert rl["data"]["format"] == "lerobot"
 
 
 def test_initial_status_is_idle_and_disconnected(console):

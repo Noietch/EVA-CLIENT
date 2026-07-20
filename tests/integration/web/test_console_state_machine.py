@@ -165,6 +165,7 @@ def test_tab_switch_away_from_collect_stops_armed_teleop():
         ik_solver=None,
         web_phase="idle",
         rollout_intervention_active=False,
+        rl_active=False,
     )
     session = SessionState(mode=SessionMode.COLLECT, status=SessionStatus.READY)
     config = ConfigDict(collection=ConfigDict(gate=ConfigDict(enabled=False)))

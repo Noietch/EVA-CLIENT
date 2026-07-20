@@ -19,6 +19,7 @@ from core.cfg import Registry as _BaseRegistry
 
 if TYPE_CHECKING:
     from core.app.handlers.space import ActionSpace
+    from critic_client.base import CriticClient
     from policy_client.base import PolicyClient
     from robots.base import Robot
     from strategy.base_strategy import BaseInferStrategy
@@ -67,6 +68,7 @@ ROBOT_REGISTRY: Registry[Robot] = Registry("robot")
 TRANSPORT_REGISTRY: Registry[TransportBridge] = Registry("transport")
 STRATEGY_REGISTRY: Registry[BaseInferStrategy] = Registry("strategy")
 POLICY_REGISTRY: Registry[PolicyClient] = Registry("policy")
+CRITIC_REGISTRY: Registry[CriticClient] = Registry("critic")
 SPACE_REGISTRY: Registry[ActionSpace] = Registry("space")
 
 # Generic registry for standalone callables (no shared base class). Side-effect

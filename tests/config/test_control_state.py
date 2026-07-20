@@ -821,6 +821,19 @@ def test_rollout_intervention_enabled_command_updates_runtime_flag():
     assert session.last_error == ""
 
 
+def test_rollout_intervention_enabled_is_applied_during_sync_motion_wait():
+    runtime, session = _runtime_and_session()
+    runtime.rollout_intervention_enabled = True
+    runtime.command_queue = queue.Queue()
+    runtime.command_queue.put("web:rollout_intervention_enabled:0")
+
+    interrupted = control.poll_motion_commands(_config(), runtime, session)
+
+    assert interrupted is False
+    assert runtime.rollout_intervention_enabled is False
+    assert runtime.command_queue.empty()
+
+
 def test_intervention_action_interrupt_respects_runtime_hil_off():
     runtime, session = _runtime_and_session()
     session.mode = SessionMode.REAL

@@ -25,6 +25,7 @@ from core.app.handlers.utils import (
     reset_run_state,
     reset_session_progress,
 )
+from core.app.rl import submit_rl_critic
 from core.app.state import (
     OutputTarget,
     RuntimeState,
@@ -373,6 +374,7 @@ def fetch_action_chunk(
         if "actions" not in response:
             raise KeyError(f"Response does not contain 'actions': {response}")
         original_chunk = normalize_action_chunk(response["actions"])
+        submit_rl_critic(runtime, observation, original_chunk, "policy")
         action_chunk = normalize_policy_action_chunk(
             config, runtime, original_chunk, response=response
         )
