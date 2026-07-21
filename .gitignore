@@ -1,4 +1,6 @@
 # Agent, IDE, and local workspace metadata.
+/AGENTS.md
+/CLAUDE.md
 .agents/
 .claude/
 .codex/
