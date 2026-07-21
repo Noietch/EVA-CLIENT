@@ -38,8 +38,10 @@ class _VectorComponent:
     field: str
     key: str
     samples: list[CollectionRawSample]
+    sample_times: list[float]
     group: Any | None
     gripper_samples: list[CollectionRawSample] | None = None
+    gripper_times: list[float] | None = None
     default_gripper: float | None = None
 
 
@@ -112,6 +114,7 @@ def align_collection_samples(
     coverage_starts: list[float] = []
     coverage_ends: list[float] = []
     image_stream_stats: dict[str, dict[str, Any]] = {}
+    image_times: dict[str, list[float]] = {}
     for key, samples in image_series.items():
         if not samples:
             return _empty_alignment_report(
@@ -126,6 +129,7 @@ def align_collection_samples(
                 )
             )
         image_series[key] = bounded_samples
+        image_times[key] = [sample.timestamp for sample in bounded_samples]
         image_stream_stats[key] = _stream_stats(bounded_samples, image_skew_sec)
         start = bounded_samples[0].timestamp
         end = bounded_samples[-1].timestamp
@@ -195,6 +199,7 @@ def align_collection_samples(
     if next_timestamp <= grid_end + tail_tolerance:
         n_frames += 1
     image_max_skew = {key: 0.0 for key in required_images}
+    image_skew_violations: dict[str, tuple[int, int, int, float]] = {}
     frames: list[Observation] = []
     discrete_masks: dict[str, np.ndarray | None] = {}
 
@@ -202,18 +207,16 @@ def align_collection_samples(
         timestamp = grid_start + frame_index * interval
         images: dict[str, np.ndarray] = {}
         for key, samples in image_series.items():
-            sample = _nearest_sample(samples, timestamp)
+            sample = _nearest_sample(samples, image_times[key], timestamp)
             skew = abs(sample.timestamp - timestamp)
             image_max_skew[key] = max(image_max_skew[key], skew)
             if skew > image_skew_sec:
-                issues.append(
-                    AlignmentIssue(
-                        code="image_skew_exceeded",
-                        detail=(
-                            f"frame {frame_index} camera {key} skew {skew:.6f}s "
-                            f"exceeds {image_skew_sec:.6f}s"
-                        ),
-                    )
+                previous = image_skew_violations.get(key)
+                image_skew_violations[key] = (
+                    1 if previous is None else previous[0] + 1,
+                    frame_index if previous is None else previous[1],
+                    frame_index,
+                    max(skew, 0.0 if previous is None else previous[3]),
                 )
             if deferred_images is None:
                 images[key] = _image_sample_value(sample)
@@ -245,6 +248,21 @@ def align_collection_samples(
                 state_eef=vectors.get("state_eef"),
                 action_qpos=vectors.get("action_qpos"),
                 action_eef=vectors.get("action_eef"),
+            )
+        )
+
+    for key in required_images:
+        violation = image_skew_violations.get(key)
+        if violation is None:
+            continue
+        count, first_frame, last_frame, max_skew = violation
+        issues.append(
+            AlignmentIssue(
+                code="image_skew_exceeded",
+                detail=(
+                    f"camera {key} skew exceeds {image_skew_sec:.6f}s on {count} frames "
+                    f"({first_frame}-{last_frame}); max {max_skew:.6f}s"
+                ),
             )
         )
 
@@ -367,7 +385,15 @@ def _vector_components(
 ) -> list[_VectorComponent]:
     full = _sorted_samples(batch.vectors.get(field, []))
     if full:
-        return [_VectorComponent(field, field, full, None)]
+        return [
+            _VectorComponent(
+                field,
+                field,
+                full,
+                [sample.timestamp for sample in full],
+                None,
+            )
+        ]
 
     groups = robot.arm_groups if field in {"state_eef", "action_eef"} else robot.actuator_groups
     components: list[_VectorComponent] = []
@@ -383,13 +409,27 @@ def _vector_components(
             if group.gripper_index is not None:
                 default_gripper = _initial_gripper_value(robot, group)
         components.append(
-            _VectorComponent(field, key, samples, group, gripper_samples, default_gripper)
+            _VectorComponent(
+                field,
+                key,
+                samples,
+                [sample.timestamp for sample in samples],
+                group,
+                gripper_samples,
+                None
+                if gripper_samples is None
+                else [sample.timestamp for sample in gripper_samples],
+                default_gripper,
+            )
         )
     return components
 
 
-def _nearest_sample(samples: list[CollectionRawSample], timestamp: float) -> CollectionRawSample:
-    times = [sample.timestamp for sample in samples]
+def _nearest_sample(
+    samples: list[CollectionRawSample],
+    times: list[float],
+    timestamp: float,
+) -> CollectionRawSample:
     index = bisect.bisect_left(times, timestamp)
     if index == 0:
         return samples[0]
@@ -412,7 +452,12 @@ def _interpolate_component(
         and component.group.gripper_index is not None
         and (component.gripper_samples is not None or component.default_gripper is not None)
     ):
-        arm = _interpolate_samples(component.samples, timestamp, None)
+        arm = _interpolate_samples(
+            component.samples,
+            component.sample_times,
+            timestamp,
+            None,
+        )
         if component.gripper_samples is None:
             gripper_value = component.default_gripper
             assert gripper_value is not None
@@ -422,11 +467,21 @@ def _interpolate_component(
         ):
             gripper_value = component.default_gripper
         else:
-            gripper = _latest_discrete_sample(component.gripper_samples, timestamp)
+            assert component.gripper_times is not None
+            gripper = _latest_discrete_sample(
+                component.gripper_samples,
+                component.gripper_times,
+                timestamp,
+            )
             value = np.asarray(gripper.value, dtype=np.float32).reshape(-1)
             gripper_value = float(value[0])
         return np.insert(arm, component.group.gripper_index, gripper_value).astype(np.float32)
-    return _interpolate_samples(component.samples, timestamp, discrete_mask)
+    return _interpolate_samples(
+        component.samples,
+        component.sample_times,
+        timestamp,
+        discrete_mask,
+    )
 
 
 def _split_group_gripper_samples(
@@ -476,9 +531,10 @@ def _split_group_gripper_samples(
 
 
 def _latest_discrete_sample(
-    samples: list[CollectionRawSample], timestamp: float
+    samples: list[CollectionRawSample],
+    times: list[float],
+    timestamp: float,
 ) -> CollectionRawSample:
-    times = [sample.timestamp for sample in samples]
     index = bisect.bisect_right(times, timestamp)
     if index == 0:
         return samples[0]
@@ -497,10 +553,10 @@ def _initial_gripper_value(robot: Robot, group: Any) -> float:
 
 def _interpolate_samples(
     samples: list[CollectionRawSample],
+    times: list[float],
     timestamp: float,
     discrete_mask: np.ndarray | None,
 ) -> np.ndarray:
-    times = [sample.timestamp for sample in samples]
     index = bisect.bisect_left(times, timestamp)
     if index == 0:
         return np.asarray(samples[0].value, dtype=np.float32).copy()

@@ -116,6 +116,55 @@ def test_console_post_requests_are_serialized():
     assert "postQueue = result.then(() => undefined, () => undefined);" in html
 
 
+def test_console_controls_expose_shared_command_templates():
+    html = console_source()
+
+    assert "function setCommandMetadata(node, command, template = false)" in html
+    assert '"b-collect-toggle": "web:operator_action:{intent}:ui"' in html
+    assert 'setCommandMetadata(task, "web:rl_select_task:{task}", true);' in html
+    assert 'setCommandMetadata(policy, "web:rl_select_policy:{slot}", true);' in html
+    assert 'setCommandMetadata(critic, "web:rl_select_critic:{slot}", true);' in html
+    assert 'setCommandMetadata(sw, "web:gripper:{side}:{state}:{lock}", true);' in html
+    assert '"rl-b-qc-pass": "web:qc_mark' not in html
+
+
+def test_rl_policy_selection_waits_for_backend_confirmation_before_auto_setup():
+    html = console_source()
+
+    assert "let rlPendingPolicy = null;" in html
+    assert "rlPendingPolicy = policy.value;" in html
+    assert 'else if (rlPendingPolicy == null) {\n    S.rlPolicy = "";' in html
+    assert "const selectionConfirmed = status.selected_task === S.rlTask" in html
+    assert "if (selectionConfirmed && !setup && !setupBusy && !setupError) scheduleRlSetup();" in html
+    assert 'status.is_setup_done || status.setup_stage' in html
+
+
+def test_rl_tab_does_not_force_generic_sim_mode_before_rl_setup():
+    html = console_source()
+
+    assert 'S.ACTIVE_TAB !== "rl" && (!S.STATUS || !S.STATUS.cli_mode' in html
+
+
+def test_rl_saved_data_render_is_keyed_instead_of_rebuilt_on_every_status_poll():
+    html = console_source()
+
+    assert 'let rlSavedRenderKey = "";' in html
+    assert "function renderSavedData(items, force = false)" in html
+    assert "if (!force && key === rlSavedRenderKey) return;" in html
+    assert "quality_issue_count: item.quality_issue_count" in html
+    assert "renderSavedData(items);" in html
+
+
+def test_rl_save_gives_immediate_feedback_and_blocks_duplicate_actions_until_setup():
+    html = console_source()
+
+    assert "let rlSaveSetupPending = false;" in html
+    assert 'setupMsg.textContent = "SAVE · QUEUING DATA…";' in html
+    assert 'intervention || rlSaveSetupPending;' in html
+    assert 'if (rlSaveSetupPending) return;' in html
+    assert 'rlSaveSetupPending = true;\n  renderRlStatus(S.STATUS || {});' in html
+
+
 def test_telemetry_bar_renders_image_hz_metric():
     html = console_source()
 
@@ -380,16 +429,18 @@ def test_replay_keeps_slave_cameras_on_the_master_clock():
     seek_start = html.index("function seekReplay(i, syncVideos = true)")
     seek_body = html[seek_start : html.index("function setReplayCursorFrame", seek_start)]
 
-    assert "const tolerance = Math.min(0.5 / replayVideoFps, 0.03);" in sync_body
+    assert "const softTolerance = 0.2 / replayVideoFps;" in sync_body
+    assert "const hardTolerance = 0.75 / replayVideoFps;" in sync_body
     assert "replayVideoFps = Math.max(1, Number(s.replay_fps) || REPLAY_DEFAULT_FPS);" in html
     assert "replayVideoFps = Math.max(1, Number(info.fps) || REPLAY_DEFAULT_FPS);" in html
     assert "if (v === master) return;" in sync_body
-    assert "force || Math.abs((v.currentTime || 0) - t) > tolerance" in sync_body
-    assert "syncReplayVideos(framePos, null);" in play_body
+    assert "force || Math.abs(drift) > hardTolerance" in sync_body
+    assert "v.playbackRate = drift < 0 ? 1.08 : 0.92;" in sync_body
+    assert "syncReplayVideos(framePos, master);" in play_body
     assert "await alignStageVideos(LIVE.cursor);" in play_body
     assert "syncReplayVideos(LIVE.cursor, null, true);" in seek_body
-    assert "const playT0 = replayTimeAtFrame(LIVE.cursor);" in play_body
-    assert "const wall0 = performance.now();" in play_body
+    assert "const master = replayMasterVideo();" in play_body
+    assert "replayFrameAtTime(master.currentTime)" in play_body
 
 
 def test_replay_local_play_clock_drives_smooth_playback():
@@ -411,7 +462,7 @@ def test_replay_local_play_clock_drives_smooth_playback():
     assert "if (replayUrdfInFlight) {" in set_frame_body
     assert "replayUrdfPendingFrame = i;" in set_frame_body
     assert "resetReplayUrdfRequests();" in load_body
-    # Local play clock + scrub play button, no per-frame network in the fast path.
+    # Presented video clock + scrub play button, no per-frame network in the fast path.
     assert "function replayPlay()" in html
     assert "function replayStop()" in html
     assert 'onclick="replayToggle()"' in html
@@ -432,9 +483,8 @@ def test_replay_local_play_clock_drives_smooth_playback():
     assert "await transformsReady" not in load_body
     assert load_body.index("seekReplay(0);") < load_body.rindex("LIVE.replayLoading = false;")
     assert "if (LIVE.replayLoading) return;" in html
-    assert "const playT0 = replayTimeAtFrame(LIVE.cursor);" in html
-    assert "const wall0 = performance.now();" in html
-    assert "const framePos = Math.max(cursor, replayFrameAtTime(targetTime));" in html
+    assert "const master = replayMasterVideo();" in html
+    assert "const framePos = Math.max(cursor, replayFrameAtTime(master.currentTime));" in html
     assert "setReplayCursorFrame(framePos, false);" in html
     assert "function syncRealReplayVisual(frame)" in html
     assert "function realReplayVisualFrame()" in html
@@ -697,6 +747,14 @@ def test_manual_qc_fail_marks_episode_tile_red():
     html = console_source()
 
     assert 'item.qc_verdict === "fail"' in html
+
+
+def test_rl_manual_qc_pass_overrides_automatic_quality_tone():
+    html = console_source()
+    start = html.index("function episodeTone(item)")
+    body = html[start : html.index("function episodeIssue", start)]
+
+    assert body.index('item.qc_verdict === "pass"') < body.index('item.quality === "red"')
 
 
 def test_saved_collect_episode_is_gray_until_manual_qc():
@@ -1103,6 +1161,7 @@ def test_rl_saved_episode_click_switches_replay_immediately_and_latest_wins():
     assert "let rlReplayRequestPending = false;" in html
     assert "clearRlCriticSeries();" in html
     assert "seriesPolling || rlReplayRequestPending" in html
+    assert "if (rlReplayRequestPending && selectedEpisode === id) return;" in html
 
 
 def test_rl_replay_disables_manual_scrub_when_critic_is_selected():
@@ -1121,6 +1180,22 @@ def test_replay_exposes_three_video_and_urdf_sync_metrics():
     assert "maxUrdfFrameSkew" in html
     assert "maxFrameGapMs" in html
     assert "recordReplaySync(frac);" in html
+    assert "hardVideoSeeks" in html
+    assert "playbackRateCorrections" in html
+    assert "sync: { ...LIVE.replaySync, videoSkewSamples: undefined }" in html
+
+
+def test_replay_uses_presented_master_video_clock_without_continuous_seeking():
+    html = console_source()
+
+    replay_start = html.index("async function replayPlay()")
+    replay_body = html[replay_start : html.index("function replayStop()", replay_start)]
+    assert "const master = replayMasterVideo();" in replay_body
+    assert "replayFrameAtTime(master.currentTime)" in replay_body
+    assert "syncReplayVideos(framePos, master);" in replay_body
+    assert "playT0 + (performance.now() - wall0)" not in replay_body
+    assert "const hardTolerance = 0.75 / replayVideoFps;" in html
+    assert "v.playbackRate = drift < 0 ? 1.08 : 0.92;" in html
 
 
 def test_live_charts_bound_draw_work_to_canvas_resolution():

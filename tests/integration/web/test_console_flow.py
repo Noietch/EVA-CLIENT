@@ -22,6 +22,11 @@ def test_config_route_serves_static_frontend_inputs(console):
     assert {s["key"] for s in cfg["strategies"]} == {"sync"}
     assert cfg["modes"] == ["real", "sim", "step", "manual"]
     assert cfg["rl"] == {"enabled": False}
+    assert cfg["control_channel"]["enabled"] is False
+    assert any(
+        item["command"] == "web:rl_select_critic:{slot}"
+        for item in cfg["control_channel"]["commands"]
+    )
 
 
 def test_config_route_serves_rl_workspace_contract(console):

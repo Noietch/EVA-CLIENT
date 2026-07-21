@@ -62,6 +62,8 @@ function resetReplaySyncMetrics() {
     metrics.maxCameraSkewSec = 0;
     metrics.videoSkewSamples = [];
     metrics.urdfMissingSamples = 0;
+    metrics.hardVideoSeeks = 0;
+    metrics.playbackRateCorrections = 0;
     replayLastRafAt = 0;
   }
 
@@ -724,7 +726,10 @@ function playStageVideos() {
   }
 
 function pauseStageVideos() {
-    replayVideos().forEach((v) => v.pause());
+    replayVideos().forEach((v) => {
+      v.pause();
+      v.playbackRate = 1;
+    });
   }
 
 function replayMasterVideo() {
@@ -735,14 +740,25 @@ function replayMasterVideo() {
   }
 
 function syncReplayVideos(frame, master = null, force = false) {
-    const t = replayTimeAtFrame(frame);
+    const t = master && Number.isFinite(master.currentTime)
+      ? master.currentTime
+      : replayTimeAtFrame(frame);
     if (!Number.isFinite(t)) return;
-    const tolerance = Math.min(0.5 / replayVideoFps, 0.03);
+    const softTolerance = 0.2 / replayVideoFps;
+    const hardTolerance = 0.75 / replayVideoFps;
     replayVideos().forEach((v) => {
       if (v === master) return;
       if (v.error) return;
-      if (force || Math.abs((v.currentTime || 0) - t) > tolerance) {
+      const drift = (v.currentTime || 0) - t;
+      if (force || Math.abs(drift) > hardTolerance) {
         v.currentTime = t;
+        v.playbackRate = 1;
+        if (!force) LIVE.replaySync.hardVideoSeeks += 1;
+      } else if (Math.abs(drift) > softTolerance) {
+        v.playbackRate = drift < 0 ? 1.08 : 0.92;
+        LIVE.replaySync.playbackRateCorrections += 1;
+      } else {
+        v.playbackRate = 1;
       }
     });
   }
@@ -881,10 +897,15 @@ async function replayPlay() {
     const btn = $("scrub-play"); if (btn) btn.textContent = "⏸";
     syncReplayRunButtons();
     const videos = replayVideos();
+    const master = replayMasterVideo();
+    if (!master) {
+      LIVE.playing = false;
+      LIVE.replayError = "replay master camera unavailable";
+      updateScrub();
+      return;
+    }
     pauseStageVideos();
     await alignStageVideos(LIVE.cursor);
-    const playT0 = replayTimeAtFrame(LIVE.cursor);
-    const wall0 = performance.now();
     await Promise.all(videos.map((video) => video.play().catch(() => null)));
     await waitForBrowserPaint();
     const frame = () => {
@@ -897,11 +918,10 @@ async function replayPlay() {
       }
       replayLastRafAt = now;
       setStageVideoLoading(false, "");
-      const targetTime = playT0 + (performance.now() - wall0) / 1000;
       const cursor = LIVE.cursorFrac != null ? LIVE.cursorFrac : LIVE.cursor;
-      const framePos = Math.max(cursor, replayFrameAtTime(targetTime));
+      const framePos = Math.max(cursor, replayFrameAtTime(master.currentTime));
       setReplayCursorFrame(framePos, false);
-      syncReplayVideos(framePos, null);
+      syncReplayVideos(framePos, master);
       recordReplaySync(framePos);
       if (framePos >= LIVE.n - 1) { replayStop(); return; }
       LIVE.raf = requestAnimationFrame(frame);
@@ -918,7 +938,12 @@ function replayStop() {
     setStageVideoLoading(false, "");
     drawReplayCharts(true);
     if (wasPlaying) {
-      clientTrace("review.pause", { episode: replayLoadedEpisodeId, cursor: LIVE.cursor, frames: LIVE.n });
+      clientTrace("review.pause", {
+        episode: replayLoadedEpisodeId,
+        cursor: LIVE.cursor,
+        frames: LIVE.n,
+        sync: { ...LIVE.replaySync, videoSkewSamples: undefined },
+      });
     }
   }
 

@@ -183,6 +183,54 @@ def test_rl_reset_route_clears_setup_and_critic_series(console, tmp_path):
     assert status["rl"]["critic_samples"] == 0
 
 
+def test_rl_async_reset_auto_setup_then_start_publishes_action(console, tmp_path):
+    _configure_rl(console, tmp_path)
+    policy_config = console.config.rl.policies[0].config
+    policy_config.inference_strategies = ConfigDict(
+        async_=ConfigDict(
+            type="AsyncLinearOverlapInferStrategy",
+            args=ConfigDict(latency_k=0),
+        )
+    )
+    console.config.rl.inference_strategy = "async_"
+
+    console.do("/api/tab_switch", {"tab": "rl"})
+    console.do("/api/rl/select_task", {"task": "pack the phone"})
+    console.do("/api/rl/select_policy", {"slot": 0})
+    console.do("/api/rl/setup")
+    console.do("/api/rl/run")
+    deadline = time.monotonic() + 2.0
+    while console.session.step_index == 0 and time.monotonic() < deadline:
+        app.publish_next_action(
+            console.runtime.active_config,
+            console.runtime,
+            console.session,
+        )
+        time.sleep(0.005)
+    assert console.session.step_index > 0
+
+    console.do("/api/rl/reset")
+    status = console.status()
+    assert status["is_setup_done"] is True
+    assert status["session_status"] == "ready"
+    assert status["step_index"] == 0
+    assert status["rl"]["selected_policy_slot"] == 0
+
+    console.do("/api/rl/run")
+    deadline = time.monotonic() + 2.0
+    while console.session.step_index == 0 and time.monotonic() < deadline:
+        app.publish_next_action(
+            console.runtime.active_config,
+            console.runtime,
+            console.session,
+        )
+        time.sleep(0.005)
+
+    assert console.session.status is SessionStatus.RUNNING
+    assert console.runtime.infer_strategy.is_loop_running()
+    assert console.session.step_index > 0
+
+
 def test_rl_reset_is_allowed_during_rollout_but_rejected_during_intervention(
     console, tmp_path, monkeypatch
 ):

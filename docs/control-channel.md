@@ -8,14 +8,15 @@ can run headless without a browser.
 
 ## Why one channel = all buttons
 
-Every console button collapses, on the backend, to one action: putting a `web:*`
+Every command-bearing console button collapses, on the backend, to one action: putting a `web:*`
 string onto the internal command queue, dispatched by
 [`core.app.run.handle_command`](../src/core/app/run.py). The HTTP console
 (`core/app/console/server.py`) is just an "HTTP endpoint → command queue"
 translator. The control channel forwards any allow-listed `web:*` command onto
 that same queue — so a single socket exposes the full button surface. It shares
 the console's `ConsoleContext`, so state driven over ZMQ and state driven from the
-browser stay in lockstep.
+browser stay in lockstep. Browser-only QC/scoring controls remain HTTP-local
+because they write review metadata rather than motion commands.
 
 ## Enable it
 
@@ -96,7 +97,7 @@ below come from [`_handle_web_command`](../src/core/app/run.py).
 > to the dataset) are intentionally **not** exposed here; do those in the browser.
 
 ### Rollout / intervention / replay
-`web:rollout_stop` · `web:rollout_save` · `web:rollout_intervention_mode:<absolute|relative>`
+`web:rollout_stop` · `web:rollout_save` · `web:rollout_intervention_enabled:<0|1>`
 · `web:rollout_intervention_abandon` · `web:load_replay_dataset` · `web:clear_replay`
 · `web:set_replay_fps:<n>` · `web:replay_seek:<frame>` · `web:select_episode:<n>`
 
@@ -147,6 +148,32 @@ an in-process interactive CLI. See [Console → Headless / low-power mode](./con
 
 ## Adding a new command
 
-The allow-list in [`control_channel._ALLOWED_VERBS`](../src/core/app/control_channel.py)
-mirrors the verb branches in `run.py::_handle_web_command`. When you add a verb
-there, add it to the allow-list too — otherwise the channel rejects it.
+The canonical registry in
+[`core.app.command_catalog`](../src/core/app/command_catalog.py) is shared by
+the channel allow-list and `/api/config.control_channel.commands`. When a new
+branch is added to `run.py::_handle_web_command`, add one registry entry so the
+channel and shortcut metadata stay aligned.
+
+## Transport separation
+
+The control channel is a separate control plane from the robot transport. It
+remains available with transport.type set to zmq, ros1, ros2, or dataset; the
+transport still carries observations/actions while this channel carries sparse
+operator commands. It never sends per-frame actions and therefore does not add a
+per-step network hop to inference.
+
+Web mode exposes command metadata at GET /api/config under
+control_channel.commands. Each entry contains a canonical web:* command template
+and the DOM controls that expose it, such as web:rl_select_policy:{slot} or
+web:gripper:{side}:{state}:{lock}. A shortcut client substitutes template fields
+and sends the resulting command over the same channel.
+
+## RL
+
+web:tab_switch:rl, web:rl_select_task:<task>, web:rl_select_policy:<slot>,
+web:rl_setup, web:rl_select_critic:<slot>, web:run, web:halt,
+web:console_reset, web:rollout_save,
+web:rollout_intervention_enabled:<0|1>, and
+web:rollout_intervention_abandon are the RL commands. Critic selection is
+optional: setup and rollout only require the policy; selecting a critic after
+setup enables critic telemetry for live rollout and replay.

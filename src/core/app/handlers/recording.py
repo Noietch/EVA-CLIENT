@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 
 
 COLLECT_STEP_MAX_RAW_SNAPSHOTS = 16
+ROLLOUT_STEP_MAX_RAW_SNAPSHOTS = 1
 
 
 def state_to_eef(config: ConfigDict, runtime: RuntimeState, qpos_state: np.ndarray) -> np.ndarray:
@@ -281,7 +282,7 @@ def begin_rollout_save_episode(
     start_collection_capture(
         runtime,
         fps=config.inference_cfg.publish_rate,
-        max_raw_snapshots_per_tick=COLLECT_STEP_MAX_RAW_SNAPSHOTS,
+        max_raw_snapshots_per_tick=ROLLOUT_STEP_MAX_RAW_SNAPSHOTS,
     )
 
 
@@ -342,6 +343,7 @@ def save_rollout_episode(runtime: RuntimeState, session: SessionState) -> bool:
         session.last_error = "Stop or reset before saving the rollout"
         return False
     stop_collection_capture(runtime)
+    logger_obj.release_unused_memory()
     runtime.transport.stop_collection()
     _close_rollout_exclusion(runtime, time.time())
     intervention_ranges = []
@@ -1042,6 +1044,7 @@ def record_executed_action(
 
 __all__ = [
     "COLLECT_STEP_MAX_RAW_SNAPSHOTS",
+    "ROLLOUT_STEP_MAX_RAW_SNAPSHOTS",
     "start_collection_capture",
     "stop_collection_capture",
     "state_to_eef",

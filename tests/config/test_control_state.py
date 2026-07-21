@@ -8,7 +8,7 @@ import queue
 import numpy as np
 
 from core.app import run as app
-from core.app.handlers import control, recording
+from core.app.handlers import control, io, recording
 from core.app.handlers.space import JointState
 from core.app.state import (
     RuntimeState,
@@ -335,7 +335,10 @@ def _config() -> ConfigDict:
         collection=ConfigDict(
             schema=ConfigDict(columns={"qpos": "state", "action_qpos": "action"}),
         ),
-        rollout=ConfigDict(intervention=ConfigDict(control_mode="relative")),
+        rollout=ConfigDict(
+            intervention=ConfigDict(control_mode="relative"),
+            storage=ConfigDict(fps=15),
+        ),
         inference_cfg=ConfigDict(
             publish_rate=1000,
             obs_space=JointState(),
@@ -461,14 +464,47 @@ def test_rollout_episode_starts_collection_before_policy_capture(monkeypatch):
     episode_logger = _RolloutLifecycleLogger()
     runtime.rollout_episode_logger = episode_logger
     session.selected_task = "pick"
+    capture_args = []
     monkeypatch.setattr(recording, "maybe_build_rollout_episode_logger", lambda *args: None)
+    monkeypatch.setattr(
+        recording,
+        "start_collection_capture",
+        lambda _runtime, fps, max_raw_snapshots_per_tick: capture_args.append(
+            (fps, max_raw_snapshots_per_tick)
+        ),
+    )
 
-    recording.begin_rollout_save_episode(_config(), runtime, session)
+    config = _config()
+    config.inference_cfg.publish_rate = 20
+    recording.begin_rollout_save_episode(config, runtime, session)
 
     assert runtime.transport.started == 1
     assert runtime.transport.cleared == 1
     assert episode_logger.started_tasks == ["pick"]
-    recording.stop_collection_capture(runtime)
+    assert capture_args == [(20, 1)]
+
+
+def test_async_warmup_leaves_prefetched_action_ready(monkeypatch):
+    from strategy.async_strategy import AsyncLinearOverlapInferStrategy
+
+    strategy = AsyncLinearOverlapInferStrategy(inference_rate=3.0, latency_k=0)
+    runtime, session = _runtime_and_session()
+    runtime.infer_strategy = strategy
+    runtime._eval_warmup_done = False
+    session.selected_task = "pick"
+    config = _config()
+    config.eval = None
+    config.inference_cfg.setup_warmup_chunks = 2
+    chunk = np.arange(8, dtype=np.float32).reshape(4, 2)
+    monkeypatch.setattr(io, "reset_ik_solver", lambda *_args: None)
+    monkeypatch.setattr(io, "fetch_action_chunk", lambda *_args, **_kwargs: chunk.copy())
+    monkeypatch.setattr(io, "start_inference_loop", lambda *_args: None)
+
+    assert io.run_warmup_and_start(config, runtime, session) is True
+
+    action = strategy.pop_next_action()
+    assert action is not None
+    np.testing.assert_allclose(action, runtime.transport.latest_qpos)
 
 
 def test_rollout_ui_save_stops_collection_and_persists_whole_episode():

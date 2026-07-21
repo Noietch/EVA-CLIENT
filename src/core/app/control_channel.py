@@ -17,63 +17,16 @@ from __future__ import annotations
 import logging
 import threading
 
+from core.app.command_catalog import WEB_COMMAND_VERBS
 from core.app.state import RuntimeState
 from core.config import ConfigDict
 
 logger = logging.getLogger(__name__)
 
-# Allow-listed ``web:*`` verbs — the authoritative set matches the branches in
-# core.app.run._handle_web_command. Keep this in sync when adding a verb there;
-# an unlisted verb is rejected so the queue can't be an arbitrary-string sink.
-_ALLOWED_VERBS = frozenset(
-    {
-        "bootstrap",
-        "warmup",
-        "switch_task",
-        "start",
-        "stop",
-        "reset",
-        "init_move",
-        "init_gripper",
-        "init_done",
-        "switch_ckpt",
-        "operator_action",
-        "operator_button",
-        "connect",
-        "disconnect",
-        "select_mode",
-        "select_episode",
-        "load_replay_dataset",
-        "clear_replay",
-        "set_replay_fps",
-        "replay_seek",
-        "select_strategy",
-        "update_infer_params",
-        "setup",
-        "run",
-        "halt",
-        "rollout_intervention_abandon",
-        "rollout_intervention_mode",
-        "console_reset",
-        "rollout_save",
-        "rollout_stop",
-        "tab_switch",
-        "step_infer",
-        "step_commit",
-        "step_cancel",
-        "manual_qpos",
-        "manual_dispatch",
-        "manual_send",
-        "manual_home",
-        "collect_start",
-        "collect_stop",
-        "collect_cancel",
-        "gripper",
-        # select_collect_task has no run.py verb — it is a pure ctx/session mutation
-        # handled inline here (mirrors console/server.py::_post_select_collect_task).
-        "select_collect_task",
-    }
-)
+# Allow-listed ``web:*`` verbs — shared with the web metadata registry. Keep the
+# registry in sync with core.app.run._handle_web_command; an unlisted verb is
+# rejected so the queue can't be an arbitrary-string sink.
+_ALLOWED_VERBS = WEB_COMMAND_VERBS
 
 _READ_ONLY_QUERIES = frozenset({"status", "config", "frame"})
 

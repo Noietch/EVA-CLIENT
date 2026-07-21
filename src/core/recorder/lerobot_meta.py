@@ -16,6 +16,37 @@ _DATA_PATH_TPL = "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.par
 _VIDEO_PATH_TPL = "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4"
 
 
+def summarize_quality_issues(
+    issues: list[dict[str, Any]] | None,
+) -> tuple[list[dict[str, Any]], int]:
+    """Aggregate repeated QC issues for status/history payloads.
+
+    Args:
+        issues: Full issue records stored in episodes.jsonl.
+
+    Returns:
+        One representative record per severity/code with an exact count, plus the
+        total number of original issue records.
+    """
+    summaries: dict[tuple[str, str], dict[str, Any]] = {}
+    source = issues or []
+    for issue in source:
+        severity = str(issue.get("severity", "red"))
+        code = str(issue.get("code", "issue"))
+        key = (severity, code)
+        summary = summaries.get(key)
+        if summary is None:
+            summaries[key] = {
+                "severity": severity,
+                "code": code,
+                "detail": str(issue.get("detail", "")),
+                "count": 1,
+            }
+        else:
+            summary["count"] = int(summary["count"]) + 1
+    return list(summaries.values()), len(source)
+
+
 def build_info(
     *,
     robot_type: str,
@@ -58,7 +89,7 @@ def history_row(row: dict[str, Any], fallback_index: int) -> dict[str, Any]:
     Returns:
         The summary dict the console renders (status always "saved" on disk).
     """
-    quality_issues = row.get("quality_issues", [])
+    quality_issues, quality_issue_count = summarize_quality_issues(row.get("quality_issues"))
     return {
         "episode_index": int(row.get("episode_index", fallback_index)),
         "length": int(row.get("length", 0)),
@@ -66,6 +97,7 @@ def history_row(row: dict[str, Any], fallback_index: int) -> dict[str, Any]:
         "quality": row.get("quality", "green"),
         "qc_verdict": row.get("qc_verdict", ""),
         "qc_note": row.get("qc_note", ""),
-        "quality_issues": [] if quality_issues is None else quality_issues,
+        "quality_issues": quality_issues,
+        "quality_issue_count": quality_issue_count,
         "error": "",
     }

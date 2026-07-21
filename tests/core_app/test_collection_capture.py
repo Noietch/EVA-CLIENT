@@ -4,6 +4,8 @@ import queue
 import time
 from types import SimpleNamespace
 
+import pytest
+
 from core.app import collection_capture
 from core.app.collection_capture import CollectionCaptureRunner
 
@@ -129,6 +131,33 @@ def test_active_rollout_capture_is_not_routed_to_collection_logger():
 
     assert runtime.rollout_raw_snapshots.qsize() == 1
     assert ingested == []
+
+
+def test_capture_loop_waits_only_for_remaining_fixed_clock_interval(monkeypatch):
+    runtime = SimpleNamespace(episode_logger=None, rollout_episode_logger=None)
+    runner = CollectionCaptureRunner(runtime, fps=10.0, max_raw_snapshots_per_tick=1)
+    now = [0.0]
+    waits = []
+
+    class _StopEvent:
+        def is_set(self):
+            return len(waits) >= 3
+
+        def wait(self, duration):
+            waits.append(duration)
+            now[0] += duration
+
+    def capture_tick():
+        now[0] += 0.03
+        return True
+
+    runner._stop_event = _StopEvent()
+    runner._capture_tick = capture_tick
+    monkeypatch.setattr(collection_capture.time, "monotonic", lambda: now[0])
+
+    runner._run()
+
+    assert waits == pytest.approx([0.07, 0.07, 0.07])
 
 
 def test_capture_lifecycle_suspends_gc_until_capture_stops(monkeypatch):

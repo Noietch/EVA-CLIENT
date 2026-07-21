@@ -476,10 +476,10 @@ def run_warmup_and_start(config: ConfigDict, runtime: RuntimeState, session: Ses
     reset_ik_solver(config, runtime)
     session.action_chunk = None
     session.chunk_index = 0
+    _anchor_buffer_to_current_qpos(runtime)
 
     if skip_warmup:
         logger.info("Eval fast-path: skipping per-trial warmup")
-        _anchor_buffer_to_current_qpos(runtime)
         start_inference_loop(config, runtime, session)
         return True
 
@@ -489,7 +489,7 @@ def run_warmup_and_start(config: ConfigDict, runtime: RuntimeState, session: Ses
             if runtime.infer_strategy is None:
                 chunk = fetch_action_chunk(config, runtime, session.selected_task, session)
             else:
-                chunk = runtime.infer_strategy.take_or_fetch_chunk(
+                chunk = runtime.infer_strategy.prepare_warmup_chunk(
                     session.selected_task,
                     partial(_loop_fetch_chunk, config, runtime, session),
                 )
@@ -510,11 +510,6 @@ def run_warmup_and_start(config: ConfigDict, runtime: RuntimeState, session: Ses
     runtime._eval_warmup_done = True
     runtime.setup_stage = ""
 
-    # Anchor the smooth buffer to the robot's actual position so the first
-    # async chunk blends from where the robot really is, not from the
-    # warmup-predicted future position that was never executed.
-    _anchor_buffer_to_current_qpos(runtime)
-
     start_inference_loop(config, runtime, session)
     return True
 
@@ -522,9 +517,8 @@ def run_warmup_and_start(config: ConfigDict, runtime: RuntimeState, session: Ses
 def _anchor_buffer_to_current_qpos(runtime: RuntimeState) -> None:
     """Anchor the smooth buffer to the robot's actual qpos.
 
-    After warmup, the buffer holds a predicted future position that was never
-    executed.  Without anchoring, the first async chunk blends from that
-    phantom position, causing a visible jump.
+    Warmup integrates its first prediction against this measured position so the
+    first published action does not jump from an unexecuted prediction.
     """
     if runtime.infer_strategy is None:
         return

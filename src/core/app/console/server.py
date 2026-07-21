@@ -35,6 +35,7 @@ import imageio_ffmpeg
 import numpy as np
 from tqdm import tqdm
 
+from core.app.command_catalog import control_command_catalog
 from core.app.console.transform_worker import build_transform_blob
 from core.app.handlers import (
     _resolve_runtime_path,
@@ -654,6 +655,12 @@ def _serialize_config(ctx: ConsoleContext) -> dict:
         "publish_mode": "joint",
         "publish_rate": config.inference_cfg.publish_rate,
         "inference_rate": config.inference_cfg.inference_rate,
+        "control_channel": {
+            "enabled": bool((config.get("control_channel") or {}).get("enabled", False)),
+            "host": str((config.get("control_channel") or {}).get("host", "127.0.0.1")),
+            "port": int((config.get("control_channel") or {}).get("port", 5757)),
+            "commands": control_command_catalog(),
+        },
         "collection": {
             "enabled": bool(config.collection.schema.columns),
             "fps": None,

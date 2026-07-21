@@ -78,6 +78,18 @@ class BaseInferStrategy:
         self._activate_chunk(chunk, start_step)
         return chunk
 
+    def prepare_warmup_chunk(self, prompt: str, fetch_chunk: FetchChunkFn) -> np.ndarray:
+        """Fetch one warmup chunk before execution starts.
+
+        Args:
+            prompt: Task instruction passed to the policy.
+            fetch_chunk: Callable invoking the policy; returns [T, action_dim].
+
+        Returns:
+            Prepared action chunk with shape [T, action_dim].
+        """
+        return self.take_or_fetch_chunk(prompt, fetch_chunk)
+
     def start_loop(
         self,
         prompt: str,
@@ -317,6 +329,23 @@ class BackgroundLoopInferStrategy(BaseInferStrategy):  # pyright: ignore[reportG
                 actions.append(act)
         chunk = np.array(actions, dtype=np.float32) if actions else raw_chunk.copy()
         self._activate_chunk(chunk, start_step)
+        return chunk
+
+    def prepare_warmup_chunk(self, prompt: str, fetch_chunk: FetchChunkFn) -> np.ndarray:
+        """Fetch and retain one warmup chunk in the continuous action buffer.
+
+        Args:
+            prompt: Task instruction passed to the policy.
+            fetch_chunk: Callable invoking the policy; returns [T, action_dim].
+
+        Returns:
+            Retained action chunk with shape [T, action_dim].
+        """
+        chunk = self._crop_chunk(fetch_chunk(prompt, None))
+        self._smooth_buffer.integrate_new_chunk(
+            chunk,
+            max_k=self.latency_k or 0,
+        )
         return chunk
 
     def seed_buffer(self, action: np.ndarray) -> None:

@@ -942,6 +942,7 @@ def test_ros2_collection_snapshot_keeps_compressed_bytes_not_ros_image_messages(
     batch = snapshot.decode_raw()
     image = batch.images[camera.observation_key][0].value
     assert isinstance(image, CollectionRawImage)
+    assert image.encoded == b"jpeg payload"
     assert image.decoder.__closure__ is None
     assert image.decoder.__defaults__ == (b"jpeg payload",)
 
