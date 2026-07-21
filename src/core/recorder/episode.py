@@ -734,12 +734,12 @@ class EpisodeLogger:
     def _decode_raw_episode_snapshots(self, payload: RawEpisodeSavePayload) -> None:
         for raw in payload.raw_snapshots:
             batch = raw.snapshot.decode_raw()
-            batch.vectors.setdefault("action_qpos", []).append(
+            batch.vectors["action_qpos"] = [
                 CollectionRawSample(
                     raw.snapshot.timestamp,
                     raw.action_qpos.copy(),
                 )
-            )
+            ]
             self._merge_raw_episode_batch(payload.raw_batch, batch)
             payload.frame_labels.append(
                 RawEpisodeFrameLabel(

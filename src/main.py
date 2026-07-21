@@ -11,6 +11,7 @@ import argparse
 import logging
 
 from core.app.run import run
+from core.cfg import DictAction
 from core.config import ConfigDict, load_config
 
 
@@ -27,6 +28,12 @@ def parse_args() -> tuple[ConfigDict, int, str | None, bool]:
         description="EVA - Unified robot VLA inference debugging client"
     )
     parser.add_argument("--config", type=str, required=True, help="Path to .py configuration file")
+    parser.add_argument(
+        "--cfg-options",
+        nargs="+",
+        action=DictAction,
+        help="Override config values as dotted KEY=VALUE pairs, matching EVA-VLA.",
+    )
     parser.add_argument("--web-port", type=int, default=8080, help="Web server port (default 8080)")
     parser.add_argument(
         "--headless",
@@ -35,7 +42,7 @@ def parse_args() -> tuple[ConfigDict, int, str | None, bool]:
     )
     args = parser.parse_args()
 
-    config = load_config(args.config)
+    config = load_config(args.config, cfg_options=args.cfg_options)
 
     return config, args.web_port, args.config, args.headless
 

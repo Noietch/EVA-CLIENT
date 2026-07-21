@@ -39,8 +39,10 @@ def _build_zmq_transport_with_fake_readers(monkeypatch):
             _robot,
             _zmq_mod,
             preserve_collection_backlog=False,
+            record_images=True,
         ) -> None:
             self.preserve_collection_backlog = preserve_collection_backlog
+            self.record_images = record_images
             self.frame = None
             self.collection_frame = None
             self.qpos = None
@@ -98,6 +100,9 @@ def _build_zmq_transport_with_fake_readers(monkeypatch):
         transport=types.SimpleNamespace(
             sub_endpoint="tcp://127.0.0.1:5555",
             pub_endpoint="tcp://127.0.0.1:5556",
+            render_on_demand=False,
+            render_timeout_s=5.0,
+            record_images=True,
         )
     )
     robot = types.SimpleNamespace(name="test_robot")
@@ -129,6 +134,7 @@ def test_observation_roundtrip_preserves_images_state_and_timestamp():
         task_name="pick_and_place",
         robot_name="piper",
         split="train",
+        prompt="pick up the banana",
         scene_state={
             "objects": [{"asset_id": "banana", "position": [0.0, 0.1, 0.2]}],
             "robot_base": {"left_arm": [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]},
@@ -145,6 +151,7 @@ def test_observation_roundtrip_preserves_images_state_and_timestamp():
     assert back.task_name == "pick_and_place"
     assert back.robot_name == "piper"
     assert back.split == "train"
+    assert back.prompt == "pick up the banana"
     assert back.scene_state == obs.scene_state
     assert back.camera_resolution == (224, 224)
     assert set(back.images) == set(images)
@@ -267,6 +274,29 @@ def test_state_only_raw_collection_keeps_camera_streams_empty():
     reader = object.__new__(_ObservationReader)
     reader._robot = robot
     reader._disabled_cameras = set()
+    reader._record_images = True
+    reader._drain_raw_collection = lambda: pack_observation(wire_obs)
+
+    snapshot = reader.acquire_collection_raw()
+    assert snapshot is not None
+    batch = snapshot.decode_raw()
+
+    assert batch.images == {}
+    assert batch.image_streams_expected is False
+
+
+def test_raw_collection_can_discard_policy_images():
+    robot = ROBOT_REGISTRY.build("agilex_piper")
+    wire_obs = WireObservation(
+        t=3.0,
+        images={"cam_high": np.zeros((4, 4, 3), dtype=np.uint8)},
+        state={
+            group.name: np.zeros(group.dof, dtype=np.float32)
+            for group in robot.actuator_groups
+        },
+    )
+    reader = object.__new__(_ObservationReader)
+    reader._record_images = False
     reader._drain_raw_collection = lambda: pack_observation(wire_obs)
 
     snapshot = reader.acquire_collection_raw()
@@ -308,8 +338,10 @@ def test_zmq_collection_reader_preserves_backlog_order():
     reader._zmq = types.SimpleNamespace(NOBLOCK=object(), Again=_Again)
     reader._sub = _Sub()
     reader._latest = None
+    reader._latest_image_observation = None
     reader._disabled_cameras = set()
     reader._latest_images = {}
+    reader._image_revision = 0
     reader._image_rate = ImageRateTracker()
     reader._preserve_collection_backlog = True
     reader._collection_queue = collections.deque()
@@ -356,8 +388,10 @@ def test_zmq_collection_reader_defaults_to_latest_frame():
     reader._zmq = types.SimpleNamespace(NOBLOCK=object(), Again=_Again)
     reader._sub = _Sub()
     reader._latest = None
+    reader._latest_image_observation = None
     reader._disabled_cameras = set()
     reader._latest_images = {}
+    reader._image_revision = 0
     reader._image_rate = ImageRateTracker()
     reader._preserve_collection_backlog = False
     reader._collection_queue = collections.deque()
@@ -534,7 +568,9 @@ def test_zmq_reader_keeps_multi_camera_visualization_cache():
     reader._zmq = types.SimpleNamespace(NOBLOCK=object(), Again=_Again)
     reader._sub = _Sub()
     reader._latest = None
+    reader._latest_image_observation = None
     reader._latest_images = {}
+    reader._image_revision = 0
     reader._image_rate = ImageRateTracker()
     reader._disabled_cameras = set()
     reader._disabled_groups = set()
@@ -580,6 +616,39 @@ def test_zmq_transport_uses_separate_internal_readers(monkeypatch):
     assert readers[1].calls == ["collection"]
     assert readers[2].calls == ["qpos"]
     assert [reader.preserve_collection_backlog for reader in readers] == [False, True, False]
+
+
+def test_zmq_transport_requests_a_new_image_for_on_demand_frame():
+    image = np.zeros((4, 4, 3), dtype=np.uint8)
+
+    class _Reader:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def get_frame(self, image_after_revision=None):
+            self.calls.append(image_after_revision)
+            if image_after_revision is None:
+                return types.SimpleNamespace(images={})
+            return types.SimpleNamespace(images={"cam_high": image})
+
+        def image_revision(self):
+            return 7
+
+    reader = _Reader()
+    render_requests = []
+    transport = object.__new__(ZmqTransport)
+    transport._render_on_demand = True
+    transport._render_timeout_s = 1.0
+    transport._closed = False
+    transport._reader = reader
+    transport._request_render = lambda: render_requests.append(True)
+
+    frame = transport.get_frame()
+
+    assert frame is not None
+    assert frame.images == {"cam_high": image}
+    assert reader.calls == [None, 7]
+    assert render_requests == [True]
 
 
 def test_zmq_reader_conflates_latest_frames_but_preserves_collection_backlog():

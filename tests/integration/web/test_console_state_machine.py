@@ -1005,6 +1005,7 @@ def test_halt_keeps_active_episode_open_for_continue():
     runtime = SimpleNamespace(
         web_phase="idle",
         replay_source=None,
+        infer_strategy=None,
         episode_logger=logger_obj,
         rollout_episode_logger=None,
     )
@@ -1226,6 +1227,43 @@ def test_eval_stop_during_running_motion_is_requeued_finalized_and_left_ready():
     assert runtime.web_phase == "ready"
     assert runtime.needs_pre_start_reset is True
     assert logger_obj.ended == 1
+
+
+def test_eval_next_trial_advances_transport_and_resets_run_state():
+    advances = []
+    runtime = SimpleNamespace(
+        web_phase="ready",
+        transport=SimpleNamespace(advance_environment=lambda: advances.append(True) or True),
+        infer_strategy=None,
+        policy=None,
+        ik_solver=None,
+        needs_pre_start_reset=False,
+        current_clip_id="clip-1",
+        current_cell={"prompt": "pick up the cup", "trial": 1},
+    )
+    session = SessionState(
+        mode=SessionMode.REAL,
+        status=SessionStatus.READY,
+        is_setup_done=True,
+        selected_task="pick up the cup",
+    )
+    session.step_index = 9
+
+    app.handle_command(
+        "web:next_trial",
+        ConfigDict(),
+        cast(RuntimeState, runtime),
+        session,
+    )
+
+    assert advances == [True]
+    assert runtime.web_phase == "ready"
+    assert runtime.needs_pre_start_reset is True
+    assert runtime.current_clip_id is None
+    assert runtime.current_cell is None
+    assert session.status is SessionStatus.UNSET
+    assert session.step_index == 0
+    assert session.is_setup_done is False
 
 
 def test_interrupting_verb_during_reset_is_requeued_not_dropped(console):

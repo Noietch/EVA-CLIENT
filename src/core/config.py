@@ -45,12 +45,16 @@ class StrategyYamlSpec(TypedDict):
 _COLLECTION_REQUIRED_COLUMNS = ("qpos", "eef", "action_qpos", "action_eef")
 
 
-def load_config(path: str | Path) -> ConfigDict:
+def load_config(
+    path: str | Path, cfg_options: dict[str, object] | None = None
+) -> ConfigDict:
     """Load a .py config (with ``_base_`` inheritance) into a ConfigDict.
 
     Args:
         path: Filesystem path to a ``.py`` config file. ``_base_`` paths inside
             the file are resolved relative to the file's own directory.
+        cfg_options: Optional dotted-key overrides applied before normalization,
+            validation, and eval checkpoint resolution.
 
     Returns:
         ConfigDict with dotted attribute access. ``inference_cfg.obs_space``
@@ -58,7 +62,10 @@ def load_config(path: str | Path) -> ConfigDict:
         (not dicts). Derived fields (``log.log_dir`` fallback) are filled in.
     """
     p = Path(path).expanduser()
-    cfg = Config.fromfile(str(p)).to_dict()
+    loaded = Config.fromfile(str(p))
+    if cfg_options:
+        loaded.merge_from_dict(cfg_options)
+    cfg = loaded.to_dict()
     cfg = ConfigDict(cfg)
     _normalize_eval_cfg(cfg)
     _coerce_spaces(cfg)

@@ -175,6 +175,10 @@ class TransportBridge(abc.ABC):
         """Signal the source to stop emitting collection frames (no-op default)."""
         return None
 
+    def advance_environment(self) -> bool:
+        """Advance a simulator to its next trial layout when supported."""
+        return False
+
     def reset_hil_control(self) -> None:
         """Reset backend HIL relay state before a new intervention/collection."""
         return None

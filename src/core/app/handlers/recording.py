@@ -432,6 +432,7 @@ def rebuild_eval_episode_logger(config: ConfigDict, runtime: RuntimeState) -> No
 def start_episode(runtime: RuntimeState, session: SessionState) -> None:
     """Begin one episode = one inference run (status -> RUNNING)."""
     if runtime.episode_logger is not None:
+        runtime.transport.clear_collection_backlog()
         runtime.episode_logger.start_episode(task=format_task_label(session.selected_task))
         _stamp_scene_meta(runtime, runtime.episode_logger)
 

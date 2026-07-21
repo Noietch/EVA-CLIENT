@@ -1,7 +1,7 @@
 .claude/
 .omx/
 .omc/
-.venv/
+.venv
 .vscode/
 __pycache__/
 .pytest_cache/

@@ -2,10 +2,6 @@
 
 _base_ = ["openpi_qpos.py"]
 
-robot = dict(
-    extra_cameras=dict(third_person="cam_third_person"),
-)
-
 transport = dict(
     type="zmq",
     resize_pad=False,

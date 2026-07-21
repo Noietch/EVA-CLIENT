@@ -463,6 +463,25 @@ def _handle_web_command(
         set_phase(runtime, "ready")
         return
 
+    if verb == "next_trial":
+        if runtime.web_phase in {"starting", "running", "stopping", "resetting"}:
+            logger.warning("Ignored next_trial while phase=%s", runtime.web_phase)
+            return
+        set_phase(runtime, "resetting")
+        if not runtime.transport.advance_environment():
+            session.last_error = "Active transport does not support environment advance"
+            set_phase(runtime, "ready")
+            return
+        reset_session_progress(session)
+        reset_infer_strategy(runtime)
+        reset_ik_solver(config, runtime)
+        runtime.needs_pre_start_reset = True
+        runtime.current_clip_id = None
+        runtime.current_cell = None
+        set_phase(runtime, "ready")
+        logger.info("Requested next simulator trial")
+        return
+
     if verb == "init_move":
         # EVAL INIT panel: move the arm to the start pose. arg is a JSON body carrying an
         # optional operator-supplied qpos list (else the configured default is used).
@@ -938,6 +957,8 @@ def _dispatch_halt(config: ConfigDict, runtime: RuntimeState, session: SessionSt
         session.mode in (SessionMode.REAL, SessionMode.SIM)
         and session.status is SessionStatus.RUNNING
     ):
+        if runtime.infer_strategy is not None:
+            runtime.infer_strategy.stop_loop()
         set_status(session, SessionStatus.READY, reason="continuous publish cancelled")
     elif session.mode is SessionMode.STEP and session.pending_real_chunk is not None:
         session.pending_real_chunk = None

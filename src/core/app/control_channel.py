@@ -33,6 +33,7 @@ _ALLOWED_VERBS = frozenset(
         "start",
         "stop",
         "reset",
+        "next_trial",
         "init_move",
         "init_gripper",
         "init_done",
@@ -123,6 +124,13 @@ def _handle_command(runtime: RuntimeState, message: dict) -> dict:
     ctx = runtime.console_ctx
     if ctx is None:
         return _reject("console context not ready")
+
+    if verb == "start" and message.get("clip_id"):
+        runtime.current_clip_id = str(message["clip_id"])
+        runtime.current_cell = {
+            "prompt": message.get("prompt"),
+            "trial": message.get("trial"),
+        }
 
     # select_collect_task: pure session mutation, mirror console/server.py exactly.
     if verb == "select_collect_task":

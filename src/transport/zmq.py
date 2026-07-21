@@ -20,6 +20,7 @@ from __future__ import annotations
 import collections
 import dataclasses
 import logging
+import queue
 import threading
 import time
 
@@ -41,6 +42,8 @@ COLLECTION_STOP_TARGET = "collect_stop"
 COLLECTION_CONTROL_REPEATS = 5
 COLLECTION_CONTROL_INTERVAL_S = 0.02
 COLLECTION_SOCKET_DRAIN_MAX = 64
+RESET_TARGET = "reset"
+RENDER_TARGET = "render"
 
 
 # --- wire protocol -------------------------------------------------------------
@@ -67,6 +70,7 @@ class WireObservation:
         split: optional simulator layout split for offline scene rebuild.
         scene_state: optional concrete assets and initial scene poses for offline rebuild.
         camera_resolution: Optional intended camera size as (height, width).
+        prompt: Optional natural-language instruction for the simulator scene.
     """
 
     t: float
@@ -84,6 +88,7 @@ class WireObservation:
     split: str | None = None
     scene_state: dict[str, object] | None = None
     camera_resolution: tuple[int, int] | None = None
+    prompt: str | None = None
 
 
 @dataclasses.dataclass
@@ -142,6 +147,8 @@ def pack_observation(obs: WireObservation) -> bytes:
         payload["scene_state"] = obs.scene_state
     if obs.camera_resolution is not None:
         payload["camera_resolution"] = list(obs.camera_resolution)
+    if obs.prompt is not None:
+        payload["prompt"] = str(obs.prompt)
     return _PACKER.pack(payload)
 
 
@@ -181,6 +188,7 @@ def unpack_observation(payload: bytes) -> WireObservation:
             if "camera_resolution" not in raw
             else (int(raw["camera_resolution"][0]), int(raw["camera_resolution"][1]))
         ),
+        prompt=None if "prompt" not in raw else str(raw["prompt"]),
     )
 
 
@@ -224,12 +232,16 @@ class _ObservationReader:
         robot: Robot,
         zmq_mod,
         preserve_collection_backlog: bool = False,
+        record_images: bool = True,
     ) -> None:
         self._robot = robot
         self._zmq = zmq_mod
         self._latest: WireObservation | None = None
+        self._latest_image_observation: WireObservation | None = None
         self._latest_images: dict[str, np.ndarray] = {}
+        self._image_revision = 0
         self._preserve_collection_backlog = preserve_collection_backlog
+        self._record_images = record_images
         self._collection_queue: collections.deque[WireObservation] = collections.deque()
         self._raw_collection_queue: collections.deque[bytes] = collections.deque()
         self._freshness = StreamFreshness()
@@ -260,6 +272,16 @@ class _ObservationReader:
     def _observation_images(self, wire_obs: WireObservation) -> dict[str, np.ndarray]:
         return {key: np.asarray(image) for key, image in wire_obs.images.items()}
 
+    def _track_images_locked(self, obs: WireObservation) -> None:
+        images = self._observation_images(obs)
+        self._image_rate.mark_many(images.keys(), obs.t)
+        self._cache_images_locked(images)
+        if not images:
+            return
+        self._image_revision += 1
+        if self._latest_image_observation is None or obs.t >= self._latest_image_observation.t:
+            self._latest_image_observation = obs
+
     def _drain_latest(self) -> WireObservation | None:
         """Pop all queued SUB messages, keeping only the newest by timestamp."""
         with self._lock:
@@ -272,9 +294,7 @@ class _ObservationReader:
                     break
                 got_message = True
                 obs = unpack_observation(payload)
-                images = self._observation_images(obs)
-                self._image_rate.mark_many(images.keys(), obs.t)
-                self._cache_images_locked(images)
+                self._track_images_locked(obs)
                 if newest is None or obs.t >= newest.t:
                     newest = obs
             if got_message:
@@ -292,9 +312,7 @@ class _ObservationReader:
                     break
                 got_message = True
                 obs = unpack_observation(payload)
-                images = self._observation_images(obs)
-                self._image_rate.mark_many(images.keys(), obs.t)
-                self._cache_images_locked(images)
+                self._track_images_locked(obs)
                 self._collection_queue.append(obs)
                 if self._latest is None or obs.t >= self._latest.t:
                     self._latest = obs
@@ -340,14 +358,24 @@ class _ObservationReader:
             self._raw_collection_queue.clear()
             return cutoff
 
-    def get_frame(self) -> Observation | None:
+    def image_revision(self) -> int:
+        """Return the number of image-bearing wire observations received."""
+        with self._lock:
+            return self._image_revision
+
+    def get_frame(self, image_after_revision: int | None = None) -> Observation | None:
         """Return the freshest snapshot as a canonical Observation.
 
         Drains the SUB socket to the newest WireObservation, then keys images by
         observation_key and concatenates state in state_composition order (disabled
         groups filled from initial qpos, disabled cameras skipped). When the snapshot
         carries a teleop action (collection mode), the Observation's ``action_qpos``
-        is set.
+        is set. If ``image_after_revision`` is provided, the returned image and state
+        come from the same image-bearing wire observation newer than that revision.
+
+        Args:
+            image_after_revision: Require an image-bearing observation newer than
+                this reader-local revision, or return the freshest observation.
 
         Returns:
             Observation with images [H, W, 3] uint8 and state_qpos [state_dim]
@@ -357,6 +385,13 @@ class _ObservationReader:
         wire_obs = self._drain_latest()
         if wire_obs is None:
             return None
+        if image_after_revision is not None:
+            with self._lock:
+                if self._image_revision <= image_after_revision:
+                    return None
+                wire_obs = self._latest_image_observation
+            if wire_obs is None:
+                return None
 
         wire_images = self._observation_images(wire_obs)
         state_only = not wire_images and wire_obs.camera_resolution is not None
@@ -383,9 +418,7 @@ class _ObservationReader:
         state = np.concatenate(state_parts, axis=0)
 
         if wire_obs.action is not None:
-            # Collection mode: the execution layer bundled the teleop action into
-            # this snapshot (already time-aligned), so carry it through for the
-            # recorder. Eval never sets action, so it stays None.
+            # Collection sources may bundle an already aligned teleop action.
             return Observation(
                 images=images,
                 state_qpos=state,
@@ -414,6 +447,7 @@ class _ObservationReader:
             "robot_name": None if wire_obs is None else wire_obs.robot_name,
             "split": None if wire_obs is None else wire_obs.split,
             "scene_state": None if wire_obs is None else wire_obs.scene_state,
+            "prompt": None if wire_obs is None else wire_obs.prompt,
         }
 
     def get_camera_frame(self, key: str) -> np.ndarray | None:
@@ -556,16 +590,17 @@ class _ObservationReader:
         wire_obs = unpack_observation(payload)
 
         def decode_raw(wire_obs: WireObservation = wire_obs) -> CollectionRawBatch:
-            # EVA Sim --skip-render publishes no images but does include the intended
-            # camera resolution. Keep saved raw streams empty and mark that omission
-            # as intentional; an empty image mapping without this marker remains a real
-            # missing-camera error.
-            state_only = not wire_obs.images and wire_obs.camera_resolution is not None
+            # State-only streams either omit images on the wire or disable their recording.
+            state_only = (
+                not self._record_images
+                or (not wire_obs.images and wire_obs.camera_resolution is not None)
+            )
             batch = CollectionRawBatch(image_streams_expected=not state_only)
-            for key, image in wire_obs.images.items():
-                batch.images.setdefault(key, []).append(
-                    CollectionRawSample(timestamp=wire_obs.t, value=np.asarray(image))
-                )
+            if self._record_images:
+                for key, image in wire_obs.images.items():
+                    batch.images.setdefault(key, []).append(
+                        CollectionRawSample(timestamp=wire_obs.t, value=np.asarray(image))
+                    )
             for group_name, state in wire_obs.state.items():
                 batch.vectors.setdefault(f"state_qpos:{group_name}", []).append(
                     CollectionRawSample(
@@ -629,10 +664,18 @@ class ZmqTransport(TransportBridge):
         self._robot = robot
         self._closed = False
         self._zmq = zmq
+        self._render_on_demand = bool(config.transport.render_on_demand)
+        self._render_timeout_s = float(config.transport.render_timeout_s)
+        self._render_requests: queue.Queue[bool | None] | None = None
+        self._render_thread: threading.Thread | None = None
 
         self._reader = _ObservationReader(config, robot, zmq)
         self._collection_reader = _ObservationReader(
-            config, robot, zmq, preserve_collection_backlog=True
+            config,
+            robot,
+            zmq,
+            preserve_collection_backlog=True,
+            record_images=bool(config.transport.record_images),
         )
         self._qpos_reader = _ObservationReader(config, robot, zmq)
         self._extra_readers: list[_ObservationReader] = []
@@ -640,6 +683,14 @@ class ZmqTransport(TransportBridge):
         ctx = zmq.Context.instance()
         self._pub = ctx.socket(zmq.PUB)
         self._pub.connect(config.transport.pub_endpoint)
+        if self._render_on_demand:
+            self._render_requests = queue.Queue(maxsize=1)
+            self._render_thread = threading.Thread(
+                target=self._render_sender_loop,
+                name="eva-zmq-render-request",
+                daemon=True,
+            )
+            self._render_thread.start()
 
         logger.info(
             "ZMQ transport ready: sub=%s pub=%s robot=%s",
@@ -648,9 +699,45 @@ class ZmqTransport(TransportBridge):
             robot.name,
         )
 
+    def _render_sender_loop(self) -> None:
+        assert self._render_requests is not None
+        ctx = self._zmq.Context.instance()
+        sender = ctx.socket(self._zmq.PUB)
+        sender.connect(self._config.transport.pub_endpoint)
+        action = np.zeros(self._robot.total_action_dim, dtype=np.float32)
+        while True:
+            request = self._render_requests.get()
+            if request is None:
+                break
+            sender.send(
+                pack_action(
+                    WireAction(t=time.monotonic(), action=action, target=RENDER_TARGET)
+                )
+            )
+        sender.close(linger=0)
+
+    def _request_render(self) -> None:
+        assert self._render_requests is not None
+        try:
+            self._render_requests.put_nowait(True)
+        except queue.Full:
+            pass
+
     def get_frame(self) -> Observation | None:
-        """Freshest observation from the control-loop reader (see _ObservationReader)."""
-        return self._reader.get_frame()
+        """Return a fresh policy observation, requesting images when configured."""
+        if not self._render_on_demand:
+            return self._reader.get_frame()
+        self._reader.get_frame()
+        revision = self._reader.image_revision()
+        self._request_render()
+        deadline = time.monotonic() + self._render_timeout_s
+        while time.monotonic() < deadline and not self._closed:
+            frame = self._reader.get_frame(image_after_revision=revision)
+            if frame is not None and frame.images:
+                return frame
+            time.sleep(0.002)
+        logger.warning("Timed out waiting for an on-demand render")
+        return None
 
     def supports_collection(self) -> bool:
         """Always True — the ZMQ transport always exposes a collection reader."""
@@ -736,6 +823,13 @@ class ZmqTransport(TransportBridge):
         """Tell the execution layer to stop recording (sends repeated stop signals)."""
         self._send_collection_control(COLLECTION_STOP_TARGET)
 
+    def advance_environment(self) -> bool:
+        """Tell EVA Sim to advance to its next scene/layout trial."""
+        action = np.zeros(self._robot.total_action_dim, dtype=np.float32)
+        message = WireAction(t=time.monotonic(), action=action, target=RESET_TARGET)
+        self._pub.send(pack_action(message))
+        return True
+
     def create_observation_reader(self) -> _ObservationReader:
         """Create and track an independent reader (own SUB socket) for an aux consumer."""
         reader = _ObservationReader(self._config, self._robot, self._zmq)
@@ -747,6 +841,10 @@ class ZmqTransport(TransportBridge):
         if self._closed:
             return
         self._closed = True
+        if self._render_requests is not None:
+            self._render_requests.put(None)
+        if self._render_thread is not None:
+            self._render_thread.join(timeout=2.0)
         self._reader.close()
         self._collection_reader.close()
         self._qpos_reader.close()

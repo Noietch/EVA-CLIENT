@@ -547,6 +547,12 @@ def test_raw_episode_snapshots_decode_on_async_save_worker(tmp_path):
                 },
                 vectors={
                     "state_qpos": [CollectionRawSample(timestamp, state.copy())],
+                    "action_qpos": [
+                        CollectionRawSample(
+                            timestamp,
+                            np.full(_DIM, -1.0, dtype=np.float32),
+                        )
+                    ],
                 },
                 start_time=timestamp,
                 end_time=timestamp,

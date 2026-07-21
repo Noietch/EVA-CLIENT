@@ -107,6 +107,23 @@ def test_load_eval_config_resolves_checkpoints():
         assert resolved.policy.port == checkpoint["port"]
 
 
+def test_load_config_applies_nested_cli_overrides_before_eval_resolution():
+    cfg = load_config(
+        _CONFIGS_DIR / "03_evaluation" / "dual_agilex_piper_eva_sim_eval.py",
+        cfg_options={
+            "eval_cfg.checkpoints.0.name": "worker_03",
+            "eval_cfg.checkpoints.0.port": 19030,
+            "eval_cfg.trials_per_prompt": 2,
+            "control_channel.port": 19033,
+        },
+    )
+
+    assert cfg.eval.checkpoints[0].name == "worker_03"
+    assert cfg.eval.checkpoints[0].port == 19030
+    assert cfg.eval.trials_per_prompt == 2
+    assert cfg.control_channel.port == 19033
+
+
 # --- derived fields + validation (synthetic .py over real defaults) ---
 
 
