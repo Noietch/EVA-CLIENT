@@ -1,12 +1,60 @@
 // main.js: app entry — wires DOM events, exposes inline handlers, boots polling
 // (main); tab switching + active-tab thumb + per-tab render dispatch (tabs).
-import { $, LIVE, S, apiGet, apiPost } from "./core.js";
+import { $, LIVE, S, apiGet, apiPost, setCommandMetadata } from "./core.js";
 import { closeChartModal, drawLiveCharts, liveDimsAll, onScrubInput, openChartModal, resetLiveSeries } from "./charts.js";
 import { applyTune, applyManualTune, renderConfig, manualConnect, manualDisconnect, manualDispatchToggle, enterManualSim, applyStatus, pauseSetup, replayIsLocalMode, resumeSetup, retrySetup, startRunFromDebug, updateGuide } from "./run.js";
 import { collectConfigured, renderCollect, renderRolloutSave, returnReviewToLive, startCollectFromTab, saveAnnotation, submitEpisodeNote, submitEpisodeQc, submitQc, clearReviewPlayback, reviewActiveInCurrentTab } from "./collect.js";
 import { evalEnabled, evalReset, evalSetup, evalRunToggle, evalResumeOnEnter, submitEvalScore, loadEvalResults, renderEvalSelectors, loadResultsAll, tpSeek, tpToggle, trialPopClose } from "./eval.js";
 import { replayPlay, replayStop, replayToggle, seekReplay, loop, pollFrame, pollScene, refreshCameraStreams, exitReplayMode } from "./replay.js";
 import { pollRlSeries, renderRlConfig, renderRlStatus } from "./rl.js";
+
+const FIXED_COMMANDS = {
+  "b-run": "web:run",
+  "b-reset": "web:console_reset",
+  "b-step": "web:step_infer",
+  "b-commit": "web:step_commit",
+  "b-step-halt": "web:step_cancel",
+  "b-step-reset": "web:console_reset",
+  "b-replay-run": "web:run",
+  "b-replay-reset": "web:console_reset",
+  "b-replay-step": "web:step_infer",
+  "b-replay-commit": "web:step_commit",
+  "b-replay-step-halt": "web:step_cancel",
+  "b-replay-step-reset": "web:console_reset",
+  "be-setup": "web:warmup",
+  "be-run": "web:start",
+  "be-reset": "web:reset",
+  "bm-connect": "web:connect",
+  "bm-send": "web:manual_send",
+  "bm-home": "web:manual_home",
+  "b-collect-toggle": "web:operator_action:{intent}:ui",
+  "b-collect-cancel": "web:collect_cancel",
+  "rl-b-setup": "web:rl_setup",
+  "rl-b-run": "web:run",
+  "rl-b-reset": "web:console_reset",
+  "rl-b-intervene": "web:halt",
+  "rl-b-accept": "web:run",
+  "rl-b-abandon": "web:rollout_intervention_abandon",
+  "rl-b-save": "web:rollout_save",
+  "rl-hil-enable": "web:rollout_intervention_enabled:{enabled}",
+};
+
+function annotateFixedCommands() {
+  Object.entries(FIXED_COMMANDS).forEach(([id, command]) => {
+    setCommandMetadata($(id), command, command.includes("{"));
+  });
+  document.querySelectorAll(".tab[data-tab]").forEach((tab) => {
+    setCommandMetadata(tab, `web:tab_switch:${tab.dataset.tab}`);
+  });
+  setCommandMetadata($("mode-list"), "web:select_mode:{mode}", true);
+  setCommandMetadata($("strategy-list"), "web:select_strategy:{strategy}", true);
+  setCommandMetadata($("prompt-list"), "web:switch_task:{task}", true);
+  setCommandMetadata($("collect-prompt-list"), "web:select_collect_task:{task}", true);
+  setCommandMetadata($("rl-task-list"), "web:rl_select_task:{task}", true);
+  setCommandMetadata($("rl-policy-list"), "web:rl_select_policy:{slot}", true);
+  setCommandMetadata($("rl-critic-list"), "web:rl_select_critic:{slot}", true);
+  setCommandMetadata($("scrub-range"), "web:replay_seek:{frame}", true);
+}
 
 // ===== tabs =====
 function moveTabThumb() {
@@ -125,6 +173,7 @@ function setActiveTab(tab) {
     // source has no live frames doesn't keep painting the previous tab's last frame.
     refreshCameraStreams();
     renderConfig();
+    annotateFixedCommands();
     // MANUAL opens straight into SIM-debug: entering the tab activates manual mode
     // so the sliders drive the sim/3D preview immediately. Connecting to the REAL
     // robot is a separate, optional step gated on the backend's live link state.
@@ -161,6 +210,7 @@ async function boot() {
     // An eval config opens straight on the EVAL tab. Without one the console still boots on
     // DEBUG, but EVAL/RESULT stay reachable as a read-only viewer over recorded results.
     if (evalEnabled()) { setActiveTab("eval"); }
+    annotateFixedCommands();
     // stage scrub bar + per-chart ALL toggles
     $("scrub-range").addEventListener("input", (e) => onScrubInput(e.target.value));
     $("action-all").addEventListener("click", () => liveDimsAll("a"));

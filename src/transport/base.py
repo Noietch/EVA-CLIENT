@@ -837,9 +837,14 @@ class _RosTransportBase(TransportBridge):
                     snapshot_timestamp,
                 )
 
-        batch = self._collection_raw_batch_from_msgs(new_messages, pinned_streams)
+        batch: CollectionRawBatch | None = None
 
         def decode_raw() -> CollectionRawBatch:
+            nonlocal batch
+            if batch is None:
+                batch = self._collection_raw_batch_from_msgs(new_messages, pinned_streams)
+                new_messages.clear()
+                pinned_streams.clear()
             return batch
 
         return RawCollectionSnapshot(

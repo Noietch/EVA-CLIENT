@@ -922,7 +922,11 @@ def summarize(name: str, data: dict[str, Any]) -> dict[str, Any]:
         key: max(values) if values else None
         for key, values in media_intervals.items()
     }
-    long_tasks = [float(row.get("duration", 0)) for row in data.get("longTasks") or []]
+    long_tasks = [
+        float(row.get("duration", 0))
+        for row in data.get("longTasks") or []
+        if float(row.get("t", -1)) >= 0
+    ]
     return {
         "name": name,
         "video_count": len(videos),
@@ -1075,6 +1079,7 @@ def main() -> None:
         set_value(cdp, "#replay-dataset-input", args.collection_dataset)
         set_value(cdp, "#replay-episode-input", str(args.collection_episode))
         human_click_and_start_probe(cdp, "#replay-b-episode-confirm")
+        wait_for(cdp, SCRUB_PLAY_VISIBLE_EXPR, args.visible_timeout)
         human_click(cdp, "#scrub-play")
         summaries.append(
             capture_measurement(cdp, "replay-load", args.visible_timeout, args.play_seconds)
@@ -1083,6 +1088,7 @@ def main() -> None:
         for i in range(args.replay_next_count):
             wait_for(cdp, REPLAY_NEXT_READY_EXPR, 10)
             human_click_and_start_probe(cdp, "#replay-b-episode-next")
+            wait_for(cdp, SCRUB_PLAY_VISIBLE_EXPR, args.visible_timeout)
             human_click(cdp, "#scrub-play")
             summaries.append(
                 capture_measurement(
@@ -1090,56 +1096,66 @@ def main() -> None:
                 )
             )
 
-        human_click(cdp, '.tab[data-tab="collect"]')
-        wait_for(cdp, tab_active_expr("collect"), 5)
-        if args.collect_task:
-            set_value(cdp, "#collect-prompt-list", args.collect_task)
-        wait_for(cdp, COLLECT_REPLAYABLE_READY_EXPR, 10)
-        for i in range(args.collect_count):
-            ensure_collect_replay_stopped(cdp)
-            target = select_clickable_tile(cdp, "#collect-queue-tiles", i)
-            human_click_target_and_start_probe(cdp, target, f"collect-tile-{i}")
-            summaries.append(
-                capture_measurement(cdp, f"collect-{i}", args.visible_timeout, args.play_seconds)
-            )
+        if args.collect_count > 0:
+            human_click(cdp, '.tab[data-tab="collect"]')
+            wait_for(cdp, tab_active_expr("collect"), 5)
+            if args.collect_task:
+                set_value(cdp, "#collect-prompt-list", args.collect_task)
+            wait_for(cdp, COLLECT_REPLAYABLE_READY_EXPR, 10)
+            for i in range(args.collect_count):
+                ensure_collect_replay_stopped(cdp)
+                target = select_clickable_tile(cdp, "#collect-queue-tiles", i)
+                human_click_target_and_start_probe(cdp, target, f"collect-tile-{i}")
+                summaries.append(
+                    capture_measurement(
+                        cdp, f"collect-{i}", args.visible_timeout, args.play_seconds
+                    )
+                )
 
-        human_click(cdp, '.tab[data-tab="debug"]')
-        wait_for(cdp, tab_active_expr("debug"), 5)
-        wait_for(cdp, ROLLOUT_REPLAYABLE_READY_EXPR, 10)
-        for i in range(args.debug_count):
-            target = select_clickable_tile(cdp, "#rollout-save-queue-tiles", i)
-            human_click_target_and_start_probe(cdp, target, f"debug-tile-{i}")
-            summaries.append(
-                capture_measurement(cdp, f"debug-{i}", args.visible_timeout, args.play_seconds)
-            )
+        if args.debug_count > 0:
+            human_click(cdp, '.tab[data-tab="debug"]')
+            wait_for(cdp, tab_active_expr("debug"), 5)
+            wait_for(cdp, ROLLOUT_REPLAYABLE_READY_EXPR, 10)
+            for i in range(args.debug_count):
+                target = select_clickable_tile(cdp, "#rollout-save-queue-tiles", i)
+                human_click_target_and_start_probe(cdp, target, f"debug-tile-{i}")
+                summaries.append(
+                    capture_measurement(
+                        cdp, f"debug-{i}", args.visible_timeout, args.play_seconds
+                    )
+                )
 
-        human_click(cdp, '.tab[data-tab="rl"]')
-        wait_for(cdp, tab_active_expr("rl"), 5)
-        wait_for(cdp, RL_REPLAYABLE_READY_EXPR, 10)
-        for i in range(args.rl_count):
-            target = select_clickable_tile(cdp, "#rl-save-tiles", i)
-            human_click_target_and_start_probe(cdp, target, f"rl-tile-{i}")
-            summaries.append(
-                capture_measurement(cdp, f"rl-{i}", args.visible_timeout, args.play_seconds)
-            )
+        if args.rl_count > 0:
+            human_click(cdp, '.tab[data-tab="rl"]')
+            wait_for(cdp, tab_active_expr("rl"), 5)
+            wait_for(cdp, RL_REPLAYABLE_READY_EXPR, 10)
+            for i in range(args.rl_count):
+                target = select_clickable_tile(cdp, "#rl-save-tiles", i)
+                human_click_target_and_start_probe(cdp, target, f"rl-tile-{i}")
+                summaries.append(
+                    capture_measurement(cdp, f"rl-{i}", args.visible_timeout, args.play_seconds)
+                )
 
-        human_click(cdp, '.tab[data-tab="result"]')
-        wait_for(cdp, tab_active_expr("result"), 5)
-        wait_for(cdp, RESULT_TRIAL_READY_EXPR, 10)
-        for i in range(args.result_count):
-            human_click(cdp, ".rv-model .rv-node-head")
-            wait_for(cdp, ".rv-task .rv-node-head", 5)
-            human_click(cdp, ".rv-task .rv-node-head")
-            wait_for(cdp, RESULT_TRIAL_READY_EXPR, 5)
-            target = select_clickable_tile(
-                cdp, ".rv-trials", i, ".eval-trial.scored"
-            )
-            human_click_target_and_start_probe(cdp, target, f"result-trial-{i}")
-            wait_for(cdp, RESULT_POP_READY_EXPR, 10)
-            human_click(cdp, "#tp-play")
-            summaries.append(
-                capture_measurement(cdp, f"result-{i}", args.visible_timeout, args.play_seconds)
-            )
+        if args.result_count > 0:
+            human_click(cdp, '.tab[data-tab="result"]')
+            wait_for(cdp, tab_active_expr("result"), 5)
+            wait_for(cdp, RESULT_TRIAL_READY_EXPR, 10)
+            for i in range(args.result_count):
+                human_click(cdp, ".rv-model .rv-node-head")
+                wait_for(cdp, ".rv-task .rv-node-head", 5)
+                human_click(cdp, ".rv-task .rv-node-head")
+                wait_for(cdp, RESULT_TRIAL_READY_EXPR, 5)
+                target = select_clickable_tile(
+                    cdp, ".rv-trials", i, ".eval-trial.scored"
+                )
+                human_click_target_and_start_probe(cdp, target, f"result-trial-{i}")
+                wait_for(cdp, RESULT_POP_READY_EXPR, 10)
+                human_click(cdp, "#tp-play")
+                summaries.append(
+                    capture_measurement(
+                        cdp, f"result-{i}", args.visible_timeout, args.play_seconds
+                    )
+                )
 
         if args.rapid_switches:
             for tab, container in (

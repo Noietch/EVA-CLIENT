@@ -18,7 +18,7 @@ from core.app.cli import maybe_start_inference_cli
 from core.app.console.server import build_console_context, start_console_server
 from core.app.control_channel import maybe_start_control_channel
 from core.app.handlers import (
-    COLLECT_STEP_MAX_RAW_SNAPSHOTS,
+    ROLLOUT_STEP_MAX_RAW_SNAPSHOTS,
     _anchor_buffer_to_current_qpos,
     accept_rollout_intervention_segment,
     begin_rollout_save_episode,
@@ -722,7 +722,7 @@ def _handle_web_command(
                 start_collection_capture(
                     runtime,
                     fps=config.inference_cfg.publish_rate,
-                    max_raw_snapshots_per_tick=COLLECT_STEP_MAX_RAW_SNAPSHOTS,
+                    max_raw_snapshots_per_tick=ROLLOUT_STEP_MAX_RAW_SNAPSHOTS,
                 )
             session.run_start_time = time.monotonic()
             set_status(session, SessionStatus.RUNNING, reason="resume after teleop intervention")
@@ -808,7 +808,7 @@ def _handle_web_command(
             start_collection_capture(
                 runtime,
                 fps=config.inference_cfg.publish_rate,
-                max_raw_snapshots_per_tick=COLLECT_STEP_MAX_RAW_SNAPSHOTS,
+                max_raw_snapshots_per_tick=ROLLOUT_STEP_MAX_RAW_SNAPSHOTS,
             )
         session.run_start_time = time.monotonic()
         set_status(session, SessionStatus.RUNNING, reason="resume after abandoned intervention")

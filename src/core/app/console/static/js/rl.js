@@ -1,5 +1,5 @@
 // rl.js: RL rollout/HIL controls, saved-episode replay, and Critic telemetry.
-import { $, LIVE, S, apiGet, apiPost, clientTrace } from "./core.js";
+import { $, LIVE, S, apiGet, apiPost, clientTrace, setCommandMetadata } from "./core.js";
 import { drawLiveCharts, updateScrub } from "./charts.js";
 import { exitReplayMode, loadReviewPlayback } from "./replay.js";
 import { renderRlGripper, updateGuide } from "./run.js";
@@ -17,6 +17,10 @@ let rlSetupRequestPending = false;
 let rlLiveActionSince = 0;
 let rlSelectionChain = Promise.resolve();
 let rlSelectionGeneration = 0;
+let rlPendingTask = null;
+let rlPendingPolicy = null;
+let rlSavedRenderKey = "";
+let rlSaveSetupPending = false;
 
 function queueRlSelection(path, body) {
   const generation = ++rlSelectionGeneration;
@@ -27,7 +31,6 @@ function queueRlSelection(path, body) {
       if (!response || response.ok === false) {
         throw new Error((response && response.error) || `${path} failed`);
       }
-      if (generation === rlSelectionGeneration) scheduleRlSetup();
     })
     .catch((error) => {
       if (generation !== rlSelectionGeneration) return;
@@ -51,7 +54,7 @@ function scheduleRlSetup() {
   rlSetupTimer = setTimeout(() => {
     rlSetupTimer = null;
     const status = S.STATUS || {};
-    if (!S.rlTask || S.rlPolicy === "" || status.setup_stage || status.session_status === "running") return;
+    if (!S.rlTask || S.rlPolicy === "" || status.is_setup_done || status.setup_stage || status.session_status === "running") return;
     if (status.last_error && !status.is_setup_done) return;
     requestRlSetup();
   }, 0);
@@ -122,8 +125,10 @@ function renderRlConfig() {
     "SELECT TASK",
     S.rlTask,
   );
+  setCommandMetadata(task, "web:rl_select_task:{task}", true);
   task.onchange = () => {
     S.rlTask = task.value;
+    rlPendingTask = task.value;
     task.classList.toggle("has-value", !!task.value);
     syncTaskChip(task);
     S.STATUS.last_error = "";
@@ -134,8 +139,10 @@ function renderRlConfig() {
 
   const policy = $("rl-policy-list");
   fillSelect(policy, cfg.policies || [], "SELECT POLICY", S.rlPolicy);
+  setCommandMetadata(policy, "web:rl_select_policy:{slot}", true);
   policy.onchange = () => {
     S.rlPolicy = policy.value;
+    rlPendingPolicy = policy.value;
     policy.classList.toggle("has-value", !!policy.value);
     S.STATUS.last_error = "";
     queueRlSelection("/api/rl/select_policy", { slot: Number(policy.value) });
@@ -144,6 +151,7 @@ function renderRlConfig() {
 
   const critic = $("rl-critic-list");
   fillSelect(critic, cfg.critics || [], "SELECT CRITIC", S.rlCritic);
+  setCommandMetadata(critic, "web:rl_select_critic:{slot}", true);
   critic.onchange = () => {
     if (!S.STATUS.is_setup_done) return;
     S.rlCritic = critic.value;
@@ -171,8 +179,8 @@ function episodeTone(item) {
   if (item.status === "queued") return "cq-queued";
   if (item.status === "saving") return "cq-busy";
   if (item.status === "failed") return "cq-fail";
-  if (item.qc_verdict === "fail" || item.quality === "red") return "cq-fail";
   if (item.qc_verdict === "pass") return "cq-ok";
+  if (item.qc_verdict === "fail" || item.quality === "red") return "cq-fail";
   return "cq-queued";
 }
 
@@ -180,7 +188,9 @@ function episodeIssue(item) {
   if (item.error) return item.error;
   if (item.qc_verdict) return `qc ${item.qc_verdict}`;
   const issues = item.quality_issues || [];
-  return issues.length ? issues.map((issue) => issue.code || issue.detail || "issue").join(", ") : (item.status || "ok");
+  return issues.length
+    ? issues.map((issue) => `${issue.code || "issue"}${Number(issue.count || 1) > 1 ? ` ×${issue.count}` : ""}`).join(", ")
+    : (item.status || "ok");
 }
 
 function renderSavedEpisodes(items) {
@@ -239,13 +249,37 @@ function renderSavedEpisodeList(items) {
   });
 }
 
+function renderSavedData(items, force = false) {
+  const key = JSON.stringify({
+    selectedEpisode,
+    expanded: S.rlSaveExpanded,
+    items: items.map((item) => ({
+      episode_index: item.episode_index,
+      length: item.length,
+      status: item.status,
+      quality: item.quality,
+      qc_verdict: item.qc_verdict,
+      quality_issue_count: item.quality_issue_count,
+      quality_issues: (item.quality_issues || []).map((issue) => ({
+        code: issue.code,
+        count: issue.count,
+      })),
+      error: item.error,
+    })),
+  });
+  if (!force && key === rlSavedRenderKey) return;
+  rlSavedRenderKey = key;
+  renderSavedEpisodes(items);
+  renderSavedEpisodeList(items);
+}
+
 function selectSavedEpisode(item, items) {
   const id = episodeId(item);
   if (id == null) return;
+  if (rlReplayRequestPending && selectedEpisode === id) return;
   selectedEpisode = id;
   S.rlQcEpisode = id;
-  renderSavedEpisodes(items);
-  renderSavedEpisodeList(items);
+  renderSavedData(items, true);
   $("rl-b-replay").disabled = false;
   replaySelectedEpisode();
 }
@@ -401,9 +435,27 @@ function renderRlStatus(status) {
   if (!S.CFG || !S.CFG.rl || !S.CFG.rl.enabled) return;
   const rl = status.rl || {};
   const rollout = status.rollout || {};
+  if (
+    rlSaveSetupPending
+    && status.is_setup_done
+    && status.session_status === "ready"
+    && Number(status.step_index || 0) === 0
+    && !rollout.save_ready
+  ) {
+    rlSaveSetupPending = false;
+  }
+  if (rlSaveSetupPending && status.last_error) rlSaveSetupPending = false;
   if (status.setup_stage || status.is_setup_done || status.last_error) rlSetupRequestPending = false;
-  if (status.selected_task && rl.active) S.rlTask = status.selected_task;
-  if (rl.selected_policy_slot != null) S.rlPolicy = String(rl.selected_policy_slot);
+  if (status.selected_task && rl.active) {
+    S.rlTask = status.selected_task;
+    if (rlPendingTask === S.rlTask) rlPendingTask = null;
+  }
+  if (rl.selected_policy_slot != null) {
+    S.rlPolicy = String(rl.selected_policy_slot);
+    if (rlPendingPolicy === S.rlPolicy) rlPendingPolicy = null;
+  } else if (rlPendingPolicy == null) {
+    S.rlPolicy = "";
+  }
   if (rl.selected_critic_slot != null) S.rlCritic = String(rl.selected_critic_slot);
   else S.rlCritic = "";
 
@@ -422,6 +474,9 @@ function renderRlStatus(status) {
   renderRlSource(status);
 
   const selected = !!S.rlTask && S.rlPolicy !== "";
+  const selectionConfirmed = status.selected_task === S.rlTask
+    && rl.selected_policy_slot != null
+    && String(rl.selected_policy_slot) === S.rlPolicy;
   const setupError = status.last_error || status.policy_error;
   const setup = !!status.is_setup_done && !!status.policy_connected;
   const setupBusy = !!status.setup_stage;
@@ -433,7 +488,8 @@ function renderRlStatus(status) {
   retry.disabled = !selected || setupBusy || status.session_status === "running";
   retry.style.display = setupError && !setup ? "" : "none";
   const setupMsg = $("rl-auto-setup-msg");
-  if (status.last_error && !setup) setupMsg.textContent = "SETUP FAILED";
+  if (rlSaveSetupPending && !status.setup_stage) setupMsg.textContent = "SAVE · QUEUING DATA…";
+  else if (status.last_error && !setup) setupMsg.textContent = "SETUP FAILED";
   else if (status.policy_error && !setup) setupMsg.textContent = "POLICY OFFLINE · SETUP REQUIRED";
   else if (setup) setupMsg.textContent = "ROBOT READY";
   else if (setupBusy) setupMsg.textContent = `AUTO · ${String(status.setup_stage).toUpperCase()}`;
@@ -455,7 +511,7 @@ function renderRlStatus(status) {
   $("rl-hil-label").textContent = hilSupported ? (hilEnabled ? "HIL ON" : "HIL OFF") : "HIL N/A";
   $("rl-hil-gate").classList.toggle("on", hilEnabled);
   $("rl-hil-gate").classList.toggle("disabled", $("rl-hil-enable").disabled);
-  $("rl-b-run").disabled = !setup || running || intervention;
+  $("rl-b-run").disabled = !setup || running || intervention || rlSaveSetupPending;
   $("rl-b-reset").disabled = !setup || intervention || setupBusy;
   $("rl-run-label").textContent = status.step_index > 0 ? "CONTINUE ▶▶" : "RUN ▶";
   $("rl-b-run").classList.toggle("recording", running);
@@ -473,7 +529,7 @@ function renderRlStatus(status) {
   $("rl-save-progress").style.width = `${progress * 100}%`;
   $("rl-save-pipeline").textContent = String(rollout.pipeline_state || "IDLE").toUpperCase();
   $("rl-save-pipeline").dataset.state = String(rollout.pipeline_state || "idle").toUpperCase();
-  $("rl-b-save").disabled = !rollout.enabled || !rollout.save_ready || intervention;
+  $("rl-b-save").disabled = !rollout.enabled || !rollout.save_ready || intervention || rlSaveSetupPending;
   $("rl-b-replay").disabled = selectedEpisode == null;
   const qcBox = $("rl-qc-box");
   const qcSelected = S.rlQcEpisode != null;
@@ -485,9 +541,9 @@ function renderRlStatus(status) {
   $("rl-save-error").textContent = rollout.save_blocked_by_intervention
     ? "accept or abandon the active intervention before saving"
     : "";
-  renderSavedEpisodes(items);
-  renderSavedEpisodeList(items);
+  renderSavedData(items);
   renderRlGripper(setup);
+  if (selectionConfirmed && !setup && !setupBusy && !setupError) scheduleRlSetup();
   updateGuide();
 }
 
@@ -544,7 +600,18 @@ $("rl-b-reset").onclick = () => apiPost("/api/rl/reset");
 $("rl-b-intervene").onclick = () => apiPost("/api/rl/intervene");
 $("rl-b-accept").onclick = () => apiPost("/api/rl/accept");
 $("rl-b-abandon").onclick = () => apiPost("/api/rl/abandon");
-$("rl-b-save").onclick = () => apiPost("/api/rl/save");
+$("rl-b-save").onclick = () => {
+  if (rlSaveSetupPending) return;
+  rlSaveSetupPending = true;
+  renderRlStatus(S.STATUS || {});
+  return apiPost("/api/rl/save").then((response) => {
+    if (!response || response.ok === false) {
+      rlSaveSetupPending = false;
+      renderRlStatus(S.STATUS || {});
+    }
+    return response;
+  });
+};
 $("rl-b-replay").onclick = replaySelectedEpisode;
 $("rl-b-qc-pass").onclick = () => submitRlQc("pass");
 $("rl-b-qc-fail").onclick = () => submitRlQc("fail");

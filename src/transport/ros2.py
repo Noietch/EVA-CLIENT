@@ -923,7 +923,10 @@ class Ros2Transport(_RosTransportBase):
         if not self._camera_is_compressed.get(camera_name, False):
             return super()._deferred_collection_image(camera_name, msg)
         payload = bytes(msg.data)
-        return CollectionRawImage(lambda payload=payload: _decode_compressed_image(payload))
+        return CollectionRawImage(
+            lambda payload=payload: _decode_compressed_image(payload),
+            encoded=payload,
+        )
 
     def _pop_latest_before(self, deque: collections.deque, frame_time: float) -> Any | None:
         with self._deque_guard():

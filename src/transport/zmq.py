@@ -464,26 +464,26 @@ class _ObservationReader:
         return self._wire_to_observation(wire_obs)
 
     def _drain_raw_collection(self) -> bytes | None:
-        """Pop all queued SUB messages as raw bytes, return the oldest unconsumed.
+        """Drain a bounded socket batch and return only its newest raw payload.
 
-        The main thread does zero msgpack work here: it only moves bytes off the
-        socket into a backlog and hands back one payload. Decoding happens later
-        through the snapshot's raw-batch closure on the ingest thread.
+        The capture clock defines the stored frame rate, so retaining older full
+        observations would create latency and pin duplicate image payloads. Decoding
+        still happens later through the snapshot's raw-batch closure.
         """
         with self._lock:
             got_message = False
+            latest = self._raw_collection_queue[-1] if self._raw_collection_queue else None
+            self._raw_collection_queue.clear()
             for _ in range(COLLECTION_SOCKET_DRAIN_MAX):
                 try:
                     payload = self._sub.recv(self._zmq.NOBLOCK)
                 except self._zmq.Again:
                     break
                 got_message = True
-                self._raw_collection_queue.append(payload)
+                latest = payload
             if got_message:
                 self._freshness.mark()
-            if not self._raw_collection_queue:
-                return None
-            return self._raw_collection_queue.popleft()
+            return latest
 
     def acquire_collection_raw(self) -> RawCollectionSnapshot | None:
         """Capture one raw collection payload and expose it as timestamped streams.

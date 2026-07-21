@@ -52,7 +52,9 @@ function collectIssueText(item) {
     if (item.error) return item.error;
     if (item.qc_verdict) return `qc ${item.qc_verdict}`;
     if (!issues.length) return item.status || "ok";
-    return issues.map((x) => x.code || x.detail || "issue").join(", ");
+    return issues.map((issue) => (
+      `${issue.code || "issue"}${Number(issue.count || 1) > 1 ? ` ×${issue.count}` : ""}`
+    )).join(", ");
   }
 
 function savedEpisodeId(item) {

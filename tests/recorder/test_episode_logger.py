@@ -5,6 +5,7 @@ data integrity.
 
 from __future__ import annotations
 
+import io
 import json
 import threading
 
@@ -318,6 +319,8 @@ def test_episode_logger_writes_faststart_mp4s(tmp_path, monkeypatch):
     assert writer_kwargs[0]["ffmpeg_params"] == [
         "-preset",
         "ultrafast",
+        "-g",
+        "30",
         "-movflags",
         "+faststart",
     ]
@@ -580,6 +583,7 @@ def test_raw_episode_snapshots_decode_on_async_save_worker(tmp_path):
     assert logger.end_episode()
     assert raw_decodes == 0
     assert image_decodes == 0
+    assert logger.status_snapshot()["queue"][0]["length"] == 2
 
     logger._save_queue_worker()
 
@@ -804,6 +808,132 @@ def test_collection_raw_batches_report_image_skew_qc(tmp_path):
     assert episode["quality"] == "red"
     assert episode["alignment_image_max_skew_sec"]["cam_high"] == 0.1
     assert "image_skew_exceeded" in {issue["code"] for issue in episode["quality_issues"]}
+
+
+def test_raw_episode_recomputes_image_skew_after_excluding_warmup(tmp_path):
+    logger = _logger(tmp_path, fps=10)
+
+    def snapshot(timestamp: float, image_timestamp: float) -> RawCollectionSnapshot:
+        state = np.full(_DIM, timestamp, dtype=np.float32)
+        batch = CollectionRawBatch(
+            images={
+                "cam_high": [
+                    CollectionRawSample(
+                        image_timestamp,
+                        np.zeros((8, 8, 3), dtype=np.uint8),
+                    )
+                ]
+            },
+            vectors={"state_qpos": [CollectionRawSample(timestamp, state)]},
+        )
+        return RawCollectionSnapshot(timestamp=timestamp, decode_raw=lambda: batch)
+
+    logger.start_episode("t")
+    for timestamp, image_timestamp in (
+        (0.0, 0.0),
+        (0.1, 0.1),
+        (0.2, 0.26),
+        (0.3, 0.3),
+        (0.4, 0.4),
+    ):
+        logger.ingest_raw_episode_snapshot(
+            snapshot(timestamp, image_timestamp),
+            np.full(_DIM, timestamp, dtype=np.float32),
+        )
+    logger.set_episode_meta(
+        excluded_ranges=[
+            {
+                "reason": "policy_warmup",
+                "start_time": 0.15,
+                "end_time": 0.25,
+            }
+        ]
+    )
+
+    assert logger.end_episode()
+
+    episode = _read_jsonl(tmp_path / "meta" / "episodes.jsonl")[0]
+    assert episode["length"] == 4
+    assert episode["quality"] == "green"
+    assert episode["quality_issues"] == []
+    assert episode["alignment_image_max_skew_sec"]["cam_high"] == pytest.approx(0.0)
+
+
+def test_raw_episode_trims_unsynchronized_leading_image_frame(tmp_path):
+    logger = _logger(tmp_path, fps=10)
+
+    def snapshot(timestamp: float, image_timestamp: float) -> RawCollectionSnapshot:
+        state = np.full(_DIM, timestamp, dtype=np.float32)
+        batch = CollectionRawBatch(
+            images={
+                "cam_high": [
+                    CollectionRawSample(
+                        image_timestamp,
+                        np.zeros((8, 8, 3), dtype=np.uint8),
+                    )
+                ]
+            },
+            vectors={"state_qpos": [CollectionRawSample(timestamp, state)]},
+        )
+        return RawCollectionSnapshot(timestamp=timestamp, decode_raw=lambda: batch)
+
+    logger.start_episode("t")
+    for timestamp, image_timestamp in ((0.06, 0.0), (0.16, 0.16), (0.26, 0.26)):
+        logger.ingest_raw_episode_snapshot(
+            snapshot(timestamp, image_timestamp),
+            np.full(_DIM, timestamp, dtype=np.float32),
+        )
+
+    assert logger.end_episode()
+
+    episode = _read_jsonl(tmp_path / "meta" / "episodes.jsonl")[0]
+    assert episode["length"] == 2
+    assert episode["quality"] == "green"
+    assert episode["alignment_trimmed_edge_frames"] == {"start": 1, "end": 0}
+    assert episode["alignment_grid_start"] == pytest.approx(0.16)
+
+
+def test_encoded_video_writer_pipes_jpegs_directly_to_ffmpeg(tmp_path, monkeypatch):
+    commands = []
+    written = []
+
+    class _Input:
+        def write(self, payload: bytes) -> None:
+            written.append(payload)
+
+        def close(self) -> None:
+            pass
+
+    class _Process:
+        stdin = _Input()
+        stderr = io.BytesIO()
+
+        def wait(self) -> int:
+            return 0
+
+    def popen(command, **kwargs):
+        commands.append((command, kwargs))
+        return _Process()
+
+    monkeypatch.setattr(episode_module.subprocess, "Popen", popen)
+    logger = _logger(tmp_path, fps=15)
+
+    logger._write_encoded_sample_video(
+        tmp_path / "episode.mp4",
+        [b"jpeg-0", b"jpeg-1"],
+        15.0,
+        (360, 640),
+    )
+
+    command, kwargs = commands[0]
+    assert written == [b"jpeg-0", b"jpeg-1"]
+    assert kwargs == {
+        "stdin": episode_module.subprocess.PIPE,
+        "stderr": episode_module.subprocess.PIPE,
+    }
+    assert "image2pipe" in command
+    assert "scale=640:360:flags=fast_bilinear" in command
+    assert command[command.index("-g") + 1] == "15"
 
 
 def test_collection_raw_end_episode_defers_alignment_and_video_preprocess(tmp_path, monkeypatch):

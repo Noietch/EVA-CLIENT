@@ -1,6 +1,6 @@
 // eval.js: evaluation runs/selectors/scoring (eval); results browser (results);
 // trial-detail popup (trialpop).
-import { $, RT_COLORS, S, apiGet, apiPost } from "./core.js";
+import { $, RT_COLORS, S, apiGet, apiPost, setCommandMetadata } from "./core.js";
 import { drawSeriesChart } from "./charts.js";
 import { renderEvalGripper, setPanel, syncChip } from "./run.js";
 
@@ -113,6 +113,7 @@ function renderEvalModelList() {
     if (EVAL_ACTIVE_SLOT == null) EVAL_ACTIVE_SLOT = Number(cks[0].slot);
     list.innerHTML = "";
     if (list.tagName === "SELECT") {
+      setCommandMetadata(list, "web:switch_ckpt:{slot}", true);
       cks.forEach((c) => {
         const slot = Number(c.slot);
         const opt = document.createElement("option");
@@ -139,6 +140,7 @@ function renderEvalModelList() {
       const seg = document.createElement("button");
       seg.className = "seg" + (slot === EVAL_ACTIVE_SLOT ? " active" : "");
       seg.dataset.slot = String(slot);
+      setCommandMetadata(seg, "web:switch_ckpt:{slot}", true);
       seg.innerHTML = '<span class="mk">' + String.fromCharCode(65 + slot) + '</span><span>'
         + (c.name || c.label) + '</span>';
       seg.onclick = () => evalSwitchCkpt(slot);

@@ -1,6 +1,6 @@
 // run.js: run lifecycle / status / UI-mode / panel orchestration (run);
 // config & tuning panel (config); manual sim/connection control (manual).
-import { $, LIVE, RUN_CONTROLS, S, apiPost } from "./core.js";
+import { $, LIVE, RUN_CONTROLS, S, apiPost, setCommandMetadata } from "./core.js";
 import { updateScrub } from "./charts.js";
 import { collectEnabled, dotClass, renderCollect, renderRolloutSave, loadAnnotation } from "./collect.js";
 import { applyEvalStatus, evalCfg, evalEnabled } from "./eval.js";
@@ -537,6 +537,7 @@ function renderPromptButtons(listId) {
     if (!host) return;
     host.innerHTML = "";
     if (host.tagName === "SELECT") {
+      setCommandMetadata(host, "web:switch_task:{task}", true);
       const placeholder = document.createElement("option");
       placeholder.value = "";
       placeholder.disabled = true;
@@ -563,6 +564,7 @@ function renderPromptButtons(listId) {
       const b = document.createElement("button");
       b.className = "seg";
       b.dataset.prompt = p;
+      setCommandMetadata(b, "web:switch_task:{task}", true);
       b.innerHTML = `<span class="mk">${String(i + 1).padStart(2, "0")}</span><span>${p || "∅ empty"}</span>`;
       b.onclick = () => {
         mark(listId, "prompt", p);
@@ -583,6 +585,7 @@ function renderCollectTaskButtons() {
     if (!host) return;
     host.innerHTML = "";
     if (host.tagName === "SELECT") {
+      setCommandMetadata(host, "web:select_collect_task:{task}", true);
       const placeholder = document.createElement("option");
       placeholder.value = "";
       placeholder.disabled = true;
@@ -611,6 +614,7 @@ function renderCollectTaskButtons() {
       const b = document.createElement("button");
       b.className = "seg";
       b.dataset.prompt = p;
+      setCommandMetadata(b, "web:select_collect_task:{task}", true);
       b.innerHTML = `<span class="mk">${String(i + 1).padStart(2, "0")}</span><span>${p || "∅ empty"}</span>`;
       b.onclick = () => {
         collectTask = p;
@@ -632,11 +636,13 @@ function renderModeButtons(listId) {
     const MODE_LABEL = { real: "REAL", sim: "SIM", step: "STEP", manual: "MANUAL" };
     // MANUAL is its own top-level tab now; keep it out of run-mode pickers.
     const modes = S.CFG.modes.filter((m) => m !== "manual");
+    setCommandMetadata(host, "web:select_mode:{mode}", true);
     host.style.setProperty("--mode-n", modes.length);
     modes.forEach((m) => {
       const b = document.createElement("button");
       b.className = "seg";
       b.dataset.mode = m;
+      setCommandMetadata(b, "web:select_mode:{mode}", true);
       b.innerHTML = `<span>${MODE_LABEL[m] || m}</span>`;
       b.onclick = () => {
         mark(listId, "mode", m);
@@ -673,6 +679,7 @@ function buildGripperCaps(host) {
       const sw = document.createElement("div");
       sw.className = "grip-sw";
       sw.dataset.grip = control.side;
+      setCommandMetadata(sw, "web:gripper:{side}:{state}:{lock}", true);
       const isOpen = GRIP_STATE[control.side] === "open";
       sw.classList.toggle("on", isOpen);
       sw.innerHTML = `<span class="grip-knob">${isOpen ? "open" : "close"}</span>`;
@@ -761,7 +768,7 @@ function renderConfig() {
         if (S.STATUS) S.STATUS.cli_mode = wantMode;
         apiPost("/api/select_mode", { mode: wantMode });
       }
-    } else if ((!S.STATUS || !S.STATUS.cli_mode || S.STATUS.cli_mode === "select") && S.CFG.modes.includes("sim")) {
+    } else if (S.ACTIVE_TAB !== "rl" && (!S.STATUS || !S.STATUS.cli_mode || S.STATUS.cli_mode === "select") && S.CFG.modes.includes("sim")) {
       // SIM is the default run mode for the plain console tabs.
       if (S.STATUS) S.STATUS.cli_mode = "sim";
       apiPost("/api/select_mode", { mode: "sim" });
@@ -770,6 +777,7 @@ function renderConfig() {
     $("strategy-h").style.display = "block";
     $("strategy-list").style.display = "block";
     const sl = $("strategy-list"); sl.innerHTML = "";
+    setCommandMetadata(sl, "web:select_strategy:{strategy}", true);
     const placeholder = document.createElement("option");
     placeholder.value = "";
     placeholder.disabled = true;
@@ -1045,6 +1053,8 @@ function renderManualConn() {
     const btn = $("bm-connect");
     const conn = $("manual-conn");
     const send = $("bm-send");
+    setCommandMetadata(btn, S.realRequested ? "web:disconnect" : "web:connect");
+    setCommandMetadata(send, S.manualDispatching ? "web:halt" : "web:manual_send");
     const capable = !!(S.CFG && S.CFG.manual_capable);
     conn.style.display = "";
     conn.classList.remove("ok", "armed", "err");

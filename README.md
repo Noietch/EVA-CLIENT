@@ -22,7 +22,8 @@ eva-client/
 │   ├── 00_openloop/      #   dataset open-loop (no policy server), one per robot
 │   ├── 01_deploy/        #   per-robot deployment (qpos / eef presets)
 │   ├── 02_collection/    #   per-robot teleop data-collection configs
-│   └── 03_evaluation/    #   blind eval (eval_cfg.checkpoints[] + optional ssh forward)
+│   ├── 03_evaluation/    #   blind eval (eval_cfg.checkpoints[] + optional ssh forward)
+│   └── 04_rl/             #   RL rollout/HIL configs (local overrides are ignored)
 ├── examples/             # execution-layer nodes, teleop publishers, sample dataset
 ├── tests/                # unit tests (IK / config merge / action conversion / smoothing)
 └── src/
@@ -76,6 +77,9 @@ eva --config configs/00_openloop/dual_agilex_piper_openloop.py
 
 # blind multi-model evaluation
 eva --config configs/03_evaluation/dual_agilex_piper_eval.py
+
+# RL rollout with optional HIL and critic telemetry
+eva --config configs/04_rl/r1lite_rl.local.py
 ```
 
 Startup logs print the web port (default `8080`); open `http://<host>:8080`. For
@@ -92,19 +96,25 @@ ssh -L 8080:localhost:8080 <user>@<host>   # then open http://localhost:8080
 
 ## Web console
 
-A single console app with six tabs. A config carrying an `eval_cfg.checkpoints[]`
+A single console app with seven tabs. A config carrying an `eval_cfg.checkpoints[]`
 block auto-activates the EVAL/RESULT tabs on startup; otherwise they are greyed out.
 
 | Tab | Purpose |
 |---|---|
 | **DEBUG** | run control (connect, setup, run, stop, reset), live camera + qpos feed, gripper control, breakpoint single-step: `SIM ↻` previews one chunk in 3D → `REAL ▶` dispatches after review |
 | **REPLAY** | open-loop replay of a recorded dataset |
+| **RL** | policy rollout with optional critic, HIL intervention, rollout saving/QC, and synchronized replay |
 | **COLLECT** | teleoperation recording into a LeRobot v2.1 dataset |
 | **MANUAL** | drag per-joint qpos sliders and dispatch (`SEND` to stage, `SYNC` to mirror the real robot) |
 | **EVAL** | blind multi-model eval — anonymized model labels (A/B/…) + reproducible shuffle, flat prompt list, per-prompt trials with milestone scoring, optional SSH port-forward + result rsync |
 | **RESULT** | per-trial replay synced across three views: camera mp4 (HTTP Range seek), 3D URDF (backend FK over recorded qpos), and a per-dimension state chart |
 
 ## Core concepts
+
+Detailed operator, headless, and control-channel usage:
+
+- [Console and headless mode](docs/console.md)
+- [Control channel](docs/control-channel.md)
 
 **Transports** — EVA speaks only the middleware protocol; the SDK that drives the
 hardware runs in a separate execution-layer node (see `examples/hardware/`).
@@ -115,6 +125,11 @@ hardware runs in a separate execution-layer node (see `examples/hardware/`).
 | `ros2` | ROS 2 bridge | ROS 2 |
 | `zmq` | ZeroMQ pub/sub to the execution-layer node | — |
 | `dataset` | offline LeRobot v2 dataset replay | — |
+
+The Control Channel is an independent ZMQ control plane. It can be enabled with
+any robot transport (`zmq`, `ros1`, `ros2`, or `dataset`) and only carries
+sparse UI commands; observations and actions continue to use the configured
+transport.
 
 **Policy backends**
 

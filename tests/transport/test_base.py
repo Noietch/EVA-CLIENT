@@ -134,6 +134,29 @@ def test_raw_collection_snapshot_defers_image_decode_until_alignment():
     assert decoded == 1
 
 
+def test_raw_collection_snapshot_defers_vector_conversion_until_save():
+    image = np.zeros((4, 4, 3), dtype=np.uint8)
+    transport = _FakeRosCollectionTransport(image)
+    converted = 0
+    convert = transport._collection_raw_batch_from_msgs
+
+    def record_conversion(new_messages, pinned_streams):
+        nonlocal converted
+        converted += 1
+        return convert(new_messages, pinned_streams)
+
+    transport._collection_raw_batch_from_msgs = record_conversion
+
+    snapshot = transport.acquire_collection_raw()
+
+    assert snapshot is not None
+    assert converted == 0
+    first = snapshot.decode_raw()
+    second = snapshot.decode_raw()
+    assert converted == 1
+    assert second is first
+
+
 def test_acquire_collection_raw_scans_only_messages_after_cursor():
     image = np.zeros((4, 4, 3), dtype=np.uint8)
     transport = _FakeRosCollectionTransport(image)
@@ -210,12 +233,7 @@ def test_acquire_collection_raw_blocks_concurrent_deque_append_during_scan():
     assert snapshot is not None
     assert appended.is_set()
     batch = snapshot.decode_raw()
-    assert [sample.timestamp for sample in batch.images["cam_high"]] == [
-        6.0,
-        7.0,
-        8.0,
-        9.0,
-    ]
+    assert [sample.timestamp for sample in batch.images["cam_high"]] == [6.0, 7.0, 8.0, 9.0]
 
 
 def test_image_rate_tracker_reports_minimum_camera_hz():

@@ -20,16 +20,19 @@ Two tables, deliberately different shapes, joined by ``absolute_step``:
 from __future__ import annotations
 
 import bisect
+import ctypes
 import dataclasses
 import datetime as _dt
 import json
 import logging
+import subprocess
 import threading
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 import imageio.v2 as imageio
+import imageio_ffmpeg
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -39,7 +42,7 @@ from core.recorder.collection_alignment import (
     align_collection_samples,
     image_skew_tolerance_sec,
 )
-from core.recorder.lerobot_meta import build_info, history_row
+from core.recorder.lerobot_meta import build_info, history_row, summarize_quality_issues
 from core.types import (
     CollectionRawBatch,
     CollectionRawImage,
@@ -62,6 +65,27 @@ logger = logging.getLogger(__name__)
 # "eval" section.
 # episodes.jsonl keys the eval layer owns, surfaced in info.json's "eval" section.
 _EVAL_META_KEYS = ("score", "max_score", "milestones", "note", "scored_at", "duration_ms")
+
+
+def _trim_process_allocator() -> None:
+    """Return freed save-worker arenas to the operating system on glibc hosts."""
+    libc = ctypes.CDLL(None)
+    malloc_trim = libc.malloc_trim
+    malloc_trim.argtypes = [ctypes.c_size_t]
+    malloc_trim.restype = ctypes.c_int
+    released = bool(malloc_trim(0))
+    logger.info("[SAVE_MEMORY_RELEASE] allocator_trimmed=%s", released)
+
+
+def _release_failed_save_payload(job: SaveJob) -> None:
+    """Drop an unrecoverable job's frame buffers while retaining its error summary."""
+    job.steps = []
+    job.collection_columns = None
+    job.collection_payload = None
+    job.raw_episode_payload = None
+    job.videos = None
+    job.raw_video_samples = None
+    job.intervention_segments = []
 
 # Observation vector fields (everything except timestamp/images) recorded per collection frame.
 _COLLECTION_VECTOR_FIELDS = (
@@ -552,6 +576,10 @@ class EpisodeLogger:
             len(self._raw_episode_snapshots),
         )
 
+    def release_unused_memory(self) -> None:
+        """Return buffers from completed save jobs while robot control is stopped."""
+        _trim_process_allocator()
+
     def end_episode(self) -> bool:
         """Finish the current episode.
 
@@ -747,6 +775,7 @@ class EpisodeLogger:
                     job.status = "failed"
                     job.error = exc
                     job.finished_wall_time = time.time()
+                    _release_failed_save_payload(job)
             else:
                 with self._lock:
                     job.status = "saved"
@@ -754,6 +783,13 @@ class EpisodeLogger:
                     self._completed_episodes += 1
                     self._remember_finished_job(job)
                     self._save_jobs = [j for j in self._save_jobs if j is not job]
+            del job
+            with self._lock:
+                episode_active = self._active
+            if episode_active:
+                logger.info("[SAVE_MEMORY_RELEASE] deferred=active_episode")
+            else:
+                _trim_process_allocator()
 
     def _write_job(self, job: SaveJob) -> None:
         """Background-thread disk write from a frozen snapshot (no live buffers)."""
@@ -1021,6 +1057,82 @@ class EpisodeLogger:
             )
         return kept_frames, kept_labels, details, kept_image_samples
 
+    def _raw_episode_image_quality(
+        self,
+        frames: list[Observation],
+        image_samples: dict[str, list[CollectionRawSample]],
+    ) -> tuple[list[QualityIssue], dict[str, float]]:
+        tolerance = self._raw_episode_image_skew_tolerance_sec()
+        issues: list[QualityIssue] = []
+        max_skew_by_camera: dict[str, float] = {}
+        for camera, samples in image_samples.items():
+            max_skew = 0.0
+            violation_count = 0
+            first_violation = -1
+            last_violation = -1
+            for frame_index, (frame, sample) in enumerate(zip(frames, samples, strict=True)):
+                assert frame.timestamp is not None
+                skew = abs(float(sample.timestamp) - float(frame.timestamp))
+                max_skew = max(max_skew, skew)
+                if skew <= tolerance:
+                    continue
+                violation_count += 1
+                if first_violation < 0:
+                    first_violation = frame_index
+                last_violation = frame_index
+            max_skew_by_camera[camera] = max_skew
+            if violation_count:
+                issues.append(
+                    QualityIssue(
+                        "red",
+                        "image_skew_exceeded",
+                        f"camera {camera} skew exceeds {tolerance:.6f}s on "
+                        f"{violation_count} frames ({first_violation}-{last_violation}); "
+                        f"max {max_skew:.6f}s",
+                    )
+                )
+        return issues, max_skew_by_camera
+
+    def _trim_raw_episode_unsynchronized_edges(
+        self,
+        frames: list[Observation],
+        labels: list[RawEpisodeFrameLabel],
+        image_samples: dict[str, list[CollectionRawSample]],
+    ) -> tuple[
+        list[Observation],
+        list[RawEpisodeFrameLabel],
+        dict[str, list[CollectionRawSample]],
+        dict[str, int],
+    ]:
+        """Trim leading/trailing frames outside common synchronized image coverage."""
+        tolerance = self._raw_episode_image_skew_tolerance_sec()
+
+        def synchronized(index: int) -> bool:
+            timestamp = float(frames[index].timestamp or 0.0)
+            return all(
+                abs(float(samples[index].timestamp) - timestamp) <= tolerance
+                for samples in image_samples.values()
+            )
+
+        start = 0
+        while start < len(frames) and not synchronized(start):
+            start += 1
+        if start == len(frames):
+            return frames, labels, image_samples, {"start": 0, "end": 0}
+        end = len(frames)
+        while end > start and not synchronized(end - 1):
+            end -= 1
+        trimmed = {"start": start, "end": len(frames) - end}
+        if not any(trimmed.values()):
+            return frames, labels, image_samples, trimmed
+        logger.info("[ROLLOUT_SAVE] trimmed_unsynchronized_edges=%s", trimmed)
+        return (
+            frames[start:end],
+            labels[start:end],
+            {key: samples[start:end] for key, samples in image_samples.items()},
+            trimmed,
+        )
+
     def _prepare_raw_episode_job(self, job: SaveJob) -> None:
         payload = job.raw_episode_payload
         if payload is None:
@@ -1073,7 +1185,17 @@ class EpisodeLogger:
             )
             if not frames:
                 raise ValueError("raw episode exclusions removed every aligned frame")
-        issues = [QualityIssue("red", issue.code, issue.detail) for issue in report.issues]
+        frames, labels, aligned_image_samples, trimmed_edge_frames = (
+            self._trim_raw_episode_unsynchronized_edges(
+                frames,
+                labels,
+                aligned_image_samples,
+            )
+        )
+        issues, image_max_skew = self._raw_episode_image_quality(
+            frames,
+            aligned_image_samples,
+        )
         self._quantize_action_grippers(frames)
         logger.info(
             "[ROLLOUT_SAVE] episode=%d aligned_policy=%d aligned_intervention=%d "
@@ -1140,10 +1262,10 @@ class EpisodeLogger:
             "quality": "red" if issues else "green",
             "quality_issues": [dataclasses.asdict(issue) for issue in issues],
             "alignment_fps": fps,
-            "alignment_grid_start": report.grid_start,
-            "alignment_grid_end": report.grid_end,
+            "alignment_grid_start": float(frames[0].timestamp or 0.0),
+            "alignment_grid_end": float(frames[-1].timestamp or 0.0),
             "alignment_image_skew_tolerance_sec": (self._raw_episode_image_skew_tolerance_sec()),
-            "alignment_image_max_skew_sec": report.image_max_skew,
+            "alignment_image_max_skew_sec": image_max_skew,
             "alignment_image_stream_stats": report.image_stream_stats,
         }
         episode_fps = self._raw_episode_average_fps(payload.raw_batch)
@@ -1156,6 +1278,8 @@ class EpisodeLogger:
             row["excluded_frames"] = sum(
                 int(interval["removed_frames"]) for interval in excluded_details
             )
+        if any(trimmed_edge_frames.values()):
+            row["alignment_trimmed_edge_frames"] = trimmed_edge_frames
         intervention_ranges = []
         range_start = None
         range_segment = -1
@@ -1329,12 +1453,33 @@ class EpisodeLogger:
                 / f"episode_{episode_index:06d}.mp4"
             )
             path.parent.mkdir(parents=True, exist_ok=True)
+            encoded = [
+                sample.value.encoded
+                if isinstance(sample.value, CollectionRawImage)
+                else None
+                for sample in samples
+            ]
+            if self._convert_bgr_to_rgb and all(payload is not None for payload in encoded):
+                self._write_encoded_sample_video(
+                    path,
+                    cast(list[bytes], encoded),
+                    video_fps,
+                    size,
+                )
+                continue
             writer = imageio.get_writer(
                 str(path),
                 fps=video_fps,
                 codec="libx264",
                 macro_block_size=1,
-                ffmpeg_params=["-preset", "ultrafast", "-movflags", "+faststart"],
+                ffmpeg_params=[
+                    "-preset",
+                    "ultrafast",
+                    "-g",
+                    str(max(1, round(video_fps))),
+                    "-movflags",
+                    "+faststart",
+                ],
             )
             active_value: Any | None = None
             active_frame: np.ndarray | None = None
@@ -1357,6 +1502,75 @@ class EpisodeLogger:
                 if isinstance(active_value, CollectionRawImage):
                     active_value.release_decoded()
                 writer.close()
+
+    def _write_encoded_sample_video(
+        self,
+        path: Path,
+        frames: list[bytes],
+        fps: float,
+        size: tuple[int, int] | None,
+    ) -> None:
+        """Encode compressed camera frames without a Python decode/resize pass.
+
+        Args:
+            path: Destination MP4 path.
+            frames: Ordered JPEG payloads, one per aligned output frame.
+            fps: Constant output video frame rate.
+            size: Optional output (height, width).
+        """
+        command = [
+            imageio_ffmpeg.get_ffmpeg_exe(),
+            "-y",
+            "-loglevel",
+            "error",
+            "-f",
+            "image2pipe",
+            "-framerate",
+            str(fps),
+            "-vcodec",
+            "mjpeg",
+            "-i",
+            "pipe:0",
+            "-an",
+        ]
+        if size is not None:
+            command.extend(["-vf", f"scale={size[1]}:{size[0]}:flags=fast_bilinear"])
+        keyframe_interval = max(1, round(fps))
+        command.extend(
+            [
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-threads",
+                "1",
+                "-pix_fmt",
+                "yuv420p",
+                "-g",
+                str(keyframe_interval),
+                "-keyint_min",
+                str(keyframe_interval),
+                "-sc_threshold",
+                "0",
+                "-movflags",
+                "+faststart",
+                str(path),
+            ]
+        )
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        assert process.stdin is not None
+        assert process.stderr is not None
+        for frame in frames:
+            process.stdin.write(frame)
+        process.stdin.close()
+        stderr = process.stderr.read().decode("utf-8", errors="replace")
+        returncode = process.wait()
+        if returncode != 0:
+            raise RuntimeError(f"ffmpeg encoded-frame writer failed for {path}: {stderr}")
 
     def _next_episode_global_index(self, n_frames: int) -> int:
         with self._lock:
@@ -1611,14 +1825,22 @@ class EpisodeLogger:
 
     def _save_job_summary(self, job: SaveJob) -> dict[str, Any]:
         row = job.collection_episode_row or {}
+        quality_issues, quality_issue_count = summarize_quality_issues(
+            row.get("quality_issues")
+        )
+        payload = job.raw_episode_payload
+        pending_length = 0
+        if payload is not None:
+            pending_length = max(len(payload.frame_labels), len(payload.raw_snapshots))
         return {
             "episode_index": job.episode_index,
-            "length": int(row.get("length", len(job.steps))),
+            "length": int(row.get("length", max(len(job.steps), pending_length))),
             "status": job.status,
             "quality": row.get("quality", "green"),
             "qc_verdict": row.get("qc_verdict", ""),
             "qc_note": row.get("qc_note", ""),
-            "quality_issues": row.get("quality_issues", []),
+            "quality_issues": quality_issues,
+            "quality_issue_count": quality_issue_count,
             "error": "" if job.error is None else str(job.error),
         }
 

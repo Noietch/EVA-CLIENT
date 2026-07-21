@@ -2,6 +2,12 @@
 
 export const $ = (id) => document.getElementById(id);
 
+export function setCommandMetadata(node, command, template = false) {
+  if (!node || !command) return;
+  if (template) node.dataset.commandTemplate = command;
+  else node.dataset.command = command;
+}
+
 function replaceCamStripContent(html) {
   const strip = $("cam-strip");
   if (!strip) return;
@@ -42,6 +48,7 @@ export const LIVE = {
     maxFrameGapMs: 0, lastFrameGapMs: 0, lastVideoSkewSec: 0, lastUrdfFrameSkew: 0,
     videoSkewSamples: [],
     urdfMissingSamples: 0,
+    hardVideoSeeks: 0, playbackRateCorrections: 0,
   },
 };
 

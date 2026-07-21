@@ -279,7 +279,7 @@ def test_zmq_collection_reader_defaults_to_latest_frame():
     np.testing.assert_allclose(frame.action_qpos, np.ones(robot.total_action_dim) * 2)
 
 
-def test_zmq_raw_collection_reader_yields_before_draining_unbounded_socket():
+def test_zmq_raw_collection_reader_keeps_latest_with_bounded_socket_drain():
     robot = ROBOT_REGISTRY.build("agilex_piper")
     budget = 64
     payloads = collections.deque(
@@ -316,7 +316,8 @@ def test_zmq_raw_collection_reader_yields_before_draining_unbounded_socket():
     snapshot = reader.acquire_collection_raw()
 
     assert snapshot is not None
-    assert len(reader._raw_collection_queue) == budget - 1
+    assert snapshot.timestamp == float(budget - 1)
+    assert not reader._raw_collection_queue
     assert len(payloads) == 5
 
 

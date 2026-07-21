@@ -2,10 +2,16 @@
 
 # 🧭 Console
 
-A single console app with six tabs, organized into three flows. Tab
+A single console app with seven tabs, organized into four flows. Tab
 availability is config-driven — a deploy config lands on **DEBUG**, an eval
 config (`eval_cfg.checkpoints[]`) lands on **EVAL**; unrelated tabs are greyed
 out or read-only.
+
+**RL flow**
+
+| Tab       | Purpose                                                                                                             |
+|-----------|---------------------------------------------------------------------------------------------------------------------|
+| **RL**    | policy rollout with optional critic telemetry, HIL intervention, rollout saving/QC, and synchronized episode replay |
 
 **Collection flow**
 
@@ -74,3 +80,11 @@ or both at once:
 Ports in play (all from `--config`, not the CLI): **policy** endpoint (`policy.host:port`,
 default `:9000`), the **transport** to the robot node, and the **ZMQ control channel**
 (`:5757`). `--web-port` is unused in headless.
+
+The browser console is normally started with:
+
+```bash
+eva --config configs/04_rl/r1lite_rl.local.py
+```
+
+Local `.local.py` files are machine-specific overrides and are ignored by git.

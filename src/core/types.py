@@ -53,6 +53,7 @@ class CollectionRawImage:
     """A lazily decoded raw collection image sample."""
 
     decoder: Callable[[], np.ndarray | None]
+    encoded: bytes | None = None
     _decoded: np.ndarray | None = dataclasses.field(default=None, init=False, repr=False)
     _decoded_once: bool = dataclasses.field(default=False, init=False, repr=False)
 

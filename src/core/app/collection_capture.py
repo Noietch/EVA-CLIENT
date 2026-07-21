@@ -69,6 +69,9 @@ class CollectionCaptureRunner:
         )
         self._error: BaseException | None = None
         self._captured = 0
+        self._capture_ticks = 0
+        self._deadline_misses = 0
+        self._max_tick_ms = 0.0
 
     def start(self) -> None:
         """Start the background capture thread."""
@@ -80,7 +83,13 @@ class CollectionCaptureRunner:
         if self._thread.is_alive():
             self._thread.join()
         self._drain_available_raw(self._max_raw_snapshots_per_tick)
-        logger.info("[RAW_CAPTURE] stopped snapshots=%d", self._captured)
+        logger.info(
+            "[RAW_CAPTURE] stopped snapshots=%d ticks=%d deadline_misses=%d max_tick_ms=%.1f",
+            self._captured,
+            self._capture_ticks,
+            self._deadline_misses,
+            self._max_tick_ms,
+        )
         if self._error is not None:
             raise RuntimeError("collection capture runner failed") from self._error
 
@@ -91,9 +100,28 @@ class CollectionCaptureRunner:
 
     def _run(self) -> None:
         try:
+            deadline = time.monotonic()
             while not self._stop_event.is_set():
+                deadline += self._interval_s
+                started = time.monotonic()
                 self._capture_tick()
-                self._stop_event.wait(self._interval_s)
+                finished = time.monotonic()
+                tick_ms = (finished - started) * 1000.0
+                self._capture_ticks += 1
+                self._max_tick_ms = max(self._max_tick_ms, tick_ms)
+                remaining = deadline - finished
+                if remaining <= 0.0:
+                    self._deadline_misses += 1
+                    if self._deadline_misses == 1 or self._deadline_misses % 100 == 0:
+                        logger.warning(
+                            "[RAW_CAPTURE_TIMING] deadline_misses=%d tick_ms=%.1f max_tick_ms=%.1f",
+                            self._deadline_misses,
+                            tick_ms,
+                            self._max_tick_ms,
+                        )
+                    deadline = finished
+                    continue
+                self._stop_event.wait(remaining)
         except BaseException as exc:
             self._error = exc
             logger.exception("Collection capture runner failed")
