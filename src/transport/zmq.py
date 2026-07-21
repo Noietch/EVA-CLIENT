@@ -66,7 +66,7 @@ class WireObservation:
         robot_name: optional simulator robot registry name for offline scene rebuild.
         split: optional simulator layout split for offline scene rebuild.
         scene_state: optional concrete assets and initial scene poses for offline rebuild.
-        camera_resolution: Optional state-only camera placeholder size as (height, width).
+        camera_resolution: Optional intended camera size as (height, width).
     """
 
     t: float
@@ -229,7 +229,6 @@ class _ObservationReader:
         self._zmq = zmq_mod
         self._latest: WireObservation | None = None
         self._latest_images: dict[str, np.ndarray] = {}
-        self._black_image_cache: dict[tuple[int, int], np.ndarray] = {}
         self._preserve_collection_backlog = preserve_collection_backlog
         self._collection_queue: collections.deque[WireObservation] = collections.deque()
         self._raw_collection_queue: collections.deque[bytes] = collections.deque()
@@ -259,18 +258,7 @@ class _ObservationReader:
         self._sub.connect(config.transport.sub_endpoint)
 
     def _observation_images(self, wire_obs: WireObservation) -> dict[str, np.ndarray]:
-        images = {key: np.asarray(image) for key, image in wire_obs.images.items()}
-        if images or wire_obs.camera_resolution is None:
-            return images
-        resolution = wire_obs.camera_resolution
-        if resolution not in self._black_image_cache:
-            self._black_image_cache[resolution] = np.zeros((*resolution, 3), dtype=np.uint8)
-        black = self._black_image_cache[resolution]
-        return {
-            camera.observation_key: black
-            for camera in self._robot.observation_schema.cameras
-            if camera.observation_key not in self._disabled_cameras
-        }
+        return {key: np.asarray(image) for key, image in wire_obs.images.items()}
 
     def _drain_latest(self) -> WireObservation | None:
         """Pop all queued SUB messages, keeping only the newest by timestamp."""
@@ -362,21 +350,24 @@ class _ObservationReader:
         is set.
 
         Returns:
-            Observation with images [H, W, 3] uint8 and state_qpos
-            [state_dim] float32, or None if no frame is available or a required
-            camera/group is missing.
+            Observation with images [H, W, 3] uint8 and state_qpos [state_dim]
+            float32. State-only observations have an empty image dict. Returns None
+            if no frame is available or a required camera/group is missing.
         """
         wire_obs = self._drain_latest()
         if wire_obs is None:
             return None
 
         wire_images = self._observation_images(wire_obs)
+        state_only = not wire_images and wire_obs.camera_resolution is not None
         images: dict[str, np.ndarray] = {}
         for camera in self._robot.observation_schema.cameras:
             if camera.observation_key in self._disabled_cameras:
                 continue
             image = wire_images.get(camera.observation_key)
             if image is None:
+                if state_only:
+                    continue
                 return None
             images[camera.observation_key] = np.asarray(image)
 
@@ -443,10 +434,12 @@ class _ObservationReader:
         return None if image is None else np.asarray(image)
 
     def get_camera_keys(self) -> list[str]:
-        """Enabled camera keys the visualization stream should expose."""
+        """Enabled live-camera keys, or none for an explicit state-only stream."""
         wire_obs = self._drain_latest()
         if wire_obs is not None:
             self._cache_images(wire_obs)
+            if not wire_obs.images and wire_obs.camera_resolution is not None:
+                return []
         return [
             camera.observation_key
             for camera in self._robot.observation_schema.cameras
@@ -564,9 +557,9 @@ class _ObservationReader:
 
         def decode_raw(wire_obs: WireObservation = wire_obs) -> CollectionRawBatch:
             # EVA Sim --skip-render publishes no images but does include the intended
-            # camera resolution so the live console can show black placeholders. Keep
-            # saved raw streams empty and mark that omission as intentional; an empty
-            # image mapping without this marker remains a real missing-camera error.
+            # camera resolution. Keep saved raw streams empty and mark that omission
+            # as intentional; an empty image mapping without this marker remains a real
+            # missing-camera error.
             state_only = not wire_obs.images and wire_obs.camera_resolution is not None
             batch = CollectionRawBatch(image_streams_expected=not state_only)
             for key, image in wire_obs.images.items():

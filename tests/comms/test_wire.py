@@ -211,14 +211,14 @@ def test_wire_observation_converts_to_collection_frame_by_robot_group_order():
     np.testing.assert_allclose(frame.action_eef, action_eef)
 
 
-def test_state_only_observation_materializes_black_camera_frames():
+def test_state_only_observation_keeps_live_camera_frames_empty():
     robot = ROBOT_REGISTRY.build("agilex_piper")
     reader = object.__new__(_ObservationReader)
     reader._robot = robot
     reader._disabled_cameras = set()
     reader._disabled_groups = set()
     reader._group_initial_qpos = {}
-    reader._black_image_cache = {}
+    reader._latest_images = {}
     wire_obs = WireObservation(
         t=3.0,
         images={},
@@ -233,9 +233,24 @@ def test_state_only_observation_materializes_black_camera_frames():
     frame = reader.get_frame()
 
     assert frame is not None
-    assert set(frame.images) == {"cam_high", "cam_left_wrist", "cam_right_wrist"}
-    assert all(image.shape == (12, 16, 3) for image in frame.images.values())
-    assert all(not np.any(image) for image in frame.images.values())
+    assert frame.images == {}
+
+
+def test_state_only_observation_hides_live_camera_streams():
+    robot = ROBOT_REGISTRY.build("agilex_piper")
+    reader = object.__new__(_ObservationReader)
+    reader._robot = robot
+    reader._disabled_cameras = set()
+    reader._latest_images = {}
+    reader._lock = threading.Lock()
+    reader._drain_latest = lambda: WireObservation(
+        t=3.0,
+        images={},
+        state={},
+        camera_resolution=(12, 16),
+    )
+
+    assert reader.get_camera_keys() == []
 
 
 def test_state_only_raw_collection_keeps_camera_streams_empty():
@@ -252,7 +267,6 @@ def test_state_only_raw_collection_keeps_camera_streams_empty():
     reader = object.__new__(_ObservationReader)
     reader._robot = robot
     reader._disabled_cameras = set()
-    reader._black_image_cache = {}
     reader._drain_raw_collection = lambda: pack_observation(wire_obs)
 
     snapshot = reader.acquire_collection_raw()
