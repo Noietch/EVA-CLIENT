@@ -52,7 +52,6 @@ def _runtime() -> RuntimeState:
 
 def _config() -> ConfigDict:
     return ConfigDict(
-        operator_control=ConfigDict(enabled=True, button_topic="/eva/operator_button"),
         collection=ConfigDict(schema=ConfigDict(columns={"qpos": "state"})),
         rollout=ConfigDict(intervention=ConfigDict(enabled=True)),
     )

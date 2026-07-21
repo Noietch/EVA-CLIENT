@@ -10,6 +10,7 @@ import logging
 import queue
 import threading
 import time
+from urllib.parse import urlparse
 
 import numpy as np
 
@@ -19,6 +20,7 @@ from core.app.control_channel import maybe_start_control_channel
 from core.app.handlers import (
     _anchor_buffer_to_current_qpos,
     accept_rollout_intervention_segment,
+    advance_collection_tasks_after_save,
     begin_rollout_save_episode,
     clear_replay,
     collect_cancel,
@@ -69,10 +71,7 @@ from core.app.handlers import (
     toggle_gripper_immediate,
     update_inference_params,
 )
-from core.app.operator_control import (
-    maybe_start_operator_button_listener,
-    resolve_operator_event,
-)
+from core.app.operator_control import resolve_operator_event
 from core.app.state import (
     RuntimeState,
     SessionMode,
@@ -262,6 +261,48 @@ def _should_start_deploy_ssh(config: ConfigDict) -> bool:
         return False
     ssh = config.transport.get("ssh") or {}
     return bool(ssh.get("host") and ssh.get("user") and ssh.get("port", 0) > 0)
+
+
+def _local_tcp_endpoint_port(endpoint: str, field: str) -> int:
+    """Return a loopback TCP endpoint's port for an SSH local forward.
+
+    A local forward only serves a client that connects through loopback.  Rejecting
+    non-loopback endpoints avoids silently starting a tunnel that the ZMQ sockets
+    would bypass.
+    """
+    parsed = urlparse(str(endpoint))
+    try:
+        port = parsed.port
+    except ValueError as error:
+        raise ValueError(f"{field} must be a valid tcp://localhost:<port> endpoint") from error
+    if (
+        parsed.scheme != "tcp"
+        or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}
+        or port is None
+    ):
+        raise ValueError(
+            f"{field} must be a tcp://localhost:<port> endpoint when SSH forwarding "
+            f"with a remote ZMQ transport; got {endpoint!r}"
+        )
+    return port
+
+
+def _deploy_ssh_forward_ports(config: ConfigDict) -> list[int]:
+    """Ports to forward for a non-eval remote-policy deployment.
+
+    The policy is always forwarded.  Every remote ZMQ deployment also consumes
+    the execution node's observation and action endpoints, so replay in REAL
+    mode can publish commands to the remote action socket as well.
+    """
+    ports = [int(config.policy.port)]
+    if config.transport.type == "zmq":
+        ports.extend(
+            (
+                _local_tcp_endpoint_port(config.transport.sub_endpoint, "transport.sub_endpoint"),
+                _local_tcp_endpoint_port(config.transport.pub_endpoint, "transport.pub_endpoint"),
+            )
+        )
+    return sorted(set(ports))
 
 
 def _format_inference_strategy_choices(config: ConfigDict) -> str:
@@ -996,6 +1037,30 @@ def run(
             )
         robot.initial_qpos = override
 
+    # Bring the remote endpoints up before creating ZMQ sockets.  A PUB socket is
+    # otherwise allowed to begin replay while its local SSH forward has not bound
+    # yet, which drops the first (and for a one-frame replay, only) command.
+    ssh_proc = None
+    result_syncer = None
+    should_start_eval_ssh = _should_start_eval_ssh(config.eval)
+    # SSH forwarding is opt-in; local checkpoint endpoints must not be killed as stale tunnels.
+    if should_start_eval_ssh:
+        eval_cfg = config.eval
+        assert eval_cfg is not None
+        ports = sorted({c.port for c in eval_cfg.checkpoints})
+        free_local_ports([web_port, *ports])
+        ssh_proc = FUNCTIONS.build("ssh_forward", eval_cfg.ssh, ports)
+        if eval_cfg.ssh.get("remote_sync_dir"):
+            local_root = resolve_output_dir(config, config_path).parent
+            result_syncer = FUNCTIONS.build("result_sync", eval_cfg.ssh, local_root)
+    elif _should_start_deploy_ssh(config):
+        # Deploy (non-eval): forward the policy and both ZMQ endpoints.
+        ports = _deploy_ssh_forward_ports(config)
+        free_local_ports([web_port, *ports])
+        ssh_proc = FUNCTIONS.build("ssh_forward", config.transport.ssh, ports)
+    else:
+        free_local_ports([web_port])
+
     logger.info(
         "Creating transport: type=%s robot=%s",
         config.transport.type,
@@ -1045,29 +1110,8 @@ def run(
     prompt_ready.set()
     runtime.command_queue = command_queue
     runtime.prompt_ready = prompt_ready
-    maybe_start_operator_button_listener(config, runtime)
     loop_rate = transport.create_rate(config.inference_cfg.publish_rate)
     loop_rate_hz = config.inference_cfg.publish_rate
-
-    ssh_proc = None
-    result_syncer = None
-    should_start_eval_ssh = _should_start_eval_ssh(config.eval)
-    # SSH forwarding is opt-in; local checkpoint endpoints must not be killed as stale tunnels.
-    if should_start_eval_ssh:
-        eval_cfg = config.eval
-        assert eval_cfg is not None
-        ports = sorted({c.port for c in eval_cfg.checkpoints})
-        free_local_ports([web_port, *ports])
-        ssh_proc = FUNCTIONS.build("ssh_forward", eval_cfg.ssh, ports)
-        if eval_cfg.ssh.get("remote_sync_dir"):
-            local_root = resolve_output_dir(config, config_path).parent
-            result_syncer = FUNCTIONS.build("result_sync", eval_cfg.ssh, local_root)
-    elif _should_start_deploy_ssh(config):
-        # Deploy (non-eval): forward the policy port to the remote inference server.
-        free_local_ports([web_port, config.policy.port])
-        ssh_proc = FUNCTIONS.build("ssh_forward", config.transport.ssh, [config.policy.port])
-    else:
-        free_local_ports([web_port])
 
     if headless:
         # Low-power path: no HTTP server, no 3D scene / camera streams / preview.
@@ -1155,6 +1199,8 @@ def run(
 
             if session.mode is SessionMode.COLLECT and session.status is SessionStatus.RUNNING:
                 collect_step(effective, runtime)
+
+            advance_collection_tasks_after_save(effective, runtime, session)
 
             # Reconcile web_phase with the real session state. A run can leave RUNNING via
             # paths that DON'T go through the eval web:stop verb — the client-liveness

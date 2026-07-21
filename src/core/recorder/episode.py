@@ -195,6 +195,8 @@ class EpisodeLogger:
         eval_mode: bool = False,
         save_image_height: int | None = None,
         save_image_width: int | None = None,
+        fallback_image_height: int | None = 480,
+        fallback_image_width: int | None = 640,
     ) -> None:
         self._log_dir = Path(log_dir)
         self._robot = robot
@@ -206,6 +208,14 @@ class EpisodeLogger:
         # Target saved-video resolution; both None keeps each camera's native size.
         self._save_image_height = save_image_height
         self._save_image_width = save_image_width
+        # Used only when a collection camera produces no frames at all. Defaults
+        # keep the placeholder shape configurable without passing it through the
+        # collection save path; normal camera videos remain native-sized unless
+        # save_image_* is configured.
+        if fallback_image_height is None or fallback_image_width is None:
+            raise ValueError("fallback image dimensions must be configured as a pair")
+        self._fallback_image_height = fallback_image_height
+        self._fallback_image_width = fallback_image_width
         # Eval datasets carry per-episode scoring (score/milestones/note/...) entered by
         # the operator. Those fields live in episodes.jsonl only and may be patched while
         # the episode save job is still queued.
@@ -259,6 +269,9 @@ class EpisodeLogger:
         self._completed_episodes = len(self._collection_history)
         self._save_durations: list[float] = []
         self._pending_episode_meta_by_clip: dict[str, dict[str, Any]] = {}
+        # Collection save completion is observed by the main loop (rather than the
+        # background writer) so task selection stays on the session thread.
+        self._saved_collection_jobs: list[SaveJob] = []
 
     # -- episode lifecycle ------------------------------------------------------
 
@@ -469,6 +482,7 @@ class EpisodeLogger:
             job.finished_wall_time = time.time()
             self._remember_finished_job(job)
             self._completed_episodes += 1
+            self._saved_collection_jobs.append(job)
             return True
         if not self._has_raw_episode_samples():
             self._active = False
@@ -636,6 +650,8 @@ class EpisodeLogger:
                     job.finished_wall_time = time.time()
                     self._completed_episodes += 1
                     self._remember_finished_job(job)
+                    if self._collection_writer is not None:
+                        self._saved_collection_jobs.append(job)
                     self._save_jobs = [j for j in self._save_jobs if j is not job]
 
     def _write_job(self, job: SaveJob) -> None:
@@ -1131,6 +1147,26 @@ class EpisodeLogger:
             worker.join(timeout)
         with self._lock:
             return not self._save_jobs
+
+    def drain_saved_collection_tasks(self) -> list[str]:
+        """Return tasks whose collection episodes have finished saving successfully.
+
+        The save worker owns disk writes, but the application main loop owns session
+        mutation.  This small handoff lets a collection plan advance only after an
+        episode is actually persisted, never merely when it is queued.
+        """
+        if self._collection_writer is None:
+            return []
+        with self._lock:
+            tasks = [job.task for job in self._saved_collection_jobs]
+            self._saved_collection_jobs.clear()
+        return tasks
+
+    def completed_collection_episodes(self, task: str) -> int:
+        """Count persisted collection episodes for one task's dataset directory."""
+        if self._collection_writer is None:
+            return 0
+        return len(self._load_collection_history(self._collection_dataset_dir(task)))
 
     def status_snapshot(self, task: str | None = None) -> dict[str, Any]:
         """Recording status for the web UI: pipeline state, history, and queue depth."""

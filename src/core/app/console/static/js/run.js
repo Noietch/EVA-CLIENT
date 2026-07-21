@@ -140,7 +140,11 @@ function applyStatus(s) {
 
     // active selections
     mark("prompt-list", "prompt", s.selected_task);
-    if (collectTask == null && s.selected_collect_task) collectTask = s.selected_collect_task;
+    // The backend may auto-advance after a collection episode is safely saved.
+    // Keep this local dropdown state aligned with that authoritative selection.
+    if (s.selected_collect_task && collectTask !== s.selected_collect_task) {
+      collectTask = s.selected_collect_task;
+    }
     mark("collect-prompt-list", "prompt", collectTaskValue());
     if (S.ACTIVE_TAB === "replay" || S.ACTIVE_TAB === "eval" || s.replay_loaded || S.CFG.is_replay) {
       const input = $("replay-episode-input");

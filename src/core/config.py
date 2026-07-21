@@ -42,7 +42,7 @@ class StrategyYamlSpec(TypedDict):
     args: StrategyYamlArgs
 
 
-_COLLECTION_REQUIRED_COLUMNS = ("qpos", "eef", "action_qpos", "action_eef")
+_COLLECTION_REQUIRED_COLUMNS = ("qpos", "action_qpos")
 
 
 def load_config(path: str | Path) -> ConfigDict:
@@ -128,7 +128,7 @@ def _apply_derived(cfg: ConfigDict, path: Path) -> None:
 
 
 def _validate(cfg: ConfigDict) -> None:
-    """Strict checks: a config carrying collection.schema.columns must define the full schema."""
+    """Validate required joint columns; EEF columns are optional for joint-only collection."""
     coll = cfg.get("collection") or {}
     schema = coll.get("schema") or {}
     columns = set(schema.get("columns") or {})
@@ -141,6 +141,11 @@ def _validate(cfg: ConfigDict) -> None:
         raise ValueError("collection.schema.cameras must define at least one camera")
     if not (schema.get("arms") or {}):
         raise ValueError("collection.schema.arms must define at least one arm")
+    trials_per_task = coll.get("trials_per_task", 0)
+    if isinstance(trials_per_task, bool) or not isinstance(trials_per_task, int):
+        raise ValueError("collection.trials_per_task must be a non-negative integer")
+    if trials_per_task < 0:
+        raise ValueError("collection.trials_per_task must be a non-negative integer")
 
 
 def _resolve_eval_checkpoints(cfg: ConfigDict, path: Path) -> None:

@@ -96,6 +96,13 @@ def test_load_collection_config_exposes_schema():
     assert cfg.collection.storage.log_dir  # explicit or derived, never empty
 
 
+def test_dual_piper_zmq_collection_configures_task_balancing():
+    cfg = load_config(
+        _CONFIGS_DIR / "02_collection" / "dual_agilex_piper_eva_sim_openpi_qpos_zmq.py"
+    )
+    assert cfg.collection.trials_per_task == 5
+
+
 def test_load_eval_config_resolves_checkpoints():
     cfg = load_config(_CONFIGS_DIR / "03_evaluation" / "arx_r5_eval.py")
     assert cfg.eval_cfg is cfg.eval
@@ -123,17 +130,29 @@ def test_collection_log_dir_derives_from_filename(tmp_path):
     assert cfg.collection.storage.log_dir.endswith("myrun")
 
 
-def test_collection_schema_requires_core_columns(tmp_path):
+def test_collection_schema_requires_joint_columns(tmp_path):
     cfg_path = _write_config(
         tmp_path / "bad.py",
+        "collection = dict(schema=dict(\n"
+        "    robot_type='ur5e', arms=dict(arm='arm'),\n"
+        "    cameras=dict(cam_high='observation.images.cam_high'),\n"
+        "    columns=dict(qpos='o.q'),\n"
+        "))\n",
+    )
+    with pytest.raises(ValueError, match="collection.schema.columns"):
+        load_config(cfg_path)
+
+
+def test_collection_schema_allows_joint_only_columns(tmp_path):
+    cfg_path = _write_config(
+        tmp_path / "joint_only.py",
         "collection = dict(schema=dict(\n"
         "    robot_type='ur5e', arms=dict(arm='arm'),\n"
         "    cameras=dict(cam_high='observation.images.cam_high'),\n"
         "    columns=dict(qpos='o.q', action_qpos='a.q'),\n"
         "))\n",
     )
-    with pytest.raises(ValueError, match="collection.schema.columns"):
-        load_config(cfg_path)
+    assert set(load_config(cfg_path).collection.schema.columns) == {"qpos", "action_qpos"}
 
 
 def test_collection_schema_requires_cameras(tmp_path):

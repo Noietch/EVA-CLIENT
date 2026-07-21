@@ -12,7 +12,14 @@ transport = dict(
     image_layout="hwc",
     convert_bgr_to_rgb=False,
     topics={},
-    ssh=dict(host="", user="", port=0),
+    ros_master_teleop=dict(
+        enabled=True,
+        python="/home/agilex/miniconda3/envs/aloha/bin/python3",
+        left_topic="/master/joint_left",
+        right_topic="/master/joint_right",
+    ),
+    ssh=dict(host="10.1.122.20", user="yangdonglin", port=22),
+    # ssh=dict(host="", user="", port=0),
 )
 
 # control_channel = dict(

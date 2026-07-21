@@ -57,6 +57,10 @@ def _build_zmq_transport_with_fake_readers(monkeypatch):
             self.calls.append("collection")
             return self.collection_frame
 
+        def clear_collection_backlog(self):
+            self.calls.append("clear_collection")
+            return None
+
         def get_latest_qpos(self):
             self.calls.append("qpos")
             return self.qpos
@@ -76,6 +80,9 @@ def _build_zmq_transport_with_fake_readers(monkeypatch):
 
         def close(self, linger=0) -> None:
             self.closed = True
+
+        def send(self, _payload) -> None:
+            return None
 
     class _Context:
         def __init__(self) -> None:
@@ -98,9 +105,10 @@ def _build_zmq_transport_with_fake_readers(monkeypatch):
         transport=types.SimpleNamespace(
             sub_endpoint="tcp://127.0.0.1:5555",
             pub_endpoint="tcp://127.0.0.1:5556",
+            ros_master_teleop=types.SimpleNamespace(enabled=False),
         )
     )
-    robot = types.SimpleNamespace(name="test_robot")
+    robot = types.SimpleNamespace(name="test_robot", total_action_dim=0)
     return (
         ZmqTransport(cast(ConfigDict, config), cast(Robot, robot)),
         readers,
@@ -267,6 +275,7 @@ def test_state_only_raw_collection_keeps_camera_streams_empty():
     reader = object.__new__(_ObservationReader)
     reader._robot = robot
     reader._disabled_cameras = set()
+    reader._latest_images = {}
     reader._drain_raw_collection = lambda: pack_observation(wire_obs)
 
     snapshot = reader.acquire_collection_raw()
@@ -469,28 +478,6 @@ def test_zmq_clear_collection_backlog_without_source_time_returns_none(monkeypat
     assert reader.clear_collection_backlog() is None
 
 
-def test_zmq_clear_collection_backlog_uses_receive_order_after_source_time_resets():
-    class _Again(Exception):
-        pass
-
-    class _Sub:
-        def recv(self, _flags):
-            raise _Again
-
-    reader = object.__new__(_ObservationReader)
-    reader._zmq = types.SimpleNamespace(NOBLOCK=object(), Again=_Again)
-    reader._sub = _Sub()
-    reader._collection_queue = collections.deque(
-        [WireObservation(t=60.0, images={}, state={})]
-    )
-    reader._raw_collection_queue = collections.deque(
-        [pack_observation(WireObservation(t=0.0, images={}, state={}))]
-    )
-    reader._lock = threading.Lock()
-
-    assert reader.clear_collection_backlog() == 0.0
-
-
 def test_zmq_reader_exposes_partial_camera_frames_for_visualization():
     robot = ROBOT_REGISTRY.build("agilex_piper")
     image = np.full((4, 4, 3), 127, dtype=np.uint8)
@@ -588,20 +575,21 @@ def test_action_default_target_is_real():
     assert back.target == "real"
 
 
-def test_zmq_transport_uses_separate_internal_readers(monkeypatch):
+def test_zmq_transport_uses_a_lazy_collection_reader(monkeypatch):
     transport, readers, _ctx = _build_zmq_transport_with_fake_readers(monkeypatch)
 
     readers[0].frame = "frame"
+    readers[0].qpos = "qpos"
+    transport.start_collection()
+    assert len(readers) == 1
+    assert transport.clear_collection_backlog() is None
     readers[1].collection_frame = "collection"
-    readers[2].qpos = "qpos"
 
     assert transport.get_frame() == "frame"
     assert transport.get_collection_frame() == "collection"
     assert transport.get_latest_qpos() == "qpos"
-    assert readers[0].calls == ["frame"]
-    assert readers[1].calls == ["collection"]
-    assert readers[2].calls == ["qpos"]
-    assert [reader.preserve_collection_backlog for reader in readers] == [False, True, False]
+    assert readers[0].calls == ["frame", "qpos"]
+    assert readers[1].calls == ["clear_collection", "collection"]
 
 
 def test_zmq_reader_conflates_latest_frames_but_preserves_collection_backlog():
@@ -630,6 +618,7 @@ def test_zmq_reader_conflates_latest_frames_but_preserves_collection_backlog():
         CONFLATE=2,
         SUBSCRIBE=3,
         RCVTIMEO=4,
+        RCVHWM=5,
         Context=types.SimpleNamespace(instance=lambda: context),
     )
     config = types.SimpleNamespace(
@@ -648,6 +637,11 @@ def test_zmq_reader_conflates_latest_frames_but_preserves_collection_backlog():
 
     assert (fake_zmq.CONFLATE, 1) in context.sockets[0].options
     assert (fake_zmq.CONFLATE, 1) not in context.sockets[1].options
+    assert (fake_zmq.RCVHWM, 1) in context.sockets[0].options
+    assert (
+        fake_zmq.RCVHWM,
+        zmq_transport.COLLECTION_SOCKET_DRAIN_MAX,
+    ) in context.sockets[1].options
 
 
 def test_zmq_reader_accepts_new_publisher_after_source_time_resets():
@@ -685,14 +679,12 @@ def test_zmq_reader_accepts_new_publisher_after_source_time_resets():
     assert latest.frame_id == 0
 
 
-def test_zmq_transport_reports_freshest_reader_and_closes_all_readers(monkeypatch):
+def test_zmq_transport_shares_latest_reader_with_aux_consumers(monkeypatch):
     transport, readers, ctx = _build_zmq_transport_with_fake_readers(monkeypatch)
     extra = transport.create_observation_reader()
 
-    readers[0].age = 3.0
-    readers[1].age = 2.0
-    readers[2].age = None
-    extra.age = 1.0  # type: ignore[reportAttributeAccessIssue]
+    assert extra is readers[0]
+    readers[0].age = 1.0
 
     assert transport.seconds_since_last_recv() == 1.0
 
@@ -718,6 +710,11 @@ def test_zmq_transport_sends_collection_control_actions(monkeypatch):
     transport = object.__new__(ZmqTransport)
     transport._pub = _Publisher()
     transport._robot = cast(Robot, _Robot())
+    transport._config = ConfigDict(
+        transport=ConfigDict(ros_master_teleop=ConfigDict(enabled=False))
+    )
+    transport._master_teleop_process = None
+    transport._collection_reader = types.SimpleNamespace(close=lambda: None)
 
     transport.start_collection()
     transport.stop_collection()
@@ -727,3 +724,32 @@ def test_zmq_transport_sends_collection_control_actions(monkeypatch):
         + ["collect_stop"] * COLLECTION_CONTROL_REPEATS
     )
     np.testing.assert_allclose(unpack_action(transport._pub.payloads[0]).action, np.zeros(7))
+
+
+def test_zmq_transport_stops_master_teleop_process_group(monkeypatch):
+    calls = []
+
+    class _Process:
+        pid = 123
+
+        def poll(self):
+            return None
+
+        def wait(self, timeout=None):
+            calls.append(("wait", timeout))
+
+    transport = object.__new__(ZmqTransport)
+    transport._master_teleop_process = _Process()
+    monkeypatch.setattr(
+        zmq_transport.os,
+        "killpg",
+        lambda pid, sig: calls.append(("killpg", pid, sig)),
+    )
+
+    transport._stop_master_teleop()
+
+    assert transport._master_teleop_process is None
+    assert calls == [
+        ("killpg", 123, zmq_transport.signal.SIGTERM),
+        ("wait", 5),
+    ]

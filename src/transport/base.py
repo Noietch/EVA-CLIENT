@@ -46,6 +46,10 @@ class ObservationSource(Protocol):
         """Return the most recent joint positions [qpos_dim] float32, or None."""
         ...
 
+    def get_latest_teleop_qpos(self) -> np.ndarray | None:
+        """Return the latest operator/master-arm qpos [qpos_dim], if available."""
+        ...
+
     def seconds_since_last_recv(self) -> float | None:
         """Return seconds since the last received message, or None if never received."""
         ...
@@ -116,6 +120,10 @@ class TransportBridge(abc.ABC):
         A lightweight read of joint feedback that skips building a full observation
         (no image decode). Default returns None for sources with no joint feedback.
         """
+        return None
+
+    def get_latest_teleop_qpos(self) -> np.ndarray | None:
+        """Latest master-arm qpos [qpos_dim], if this transport exposes one."""
         return None
 
     def seconds_since_last_recv(self) -> float | None:

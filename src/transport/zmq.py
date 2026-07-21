@@ -20,6 +20,10 @@ from __future__ import annotations
 import collections
 import dataclasses
 import logging
+import os
+import signal
+import subprocess
+import sys
 import threading
 import time
 
@@ -209,13 +213,11 @@ def unpack_action(payload: bytes) -> WireAction:
 
 
 class _ObservationReader:
-    """One independent SUB socket + the WireObservation->Observation conversion.
+    """One SUB socket + the WireObservation->Observation conversion.
 
-    Each reader owns its own SUB socket connected to the same PUB endpoint, so the
-    pub/sub fan-out delivers a full copy of every observation to each reader — a
-    visualization reader and the control-loop reader never steal frames from one
-    another. A lock guards drain/_latest because the console serves frames from
-    multiple HTTP worker threads against a single reader.
+    Latest-only consumers share one reader. Its lock guards draining and caching
+    so concurrent control-loop and HTTP calls observe the same newest snapshot
+    without duplicating an image-heavy stream over the transport link.
     """
 
     def __init__(
@@ -251,11 +253,23 @@ class _ObservationReader:
 
         ctx = zmq_mod.Context.instance()
         self._sub = ctx.socket(zmq_mod.SUB)
-        if not preserve_collection_backlog:
+        # Control, state feedback and web visualization only ever consume the
+        # newest observation.  Keeping a normal per-reader queue here is actively
+        # harmful for image-heavy streams: each independent SUB socket can build a
+        # multi-megabyte backlog, then ``_drain_latest`` spends time unpacking stale
+        # images before it reaches the frame the operator should see.  Conflation
+        # makes the ZMQ pipe retain only the newest complete WireObservation.
+        #
+        # Collection is the sole exception: its recorder needs every source frame
+        # while an episode is active, so it gets a bounded FIFO instead.
+        if preserve_collection_backlog:
+            self._sub.setsockopt(zmq_mod.RCVHWM, COLLECTION_SOCKET_DRAIN_MAX)
+        else:
             self._sub.setsockopt(zmq_mod.CONFLATE, 1)
+            self._sub.setsockopt(zmq_mod.RCVHWM, 1)
+        self._sub.connect(config.transport.sub_endpoint)
         self._sub.setsockopt(zmq_mod.SUBSCRIBE, b"")
         self._sub.setsockopt(zmq_mod.RCVTIMEO, 0)  # non-blocking drain
-        self._sub.connect(config.transport.sub_endpoint)
 
     def _observation_images(self, wire_obs: WireObservation) -> dict[str, np.ndarray]:
         return {key: np.asarray(image) for key, image in wire_obs.images.items()}
@@ -475,6 +489,13 @@ class _ObservationReader:
             parts.append(np.asarray(part, dtype=np.float32))
         return np.concatenate(parts, axis=0)
 
+    def get_latest_teleop_qpos(self) -> np.ndarray | None:
+        """Latest master-arm command carried by the ZMQ collection action."""
+        wire_obs = self._drain_latest()
+        if wire_obs is None or wire_obs.action is None:
+            return None
+        return np.asarray(wire_obs.action, dtype=np.float32).copy()
+
     def _concat_group_fields(
         self, mapping: dict[str, np.ndarray] | None, groups: tuple | None = None
     ) -> np.ndarray | None:
@@ -612,11 +633,10 @@ class ZmqTransport(TransportBridge):
     converted into the robot's canonical Observation (images keyed by
     observation_key, state concatenated in state_composition order).
 
-    The SUB side lives in an _ObservationReader. The control loop reads through the
-    transport's own reader; auxiliary consumers (e.g. the console visualization,
-    polled from HTTP worker threads) get an independent reader with its own socket
-    via create_observation_reader(), so they never contend for the same socket or
-    steal each other's frames — pub/sub fans a full copy out to each subscriber.
+    The SUB side lives in one conflated _ObservationReader shared by the control
+    loop and console. They all need the newest snapshot, so sharing avoids
+    multiplying the image stream across an SSH tunnel. Recording creates its own
+    bounded FIFO reader only for the duration of an active collection episode.
     """
 
     def __init__(self, config: ConfigDict, robot: Robot) -> None:
@@ -627,16 +647,15 @@ class ZmqTransport(TransportBridge):
         self._closed = False
         self._zmq = zmq
 
-        self._reader = _ObservationReader(config, robot, zmq)
-        self._collection_reader = _ObservationReader(
-            config, robot, zmq, preserve_collection_backlog=True
-        )
-        self._qpos_reader = _ObservationReader(config, robot, zmq)
-        self._extra_readers: list[_ObservationReader] = []
-
         ctx = zmq.Context.instance()
         self._pub = ctx.socket(zmq.PUB)
         self._pub.connect(config.transport.pub_endpoint)
+        self._master_teleop_process: subprocess.Popen | None = None
+        self._reader = _ObservationReader(config, robot, zmq)
+        # Do not subscribe a recording FIFO until recording actually begins.  An
+        # idle collection reader otherwise receives a full copy of every camera
+        # frame over SSH and accumulates stale data which is discarded at start.
+        self._collection_reader: _ObservationReader | None = None
 
         logger.info(
             "ZMQ transport ready: sub=%s pub=%s robot=%s",
@@ -655,45 +674,45 @@ class ZmqTransport(TransportBridge):
 
     def get_collection_frame(self) -> Observation | None:
         """Next collection frame from the dedicated collection reader."""
+        if self._collection_reader is None:
+            return None
         return self._collection_reader.get_collection_frame()
 
     def acquire_collection_raw(self) -> RawCollectionSnapshot | None:
         """Deferred-decode collection snapshot from the dedicated collection reader."""
+        if self._collection_reader is None:
+            return None
         return self._collection_reader.acquire_collection_raw()
 
     def get_latest_qpos(self) -> np.ndarray | None:
-        """Latest joint state [qpos_dim] float32 from the dedicated qpos reader."""
-        return self._qpos_reader.get_latest_qpos()
+        """Latest joint state [qpos_dim] float32 from the control reader.
+
+        Both consumers need only the newest observation.  Reusing the conflated
+        control reader avoids a second full image stream over the SSH tunnel.
+        """
+        return self._reader.get_latest_qpos()
+
+    def get_latest_teleop_qpos(self) -> np.ndarray | None:
+        """Latest teleoperation qpos carried by the collection action stream."""
+        return self._reader.get_latest_teleop_qpos()
 
     def get_task_status(self) -> dict[str, object]:
         """Latest optional simulator frame, task-success, and scene fields."""
-        return self._qpos_reader.get_task_status()
+        return self._reader.get_task_status()
 
     def seconds_since_last_recv(self) -> float | None:
         """Freshest receipt age across all readers, or None if none have received."""
-        ages = [
-            reader.seconds_since_last_recv()
-            for reader in (
-                self._reader,
-                self._collection_reader,
-                self._qpos_reader,
-                *self._extra_readers,
-            )
-        ]
+        ages = [self._reader.seconds_since_last_recv()]
+        if self._collection_reader is not None:
+            ages.append(self._collection_reader.seconds_since_last_recv())
         known = [age for age in ages if age is not None]
         return min(known) if known else None
 
     def image_min_hz(self) -> float | None:
         """Minimum known image receive rate across all active readers."""
-        rates = [
-            reader.image_min_hz()
-            for reader in (
-                self._reader,
-                self._collection_reader,
-                self._qpos_reader,
-                *self._extra_readers,
-            )
-        ]
+        rates = [self._reader.image_min_hz()]
+        if self._collection_reader is not None:
+            rates.append(self._collection_reader.image_min_hz())
         known = [rate for rate in rates if rate is not None]
         return min(known) if known else None
 
@@ -712,6 +731,109 @@ class ZmqTransport(TransportBridge):
         message = WireAction(t=time.monotonic(), action=np.asarray(action), target=target)
         self._pub.send(pack_action(message))
 
+    def _start_master_teleop(self) -> None:
+        spec = self._config.transport.ros_master_teleop
+        if not spec.enabled:
+            return
+        if (
+            self._master_teleop_process is not None
+            and self._master_teleop_process.poll() is None
+        ):
+            return
+        # An EVA process can be interrupted while collecting, leaving its ROS->ZMQ
+        # publisher orphaned.  That publisher keeps writing master-arm commands to
+        # the same action endpoint and would override a subsequent replay.  There
+        # must be exactly one publisher for this endpoint.
+        self._stop_stale_master_teleop_processes()
+        env = os.environ | {
+            "PYTHONPATH": os.path.dirname(os.path.dirname(__file__))
+        }
+        self._master_teleop_process = subprocess.Popen(
+            [
+                sys.executable,
+                "-m",
+                "ros_master_teleop_bridge",
+                "--action-endpoint",
+                self._config.transport.pub_endpoint,
+                "--left-topic",
+                spec.left_topic,
+                "--right-topic",
+                spec.right_topic,
+                "--ros-python",
+                spec.python,
+            ],
+            env=env,
+            start_new_session=True,
+        )
+
+    def _stop_master_teleop(self) -> None:
+        process = self._master_teleop_process
+        if process is None:
+            return
+        self._master_teleop_process = None
+        if process.poll() is not None:
+            return
+        # The ROS receiver is a child of the bridge.  Terminating the process group
+        # prevents it from being orphaned when the bridge exits.
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+            process.wait(timeout=5)
+        except ProcessLookupError:
+            return
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                "Master teleop bridge did not stop; killing process group %d",
+                process.pid,
+            )
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                return
+            process.wait(timeout=5)
+
+    def _stop_stale_master_teleop_processes(self) -> None:
+        """Terminate orphaned bridge processes targeting this ZMQ action endpoint."""
+        import psutil
+
+        endpoint = str(self._config.transport.pub_endpoint)
+        stale: list[psutil.Process] = []
+        for process in psutil.process_iter(["pid", "cmdline"]):
+            try:
+                cmdline = process.info["cmdline"] or []
+                if (
+                    process.pid != os.getpid()
+                    and "ros_master_teleop_bridge" in cmdline
+                    and "--action-endpoint" in cmdline
+                    and cmdline[cmdline.index("--action-endpoint") + 1] == endpoint
+                ):
+                    stale.append(process)
+            except (IndexError, psutil.AccessDenied, psutil.NoSuchProcess):
+                continue
+        if not stale:
+            return
+        descendants: list[psutil.Process] = []
+        for process in stale:
+            try:
+                descendants.extend(process.children(recursive=True))
+            except (psutil.AccessDenied, psutil.NoSuchProcess):
+                continue
+        for process in [*descendants, *stale]:
+            try:
+                process.terminate()
+            except (psutil.AccessDenied, psutil.NoSuchProcess):
+                continue
+        _, alive = psutil.wait_procs([*descendants, *stale], timeout=5)
+        for process in alive:
+            try:
+                process.kill()
+            except (psutil.AccessDenied, psutil.NoSuchProcess):
+                continue
+        logger.warning(
+            "Stopped %d stale master teleop bridge(s) for action endpoint %s",
+            len(stale),
+            endpoint,
+        )
+
     def _send_collection_control(self, target: str) -> None:
         action = np.zeros(self._robot.total_action_dim, dtype=np.float32)
         for attempt in range(COLLECTION_CONTROL_REPEATS):
@@ -722,22 +844,32 @@ class ZmqTransport(TransportBridge):
                 time.sleep(COLLECTION_CONTROL_INTERVAL_S)
 
     def start_collection(self) -> None:
-        """Tell the execution layer to start recording (sends repeated start signals)."""
+        """Arm remote teleoperation without adding an idle observation subscriber."""
         self._send_collection_control(COLLECTION_START_TARGET)
+        self._start_master_teleop()
 
     def clear_collection_backlog(self) -> float | None:
-        """Drop collection frames buffered before the active recording episode."""
+        """Start the bounded collection FIFO and discard pre-episode frames."""
+        if self._collection_reader is None:
+            self._collection_reader = _ObservationReader(
+                self._config,
+                self._robot,
+                self._zmq,
+                preserve_collection_backlog=True,
+            )
         return self._collection_reader.clear_collection_backlog()
 
     def stop_collection(self) -> None:
         """Tell the execution layer to stop recording (sends repeated stop signals)."""
+        self._stop_master_teleop()
         self._send_collection_control(COLLECTION_STOP_TARGET)
+        if self._collection_reader is not None:
+            self._collection_reader.close()
+            self._collection_reader = None
 
     def create_observation_reader(self) -> _ObservationReader:
-        """Create and track an independent reader (own SUB socket) for an aux consumer."""
-        reader = _ObservationReader(self._config, self._robot, self._zmq)
-        self._extra_readers.append(reader)
-        return reader
+        """Return the shared latest-only reader for an auxiliary consumer."""
+        return self._reader
 
     def close(self) -> None:
         """Close every reader and the PUB socket (idempotent)."""
@@ -745,10 +877,10 @@ class ZmqTransport(TransportBridge):
             return
         self._closed = True
         self._reader.close()
-        self._collection_reader.close()
-        self._qpos_reader.close()
-        for reader in self._extra_readers:
-            reader.close()
+        if self._collection_reader is not None:
+            self._collection_reader.close()
+            self._collection_reader = None
+        self._stop_master_teleop()
         self._pub.close(linger=0)
 
     def is_shutdown(self) -> bool:

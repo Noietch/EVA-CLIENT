@@ -3,7 +3,7 @@ name = "eva-client"
 version = "0.1.0"
 description = "A unified framework for deployment, evaluation, and data collection on real robots."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11,<3.12"
 dependencies = [
     "addict>=2.4.0",
     "av>=17.1.0",
@@ -23,6 +23,7 @@ dependencies = [
     "pyarrow==23.0.0",
     "pycollada==0.9.3",
     "pydantic==2.11.7",
+    "piper-sdk",
     "pyroki @ git+https://github.com/chungmin99/pyroki.git@388e43e1fc0d0ee382968d3dd72970fd62a0450c",
     "pyyaml==6.0.3",
     "pyzmq>=25.0.0",
@@ -119,8 +120,8 @@ extend-exclude = ["examples/hardware/arx/SDK"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
-# UP042 wants `enum.StrEnum`, but we keep `class X(str, enum.Enum)` for Python 3.10
-# compatibility (StrEnum is 3.11+).
+# UP042 wants `enum.StrEnum`, but we keep `class X(str, enum.Enum)` for consistency
+# with the rest of the codebase.
 ignore = ["UP042"]
 
 # These modules must run setup before importing project code: manual verify scripts

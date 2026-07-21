@@ -82,9 +82,7 @@ def align_collection_samples(
     upper_bound = batch.end_time if end_time is None else end_time
     required_images = tuple(camera_keys)
     required_vectors = tuple(vector_fields)
-    image_series: dict[str, list[CollectionRawSample]] = {
-        key: _sorted_samples(batch.images.get(key, [])) for key in required_images
-    }
+    image_series: dict[str, list[CollectionRawSample]] = {}
     vector_series = {
         field: _vector_components(batch, field, robot) for field in required_vectors
     }
@@ -92,19 +90,26 @@ def align_collection_samples(
     coverage_starts: list[float] = []
     coverage_ends: list[float] = []
     image_stream_stats: dict[str, dict[str, Any]] = {}
-    for key, samples in image_series.items():
+    for key in required_images:
+        samples = _sorted_samples(batch.images.get(key, []))
         if not samples:
-            return _empty_alignment_report(
+            # Images are optional for alignment: state/action still form a useful
+            # episode, and the collection writer inserts black frames for this
+            # camera before encoding the videos.  Keep the issue so callers can
+            # distinguish a real camera recording from a placeholder one.
+            issues.append(
                 AlignmentIssue("missing_image_stream", f"{key} has no samples")
             )
+            continue
         bounded_samples = _bounded_samples(samples, lower_bound, upper_bound)
         if not bounded_samples:
-            return _empty_alignment_report(
+            issues.append(
                 AlignmentIssue(
                     "image_stream_outside_episode",
                     f"{key} has no samples within [{lower_bound}, {upper_bound}]",
                 )
             )
+            continue
         image_series[key] = bounded_samples
         image_stream_stats[key] = _stream_stats(bounded_samples, image_skew_sec)
         start = bounded_samples[0].timestamp

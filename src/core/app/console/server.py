@@ -269,6 +269,7 @@ def _serialize_config(ctx: ConsoleContext) -> dict:
         "collection": {
             "enabled": bool(config.collection.schema.columns),
             "fps": None,
+            "trials_per_task": int(config.collection.get("trials_per_task", 0)),
             "dataset_dir": _resolve_dataset_dir(
                 config.collection.storage.log_dir if config.collection.schema.columns else ""
             ),
@@ -551,6 +552,18 @@ def _serialize_scene(ctx: ConsoleContext) -> dict:
             "available": True,
             "arms": ctx.scene.transforms(session.manual_qpos),  # type: ignore[attr-defined]
         }
+    elif (
+        session.mode is SessionMode.COLLECT
+        and ctx.runtime.collection_teleop_armed
+        and session.selected_collect_task is not None
+    ):
+        teleop_qpos = reader.get_latest_teleop_qpos()
+        if teleop_qpos is not None:
+            qpos = teleop_qpos
+            source = "collection_master_teleop_qpos"
+        else:
+            qpos = reader.get_latest_qpos()
+            source = "reader.get_latest_qpos"
     elif session.sim_preview_qpos is not None:
         # SIM run/preview: render the last command directly. A replay source may
         # still be mounted after visiting REPLAY, but active SIM commands should

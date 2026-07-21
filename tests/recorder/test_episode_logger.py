@@ -824,6 +824,53 @@ def test_collection_save_error_reports_missing_required_stream(tmp_path):
         logger.end_episode()
 
 
+def test_collection_replaces_missing_image_stream_with_black_frames(tmp_path, monkeypatch):
+    written_frames = []
+
+    class _Writer:
+        def append_data(self, frame: np.ndarray) -> None:
+            written_frames.append(np.asarray(frame).copy())
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(episode_module.imageio, "get_writer", lambda *a, **k: _Writer())
+    logger = _collection_logger(
+        tmp_path, save_video=True, save_image_height=4, save_image_width=6
+    )
+    qpos = np.zeros(_DIM, dtype=np.float32)
+    batch = CollectionRawBatch(
+        vectors={
+            "state_qpos": [
+                CollectionRawSample(0.0, qpos),
+                CollectionRawSample(0.2, qpos),
+            ],
+            "action_qpos": [
+                CollectionRawSample(0.0, qpos),
+                CollectionRawSample(0.2, qpos),
+            ],
+        },
+    )
+
+    logger.start_episode("t")
+    logger.ingest_collection_snapshot(
+        RawCollectionSnapshot(timestamp=0.2, decode_raw=lambda: batch)
+    )
+    assert logger.end_episode()
+
+    task_dir = _collection_task_dir(tmp_path)
+    table = pq.read_table(task_dir / "data" / "chunk-000" / "episode_000000.parquet")
+    assert table.num_rows == 3
+    assert len(written_frames) == table.num_rows
+    assert all(frame.shape == (4, 6, 3) for frame in written_frames)
+    assert all(not frame.any() for frame in written_frames)
+    episode = _read_jsonl(task_dir / "meta" / "episodes.jsonl")[0]
+    assert episode["length"] == table.num_rows
+    assert {issue["code"] for issue in episode["quality_issues"]} == {
+        "missing_image_stream"
+    }
+
+
 def test_collection_state_only_episode_saves_green_without_videos(tmp_path):
     logger = _collection_logger(tmp_path, save_video=True)
     timestamps = (1.0, 1.1, 1.2)
@@ -890,7 +937,7 @@ def test_collection_state_only_rows_keep_state_action_and_capture_time_aligned(t
     np.testing.assert_allclose(np.diff(capture_time), 1.0 / 30.0, atol=1e-9)
 
 
-def test_collection_still_rejects_unexpected_empty_camera_stream(tmp_path):
+def test_collection_marks_unexpected_empty_camera_stream_red(tmp_path):
     logger = _collection_logger(tmp_path)
     qpos = np.zeros(_DIM, dtype=np.float32)
     batch = CollectionRawBatch(
@@ -906,8 +953,11 @@ def test_collection_still_rejects_unexpected_empty_camera_stream(tmp_path):
         RawCollectionSnapshot(timestamp=1.0, decode_raw=lambda: batch)
     )
 
-    with pytest.raises(ValueError, match="missing_image_stream"):
-        logger.end_episode()
+    assert logger.end_episode()
+
+    episode = _read_jsonl(_collection_task_dir(tmp_path) / "meta" / "episodes.jsonl")[0]
+    assert episode["quality"] == "red"
+    assert "missing_image_stream" in {issue["code"] for issue in episode["quality_issues"]}
 
 
 def test_collection_mixed_state_only_and_image_stream_is_red_and_keeps_video(

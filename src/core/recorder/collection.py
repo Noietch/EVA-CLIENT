@@ -275,9 +275,39 @@ class CollectionEpisodeWriter:
         self._alignment_report = report
         for issue in report.issues:
             self._add_issue(issue.code, issue.detail)
+        self._fill_missing_camera_frames(frames)
         self._fill_fk_eef(frames, tuple(derived_eef))
         for frame in frames:
             self._append_aligned_frame(frame)
+
+    def _fill_missing_camera_frames(self, frames: list[Observation]) -> None:
+        """Fill absent configured camera streams with black frames.
+
+        Alignment intentionally uses state/action streams as the source of truth
+        when a camera was unavailable.  The dataset still needs one video frame per
+        aligned row, so insert a shared-shape black RGB image for every missing
+        camera.  A missing image stream remains a red QC issue in the alignment
+        report; this only makes the episode serializable and time-aligned.
+        """
+        for camera_key, video_key in self._schema.cameras.items():
+            if all(camera_key in frame.images for frame in frames):
+                continue
+            shape = self._fallback_image_shape(video_key)
+            for frame in frames:
+                if camera_key not in frame.images:
+                    frame.images[camera_key] = np.zeros((*shape, 3), dtype=np.uint8)
+
+    def _fallback_image_shape(self, video_key: str) -> tuple[int, int]:
+        """Return a stable output shape for black camera placeholders."""
+        size = self._save_size()
+        if size is not None:
+            return size
+        if video_key in self._image_shapes:
+            return self._image_shapes[video_key]
+        height = self._logger._fallback_image_height
+        width = self._logger._fallback_image_width
+        assert height is not None and width is not None
+        return int(height), int(width)
 
     def _has_raw_vector_field(self, field: str) -> bool:
         if self._raw_batch.vectors.get(field):

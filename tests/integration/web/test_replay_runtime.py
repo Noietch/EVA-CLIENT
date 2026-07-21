@@ -125,6 +125,27 @@ def test_replay_run_after_halt_continues_from_current_frame():
     assert runtime.replay_source.frame_index == 2
 
 
+def test_replay_real_mode_publishes_recorded_action_to_real_transport():
+    action = np.linspace(0.1, 1.4, 14, dtype=np.float32)
+    transport = _FakeTransport()
+    runtime = RuntimeState(
+        robot=ROBOT_REGISTRY.build("agilex_piper"),
+        transport=transport,
+    )
+    runtime.replay_source = cast(DatasetTransport, _ReplaySource(action[None, :]))
+    runtime.replay_trajectory = action[None, :].copy()
+    session = SessionState(
+        mode=SessionMode.REAL,
+        status=SessionStatus.RUNNING,
+        is_setup_done=True,
+        selected_task="replay task",
+    )
+
+    assert handlers.publish_next_action(_joint_config(), runtime, session)
+    assert [target for target, _ in transport.published] == ["real"]
+    np.testing.assert_allclose(transport.published[0][1], action)
+
+
 def test_tab_switch_away_from_replay_unmounts_source():
     """Leaving REPLAY for a non-replay tab must drop replay_source.
 

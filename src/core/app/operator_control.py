@@ -1,4 +1,4 @@
-"""Operator action routing shared by UI and CAT controller events."""
+"""Operator action routing shared by HTTP and externally normalized input events."""
 
 from __future__ import annotations
 
@@ -9,7 +9,6 @@ from core.app.state import RuntimeState, SessionMode, SessionState, SessionStatu
 from core.config import ConfigDict
 
 logger = logging.getLogger(__name__)
-
 
 @dataclasses.dataclass(frozen=True)
 class OperatorEvent:
@@ -162,36 +161,3 @@ def resolve_operator_event(
         command,
     )
     return command
-
-
-def maybe_start_operator_button_listener(
-    config: ConfigDict,
-    runtime: RuntimeState,
-) -> None:
-    """Subscribe to the CAT operator button topic and enqueue internal web commands."""
-    operator_cfg = config.get("operator_control") or {}
-    if not operator_cfg.get("enabled", False):
-        return
-    if config.transport.type != "ros2":
-        logger.warning("operator_control requires ros2 transport, got %s", config.transport.type)
-        return
-    if runtime.command_queue is None:
-        raise RuntimeError("operator_control requires runtime.command_queue")
-    command_queue = runtime.command_queue
-
-    from std_msgs.msg import String
-
-    from transport.ros2 import get_ros2_runtime
-
-    topic = str(operator_cfg.get("button_topic", "/eva/operator_button"))
-    ros_runtime = get_ros2_runtime(config.transport.node_name)
-
-    def on_button(msg: String) -> None:
-        button_value = msg.data.strip().lower()
-        if not button_value:
-            logger.warning("[OPERATOR] ignored empty operator event")
-            return
-        command_queue.put(f"web:operator_button:{button_value}:cat")
-
-    ros_runtime.node.create_subscription(String, topic, on_button, 10)
-    logger.info("[OPERATOR] listening for CAT buttons on %s", topic)

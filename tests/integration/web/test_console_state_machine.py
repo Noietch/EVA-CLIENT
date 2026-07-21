@@ -993,6 +993,48 @@ def test_manual_scene_payloads_keep_eased_mesh_updates():
     assert "instant" not in _serialize_manual_scene(ctx)
 
 
+def test_armed_collection_scene_follows_master_arm_teleop_qpos():
+    class _Scene:
+        def __init__(self) -> None:
+            self.last_qpos: np.ndarray | None = None
+
+        def transforms(self, qpos: np.ndarray | None) -> dict:
+            self.last_qpos = None if qpos is None else np.asarray(qpos).copy()
+            return {"body": {}}
+
+    class _Reader:
+        def get_latest_qpos(self) -> np.ndarray:
+            return np.asarray([-1.0, -1.0], dtype=np.float32)
+
+        def get_latest_teleop_qpos(self) -> np.ndarray:
+            return np.asarray([0.25, -0.25], dtype=np.float32)
+
+    scene = _Scene()
+    runtime = SimpleNamespace(
+        transport=_Reader(),
+        replay_source=None,
+        collection_replay_qpos=None,
+        collection_replay_started=0.0,
+        collection_replay_fps=10,
+        collection_teleop_armed=True,
+    )
+    session = SessionState(
+        mode=SessionMode.COLLECT,
+        selected_collect_task="pick up the apple",
+    )
+    ctx = ConsoleContext(
+        config=ConfigDict(),
+        runtime=cast(RuntimeState, runtime),
+        session=session,
+        scene=scene,
+        obs_reader=_Reader(),
+        active_tab="collect",
+    )
+
+    assert _serialize_scene(ctx)["available"] is True
+    np.testing.assert_allclose(scene.last_qpos, [0.25, -0.25])
+
+
 def test_halt_keeps_active_episode_open_for_continue():
     class _Logger:
         def __init__(self) -> None:

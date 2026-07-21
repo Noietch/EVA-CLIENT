@@ -40,6 +40,7 @@ transport = dict(
     pub_endpoint="tcp://127.0.0.1:5556",
     disabled_cameras=[],
     disabled_groups=[],
+    ros_master_teleop=dict(enabled=False),
     dataset_keys=dict(
         state_key="observations.state.qpos",
         eef_key="observations.state.eef",
@@ -101,6 +102,9 @@ collection = dict(
         ros2=dict(primary_camera="", max_frame_skew_sec=0.1, groups={}),
     ),
     tasks=[],
+    # 0 keeps manual task selection.  A positive value advances to the next
+    # configured task after that many successfully saved collection episodes.
+    trials_per_task=0,
 )
 
 rollout = dict(
@@ -115,11 +119,6 @@ rollout = dict(
         enabled=False,
         control_mode="absolute",
     ),
-)
-
-operator_control = dict(
-    enabled=False,
-    button_topic="/eva/operator_button",
 )
 
 # ZMQ control channel: exposes every console button (web:* commands) + read-only

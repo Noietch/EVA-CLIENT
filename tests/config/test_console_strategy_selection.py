@@ -89,6 +89,53 @@ def test_eval_ssh_start_requires_explicit_ssh_fields():
     assert app._should_start_eval_ssh(eval_cfg)
 
 
+def test_deploy_ssh_forwards_zmq_action_endpoint_for_remote_replay():
+    config = ConfigDict(
+        policy=ConfigDict(port=9000),
+        transport=ConfigDict(
+            type="zmq",
+            sub_endpoint="tcp://127.0.0.1:5555",
+            pub_endpoint="tcp://127.0.0.1:5556",
+            ros_master_teleop=ConfigDict(enabled=True),
+        ),
+    )
+
+    assert app._deploy_ssh_forward_ports(config) == [5555, 5556, 9000]
+
+
+def test_deploy_ssh_forwards_zmq_endpoints_without_master_teleop():
+    config = ConfigDict(
+        policy=ConfigDict(port=9000),
+        transport=ConfigDict(
+            type="zmq",
+            sub_endpoint="tcp://127.0.0.1:5555",
+            pub_endpoint="tcp://127.0.0.1:5556",
+            ros_master_teleop=ConfigDict(enabled=False),
+        ),
+    )
+
+    assert app._deploy_ssh_forward_ports(config) == [5555, 5556, 9000]
+
+
+def test_deploy_ssh_rejects_non_loopback_remote_zmq_endpoint():
+    config = ConfigDict(
+        policy=ConfigDict(port=9000),
+        transport=ConfigDict(
+            type="zmq",
+            sub_endpoint="tcp://10.1.122.20:5555",
+            pub_endpoint="tcp://127.0.0.1:5556",
+            ros_master_teleop=ConfigDict(enabled=True),
+        ),
+    )
+
+    try:
+        app._deploy_ssh_forward_ports(config)
+    except ValueError as error:
+        assert "transport.sub_endpoint" in str(error)
+    else:
+        raise AssertionError("expected an invalid remote ZMQ endpoint to be rejected")
+
+
 def test_eval_bootstrap_uses_default_ckpt_slot(monkeypatch):
     ckpt_config = ConfigDict(policy=ConfigDict(port=9080))
     ckpt = ConfigDict(

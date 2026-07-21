@@ -416,6 +416,55 @@ def test_collect_stop_reports_collection_diagnostics(caplog):
     assert session.last_error in caplog.text
 
 
+def test_collection_task_advances_only_after_target_trial_is_saved():
+    class _Logger:
+        def drain_saved_collection_tasks(self):
+            return ["pick cup"]
+
+        def completed_collection_episodes(self, task):
+            assert task == "pick cup"
+            return 2
+
+    runtime, session = _runtime_and_session()
+    runtime.episode_logger = _Logger()
+    session.selected_collect_task = "pick cup"
+    config = _config()
+    config.collection.tasks = ["pick cup", "place cup"]
+    config.collection.trials_per_task = 2
+
+    recording.advance_collection_tasks_after_save(config, runtime, session)
+
+    assert session.selected_collect_task == "place cup"
+
+
+def test_collection_task_does_not_advance_before_target_or_overwrite_selection():
+    class _Logger:
+        def __init__(self, completed):
+            self.completed = completed
+
+        def drain_saved_collection_tasks(self):
+            return ["pick cup"]
+
+        def completed_collection_episodes(self, task):
+            assert task == "pick cup"
+            return self.completed
+
+    config = _config()
+    config.collection.tasks = ["pick cup", "place cup"]
+    config.collection.trials_per_task = 2
+
+    runtime, session = _runtime_and_session()
+    runtime.episode_logger = _Logger(completed=1)
+    session.selected_collect_task = "pick cup"
+    recording.advance_collection_tasks_after_save(config, runtime, session)
+    assert session.selected_collect_task == "pick cup"
+
+    runtime.episode_logger = _Logger(completed=2)
+    session.selected_collect_task = "place cup"
+    recording.advance_collection_tasks_after_save(config, runtime, session)
+    assert session.selected_collect_task == "place cup"
+
+
 def test_start_rollout_intervention_starts_transport_collection():
     runtime, session = _runtime_and_session()
 

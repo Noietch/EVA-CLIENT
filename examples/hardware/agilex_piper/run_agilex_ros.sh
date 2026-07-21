@@ -4,16 +4,19 @@ set -euo pipefail
 
 DEFAULT_PIPER_ROOT="/home/agilex/cobot_magic/Piper_ros_private-ros-noetic"
 DEFAULT_CAMERA_ROOT="/home/agilex/cobot_magic/camera_ws"
+DEFAULT_PIPER_PYTHON="/home/agilex/miniconda3/envs/aloha/bin/python3"
 PIPER_ROOT="${PIPER_ROOT:-${DEFAULT_PIPER_ROOT}}"
 CAMERA_ROOT="${CAMERA_ROOT:-${DEFAULT_CAMERA_ROOT}}"
 CAMERA_LAUNCH_PKG="${CAMERA_LAUNCH_PKG:-astra_camera}"
 CAMERA_LAUNCH_FILE="${CAMERA_LAUNCH_FILE:-multi_camera.launch}"
+PIPER_PYTHON="${PIPER_PYTHON:-${DEFAULT_PIPER_PYTHON}}"
 MODE="1"
 AUTO_ENABLE="true"
 RUN_CAN_CONFIG="true"
 RUN_BUILD="false"
 START_ROSCORE="true"
 START_CAMERA="true"
+MASTER_ONLY="false"
 ROSCORE_LOG="${PIPER_ROOT}/roscore.log"
 CAMERA_PID=""
 ROSCORE_PID=""
@@ -27,6 +30,7 @@ Options:
   --auto-enable <bool>   auto_enable passed to roslaunch. Default: true
   --skip-can             Skip running can_config.sh
   --skip-camera          Skip launching camera_ws
+  --master-only          Read master-arm joints only; do not launch the master/slave node
   --build                Run catkin_make before launch
   --no-roscore           Assume roscore is already running
   -h, --help             Show this help
@@ -36,6 +40,7 @@ Env:
   CAMERA_ROOT            Override camera workspace path
   CAMERA_LAUNCH_PKG      Override camera launch package
   CAMERA_LAUNCH_FILE     Override camera launch file
+  PIPER_PYTHON           Python 3.8 interpreter for ROS Noetic Piper nodes
 EOF
 }
 
@@ -113,6 +118,10 @@ while [[ $# -gt 0 ]]; do
             START_CAMERA="false"
             shift
             ;;
+        --master-only)
+            MASTER_ONLY="true"
+            shift
+            ;;
         --build)
             RUN_BUILD="true"
             shift
@@ -158,7 +167,12 @@ if [[ ! -f /opt/ros/noetic/setup.bash ]]; then
     exit 1
 fi
 
+export ROS_DISTRO=noetic
+# ROS Noetic's generated environment hooks read optional variables such as
+# ROS_MASTER_URI directly, which is incompatible with this script's `set -u`.
+set +u
 source /opt/ros/noetic/setup.bash
+set -u
 trap cleanup EXIT INT TERM
 
 if [[ "${START_CAMERA}" == "true" && ( ! -f "${CAMERA_ROOT}/devel/setup.bash" || "${RUN_BUILD}" == "true" ) ]]; then
@@ -182,6 +196,21 @@ if [[ "${START_CAMERA}" == "true" ]]; then
 fi
 
 source "${PIPER_ROOT}/devel/setup.bash"
+
+if [[ ! -x "${PIPER_PYTHON}" ]]; then
+    echo "PIPER_PYTHON is not executable: ${PIPER_PYTHON}" >&2
+    exit 1
+fi
+
+if ! "${PIPER_PYTHON}" -c 'import piper_sdk' >/dev/null 2>&1; then
+    echo "piper_sdk is not available in PIPER_PYTHON: ${PIPER_PYTHON}" >&2
+    exit 1
+fi
+
+# Piper ROS nodes use `#!/usr/bin/env python3`. Put the Python 3.8 runtime
+# first so they remain compatible with the system ROS Noetic installation even
+# when the EVA project virtual environment uses a newer Python release.
+export PATH="$(dirname "${PIPER_PYTHON}"):${PATH}"
 
 if [[ "${START_ROSCORE}" == "true" ]]; then
     if rostopic list >/dev/null 2>&1; then
@@ -219,6 +248,11 @@ if [[ "${RUN_CAN_CONFIG}" == "true" ]]; then
     )
 fi
 
-log "Launching piper: puppet_mode=${MODE}, master_mode=0, auto_enable=${AUTO_ENABLE}"
 cd "${PIPER_ROOT}"
-roslaunch piper start_ms_piper.launch puppet_mode:="${MODE}" master_mode:="0" auto_enable:="${AUTO_ENABLE}"
+if [[ "${MASTER_ONLY}" == "true" ]]; then
+    log "Launching master-arm state readers only"
+    roslaunch piper start_master_aloha.launch
+else
+    log "Launching piper: puppet_mode=${MODE}, master_mode=0, auto_enable=${AUTO_ENABLE}"
+    roslaunch piper start_ms_piper.launch puppet_mode:="${MODE}" master_mode:="0" auto_enable:="${AUTO_ENABLE}"
+fi

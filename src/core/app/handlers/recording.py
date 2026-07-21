@@ -174,6 +174,8 @@ def maybe_build_episode_logger(config: ConfigDict, runtime: RuntimeState) -> Non
         eval_mode=False,
         save_image_height=storage.get("image_height"),
         save_image_width=storage.get("image_width"),
+        fallback_image_height=config.transport.image_height,
+        fallback_image_width=config.transport.image_width,
     )
 
 
@@ -761,6 +763,66 @@ def collect_stop(config: ConfigDict, runtime: RuntimeState, session: SessionStat
     logger.info("Collection episode stopped; leaving hardware at current pose")
 
 
+def advance_collection_tasks_after_save(
+    config: ConfigDict, runtime: RuntimeState, session: SessionState
+) -> None:
+    """Advance the collection task after a configured number of saved trials.
+
+    Save completion arrives from the logger's worker thread.  This function is
+    intentionally called from the application loop so the session and web status
+    are changed on their normal owner thread.
+    """
+    logger_obj = runtime.episode_logger
+    if logger_obj is None:
+        return
+    drain = getattr(logger_obj, "drain_saved_collection_tasks", None)
+    if drain is None:
+        return
+    saved_tasks = drain()
+    if not saved_tasks:
+        return
+
+    trials_per_task = config.collection.get("trials_per_task", 0)
+    if not isinstance(trials_per_task, int) or isinstance(trials_per_task, bool):
+        return
+    if trials_per_task <= 0:
+        return
+    tasks = list(config.collection.get("tasks") or ())
+    if not tasks:
+        return
+    completed = getattr(logger_obj, "completed_collection_episodes", None)
+    if completed is None:
+        return
+
+    for saved_task in saved_tasks:
+        # Do not override a deliberate operator selection made while an older
+        # episode was still flushing in the background.
+        if session.selected_collect_task != saved_task:
+            continue
+        if completed(saved_task) < trials_per_task:
+            continue
+        try:
+            task_index = tasks.index(saved_task)
+        except ValueError:
+            continue
+        if task_index + 1 >= len(tasks):
+            logger.info(
+                "Collection target reached for final task %s (%d trials)",
+                format_task_label(saved_task),
+                trials_per_task,
+            )
+            continue
+        next_task = tasks[task_index + 1]
+        session.selected_collect_task = next_task
+        session.last_error = ""
+        logger.info(
+            "Collection target reached for %s (%d trials); next task -> %s",
+            format_task_label(saved_task),
+            trials_per_task,
+            format_task_label(next_task),
+        )
+
+
 def collect_cancel(runtime: RuntimeState, session: SessionState) -> None:
     """Discard the in-flight collection episode (no save, partial files removed)."""
     if runtime.episode_logger is not None and runtime.episode_logger.is_collection_enabled:
@@ -837,6 +899,7 @@ __all__ = [
     "collect_start",
     "collect_step",
     "collect_stop",
+    "advance_collection_tasks_after_save",
     "collect_cancel",
     "_active_loggers",
     "record_executed_action",

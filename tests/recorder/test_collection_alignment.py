@@ -131,6 +131,36 @@ def test_align_collection_samples_reports_missing_required_vector_stream():
     ]
 
 
+def test_align_collection_samples_keeps_vector_grid_when_image_stream_is_missing():
+    batch = CollectionRawBatch(
+        vectors={
+            "state_qpos": [
+                _sample(0.0, np.zeros(3, dtype=np.float32)),
+                _sample(0.2, np.ones(3, dtype=np.float32)),
+            ],
+            "action_qpos": [
+                _sample(0.0, np.full(3, 2.0, dtype=np.float32)),
+                _sample(0.2, np.full(3, 3.0, dtype=np.float32)),
+            ],
+        },
+    )
+
+    frames, report = align_collection_samples(
+        batch,
+        robot=_robot(),
+        camera_keys=("cam_high",),
+        vector_fields=("state_qpos", "action_qpos"),
+        fps=10.0,
+        image_skew_sec=0.06,
+    )
+
+    assert [frame.timestamp for frame in frames] == [0.0, 0.1, 0.2]
+    assert all("cam_high" not in frame.images for frame in frames)
+    assert [(issue.code, issue.detail) for issue in report.issues] == [
+        ("missing_image_stream", "cam_high has no samples")
+    ]
+
+
 def test_align_collection_samples_holds_gripper_dimensions_discrete():
     batch = CollectionRawBatch(
         images={
