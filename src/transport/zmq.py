@@ -261,7 +261,7 @@ class _ObservationReader:
         return {key: np.asarray(image) for key, image in wire_obs.images.items()}
 
     def _drain_latest(self) -> WireObservation | None:
-        """Pop all queued SUB messages, keeping only the newest by timestamp."""
+        """Pop all queued SUB messages, keeping the newest by receive order."""
         with self._lock:
             newest = self._latest
             got_message = False
@@ -275,8 +275,8 @@ class _ObservationReader:
                 images = self._observation_images(obs)
                 self._image_rate.mark_many(images.keys(), obs.t)
                 self._cache_images_locked(images)
-                if newest is None or obs.t >= newest.t:
-                    newest = obs
+                # Simulator time resets when the publisher restarts; receive order is authoritative.
+                newest = obs
             if got_message:
                 self._freshness.mark()
             self._latest = newest
@@ -296,8 +296,7 @@ class _ObservationReader:
                 self._image_rate.mark_many(images.keys(), obs.t)
                 self._cache_images_locked(images)
                 self._collection_queue.append(obs)
-                if self._latest is None or obs.t >= self._latest.t:
-                    self._latest = obs
+                self._latest = obs
             if got_message:
                 self._freshness.mark()
             if not self._collection_queue:
@@ -320,9 +319,7 @@ class _ObservationReader:
     def clear_collection_backlog(self) -> float | None:
         """Drain the socket and drop queued collection frames captured pre-recording."""
         with self._lock:
-            cutoff = None
-            if self._collection_queue:
-                cutoff = max(obs.t for obs in self._collection_queue)
+            cutoff = self._collection_queue[-1].t if self._collection_queue else None
             last_payload = self._raw_collection_queue[-1] if self._raw_collection_queue else None
             while True:
                 try:
@@ -335,7 +332,7 @@ class _ObservationReader:
                 except Exception:
                     payload_time = None
                 if payload_time is not None:
-                    cutoff = payload_time if cutoff is None else max(cutoff, payload_time)
+                    cutoff = payload_time
             self._collection_queue.clear()
             self._raw_collection_queue.clear()
             return cutoff

@@ -41,3 +41,19 @@ is green. The live console keeps updating robot state without opening camera str
 A dataset exposes only camera features present in every episode; extra
 per-episode videos remain available to the console through `episodes.jsonl`. Mixing
 state-only and rendered observations inside one episode is a QC failure.
+
+Measure state-only collection alignment and live-console latency with explicit checks:
+
+```bash
+python tests/manual/benchmark_state_only_latency.py --mode synthetic
+python tests/manual/benchmark_state_only_latency.py --mode recording
+python tests/manual/benchmark_state_only_latency.py --mode live \
+    --obs-endpoint tcp://127.0.0.1:5555 \
+    --console-url http://127.0.0.1:8080
+```
+
+Recording mode deliberately stalls capture for three seconds, catches up, writes an
+episode, and verifies every Parquet row's state/action/capture-time alignment. The
+command exits nonzero on dropped raw snapshots, misalignment, excessive p95 latency,
+or an excessive state-update freeze. Use `--capture-stall`, `--max-latency-ms`, and
+`--max-freeze-ms` to override the defaults.

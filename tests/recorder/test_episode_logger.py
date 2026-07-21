@@ -97,11 +97,12 @@ def _collection_logger(
     save_image_height: int | None = None,
     save_image_width: int | None = None,
     async_save: bool = False,
+    fps: int = 10,
 ) -> EpisodeLogger:
     return EpisodeLogger(
         log_dir,
         _robot(),
-        fps=10,
+        fps=fps,
         dataset_keys=ConfigDict(
             state_key="observations.state.qpos",
             eef_key="observations.state.eef",
@@ -853,6 +854,40 @@ def test_collection_state_only_episode_saves_green_without_videos(tmp_path):
     assert info["total_videos"] == 0
     assert "observation.images.cam_high" not in info["features"]
     assert logger.status_snapshot("t")["episodes"][0]["state_only"] is True
+
+
+def test_collection_state_only_rows_keep_state_action_and_capture_time_aligned(tmp_path):
+    logger = _collection_logger(tmp_path, fps=30)
+    source_times = np.arange(121, dtype=np.float64) / 60.0
+
+    logger.start_episode("t")
+    for capture_time in source_times:
+        state = np.full(_DIM, capture_time, dtype=np.float32)
+        action = state + 10.0
+        batch = CollectionRawBatch(
+            images={},
+            vectors={
+                "state_qpos": [CollectionRawSample(capture_time, state)],
+                "action_qpos": [CollectionRawSample(capture_time, action)],
+            },
+            image_streams_expected=False,
+        )
+        logger.ingest_collection_snapshot(
+            RawCollectionSnapshot(timestamp=capture_time, decode_raw=lambda batch=batch: batch)
+        )
+
+    assert logger.end_episode()
+    task_dir = _collection_task_dir(tmp_path)
+    table = pq.read_table(task_dir / "data" / "chunk-000" / "episode_000000.parquet")
+    state = np.asarray(table.column("observation.qpos").to_pylist(), dtype=np.float64)
+    action = np.asarray(table.column("action").to_pylist(), dtype=np.float64)
+    capture_time = np.asarray(table.column("capture_time").to_pylist(), dtype=np.float64)
+
+    assert table.num_rows == 61
+    assert table.column("frame_index").to_pylist() == list(range(table.num_rows))
+    np.testing.assert_allclose(action - state, 10.0, atol=1e-6)
+    np.testing.assert_allclose(state[:, 0], capture_time, atol=1e-6)
+    np.testing.assert_allclose(np.diff(capture_time), 1.0 / 30.0, atol=1e-9)
 
 
 def test_collection_still_rejects_unexpected_empty_camera_stream(tmp_path):
