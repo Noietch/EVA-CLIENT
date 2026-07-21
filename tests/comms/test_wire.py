@@ -503,6 +503,28 @@ def test_zmq_clear_collection_backlog_without_source_time_returns_none(monkeypat
     assert reader.clear_collection_backlog() is None
 
 
+def test_zmq_clear_collection_backlog_uses_receive_order_after_source_time_resets():
+    class _Again(Exception):
+        pass
+
+    class _Sub:
+        def recv(self, _flags):
+            raise _Again
+
+    reader = object.__new__(_ObservationReader)
+    reader._zmq = types.SimpleNamespace(NOBLOCK=object(), Again=_Again)
+    reader._sub = _Sub()
+    reader._collection_queue = collections.deque(
+        [WireObservation(t=60.0, images={}, state={})]
+    )
+    reader._raw_collection_queue = collections.deque(
+        [pack_observation(WireObservation(t=0.0, images={}, state={}))]
+    )
+    reader._lock = threading.Lock()
+
+    assert reader.clear_collection_backlog() == 0.0
+
+
 def test_zmq_reader_exposes_partial_camera_frames_for_visualization():
     robot = ROBOT_REGISTRY.build("agilex_piper")
     image = np.full((4, 4, 3), 127, dtype=np.uint8)
@@ -695,6 +717,51 @@ def test_zmq_reader_conflates_latest_frames_but_preserves_collection_backlog():
 
     assert (fake_zmq.CONFLATE, 1) in context.sockets[0].options
     assert (fake_zmq.CONFLATE, 1) not in context.sockets[1].options
+
+
+def test_zmq_reader_accepts_new_publisher_after_source_time_resets():
+    class _Again(Exception):
+        pass
+
+    new_observation = WireObservation(
+        t=0.0,
+        images={"cam_high": np.zeros((4, 4, 3), dtype=np.uint8)},
+        state={},
+        frame_id=0,
+        camera_resolution=(480, 640),
+    )
+    payloads = collections.deque([pack_observation(new_observation)])
+
+    class _Socket:
+        def recv(self, _flags):
+            if not payloads:
+                raise _Again
+            return payloads.popleft()
+
+    reader = object.__new__(_ObservationReader)
+    old_observation = WireObservation(
+        t=60.0,
+        images={"cam_high": np.ones((4, 4, 3), dtype=np.uint8)},
+        state={},
+        frame_id=3600,
+    )
+    reader._latest = old_observation
+    reader._latest_image_observation = old_observation
+    reader._image_revision = 1
+    reader._sub = _Socket()
+    reader._zmq = types.SimpleNamespace(NOBLOCK=object(), Again=_Again)
+    reader._image_rate = ImageRateTracker()
+    reader._latest_images = {}
+    reader._disabled_cameras = set()
+    reader._freshness = types.SimpleNamespace(mark=lambda: None)  # type: ignore[reportAttributeAccessIssue]
+    reader._lock = threading.Lock()
+
+    latest = reader._drain_latest()
+
+    assert latest is not None
+    assert latest.frame_id == 0
+    assert reader._latest_image_observation is latest
+    assert reader._image_revision == 2
 
 
 def test_zmq_transport_reports_freshest_reader_and_closes_all_readers(monkeypatch):
