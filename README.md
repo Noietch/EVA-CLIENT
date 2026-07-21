@@ -1,209 +1,192 @@
-# EVA Client
+<p align="center">
+  <a href="https://colalab.net/projects/eva-client/"><img src="assets/eva-logo.svg" alt="EVA-Client Logo" width="34%"></a>
+</p>
 
-> v0.1 — Unified robot VLA inference debugging and evaluation client
+<h1 align="center">EVA-Client: A Unified Framework for Deployment, Evaluation, and Data Collection on Real Robots</h1>
 
-EVA connects to a VLA (Vision-Language-Action) policy server, streams live
-observations, and dispatches actions in real time — covering the full loop of
-**single-machine debugging → data collection → blind evaluation → result
-visualization**. Everything is driven from a browser-based **web console** (control
-commands flow through an internal HTTP command queue), including a self-rendered 3D
-scene (yourdfpy parses URDF, Three.js loads geometry once and streams per-frame 4×4
-world transforms).
+<p align="center">One policy, any robot — the smooth all-in-one real-robot stack. Debug, record, evaluate, visualize, all in the browser.</p>
 
-It supports real / simulation / offline runtimes, 6 robots, 4 transports, 6 policy
-backends, and 5 inference strategies.
+<p align="center">
+<a href="https://colalab.net/projects/eva-client/"><img src="https://img.shields.io/badge/Project%20Page-colalab.net-blue?style=for-the-badge&logo=googlechrome&logoColor=white" alt="Project Page"></a>
+<a href="https://colalab.net/projects/eva-client/paper/EVA_Client_Report.pdf"><img src="https://img.shields.io/badge/Technical%20Report-PDF-red?style=for-the-badge&logo=adobeacrobatreader&logoColor=white" alt="Technical Report"></a>
+<a href="https://colalab.net/projects/eva-client/docs/introduction.html"><img src="https://img.shields.io/badge/Docs-English-2ea44f?style=for-the-badge&logo=readthedocs&logoColor=white" alt="Documentation (English)"></a>
+<a href="https://colalab.net/projects/eva-client/docs/introduction.zh.html"><img src="https://img.shields.io/badge/文档-中文-2ea44f?style=for-the-badge&logo=readthedocs&logoColor=white" alt="Documentation (中文)"></a>
+<a href="https://github.com/Noietch/EVA-CLIENT/stargazers"><img src="https://img.shields.io/github/stars/Noietch/EVA-CLIENT?style=for-the-badge&logo=github&logoColor=white&color=0a0a0a&cacheSeconds=60" alt="GitHub Stars"></a>
+<p align="center">
+  <video src="https://github.com/user-attachments/assets/09cf8c98-396d-45d0-bd38-8603412ec3c2" controls muted></video>
+</p>
 
-## Architecture
+<p align="center"><em>EVA-Client driving an AgileX bimanual arm end-to-end from the browser — teleop → record → π₀ checkpoint → smooth async deploy. Real hardware, not a rendering.</em></p>
 
-```
-eva-client/
-├── configs/              # .py configs with mmengine-style `_base_` inheritance + deep merge
-│   ├── 00_base/          #   defaults.py — single source of truth for omitted fields
-│   ├── 00_openloop/      #   dataset open-loop (no policy server), one per robot
-│   ├── 01_deploy/        #   per-robot deployment (qpos / eef presets)
-│   ├── 02_collection/    #   per-robot teleop data-collection configs
-│   ├── 03_evaluation/    #   blind eval (eval_cfg.checkpoints[] + optional ssh forward)
-│   └── 04_rl/             #   RL rollout/HIL configs (local overrides are ignored)
-├── examples/             # execution-layer nodes, teleop publishers, sample dataset
-├── tests/                # unit tests (IK / config merge / action conversion / smoothing)
-└── src/
-    ├── main.py           # entry: parse CLI, launch the web app
-    ├── core/
-    │   ├── cfg/          #   .py config loading (`_base_`) + type registry
-    │   ├── app/          #   main loop, state, command handlers, console server
-    │   ├── recorder/     #   LeRobot v2.1 episode + collection recording
-    │   └── utils/        #   math, paths, lerobot meta, ssh forwarding
-    ├── policy_client/    # backends: openpi / openpi_rtc / starvla / gr00t / mock / replay
-    ├── robots/           # robot zoo (6 robots) + PyRoki (JAX/jaxls) kinematics
-    ├── strategy/         # inference strategies (sync / async / naive / act / rtc)
-    └── transport/        # transports (ros1 / ros2 / zmq / dataset)
-```
+<p align="center">
+  <b>Jump to:</b>&nbsp;
+  <a href="#-what-you-get">What you get</a> ·
+  <a href="#-robot-zoo--compatibility">Robot zoo</a> ·
+  <a href="#-protocols--middleware">Protocols</a> ·
+  <a href="#%EF%B8%8F-architecture">Architecture</a> ·
+  <a href="#-documentation">Documentation</a> ·
+  <a href="#%EF%B8%8F-roadmap">Roadmap</a> ·
+  <a href="#-citation">Cite</a>
+</p>
 
-## Requirements
+---
 
-- Python ≥ 3.10, < 3.12 for the EVA client environment
-- ROS Noetic — only for the `ros1` transport
-- ROS 2 — only for the `ros2` transport. Its Python packages (`rclpy`, `cv_bridge`,
-  message packages) must be built for the same Python minor version as `.venv`; use
-  Python 3.10 for Ubuntu 22.04 / ROS 2 Humble apt packages.
-- `zmq` / `dataset` transports have no ROS dependency
-- [uv](https://github.com/astral-sh/uv) for dependency management
+## ✨ What you get
 
-## Installation
+* **🚀 Deployment.** One command brings up a real-robot closed loop:
+  `.py` config → transport ([ROS1](https://github.com/ros/ros) / [ROS2](https://github.com/ros2/ros2) / [ZeroMQ](https://github.com/zeromq/pyzmq) / offline dataset) → policy
+  backend ([OpenPI](https://github.com/Physical-Intelligence/openpi), [OpenPI-RTC](https://www.pi.website/research/real_time_chunking), [StarVLA](https://github.com/starVLA/starVLA), [GR00T](https://github.com/Nvidia/Isaac-GR00T), mock, replay) → inference
+  strategy (sync / [async](https://github.com/OpenDriveLab/kai0#train-deploy-alignment) / naive / [ACT-ensemble](https://github.com/tonyzhaozh/act) / RTC) with live latency
+  compensation. **6 robots already** — joint-space or EEF-space (PyRoki IK),
+  all live-switchable from the DEBUG tab.
+* **📊 Evaluation.** Multi-checkpoint sweeps with per-trial records: every
+  rollout captures camera video, 3D URDF scene, per-dimension state charts,
+  and per-prompt milestone scores into dataset metadata, then replays
+  synchronously in the RESULT tab. Prompt shuffling, and remote
+  policy servers over SSH port-forward are first-class.
+* **🎥 Data collection.** Teleop capture straight into [LeRobot](https://github.com/huggingface/lerobot) v2.1 episodes
+  from the COLLECT tab — background saver, in-tab QC PASS/FAIL replay, camera
+  streams encoded to mp4, per-frame green/red quality flags. Teleop demos and
+  model rollouts share one on-disk layout.
 
-```bash
-source /opt/ros/humble/setup.bash  # required before running the ros2 transport
-uv venv --python /usr/bin/python3.10 --system-site-packages .venv
-source .venv/bin/activate
-uv pip install -e ".[dev]"
-```
+---
 
-Optional extras: `franka`, `arx`, `ur5e`, `camera` (Orbbec SDK), `viz`.
+## 🔥 What's NEW!
 
-## Quick start
+* **[2026-07] New RL Workspace.** EVA-Client now supports human-in-the-loop (HIL) intervention during policy rollouts and real-time value-curve visualization.
 
-The entry point is `eva` (`src/main.py`). `--config` is required and must point to a
-`.py` config; operate everything from the browser.
+<p align="center">
+  <video src="https://github.com/user-attachments/assets/63a48ff6-5889-49f0-adaa-61cff1e4a55a" controls muted></video>
+</p>
 
-```bash
-# deploy: openpi policy, joint-space action
-eva --config configs/01_deploy/dual_agilex_piper/openpi_qpos.py
+* **[2026-07] EVA-Client is open-sourced!**
+* **[2026-07] Paper, docs, and project page are live!** Read the [Technical Report](https://colalab.net/projects/eva-client/paper/EVA_Client_Report.pdf), browse the [Documentation](https://colalab.net/projects/eva-client/docs/introduction.html) ([中文](https://colalab.net/projects/eva-client/docs/introduction.zh.html)), and visit the [Project Page](https://colalab.net/projects/eva-client/).
 
-# deploy: EEF-pose action (policy outputs EEF, PyRoki IK converts to joint commands)
-eva --config configs/01_deploy/dual_agilex_piper/openpi_eef.py
+---
 
-# offline: dataset open-loop replay (no ROS or policy server)
-eva --config configs/00_openloop/dual_agilex_piper_openloop.py
+## 🤖 Robot zoo & compatibility
 
-# blind multi-model evaluation
-eva --config configs/03_evaluation/dual_agilex_piper_eval.py
+✅ Supported &nbsp;·&nbsp; 🚧 In development &nbsp;·&nbsp; 📦 To be added
 
-# RL rollout with optional HIL and critic telemetry
-eva --config configs/04_rl/r1lite_rl.local.py
-```
+| Robot | Form factor | Supported |
+|-------|-------------|:---------:|
+| AgileX Piper | Dual 6-DoF arm + gripper | ✅ |
+| ARX R5 | Dual 6-DoF arm + gripper | ✅ |
+| Dual Franka Panda | Dual 7-DoF arm + gripper | ✅ |
+| Galaxea R1 Lite | Dual 6-DoF arm on torso | ✅ |
+| Universal Robots UR5e | Single 6-DoF arm + gripper | ✅ |
+| AgiBot G2 | Dual-arm humanoid (24-DoF body) | ✅ |
+| AgiBot G2 (mobile base) | Humanoid on mobile chassis | 🚧 |
+| YAM | Dual-arm manipulator | 🚧 |
+| Tianji | Dual-arm manipulator | 🚧 |
+| Unitree H1 / G1 | Humanoid | 🚧 |
+| Fourier GR-1 | Humanoid | 📦 |
+| Booster T1 | Humanoid | 📦 |
+| Mobile ALOHA | Mobile dual-arm | 📦 |
 
-Startup logs print the web port (default `8080`); open `http://<host>:8080`. For
-remote work, forward the port over SSH:
+---
 
-```bash
-ssh -L 8080:localhost:8080 <user>@<host>   # then open http://localhost:8080
-```
+## 🔌 Protocols & middleware
 
-| Argument | Description | Default |
-|---|---|---|
-| `--config` | path to a `.py` config (required) | — |
-| `--web-port` | web server port | `8080` |
+| Layer | Name | Protocol / wire format | Supported |
+|-------|------|------------------------|:---------:|
+| Transport | ROS 1 | ROS 1 stack | ✅ |
+| Transport | ROS 2 | ROS 2 stack | ✅ |
+| Transport | ZeroMQ | ZeroMQ execution node | ✅ |
+| Transport | Offline dataset | Offline LeRobot v2.x replay | ✅ |
+| Policy backend | OpenPI | WebSocket + msgpack (OpenPI, stateless) | ✅ |
+| Policy backend | OpenPI-RTC | WebSocket + msgpack (Real-Time Chunking) | ✅ |
+| Policy backend | StarVLA | WebSocket + msgpack (typed envelope) | ✅ |
+| Policy backend | GR00T | ZeroMQ REQ/REP + msgpack-numpy (Isaac-GR00T) | ✅ |
+| Policy backend | Mock | Local (smooth random actions) | ✅ |
+| Policy backend | Replay | Local (recorded trajectory replay) | ✅ |
 
-## Web console
+---
 
-A single console app with seven tabs. A config carrying an `eval_cfg.checkpoints[]`
-block auto-activates the EVAL/RESULT tabs on startup; otherwise they are greyed out.
+## 🏗️ Architecture
 
-| Tab | Purpose |
-|---|---|
-| **DEBUG** | run control (connect, setup, run, stop, reset), live camera + qpos feed, gripper control, breakpoint single-step: `SIM ↻` previews one chunk in 3D → `REAL ▶` dispatches after review |
-| **REPLAY** | open-loop replay of a recorded dataset |
-| **RL** | policy rollout with optional critic, HIL intervention, rollout saving/QC, and synchronized replay |
-| **COLLECT** | teleoperation recording into a LeRobot v2.1 dataset |
-| **MANUAL** | drag per-joint qpos sliders and dispatch (`SEND` to stage, `SYNC` to mirror the real robot) |
-| **EVAL** | blind multi-model eval — anonymized model labels (A/B/…) + reproducible shuffle, flat prompt list, per-prompt trials with milestone scoring, optional SSH port-forward + result rsync |
-| **RESULT** | per-trial replay synced across three views: camera mp4 (HTTP Range seek), 3D URDF (backend FK over recorded qpos), and a per-dimension state chart |
+<p align="center">
+  <img src="assets/workflow.png" width="100%" alt="EVA-Client workflow">
+</p>
 
-## Core concepts
+---
 
-Detailed operator, headless, and control-channel usage:
+## 📚 Documentation
 
-- [Console and headless mode](docs/console.md)
-- [Control channel](docs/control-channel.md)
+Full guides live in [`docs/`](./docs). Start here:
 
-**Transports** — EVA speaks only the middleware protocol; the SDK that drives the
-hardware runs in a separate execution-layer node (see `examples/hardware/`).
+| Guide | What's inside |
+|-------|---------------|
+| [📦 Installation](./docs/installation.md) | Requirements, `uv` setup, hardware extras, verify |
+| [🚀 Quick start](./docs/quick-start.md) | Two-process bring-up, supported transports, deploy/eval/replay presets |
+| [🧭 Web console](./docs/console.md) | The seven tabs — MANUAL, COLLECT, REPLAY, DEBUG, RL, EVAL, RESULT |
+| [📚 Core concepts](./docs/concepts.md) | Transports, policy backends, inference strategies, robots, action spaces |
+| [⚙️ Configuration](./docs/configuration.md) | `_base_` inheritance, deep merge, startup pipeline |
+| [🎞️ Recording](./docs/recording.md) | LeRobot v2.1 on-disk layout, QC flags, eval trials |
+| [🔬 Development](./docs/development.md) | Tests, lint, type-check, and how the robot side is faked |
 
-| Type | Description | Dependency |
-|---|---|---|
-| `ros1` | ROS Noetic bridge (joint / EEF / camera topics) | ROS Noetic |
-| `ros2` | ROS 2 bridge | ROS 2 |
-| `zmq` | ZeroMQ pub/sub to the execution-layer node | — |
-| `dataset` | offline LeRobot v2 dataset replay | — |
+---
 
-The Control Channel is an independent ZMQ control plane. It can be enabled with
-any robot transport (`zmq`, `ros1`, `ros2`, or `dataset`) and only carries
-sparse UI commands; observations and actions continue to use the configured
-transport.
+## 🗺️ Roadmap
 
-**Policy backends**
+- [ ] **More robots.** Extend the robot zoo to more embodiments — dual-arm
+      manipulators (YAM, Tianji, …), humanoids
+      (Unitree H1/G1, Fourier GR-1, Booster T1, …) and mobile / wheeled
+      platforms (mobile ALOHA, Galaxea R1 base, quadruped + arm).
+- [x] **Human-in-the-loop data collection for RL.** Interventions during
+      policy rollout captured as preference / correction data, DAgger-style
+      relabeling, and reward-model signals piped back through the LeRobot
+      episode format for online RL fine-tuning.
+- [ ] **Embodied agent.** Wrap the deployment + evaluation loop with a
+      language-driven planner (VLM / VLA + tool use) so long-horizon tasks
+      can be decomposed, executed, verified, and re-planned end-to-end from
+      the same console.
+- [ ] **Data annotation.** Extend Collect mode with fine-grained task and
+      sub-task annotation, segmenting long-horizon episodes into labeled
+      sub-task units and milestones within the same LeRobot dataset. This
+      makes a collection reusable at the level of individual manipulation
+      phases.
 
-| Backend | Protocol | Notes |
-|---|---|---|
-| `openpi` / `openpi_rtc` | WebSocket + msgpack | OpenPI server; `_rtc` variant feeds prev_action back |
-| `starvla` | WebSocket + msgpack | typed envelope, configurable camera / unnorm key |
-| `gr00t` | ZeroMQ REQ/REP + msgpack-numpy | Isaac-GR00T, nested by modality key |
-| `mock` | local | smooth random actions, offline integration testing |
-| `replay` | local | replays a dataset's recorded action trajectory |
+---
 
-**Inference strategies** (preset in config, switchable from the console)
+## 📝 Citation
 
-| Type | Description |
-|---|---|
-| `BaseInferStrategy` | synchronous — execute one chunk per response |
-| `AsyncLinearOverlapInferStrategy` | background fixed-rate thread, linear-overlap smoothing (`latency_k` clips the first k steps for latency) |
-| `NaiveAsyncInferStrategy` | background thread, switches to the new chunk with no smoothing |
-| `ActEnsembleInferStrategy` | background thread, ACT-style temporal aggregation (`exp_weight_m`) |
-| `RtcInferStrategy` | Real-Time Chunking — prev_action-guided diffusion alignment + latency-compensated overlap |
+If EVA-Client is useful for your research or product, please cite:
 
-**Robots** — `agilex_piper`, `arx_r5`, `dual_franka`, `r1_lite`, `ur5e`, `agibot_g2`.
-All kinematics go through one PyRoki (JAX + jaxls) backend: per-frame Levenberg–
-Marquardt IK chained for continuity (velocity cost ties each frame to the previous
-solve, rest cost biases toward the home pose to fight null-space drift). The first
-frame anchors to the measured current state, so execution starts without a jump.
-
-**Action spaces** — `inference_cfg.obs_space` and `inference_cfg.action_space` are
-each `JointState` or `EEFPose`. When the policy outputs `EEFPose` but the robot
-consumes joints, EVA runs PyRoki IK to convert. An `EEFPose` vector is laid out as
-`n_arms × (xyz3 + rot + grip1)` (`rotation: quat` → 4D).
-
-## Configuration
-
-Configs are `.py` files using mmengine-style `_base_` inheritance with field-wise
-deep merge — a preset overrides only what it changes. `configs/00_base/defaults.py`
-is the single source of truth for omitted fields.
-
-```python
-# configs/01_deploy/dual_agilex_piper/openpi_qpos.py
-_base_ = ['_base.py']                          # → ../../00_base/defaults.py
-
-policy = dict(
-    type='openpi_rtc',                         # openpi / openpi_rtc / starvla / gr00t / mock / replay
-    backend_options=dict(latency_k=4),
-)
-
-inference_cfg = dict(
-    obs_space=dict(type='JointState'),
-    action_space=dict(type='JointState'),
-    publish_rate=30,
-    debug_tasks=['pick up the yellow spoon and place it on the green plate'],
-)
-
-inference_strategies = {
-    'sync':  dict(type='BaseInferStrategy', args=dict(execute_horizon=5)),
-    'async': dict(type='AsyncLinearOverlapInferStrategy', args=dict(latency_k=4)),
+```bibtex
+@misc{yang2026evaclient,
+      title={EVA-Client: A Unified Data Collection, Inference, and Deployment Framework for Embodied Policies on Real Robots},
+      author={Heqing Yang and Yang Yi and Liyao Wang and Linqing Zhong and Donglin Yang and Ruipu Wu and Zitong Bai and Fengjiao Chen and Manyuan Zhang and Linjiang Huang and Si Liu},
+      year={2026},
+      eprint={2607.02646},
+      archivePrefix={arXiv},
+      primaryClass={cs.RO},
+      url={https://arxiv.org/abs/2607.02646},
 }
 ```
 
-## Data collection
+## 📬 Contact
 
-With logging enabled, each inference run is recorded as one LeRobot v2.1 episode
-(one config → one dataset), using a two-table layout: a main table (strictly 1 row
-per step, SFT-ready) plus a debug long-table sidecar (multiple raw predictions per
-step for overlapping async/RTC chunks), joined on `absolute_step`. Cameras are
-encoded as streaming mp4. The COLLECT tab records teleoperation via transport-level
-`CollectionFrame` snapshots; QC marks each episode green/red (red ones are still
-saved, with issues recorded in `quality_issues`).
+For questions or collaboration, feel free to reach out via WeChat:
 
-## Development
+<p align="left">
+  <img src="https://github.com/user-attachments/assets/e2c22730-b832-4dae-bb6b-c7734e3e0225" alt="WeChat QR Code" width="240" />
+</p>
 
-```bash
-pytest            # tests
-ruff check .      # lint
-pyright           # type check
-```
+---
+
+<details>
+<summary><b>License &amp; Acknowledgements</b></summary>
+
+This project is licensed under the Apache-2.0 License. See [LICENSE](./LICENSE)
+for more information.
+
+Builds upon several excellent open-source efforts, including
+[PyRoki](https://github.com/chungmin99/pyroki) and
+[jaxls](https://github.com/brentyi/jaxls) for kinematics,
+[OpenPI](https://github.com/Physical-Intelligence/openpi) for policy serving,
+the [LeRobot](https://github.com/huggingface/lerobot) dataset format, and a
+vendored mmengine-style config system from
+[MMEngine](https://github.com/open-mmlab/mmengine).
+
+</details>
