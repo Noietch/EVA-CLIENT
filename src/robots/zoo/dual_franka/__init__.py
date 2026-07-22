@@ -24,7 +24,18 @@ from robots.base import (
     RobotVisConfig,
     VisPart,
 )
-from robots.kinematics.pyroki import PyrokiDualArm, PyrokiSingleArm
+
+try:
+    from robots.kinematics.pyroki import PyrokiDualArm, PyrokiSingleArm
+except ImportError as exc:
+    _PYROKI_IMPORT_ERROR: ImportError | None = exc
+
+    class PyrokiDualArm:  # type: ignore[no-redef]
+        pass
+
+    PyrokiSingleArm = None  # type: ignore[assignment]
+else:
+    _PYROKI_IMPORT_ERROR = None
 
 
 def _unit_quat(quat_wxyz: Iterable[float]) -> tuple[float, float, float, float]:
@@ -139,6 +150,10 @@ class DualFranka(Robot):
         )
 
     def build_kinematics(self, *, reference_frame: str | None = None, **kwargs: Any) -> Any:
+        if _PYROKI_IMPORT_ERROR is not None:
+            raise ImportError("Franka kinematics requires the PyRoki/JAX dependencies") from (
+                _PYROKI_IMPORT_ERROR
+            )
         frame = reference_frame or self.DEFAULT_FRAME
         if frame not in self.SUPPORTED_FRAMES:
             allowed = ", ".join(self.SUPPORTED_FRAMES)

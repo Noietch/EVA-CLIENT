@@ -23,6 +23,7 @@ transport = dict(
                 eef_state_topic='/relaxed_ik/motion_control/pose_ee_arm_left',
                 gripper_state_topic='/hdas/feedback_gripper_left',
                 gripper_command_topic='/motion_target/target_position_gripper_left',
+                hil_input_topic='/eva/hil/input_joint_state_arm_left',
             ),
             right_arm=dict(
                 state_topic='/hdas/feedback_arm_right',
@@ -30,6 +31,7 @@ transport = dict(
                 eef_state_topic='/relaxed_ik/motion_control/pose_ee_arm_right',
                 gripper_state_topic='/hdas/feedback_gripper_right',
                 gripper_command_topic='/motion_target/target_position_gripper_right',
+                hil_input_topic='/eva/hil/input_joint_state_arm_right',
             ),
         ),
     ),
@@ -68,7 +70,6 @@ collection = dict(
                     qpos_topic='/hdas/feedback_arm_left',
                     qpos_gripper_topic='/hdas/feedback_gripper_left',
                     eef_topic='/relaxed_ik/motion_control/pose_ee_arm_left',
-                    hil_qpos_topic='/eva/hil/input_joint_state_arm_left',
                     action_qpos_topic='/motion_target/target_joint_state_arm_left',
                     action_qpos_gripper_source='operator',
                     action_qpos_gripper_topic=None,
@@ -79,7 +80,6 @@ collection = dict(
                     qpos_topic='/hdas/feedback_arm_right',
                     qpos_gripper_topic='/hdas/feedback_gripper_right',
                     eef_topic='/relaxed_ik/motion_control/pose_ee_arm_right',
-                    hil_qpos_topic='/eva/hil/input_joint_state_arm_right',
                     action_qpos_topic='/motion_target/target_joint_state_arm_right',
                     action_qpos_gripper_source='operator',
                     action_qpos_gripper_topic=None,
@@ -101,10 +101,10 @@ rollout = dict(
         image_height=360,
         image_width=640,
     ),
-    intervention=dict(enabled=True, control_mode='relative'),
+    intervention=dict(control_mode='relative'),
 )
 
 operator_control = dict(
     enabled=True,
-    button_topic='/eva/operator_button',
+    action_topic='/eva/operator_action',
 )

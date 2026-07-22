@@ -402,21 +402,27 @@ class UrdfScene:
             matching the header. The key order is derived from the first frame's
             ``transforms`` output so it always matches the float layout.
         """
-        seq = np.asarray(qpos_seq, dtype=np.float64)
-        n_frames = seq.shape[0]
-        # Derive the geom key order from the float source itself, never from static_meshes
-        # (that walks a separate URDF load whose dict order need not agree).
-        first = self.transforms(seq[0]) if n_frames else {}
-        keys = [(part, geom) for part in first for geom in first[part]]
-        n_geoms = len(keys)
-        flat = np.empty((n_frames, n_geoms, 4, 4), dtype="<f4")
-        for f in range(n_frames):
-            arms = self.transforms(seq[f])
-            for g, (part, geom) in enumerate(keys):
-                flat[f, g] = arms[part][geom]
-        header = json.dumps([f"{part}/{geom}" for part, geom in keys]).encode("utf-8")
-        meta = _XFRM_MAGIC + struct.pack("<III", n_frames, n_geoms, len(header))
-        return meta + header + flat.tobytes()
+        # Keep the mutable yourdfpy scene graph exclusively for the whole batch.
+        # Without the outer lock, each re-entrant transforms() call releases between
+        # frames and high-rate live /api/scene polls can repeatedly cut in, turning a
+        # ~1 s batch into 6-8 s under the real console workload.
+        with self._lock:
+            seq = np.asarray(qpos_seq, dtype=np.float64)
+            n_frames = seq.shape[0]
+            # Derive the geom key order from the float source itself, never from
+            # static_meshes (that walks a separate URDF load whose dict order need not
+            # agree).
+            first = self.transforms(seq[0]) if n_frames else {}
+            keys = [(part, geom) for part in first for geom in first[part]]
+            n_geoms = len(keys)
+            flat = np.empty((n_frames, n_geoms, 4, 4), dtype="<f4")
+            for f in range(n_frames):
+                arms = self.transforms(seq[f])
+                for g, (part, geom) in enumerate(keys):
+                    flat[f, g] = arms[part][geom]
+            header = json.dumps([f"{part}/{geom}" for part, geom in keys]).encode("utf-8")
+            meta = _XFRM_MAGIC + struct.pack("<III", n_frames, n_geoms, len(header))
+            return meta + header + flat.tobytes()
 
     def solve_ik(self, robot: Robot, eef_target: np.ndarray, seed: np.ndarray) -> np.ndarray:
         """Solve IK by delegating to the robot's own kinematics solver.

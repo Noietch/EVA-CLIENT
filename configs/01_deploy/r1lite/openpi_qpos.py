@@ -3,14 +3,22 @@
 _base_ = ['openpi_base.py']
 
 policy = dict(
-    type='openpi_rtc',
+    type='openpi',
     backend_options=dict(latency_k=4),
 )
 
+transport = dict(
+    resize_pad=False,
+    image_layout='hwc',
+)
+
+robot = dict(
+    gripper_threshold=80.0,
+)
+
 inference_cfg = dict(
-    debug_tasks=[
-        'first scoop up the black foam and place it in the box, then scoop up the phone and place it in the box, and finally pick up the lid, put it on the box, and press it down firmly',  # noqa: E501
-    ],
+    publish_rate=30,
+    debug_tasks=['placeholder task — replace with the real task prompt'],
 )
 
 inference_strategies = {

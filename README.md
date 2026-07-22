@@ -53,7 +53,14 @@
 
 ## 🔥 What's NEW!
 
-* **[2026-07] EVA-Client is open-sourced!** 
+* **[2026-07] New RL Workspace.** EVA-Client now supports human-in-the-loop (HIL) intervention during policy rollouts and real-time value-curve visualization.
+
+<p align="center">
+  <video src="https://github.com/user-attachments/assets/63a48ff6-5889-49f0-adaa-61cff1e4a55a" controls muted></video>
+</p>
+
+* **[2026-07] Headless CLI + ZMQ control channel.** Drive the full deploy / eval / RL / collect loop from a single `.py` config without the browser — every console button (incl. HIL takeover) mirrored on a ZMQ socket. See [`docs/console.md`](./docs/console.md) and [`docs/control-channel.md`](./docs/control-channel.md).
+* **[2026-07] EVA-Client is open-sourced!**
 * **[2026-07] Paper, docs, and project page are live!** Read the [Technical Report](https://colalab.net/projects/eva-client/paper/EVA_Client_Report.pdf), browse the [Documentation](https://colalab.net/projects/eva-client/docs/introduction.html) ([中文](https://colalab.net/projects/eva-client/docs/introduction.zh.html)), and visit the [Project Page](https://colalab.net/projects/eva-client/).
 
 ---
@@ -113,7 +120,7 @@ Full guides live in [`docs/`](./docs). Start here:
 |-------|---------------|
 | [📦 Installation](./docs/installation.md) | Requirements, `uv` setup, hardware extras, verify |
 | [🚀 Quick start](./docs/quick-start.md) | Two-process bring-up, supported transports, deploy/eval/replay presets |
-| [🧭 Web console](./docs/web-console.md) | The six tabs — MANUAL, COLLECT, REPLAY, DEBUG, EVAL, RESULT |
+| [🧭 Web console](./docs/console.md) | The seven tabs — MANUAL, COLLECT, REPLAY, DEBUG, RL, EVAL, RESULT |
 | [📚 Core concepts](./docs/concepts.md) | Transports, policy backends, inference strategies, robots, action spaces |
 | [⚙️ Configuration](./docs/configuration.md) | `_base_` inheritance, deep merge, startup pipeline |
 | [🎞️ Recording](./docs/recording.md) | LeRobot v2.1 on-disk layout, QC flags, eval trials |
@@ -127,7 +134,7 @@ Full guides live in [`docs/`](./docs). Start here:
       manipulators (YAM, Tianji, …), humanoids
       (Unitree H1/G1, Fourier GR-1, Booster T1, …) and mobile / wheeled
       platforms (mobile ALOHA, Galaxea R1 base, quadruped + arm).
-- [ ] **Human-in-the-loop data collection for RL.** Interventions during
+- [x] **Human-in-the-loop data collection for RL.** Interventions during
       policy rollout captured as preference / correction data, DAgger-style
       relabeling, and reward-model signals piped back through the LeRobot
       episode format for online RL fine-tuning.
@@ -149,13 +156,13 @@ If EVA-Client is useful for your research or product, please cite:
 
 ```bibtex
 @misc{yang2026evaclient,
-      title={EVA-Client: A Unified Data Collection, Inference, and Deployment Framework for Embodied Policies on Real Robots}, 
+      title={EVA-Client: A Unified Data Collection, Inference, and Deployment Framework for Embodied Policies on Real Robots},
       author={Heqing Yang and Yang Yi and Liyao Wang and Linqing Zhong and Donglin Yang and Ruipu Wu and Zitong Bai and Fengjiao Chen and Manyuan Zhang and Linjiang Huang and Si Liu},
       year={2026},
       eprint={2607.02646},
       archivePrefix={arXiv},
       primaryClass={cs.RO},
-      url={https://arxiv.org/abs/2607.02646}, 
+      url={https://arxiv.org/abs/2607.02646},
 }
 ```
 

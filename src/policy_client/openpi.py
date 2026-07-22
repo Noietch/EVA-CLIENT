@@ -165,7 +165,12 @@ class RtcOpenPiPolicyClient(OpenPiPolicyClient):
         prev_action_arg: np.ndarray | None = None
         rtc_params_arg: dict | None = None
         if active_response is not None:
-            actions = np.asarray(active_response["actions"], dtype=np.float32)
+            response_actions = (
+                active_response["origin_actions"]
+                if "origin_actions" in active_response
+                else active_response["actions"]
+            )
+            actions = np.asarray(response_actions, dtype=np.float32)
             if actions.ndim >= 2 and 0 < latency_k < actions.shape[0]:
                 shifted = np.empty_like(actions)
                 shifted[: actions.shape[0] - latency_k] = actions[latency_k:]

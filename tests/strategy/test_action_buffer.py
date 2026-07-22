@@ -7,6 +7,7 @@ import threading
 import numpy as np
 import pytest
 
+import strategy.action_buffer as action_buffer
 from strategy.action_buffer import StreamActionBuffer
 
 
@@ -196,3 +197,33 @@ def test_stream_concurrent_pop_and_integrate():
                 assert np.all(np.isfinite(a))
 
     assert _run_concurrent(writer, reader) == []
+
+
+def test_stream_vector_blending_does_not_hold_pop_lock(monkeypatch):
+    buf = StreamActionBuffer()
+    buf.integrate_new_chunk(np.ones((16, 7), dtype=np.float32))
+    blending = threading.Event()
+    release = threading.Event()
+    popped = threading.Event()
+    original_deque = action_buffer.deque
+
+    def blocked_deque(values):
+        blending.set()
+        release.wait(timeout=1.0)
+        return original_deque(values)
+
+    monkeypatch.setattr(action_buffer, "deque", blocked_deque)
+    writer = threading.Thread(
+        target=buf.integrate_new_chunk,
+        args=(np.full((16, 7), 2.0, dtype=np.float32),),
+    )
+    reader = threading.Thread(target=lambda: (buf.pop_next_action(), popped.set()))
+    writer.start()
+    assert blending.wait(timeout=1.0)
+    reader.start()
+
+    assert popped.wait(timeout=0.1)
+
+    release.set()
+    writer.join(timeout=1.0)
+    reader.join(timeout=1.0)

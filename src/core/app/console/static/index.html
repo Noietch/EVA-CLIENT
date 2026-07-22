@@ -28,8 +28,9 @@
     <button class="tab" data-tab="manual"><span class="idx">02</span> MANUAL</button>
     <button class="tab" data-tab="collect"><span class="idx">03</span> COLLECT</button>
     <button class="tab" data-tab="replay"><span class="idx">04</span> REPLAY</button>
-    <button class="tab" data-tab="eval"><span class="idx">05</span> EVAL</button>
-    <button class="tab" data-tab="result"><span class="idx">06</span> RESULT</button>
+    <button class="tab" data-tab="rl"><span class="idx">05</span> RL</button>
+    <button class="tab" data-tab="eval"><span class="idx">06</span> EVAL</button>
+    <button class="tab" data-tab="result"><span class="idx">07</span> RESULT</button>
   </div>
 
   <!-- ============ onboarding guide bar ============ -->
@@ -96,27 +97,6 @@
               <button class="btn primary full" id="b-run"><span class="rec-dot"></span><span class="rec-label">RUN ▶</span></button>
               <button class="btn full" id="b-reset">RESET ⟲</button>
             </div>
-            <button class="btn danger full" id="b-rollout-intervention-abandon" style="display:none;margin-top:8px">ABANDON</button>
-            <div id="rollout-save-panel" style="margin-top:8px">
-              <button class="btn primary full" id="b-rollout-save">SAVE ROLLOUT</button>
-              <div class="kv"><span class="k">pipeline</span><span class="v sig" id="rollout-save-pipeline">IDLE</span></div>
-              <div class="collect-progress"><i id="rollout-save-progress-fill"></i></div>
-              <div class="collect-queue-head">
-                <span><span id="rollout-save-count">0/0</span> saved</span>
-                <button class="btn" id="rollout-save-queue-toggle">EXPAND</button>
-              </div>
-              <div class="kv"><span class="k">eta</span><span class="v tnum" id="rollout-save-eta">—</span></div>
-              <div class="collect-tiles" id="rollout-save-queue-tiles"></div>
-              <div class="collect-list" id="rollout-save-queue-list" style="display:none"></div>
-              <div class="step-state" id="rollout-review-title">no rollout selected</div>
-              <div class="review-actions">
-                <button class="btn" id="b-rollout-qc-pass">PASS ✓</button>
-                <button class="btn danger" id="b-rollout-qc-fail">FAIL ✗</button>
-              </div>
-              <textarea class="review-note" id="rollout-qc-note" rows="3" placeholder="QC note (optional)"></textarea>
-              <div class="rollout-save-note" id="rollout-save-dir"></div>
-              <div class="errline" id="rollout-save-err"></div>
-            </div>
             <!-- breakpoint controls: shown for STEP (sim_real) mode -->
             <div id="control-step" style="display:none">
               <div class="step-state" id="step-state">IDLE</div>
@@ -141,8 +121,7 @@
         <div class="panel" id="panel-tune">
           <div class="panel-h">TUNING</div>
           <div class="card">
-            <div class="sub-h">HIL CONTROL</div>
-            <div class="row-2" id="hil-control-mode"></div>
+            <div class="sub-h">RATES</div>
             <div class="tune-row"><span>inference rate Hz</span><input type="number" id="tune-inference-rate" min="0.1" step="0.1" /></div>
             <div class="tune-row"><span>publish rate Hz</span><input type="number" id="tune-publish-rate" min="1" step="1" /></div>
             <div class="sub-h" id="tune-strategy-h">STRATEGY · <span id="tune-strategy-key">—</span></div>
@@ -196,10 +175,7 @@
         <div class="panel" id="collect-panel-replay">
           <div class="panel-h"><span class="step-badge">4</span>QUALITY CHECK</div>
           <div class="card">
-            <div class="kv"><span class="k">frame</span><span class="v tnum" id="collect-replay-frame">—</span></div>
-            <div class="collect-progress"><i id="collect-replay-fill"></i></div>
             <div class="review-actions">
-              <button class="btn primary full" id="b-collect-replay-toggle">REPLAY ▶</button>
               <button class="btn" id="b-collect-qc-pass">PASS ✓</button>
               <button class="btn danger" id="b-goto-qc">FAIL ✗</button>
             </div>
@@ -211,8 +187,8 @@
       </div>
 
       <!-- ============ stage (shared, reparented between tabs) ============
-           3D + cameras are always shared; ACTION/STATE charts are shown only
-           for REPLAY. One WebGL context lives in #canvas-col; the whole
+           3D + cameras are always shared; RL adds critic/action/state charts and
+           REPLAY uses action/state charts. One WebGL context lives in #canvas-col; the whole
            #stage node is moved into the active view. -->
       <div class="stage no-series" id="stage">
 
@@ -233,6 +209,16 @@
           <div class="cam-strip" id="cam-strip">
             <div class="cam-empty">awaiting frame…</div>
           </div>
+        </div>
+
+        <div class="stage-chart stage-critic" id="stage-critic">
+          <div class="chart-head">
+            <span class="chart-title">CRITIC VALUE <span class="chart-sub">time (s) · value</span></span>
+            <span class="critic-source-legend"><i class="policy"></i>POLICY <i class="intervention"></i>INTERVENTION</span>
+            <span class="critic-latest tnum" id="critic-latest">—</span>
+            <button class="chart-expand" id="critic-expand" title="expand">⤢</button>
+          </div>
+          <div class="chart-body"><canvas id="chart-critic-cv"></canvas></div>
         </div>
 
         <!-- charts region: ACTION + STATE side-by-side, each expandable to a modal -->
@@ -265,8 +251,10 @@
           <button class="scrub-play" id="scrub-play" onclick="replayToggle()" style="display:none">▶</button>
           <span class="scrub-state" id="scrub-state">LIVE</span>
           <input type="range" id="scrub-range" min="0" max="0" value="0" disabled>
+          <span class="control-legend"><i class="policy"></i>rollout <i class="intervention"></i>intervention</span>
           <span class="tnum scrub-pos" id="scrub-pos">0 / 0</span>
           <span class="tnum scrub-time" id="scrub-time">0.0s</span>
+          <button class="btn review-return-live" id="review-return-live" style="display:none">RETURN TO LIVE</button>
         </div>
       </div>
     </div>
@@ -282,6 +270,123 @@
         </div>
         <div class="chart-modal-body"><canvas id="chart-modal-cv"></canvas></div>
       </div>
+    </div>
+
+    <!-- ---- RL ---- -->
+    <div class="view" id="view-rl">
+      <div class="col col-control" id="rl-control-col">
+        <div class="panel" id="rl-panel-task" data-st="active">
+          <div class="panel-h"><span class="step-badge">1</span>TASK <span class="sel-chip" id="rl-task-chip"></span></div>
+          <select class="choice-select task-select" id="rl-task-list" aria-label="RL task"></select>
+        </div>
+
+        <div class="panel" id="rl-panel-models" data-st="pending">
+          <div class="panel-h"><span class="step-badge">2</span>MODELS</div>
+          <div class="card">
+            <div class="sub-h">POLICY <span class="model-link" id="rl-policy-link">NOT SELECTED</span></div>
+            <select class="choice-select" id="rl-policy-list" aria-label="RL policy model"></select>
+            <div id="rl-critic-choice" style="display:none">
+              <div class="sub-h">CRITIC · OPTIONAL <span class="model-link" id="rl-critic-link">OPTIONAL · AFTER SETUP</span></div>
+              <select class="choice-select" id="rl-critic-list" aria-label="RL critic model"></select>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel" id="rl-panel-data" data-st="done" hidden>
+          <div class="panel-h"><span class="step-badge">—</span>DATA CONFIG</div>
+          <div class="card">
+            <div class="sub-h">FORMAT</div>
+            <select class="choice-select has-value" id="rl-data-format" disabled>
+              <option value="lerobot" selected>LeRobot</option>
+              <option value="transition" disabled>Transition · backend later</option>
+            </select>
+            <div class="kv"><span class="k">dataset</span><span class="v mono" id="rl-dataset-dir">—</span></div>
+            <div class="sub-h">REWARD</div>
+            <select class="choice-select" id="rl-reward-mode" disabled>
+              <option>Available with Transition</option>
+              <option>0-1 reward</option>
+              <option>EVA-RWRL reward</option>
+            </select>
+            <div class="rl-unavailable">Transition and reward configuration are intentionally unavailable in this version.</div>
+          </div>
+        </div>
+
+        <div class="panel setup-panel" id="rl-panel-setup" data-st="pending">
+          <div class="panel-h"><span class="step-badge">3</span>SETUP</div>
+          <div class="card">
+            <div class="kv"><span class="k">mode</span><span class="v" id="rl-mode">—</span></div>
+            <div class="kv"><span class="k">strategy</span><span class="v" id="rl-strategy">—</span></div>
+            <div class="auto-setup" id="rl-auto-setup">
+              <div class="auto-setup-row">
+                <span class="auto-spinner"></span>
+                <span class="auto-setup-msg" id="rl-auto-setup-msg">SELECT TASK + POLICY</span>
+              </div>
+              <div class="auto-bar"><i></i></div>
+            </div>
+            <button class="btn primary full" id="rl-b-setup" disabled style="display:none">RETRY SETUP ↻</button>
+            <div class="lock-note" id="rl-setup-state">Select task and Policy; Critic is optional</div>
+          </div>
+        </div>
+
+        <div class="panel" id="rl-panel-rollout" data-st="pending">
+          <div class="panel-h"><span class="step-badge">4</span>ROLLOUT + HIL</div>
+          <div class="card">
+            <div class="rl-source-readout" id="rl-control-source" data-source="idle">
+              <span class="rl-source-label">SOURCE</span>
+              <span class="rl-source-value" id="rl-control-source-value">IDLE</span>
+            </div>
+            <label class="collect-arm-gate disabled" id="rl-hil-gate">
+              <span class="collect-arm-text" id="rl-hil-label">HIL OFF</span>
+              <input type="checkbox" id="rl-hil-enable" disabled aria-label="Enable RL HIL intervention">
+              <span class="ios-sw"></span>
+            </label>
+            <div class="btn-grid">
+              <button class="btn primary full" id="rl-b-run" disabled><span class="rec-dot"></span><span id="rl-run-label">RUN ▶</span></button>
+              <button class="btn full" id="rl-b-reset" disabled>RESET ⟲</button>
+              <button class="btn" id="rl-b-intervene" disabled>STOP / INTERVENE</button>
+              <button class="btn" id="rl-b-accept" disabled>ACCEPT</button>
+              <button class="btn danger full" id="rl-b-abandon" disabled>ABANDON</button>
+            </div>
+            <div class="errline" id="rl-run-error"></div>
+          </div>
+        </div>
+
+        <div class="panel" id="rl-panel-gripper" data-st="pending">
+          <div class="panel-h"><span class="step-badge">5</span>GRIPPER</div>
+          <div class="card"><div class="btn-grid" id="rl-gripper-buttons"></div><div class="step-state muted" id="rl-gripper-state">Available after setup</div></div>
+        </div>
+
+        <div class="panel" id="rl-panel-saved" data-st="pending">
+          <div class="panel-h"><span class="step-badge">6</span>SAVED DATA</div>
+          <div class="card">
+            <button class="btn primary full" id="rl-b-save" disabled>SAVE ROLLOUT</button>
+            <button class="btn full" id="rl-b-replay" disabled style="margin-top:6px">REPLAY ▶</button>
+            <div class="qc-box" id="rl-qc-box" style="display:none">
+              <div class="qc-actions">
+                <button class="btn" id="rl-b-qc-pass">PASS ✓</button>
+                <button class="btn danger" id="rl-b-qc-fail">FAIL ✗</button>
+              </div>
+              <textarea id="rl-qc-note" class="review-note" rows="3" placeholder="QC note (optional)"></textarea>
+              <button class="btn full" id="rl-b-qc-note-save">SAVE NOTE</button>
+              <div class="qc-status" id="rl-qc-status"></div>
+            </div>
+            <div class="kv"><span class="k">pipeline</span><span class="v sig" id="rl-save-pipeline" data-state="off">IDLE</span></div>
+            <div class="collect-queue-head">
+              <span><span id="rl-save-count">0/0</span> done</span>
+              <button class="btn" id="rl-save-expand">EXPAND</button>
+            </div>
+            <div class="collect-progress"><i id="rl-save-progress"></i></div>
+            <div class="kv"><span class="k">eta</span><span class="v tnum" id="rl-save-eta">—</span></div>
+            <div class="collect-tiles" id="rl-save-tiles"></div>
+            <div class="collect-tiles-hint" id="rl-save-hint" style="display:none">saved episodes are replayable</div>
+            <div class="collect-list" id="rl-save-list" style="display:none"></div>
+            <div class="lock-note" id="rl-save-dir"></div>
+            <div class="errline" id="rl-save-error"></div>
+          </div>
+        </div>
+
+      </div>
+      <div class="col-canvas" id="rl-stage-col"></div>
     </div>
 
     <!-- ---- REPLAY ---- -->

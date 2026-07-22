@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import cast
 
 from core.app import run as app
+from core.app.console.server import _ensure_ckpt_order
 from core.app.state import RuntimeState, SessionMode, SessionState
 from core.config import ConfigDict
 from robots.base import Robot
@@ -100,6 +101,7 @@ def test_eval_bootstrap_uses_default_ckpt_slot(monkeypatch):
     eval_cfg = ConfigDict(
         checkpoints=(ckpt,),
         inference_strategy="sync",
+        shuffle_ckpts=False,
         cli_mode="real",
     )
     config = ConfigDict(eval=eval_cfg, eval_cfg=eval_cfg)
@@ -116,8 +118,10 @@ def test_eval_bootstrap_uses_default_ckpt_slot(monkeypatch):
     monkeypatch.setattr(app, "select_inference_strategy", lambda *args, **kwargs: None)
     monkeypatch.setattr(app, "rebuild_eval_episode_logger", lambda *args, **kwargs: None)
 
+    _ensure_ckpt_order(config, runtime)
     app._handle_web_command("web:bootstrap", config, runtime, session)
 
+    assert runtime.ckpt_order == [0]
     assert runtime.active_ckpt_slot == 0
     assert runtime.active_config is not None
     assert runtime.active_config.policy.port == 9080

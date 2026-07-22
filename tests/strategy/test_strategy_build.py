@@ -288,6 +288,24 @@ def test_take_or_fetch_chunk_fallback_first_chunk(spec):
 
 
 @pytest.mark.parametrize("spec", _LOOP_SPECS, ids=_LOOP_IDS)
+def test_prepare_warmup_chunk_remains_available_for_immediate_publish(spec):
+    strategy = _build_loop(spec)
+    fetch = _FakeFetch()
+    strategy.seed_buffer(np.array([0.0], dtype=np.float32))
+
+    try:
+        strategy.prepare_warmup_chunk("p", fetch)
+        action = strategy.pop_next_action()
+
+        assert action is not None
+        assert action.dtype == np.float32
+        assert action.shape == (1,)
+    finally:
+        strategy.stop_loop()
+        strategy.close()
+
+
+@pytest.mark.parametrize("spec", _LOOP_SPECS, ids=_LOOP_IDS)
 def test_loop_integrates_chunks_for_pop(spec):
     strategy = _build_loop(spec)
     fetch = _FakeFetch()

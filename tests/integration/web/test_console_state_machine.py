@@ -15,7 +15,8 @@ import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
+from urllib.parse import urlencode
 
 import numpy as np
 import pyarrow as pa
@@ -26,6 +27,7 @@ from _harness import MULTI_STRATEGY, console_config, serve_console
 import robots  # noqa: F401  (registers ROBOT_REGISTRY incl. ur5e for single-arm UI tests)
 from core.app import handlers
 from core.app import run as app
+from core.app.console import server as console_server
 from core.app.console.server import ConsoleContext, _serialize_manual_scene, _serialize_scene
 from core.app.handlers import utils as handlers_utils
 from core.app.state import (
@@ -65,11 +67,7 @@ def test_single_gripper_config_exposes_one_gripper_control(console):
 
 @pytest.mark.parametrize(
     "console",
-    [
-        console_config(
-            robot=dict(type="r1_lite", gripper_open=100.0, gripper_close=0.0)
-        )
-    ],
+    [console_config(robot=dict(type="r1_lite", gripper_open=100.0, gripper_close=0.0))],
     indirect=True,
 )
 def test_r1lite_manual_qpos_limits_expose_full_gripper_range(console):
@@ -149,6 +147,9 @@ def test_tab_switch_away_from_collect_stops_armed_teleop():
     calls = []
 
     class _Transport:
+        def set_hil_relay_enabled(self, enabled):
+            calls.append(f"set_hil_relay_enabled:{enabled}")
+
         def stop_collection(self):
             calls.append("stop_collection")
 
@@ -164,13 +165,14 @@ def test_tab_switch_away_from_collect_stops_armed_teleop():
         ik_solver=None,
         web_phase="idle",
         rollout_intervention_active=False,
+        rl_active=False,
     )
     session = SessionState(mode=SessionMode.COLLECT, status=SessionStatus.READY)
     config = ConfigDict(collection=ConfigDict(gate=ConfigDict(enabled=False)))
 
     app.handle_command("web:tab_switch:manual", config, cast(RuntimeState, runtime), session)
 
-    assert calls == ["stop_collection"]
+    assert calls == ["set_hil_relay_enabled:False", "stop_collection"]
     assert runtime.collection_teleop_active is False
     assert session.mode is SessionMode.SELECT
 
@@ -249,9 +251,7 @@ def test_collect_loop_uses_publish_rate_without_dataset_fps():
         ),
     )
     assert (
-        app._target_loop_rate_hz(
-            config, cast(RuntimeState, SimpleNamespace(replay_source=None))
-        )
+        app._target_loop_rate_hz(config, cast(RuntimeState, SimpleNamespace(replay_source=None)))
         == 10
     )
 
@@ -306,6 +306,118 @@ def test_collect_status_follows_selected_collect_task():
     assert collect["episodes"] == [{"episode_index": 0, "status": "saved"}]
 
 
+@pytest.mark.parametrize("verdict", ["pass", "fail", ""])
+def test_collect_qc_mark_routes_to_active_collection_logger(verdict):
+    calls = []
+
+    class _Logger:
+        def mark_collection_qc(self, task, episode, qc_verdict, note):
+            calls.append((task, episode, qc_verdict, note))
+            return True
+
+    with serve_console(console_config()) as h:
+        h.runtime.episode_logger = cast(Any, _Logger())
+        h.session.selected_collect_task = "pick up cup"
+
+        resp = h.post(
+            "/api/collect_qc_mark",
+            {
+                "task": "pick up cup",
+                "episode": 3,
+                "verdict": verdict,
+                "note": "checked",
+            },
+        )
+
+    assert resp.status == 200
+    assert resp.json == {"ok": True, "episode": 3, "verdict": verdict}
+    assert calls == [("pick up cup", 3, verdict, "checked")]
+
+
+def test_collect_qc_mark_rejects_unsupported_verdict():
+    with serve_console(console_config()) as h:
+        resp = h.post(
+            "/api/collect_qc_mark",
+            {"episode": 0, "verdict": "approve", "note": ""},
+        )
+
+    assert resp.status == 400
+    assert resp.json == {"ok": False, "error": "unsupported QC verdict: approve"}
+
+
+@pytest.mark.parametrize("episode", [None, -1, 1.5, "1.5", "²", {}])
+def test_collect_qc_mark_rejects_invalid_episode(episode):
+    with serve_console(console_config()) as h:
+        resp = h.post(
+            "/api/collect_qc_mark",
+            {"task": "unset", "episode": episode, "verdict": "pass", "note": ""},
+        )
+
+    assert resp.status == 400
+    assert resp.json == {"ok": False, "error": "collection episode must be a non-negative integer"}
+
+
+def test_collect_qc_mark_rejects_when_collection_logger_is_unavailable():
+    with serve_console(console_config()) as h:
+        resp = h.post(
+            "/api/collect_qc_mark",
+            {"task": "pick up cup", "episode": 0, "verdict": "pass", "note": ""},
+        )
+
+    assert resp.status == 409
+    assert resp.json == {"ok": False, "error": "collection recording is unavailable"}
+
+
+def test_collect_qc_mark_rejects_episode_that_is_not_saved():
+    class _Logger:
+        def mark_collection_qc(self, task, episode, verdict, note):
+            return False
+
+    with serve_console(console_config()) as h:
+        h.runtime.episode_logger = cast(Any, _Logger())
+        h.session.selected_collect_task = "pick up cup"
+
+        resp = h.post(
+            "/api/collect_qc_mark",
+            {
+                "task": "pick up cup",
+                "episode": 4,
+                "verdict": "fail",
+                "note": "pending",
+            },
+        )
+
+    assert resp.status == 409
+    assert resp.json == {"ok": False, "error": "collection episode is not saved"}
+
+
+def test_collect_qc_mark_rejects_review_from_previous_collection_task():
+    calls = []
+
+    class _Logger:
+        def mark_collection_qc(self, task, episode, verdict, note):
+            calls.append((task, episode, verdict, note))
+            return True
+
+    with serve_console(console_config()) as h:
+        h.runtime.episode_logger = cast(Any, _Logger())
+        h.session.selected_collect_task = "place cup"
+
+        resp = h.post(
+            "/api/collect_qc_mark",
+            {
+                "task": "pick up cup",
+                "episode": 0,
+                "verdict": "pass",
+                "note": "reviewed before task switch",
+            },
+        )
+
+    assert resp.status == 409
+    assert resp.json == {"ok": False, "error": "collection review task is no longer active"}
+    assert calls == []
+
+
 def test_status_exposes_replay_action_key_for_series_cache():
     with serve_console(console_config()) as h:
         h.runtime.replay_action_key = "action_eef"
@@ -339,6 +451,80 @@ def test_inspect_dataset_resolves_relative_dataset_dir(tmp_path, monkeypatch):
     assert resp.json["keys"]["state"]["default"] == "observation.qpos"
 
 
+def test_load_replay_dataset_mounts_episode_before_response(tmp_path, monkeypatch):
+    repo_root = tmp_path / "repo"
+    dataset_dir = repo_root / "work_dirs" / "replay"
+    data_dir = dataset_dir / "data" / "chunk-000"
+    meta_dir = dataset_dir / "meta"
+    data_dir.mkdir(parents=True)
+    meta_dir.mkdir(parents=True)
+    monkeypatch.setattr(handlers_utils, "_REPO_ROOT", repo_root)
+
+    with serve_console(console_config(robot_type="ur5e")) as h:
+        dim = h.runtime.robot.total_action_dim
+        (meta_dir / "info.json").write_text(
+            json.dumps(
+                {
+                    "total_episodes": 1,
+                    "fps": 10,
+                    "features": {
+                        "observation.state": {"dtype": "float32", "shape": [dim]},
+                        "action": {"dtype": "float32", "shape": [dim]},
+                        "observation.images.cam_high": {
+                            "dtype": "video",
+                            "shape": [480, 640, 3],
+                        },
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        (meta_dir / "episodes.jsonl").write_text(
+            json.dumps({"episode_index": 0, "length": 2, "tasks": ["replay"]}) + "\n",
+            encoding="utf-8",
+        )
+        pq.write_table(
+            pa.table(
+                {
+                    "observation.state": [
+                        np.zeros(dim, dtype=np.float32).tolist(),
+                        np.ones(dim, dtype=np.float32).tolist(),
+                    ],
+                    "action": [
+                        np.zeros(dim, dtype=np.float32).tolist(),
+                        np.ones(dim, dtype=np.float32).tolist(),
+                    ],
+                    "timestamp": [0.0, 0.1],
+                    "frame_index": [0, 1],
+                    "episode_index": [0, 0],
+                    "index": [0, 1],
+                    "task_index": [0, 0],
+                }
+            ),
+            data_dir / "episode_000000.parquet",
+        )
+
+        resp = h.post(
+            "/api/load_replay_dataset",
+            {
+                "dataset_dir": "work_dirs/replay",
+                "episode": 0,
+                "keys": {"state": "observation.state", "action": "action"},
+                "video_keys": {"cam_high": "observation.images.cam_high"},
+                "action_mode": "joint",
+            },
+        )
+
+        assert resp.status == 200
+        assert resp.json["ok"] is True
+        assert resp.json["episode"] == 0
+        assert resp.json["frames"] == 2
+        assert resp.json["dataset_dir"] == str(dataset_dir)
+        assert resp.json["video_keys"] == {"cam_high": "observation.images.cam_high"}
+        assert h.runtime.replay_source is not None
+        assert h.runtime.command_queue.empty()
+
+
 def test_replay_video_resolves_relative_dataset_episode_video(tmp_path, monkeypatch):
     repo_root = tmp_path / "repo"
     dataset_dir = repo_root / "work_dirs" / "collection" / "ur5e"
@@ -363,17 +549,76 @@ def test_replay_video_resolves_relative_dataset_episode_video(tmp_path, monkeypa
     (video_dir / "prompt_a_ep_000007.mp4").write_bytes(payload)
     monkeypatch.setattr(handlers_utils, "_REPO_ROOT", repo_root)
 
+    path = "/api/replay_video?dataset_dir=work_dirs/collection/ur5e&episode=7&cam=cam_high"
     with serve_console(console_config()) as h:
-        resp = h.get(
-            "/api/replay_video?dataset_dir=work_dirs/collection/ur5e&episode=7&cam=cam_high"
-        )
+        resp = h.get(path)
+        suffix = h.get(path, headers={"Range": "bytes=-5"})
 
     assert resp.status == 200
     assert resp.headers["content-type"] == "video/mp4"
+    assert resp.headers["accept-ranges"] == "bytes"
+    assert resp.headers["cache-control"] == "public, max-age=3600"
     assert resp.raw == payload
+    assert suffix.status == 206
+    assert suffix.headers["content-range"] == (
+        f"bytes {len(payload) - 5}-{len(payload) - 1}/{len(payload)}"
+    )
+    assert suffix.raw == payload[-5:]
 
 
-def test_review_episode_loads_selected_dataset_without_replay_source(tmp_path, monkeypatch):
+def test_replay_poster_resolves_relative_dataset_episode_video(tmp_path, monkeypatch):
+    repo_root = tmp_path / "repo"
+    dataset_dir = repo_root / "work_dirs" / "collection" / "ur5e"
+    meta_dir = dataset_dir / "meta"
+    video_dir = dataset_dir / "videos" / "chunk-000" / "observation.images.cam_high"
+    meta_dir.mkdir(parents=True)
+    video_dir.mkdir(parents=True)
+    info = {
+        "total_episodes": 8,
+        "chunks_size": 1000,
+        "video_path": "videos/chunk-{episode_chunk:03d}/{video_key}/{episode_file}.mp4",
+        "features": {
+            "observation.images.cam_high": {"dtype": "video", "shape": [480, 640, 3]},
+        },
+    }
+    (meta_dir / "info.json").write_text(json.dumps(info), encoding="utf-8")
+    (meta_dir / "episodes.jsonl").write_text(
+        json.dumps({"episode_index": 7, "file_stem": "prompt_a_ep_000007"}) + "\n",
+        encoding="utf-8",
+    )
+    video_path = video_dir / "prompt_a_ep_000007.mp4"
+    video_path.write_bytes(b"episode-7-video")
+    monkeypatch.setattr(handlers_utils, "_REPO_ROOT", repo_root)
+
+    class FakeCapture:
+        def __init__(self, path: str) -> None:
+            self.path = path
+
+        def read(self):
+            assert self.path == str(video_path)
+            return True, np.zeros((2, 3, 3), dtype=np.uint8)
+
+        def release(self) -> None:
+            pass
+
+    monkeypatch.setattr(console_server.cv2, "VideoCapture", FakeCapture)
+    monkeypatch.setattr(
+        console_server.cv2,
+        "imencode",
+        lambda ext, frame, args: (True, np.frombuffer(b"jpeg-frame", dtype=np.uint8)),
+    )
+
+    path = "/api/replay_poster?dataset_dir=work_dirs/collection/ur5e&episode=7&cam=cam_high"
+    with serve_console(console_config()) as h:
+        resp = h.get(path)
+
+    assert resp.status == 200
+    assert resp.headers["content-type"] == "image/jpeg"
+    assert resp.headers["cache-control"] == "public, max-age=3600"
+    assert resp.raw == b"jpeg-frame"
+
+
+def test_review_episode_returns_series_without_mutating_runtime(tmp_path, monkeypatch):
     repo_root = tmp_path / "repo"
     dataset_dir = repo_root / "work_dirs" / "review"
     data_dir = dataset_dir / "data" / "chunk-000"
@@ -419,19 +664,202 @@ def test_review_episode_loads_selected_dataset_without_replay_source(tmp_path, m
             data_dir / "episode_000000.parquet",
         )
 
+        sentinel_qpos = np.full((1, dim), 7.0, dtype=np.float32)
+        h.runtime.collection_replay_qpos = sentinel_qpos
+        h.runtime.collection_replay_episode = 9
+        h.runtime.collection_replay_started = 123.0
+
         resp = h.post("/api/review_episode", {"dataset_dir": "work_dirs/review", "episode": 0})
 
         assert resp.status == 200
         assert resp.json["ok"] is True
         assert resp.json["frames"] == 2
-        assert h.runtime.collection_replay_episode == 0
-        assert h.runtime.collection_replay_qpos is not None
-        assert h.runtime.collection_replay_qpos.shape[0] == 2
-        assert h.runtime.collection_replay_started == 0.0
+        assert resp.json["timestamp"] == pytest.approx([0.0, 0.1])
+        assert len(resp.json["state"]) == 2
+        assert len(resp.json["action"]) == 2
+        assert h.runtime.collection_replay_qpos is sentinel_qpos
+        assert h.runtime.collection_replay_episode == 9
+        assert h.runtime.collection_replay_started == 123.0
         assert h.runtime.replay_source is None
 
 
-def test_review_replay_start_releases_paused_review(tmp_path, monkeypatch):
+def test_client_trace_is_logged_without_enqueuing_command(console, caplog):
+    with caplog.at_level("INFO", logger="core.app.console.server"):
+        resp = console.post(
+            "/api/client_trace",
+            {
+                "client_id": "browser-a",
+                "seq": 7,
+                "event": "review.video.error",
+                "details": {"episode": 3, "camera": "cam_high"},
+            },
+        )
+
+    assert resp.status == 200
+    assert resp.json == {"ok": True}
+    assert console.runtime.command_queue.empty()
+    assert "[UI_TRACE]" in caplog.text
+    assert "client=browser-a" in caplog.text
+    assert "seq=7" in caplog.text
+    assert "event=review.video.error" in caplog.text
+    assert '"episode":3' in caplog.text
+
+
+def test_scene_poll_returns_cached_frame_while_batch_transforms_are_loading(console):
+    cached = {"available": True, "arms": {"cached": {}}}
+    ctx = console_server.ConsoleRequestHandler.ctx
+    ctx.scene_cache = cached
+    ctx.scene_batch_loading = threading.Event()
+    ctx.scene_batch_loading.set()
+
+    class ExplodingScene:
+        def transforms(self, _qpos):
+            raise AssertionError("live scene must not contend with batch transforms")
+
+    ctx.scene = ExplodingScene()
+
+    resp = console.get("/api/scene")
+
+    assert resp.status == 200
+    assert resp.json == cached
+
+
+def test_native_transform_batch_uses_isolated_worker(monkeypatch):
+    qpos = np.zeros((3, 14), dtype=np.float32)
+    calls = []
+
+    class Future:
+        def result(self, timeout):
+            assert timeout == 120
+            return b"worker-transform-blob"
+
+    class Executor:
+        def submit(self, fn, *args):
+            calls.append((fn, args))
+            return Future()
+
+    class NativeScene:
+        def all_transforms_blob(self, _qpos):
+            raise AssertionError("native scene must not compute the batch in the web process")
+
+    monkeypatch.setattr(console_server, "_get_transform_executor", lambda: Executor())
+    monkeypatch.setattr(console_server, "_is_native_urdf_scene", lambda _scene: True)
+
+    raw = console_server._compute_transform_blob(NativeScene(), qpos, "r1_lite", 100.0, 0.0)
+
+    assert raw == b"worker-transform-blob"
+    assert len(calls) == 1
+    assert calls[0][1][0:3] == ("r1_lite", 100.0, 0.0)
+    np.testing.assert_array_equal(calls[0][1][3], qpos)
+
+
+def test_transform_worker_prewarm_is_non_blocking(monkeypatch):
+    submitted = []
+
+    class Future:
+        def add_done_callback(self, callback):
+            submitted.append(callback)
+
+    class Executor:
+        def submit(self, fn, *args):
+            submitted.append((fn, args))
+            return Future()
+
+    monkeypatch.setattr(console_server, "_get_transform_executor", lambda: Executor())
+    config = SimpleNamespace(
+        robot=SimpleNamespace(type="r1_lite", gripper_open=100.0, gripper_close=0.0)
+    )
+    runtime = SimpleNamespace(robot=SimpleNamespace(total_action_dim=14))
+
+    console_server._prewarm_transform_worker(config, runtime)
+
+    assert len(submitted) == 2
+    assert submitted[0][1][0:3] == ("r1_lite", 100.0, 0.0)
+    assert submitted[0][1][3].shape == (0, 14)
+
+
+def test_review_transforms_are_addressed_by_episode_without_runtime_mount(tmp_path, monkeypatch):
+    repo_root = tmp_path / "repo"
+    dataset_dir = repo_root / "work_dirs" / "review"
+    data_dir = dataset_dir / "data" / "chunk-000"
+    meta_dir = dataset_dir / "meta"
+    data_dir.mkdir(parents=True)
+    meta_dir.mkdir(parents=True)
+    monkeypatch.setattr(handlers_utils, "_REPO_ROOT", repo_root)
+
+    class _Scene:
+        def __init__(self):
+            self.calls = []
+
+        def all_transforms_blob(self, qpos: np.ndarray) -> bytes:
+            self.calls.append(qpos.copy())
+            return b"EVAXFRM1" + qpos.astype(np.float32).tobytes()
+
+    with serve_console(console_config(robot_type="ur5e")) as h:
+        dim = h.runtime.robot.total_action_dim
+        (meta_dir / "info.json").write_text(
+            json.dumps(
+                {
+                    "total_episodes": 1,
+                    "fps": 10,
+                    "features": {
+                        "observation.state": {"dtype": "float32", "shape": [dim]},
+                        "action": {"dtype": "float32", "shape": [dim]},
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        (meta_dir / "episodes.jsonl").write_text(
+            json.dumps({"episode_index": 0, "length": 2, "tasks": ["review"]}) + "\n",
+            encoding="utf-8",
+        )
+        pq.write_table(
+            pa.table(
+                {
+                    "observation.state": [
+                        np.zeros(dim, dtype=np.float32).tolist(),
+                        np.ones(dim, dtype=np.float32).tolist(),
+                    ],
+                    "action": [
+                        np.zeros(dim, dtype=np.float32).tolist(),
+                        np.ones(dim, dtype=np.float32).tolist(),
+                    ],
+                    "timestamp": [0.0, 0.1],
+                    "frame_index": [0, 1],
+                    "episode_index": [0, 0],
+                    "index": [0, 1],
+                    "task_index": [0, 0],
+                }
+            ),
+            data_dir / "episode_000000.parquet",
+        )
+        sentinel_qpos = np.ones((1, dim), dtype=np.float32)
+        h.runtime.collection_replay_qpos = sentinel_qpos
+        scene = _Scene()
+        console_server.ConsoleRequestHandler.ctx.scene = scene
+
+        query = urlencode({"dataset_dir": "work_dirs/review", "episode": 0})
+        resp = h.get(f"/api/review_transforms?{query}")
+
+        assert resp.status == 200
+        assert resp.headers["content-type"] == "application/octet-stream"
+        assert resp.raw[:8] == b"EVAXFRM1"
+        assert h.runtime.collection_replay_qpos is sentinel_qpos
+        assert h.runtime.replay_source is None
+
+        chunk_query = urlencode(
+            {"dataset_dir": "work_dirs/review", "episode": 0, "start": 1, "count": 1}
+        )
+        chunk = h.get(f"/api/review_transforms?{chunk_query}")
+        assert chunk.status == 200
+        assert chunk.headers["x-eva-transform-start"] == "1"
+        assert chunk.headers["x-eva-transform-count"] == "1"
+        assert chunk.headers["x-eva-transform-total"] == "2"
+        assert scene.calls[-1].shape[0] == 1
+
+
+def test_rollout_review_is_stateless_local_playback(tmp_path, monkeypatch):
     repo_root = tmp_path / "repo"
     dataset_dir = repo_root / "work_dirs" / "review"
     data_dir = dataset_dir / "data" / "chunk-000"
@@ -480,12 +908,18 @@ def test_review_replay_start_releases_paused_review(tmp_path, monkeypatch):
             data_dir / "episode_000000.parquet",
         )
 
-        h.post("/api/review_episode", {"dataset_dir": "work_dirs/review", "episode": 0})
-        resp = h.post("/api/review_replay_start", {"episode": 0})
+        sentinel_qpos = np.ones((1, dim), dtype=np.float32)
+        h.runtime.collection_replay_qpos = sentinel_qpos
+        resp = h.post(
+            "/api/review_episode",
+            {"dataset_dir": "work_dirs/review", "episode": 0},
+        )
 
         assert resp.status == 200
         assert resp.json["ok"] is True
-        assert h.runtime.collection_replay_started > 0.0
+        assert resp.json["frames"] == 2
+        assert h.runtime.collection_replay_qpos is sentinel_qpos
+        assert h.runtime.collection_replay_started == 0.0
 
 
 def test_collection_replay_status_stops_playing_at_last_frame():
@@ -543,6 +977,9 @@ def test_collect_start_runs_collection_capture_in_background():
         def reset_hil_control(self):
             return None
 
+        def set_hil_relay_enabled(self, enabled):
+            return None
+
         def clear_collection_backlog(self):
             return 42.0
 
@@ -553,6 +990,7 @@ def test_collect_start_runs_collection_capture_in_background():
 
     class _Logger:
         is_collection_enabled = True
+        has_active_episode = True
 
         def is_queue_full(self):
             return False
@@ -600,6 +1038,9 @@ def test_collect_start_clears_backlog_and_passes_cutoff_to_logger():
         def reset_hil_control(self):
             calls.append("reset_hil_control")
 
+        def set_hil_relay_enabled(self, enabled):
+            calls.append(("set_hil_relay_enabled", enabled))
+
         def clear_collection_backlog(self):
             calls.append("clear_collection_backlog")
             return 42.0
@@ -632,6 +1073,7 @@ def test_collect_start_clears_backlog_and_passes_cutoff_to_logger():
     try:
         assert calls == [
             "reset_hil_control",
+            ("set_hil_relay_enabled", True),
             "start_collection",
             "clear_collection_backlog",
             ("start_episode", "pick", 42.0),
@@ -1043,6 +1485,36 @@ def test_run_clears_collection_replay_preview():
     assert runtime.collection_replay_episode is None
 
 
+def test_run_uses_rollout_logger_without_opening_collection_logger(monkeypatch):
+    calls = []
+    rollout_logger = object()
+    runtime = SimpleNamespace(
+        rollout_episode_logger=None,
+        replay_source=None,
+    )
+    session = SessionState(
+        mode=SessionMode.REAL,
+        status=SessionStatus.READY,
+        is_setup_done=True,
+        selected_task="pick up the cup",
+    )
+    monkeypatch.setattr(app, "_select_only_inference_strategy_if_needed", lambda *args: True)
+    monkeypatch.setattr(app, "run_warmup_and_start", lambda *args: True)
+    monkeypatch.setattr(app, "is_replay", lambda runtime: False)
+
+    def _begin_rollout(config, runtime, session):
+        calls.append("rollout")
+        runtime.rollout_episode_logger = rollout_logger
+
+    monkeypatch.setattr(app, "begin_rollout_save_episode", _begin_rollout)
+    monkeypatch.setattr(app, "start_episode", lambda *args: calls.append("collection"))
+
+    app._dispatch_run(ConfigDict(), cast(RuntimeState, runtime), session)
+
+    assert calls == ["rollout"]
+    assert session.status is SessionStatus.RUNNING
+
+
 def test_repeated_setup_run_stop_cycles_never_pin_running(console):
     """setup->run->publish->stop, ~15x. step_index is reset by run_setup (via
     reset_session_progress), so it must read 0 right after each /api/setup. The final
@@ -1122,7 +1594,9 @@ def test_eval_start_runs_setup_when_not_warmed(monkeypatch):
         return True
 
     monkeypatch.setattr(app, "run_setup", _fake_setup)
-    monkeypatch.setattr(app, "_dispatch_run", lambda *a: setattr(a[2], "status", SessionStatus.RUNNING))
+    monkeypatch.setattr(
+        app, "_dispatch_run", lambda *a: setattr(a[2], "status", SessionStatus.RUNNING)
+    )
 
     runtime = SimpleNamespace(
         web_phase="ready",
@@ -1151,7 +1625,9 @@ def test_eval_start_binds_cell_prompt_before_task_gate(monkeypatch):
         return True
 
     monkeypatch.setattr(app, "run_setup", _fake_setup)
-    monkeypatch.setattr(app, "_dispatch_run", lambda *a: setattr(a[2], "status", SessionStatus.RUNNING))
+    monkeypatch.setattr(
+        app, "_dispatch_run", lambda *a: setattr(a[2], "status", SessionStatus.RUNNING)
+    )
 
     runtime = SimpleNamespace(
         web_phase="ready",

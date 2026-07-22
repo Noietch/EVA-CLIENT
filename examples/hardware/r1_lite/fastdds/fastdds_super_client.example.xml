@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<dds>
+  <profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+    <transport_descriptors>
+      <transport_descriptor>
+        <transport_id>udp_transport</transport_id>
+        <type>UDPv4</type>
+        <receiveBufferSize>16777216</receiveBufferSize>
+        <interfaceWhiteList>
+          <address>__EVA_LOCAL_IP__</address>
+        </interfaceWhiteList>
+      </transport_descriptor>
+    </transport_descriptors>
+    <participant profile_name="super_client_profile" is_default_profile="true">
+      <rtps>
+        <userTransports>
+          <transport_id>udp_transport</transport_id>
+        </userTransports>
+        <useBuiltinTransports>false</useBuiltinTransports>
+        <builtin>
+          <discovery_config>
+            <discoveryProtocol>SUPER_CLIENT</discoveryProtocol>
+            <discoveryServersList>
+              <RemoteServer prefix="__DISCOVERY_SERVER_GUID_PREFIX__">
+                <metatrafficUnicastLocatorList>
+                  <locator>
+                    <udpv4>
+                      <address>__DISCOVERY_SERVER_IP__</address>
+                      <port>__DISCOVERY_SERVER_PORT__</port>
+                    </udpv4>
+                  </locator>
+                </metatrafficUnicastLocatorList>
+              </RemoteServer>
+            </discoveryServersList>
+          </discovery_config>
+        </builtin>
+      </rtps>
+    </participant>
+  </profiles>
+</dds>

@@ -1,23 +1,13 @@
-"""Operator action routing shared by UI and CAT controller events."""
+"""Device-independent operator action routing shared by all producers."""
 
 from __future__ import annotations
 
-import dataclasses
 import logging
 
 from core.app.state import RuntimeState, SessionMode, SessionState, SessionStatus
 from core.config import ConfigDict
 
 logger = logging.getLogger(__name__)
-
-
-@dataclasses.dataclass(frozen=True)
-class OperatorEvent:
-    """Generic operator event after backend-specific normalization."""
-
-    intent: str | None = None
-    gripper_side: str | None = None
-    gripper_command: str | None = None
 
 
 def _collection_recording(runtime: RuntimeState, session: SessionState) -> bool:
@@ -30,124 +20,121 @@ def _collection_recording(runtime: RuntimeState, session: SessionState) -> bool:
     )
 
 
-def _gripper_command(event: OperatorEvent) -> str | None:
-    side = (event.gripper_side or "").strip().lower()
-    command = (event.gripper_command or "").strip().lower()
-    if side in {"left", "l"}:
-        side_key = "l"
-    elif side in {"right", "r"}:
-        side_key = "r"
-    else:
-        return None
-    if command not in {"open", "close"}:
-        return None
-    return f"web:gripper:{side_key}:{command}:0"
-
-
-def _normalize_button_event(
-    button: str,
+def resolve_operator_action(
     runtime: RuntimeState,
     session: SessionState,
-) -> OperatorEvent:
-    value = button.strip().lower()
-    if value == "y":
-        return OperatorEvent(intent="accept")
-    if value == "x":
-        if _collection_recording(runtime, session) or runtime.rollout_intervention_active:
-            return OperatorEvent(intent="cancel")
-        return OperatorEvent(intent="start")
-    for side in ("left", "right", "l", "r"):
-        for command in ("open", "close"):
-            if value == f"{side}_gripper_{command}":
-                return OperatorEvent(gripper_side=side, gripper_command=command)
-    return OperatorEvent()
-
-
-def _resolve_event_command(
-    runtime: RuntimeState,
-    session: SessionState,
-    event: OperatorEvent,
+    action: str,
+    *,
+    source: str = "ui",
 ) -> str | None:
-    command = _gripper_command(event)
+    """Resolve one device-independent operator action into an internal command.
+
+    Args:
+        runtime: Current runtime state.
+        session: Current session state.
+        action: Semantic operator action emitted by UI or a hardware adapter.
+        source: Human-readable producer used only for logs.
+
+    Returns:
+        A concrete ``web:*`` command, or None when the action is invalid for the
+        current state.
+    """
+    normalized = action.strip().lower()
+    command = {
+        "gripper_left_open": "web:gripper:l:open:0",
+        "gripper_left_close": "web:gripper:l:close:0",
+        "gripper_right_open": "web:gripper:r:open:0",
+        "gripper_right_close": "web:gripper:r:close:0",
+    }.get(normalized)
     if command is not None:
+        session.last_error = ""
         return command
 
-    resolved_intent = event.intent
-    if resolved_intent not in {"start", "accept", "cancel"}:
+    if normalized not in {
+        "start",
+        "accept",
+        "cancel",
+        "rollout_toggle",
+        "rollout_reset",
+        "intervention_toggle",
+        "intervention_accept",
+    }:
+        session.last_error = f"Unsupported operator action: {normalized!r}"
         return None
 
-    if resolved_intent == "start":
-        if session.mode is SessionMode.COLLECT and session.status is not SessionStatus.RUNNING:
-            return "web:collect_start"
-        if session.status is SessionStatus.RUNNING and session.mode in (
+    if normalized == "rollout_toggle":
+        if runtime.rollout_intervention_active:
+            command = None
+        elif (
+            runtime.rollout_episode_logger is not None
+            and runtime.rollout_episode_logger.has_active_episode
+        ) or (
+            session.status is SessionStatus.RUNNING
+            and session.mode in (SessionMode.REAL, SessionMode.SIM)
+        ):
+            command = "web:rollout_save"
+        elif (
+            session.status is SessionStatus.READY
+            and session.mode in (SessionMode.REAL, SessionMode.SIM)
+            and session.is_setup_done
+        ):
+            command = "web:run"
+        else:
+            command = None
+    elif normalized == "rollout_reset":
+        command = (
+            "web:console_reset" if session.mode in (SessionMode.REAL, SessionMode.SIM) else None
+        )
+    elif normalized == "intervention_toggle":
+        if runtime.rollout_intervention_active:
+            command = "web:rollout_intervention_abandon"
+        elif session.status is SessionStatus.RUNNING and session.mode in (
             SessionMode.REAL,
             SessionMode.SIM,
         ):
-            return "web:halt"
-        if runtime.rollout_intervention_active:
-            return "web:run"
-    if resolved_intent == "accept":
+            command = "web:halt"
+        else:
+            command = None
+    elif normalized == "intervention_accept":
+        command = "web:run" if runtime.rollout_intervention_active else None
+    elif normalized == "start":
+        if session.mode is SessionMode.COLLECT and session.status is not SessionStatus.RUNNING:
+            command = "web:collect_start"
+        elif session.status is SessionStatus.RUNNING and session.mode in (
+            SessionMode.REAL,
+            SessionMode.SIM,
+        ):
+            command = "web:halt"
+        elif runtime.rollout_intervention_active:
+            command = "web:run"
+        else:
+            command = None
+    elif normalized == "accept":
         if _collection_recording(runtime, session):
-            return "web:collect_stop"
-        if runtime.rollout_intervention_active:
-            return "web:run"
-        if runtime.rollout_save_ready:
-            return "web:rollout_save"
-    if resolved_intent == "cancel":
+            command = "web:collect_stop"
+        elif runtime.rollout_intervention_active:
+            command = "web:run"
+        elif runtime.rollout_save_ready:
+            command = "web:rollout_save"
+        else:
+            command = None
+    else:
         if _collection_recording(runtime, session):
-            return "web:collect_cancel"
-        if runtime.rollout_intervention_active:
-            return "web:rollout_intervention_abandon"
-    return None
-
-
-def resolve_operator_event(
-    config: ConfigDict,
-    runtime: RuntimeState,
-    session: SessionState,
-    *,
-    intent: str | None = None,
-    button: str | None = None,
-    source: str = "ui",
-) -> str | None:
-    """Resolve a UI/CAT operator event into one existing web command.
-
-    Args:
-        config: Active config.
-        runtime: Current runtime state.
-        session: Current session state.
-        intent: High-level UI intent: start, accept, or cancel.
-        button: Physical CAT button: x or y.
-        source: Human-readable event source used only for logs.
-
-    Returns:
-        A concrete ``web:*`` command for ``handle_command`` to execute, or None
-        when the event is invalid in the current state.
-    """
-    event = OperatorEvent(intent=intent)
-    if button is not None:
-        event = _normalize_button_event(button, runtime, session)
-
-    if event.intent not in {"start", "accept", "cancel", None}:
-        session.last_error = f"Unsupported operator event: intent={intent!r} button={button!r}"
-        return None
-
-    command = _resolve_event_command(runtime, session, event)
-    if command is None and event.intent is None:
-        session.last_error = f"Unsupported operator event: intent={intent!r} button={button!r}"
-        return None
+            command = "web:collect_cancel"
+        elif runtime.rollout_intervention_active:
+            command = "web:rollout_intervention_abandon"
+        else:
+            command = None
 
     if command is None:
-        resolved_intent = event.intent
         session.last_error = (
-            f"Operator action {resolved_intent!r} is not valid in "
+            f"Operator action {normalized!r} is not valid in "
             f"mode={session.mode.value} status={session.status.value}"
         )
         logger.info(
-            "[OPERATOR] source=%s intent=%s button=%s ignored mode=%s status=%s",
+            "[OPERATOR] source=%s action=%s ignored mode=%s status=%s",
             source,
-            resolved_intent,
-            button,
+            normalized,
             session.mode.value,
             session.status.value,
         )
@@ -155,20 +142,19 @@ def resolve_operator_event(
 
     session.last_error = ""
     logger.info(
-        "[OPERATOR] source=%s intent=%s button=%s resolved=%s",
+        "[OPERATOR] source=%s action=%s resolved=%s",
         source,
-        event.intent,
-        button,
+        normalized,
         command,
     )
     return command
 
 
-def maybe_start_operator_button_listener(
+def maybe_start_operator_action_listener(
     config: ConfigDict,
     runtime: RuntimeState,
 ) -> None:
-    """Subscribe to the CAT operator button topic and enqueue internal web commands."""
+    """Subscribe to semantic operator actions and enqueue internal web commands."""
     operator_cfg = config.get("operator_control") or {}
     if not operator_cfg.get("enabled", False):
         return
@@ -183,15 +169,15 @@ def maybe_start_operator_button_listener(
 
     from transport.ros2 import get_ros2_runtime
 
-    topic = str(operator_cfg.get("button_topic", "/eva/operator_button"))
+    topic = str(operator_cfg.get("action_topic", "/eva/operator_action"))
     ros_runtime = get_ros2_runtime(config.transport.node_name)
 
-    def on_button(msg: String) -> None:
-        button_value = msg.data.strip().lower()
-        if not button_value:
+    def on_action(msg: String) -> None:
+        action = msg.data.strip().lower()
+        if not action:
             logger.warning("[OPERATOR] ignored empty operator event")
             return
-        command_queue.put(f"web:operator_button:{button_value}:cat")
+        command_queue.put(f"web:operator_action:{action}:external")
 
-    ros_runtime.node.create_subscription(String, topic, on_button, 10)
-    logger.info("[OPERATOR] listening for CAT buttons on %s", topic)
+    ros_runtime.node.create_subscription(String, topic, on_action, 10)
+    logger.info("[OPERATOR] listening for semantic actions on %s", topic)

@@ -25,6 +25,7 @@ from core.app.handlers.utils import (
     reset_run_state,
     reset_session_progress,
 )
+from core.app.rl import submit_rl_critic
 from core.app.state import (
     OutputTarget,
     RuntimeState,
@@ -373,6 +374,7 @@ def fetch_action_chunk(
         if "actions" not in response:
             raise KeyError(f"Response does not contain 'actions': {response}")
         original_chunk = normalize_action_chunk(response["actions"])
+        submit_rl_critic(runtime, observation, original_chunk, "policy")
         action_chunk = normalize_policy_action_chunk(
             config, runtime, original_chunk, response=response
         )
@@ -383,7 +385,7 @@ def fetch_action_chunk(
             config.robot.gripper_close,
         )
         step_index = session.step_index if session is not None else -1
-        logger.info(
+        logger.debug(
             "[INFER_CHUNK] step=%d infer_ms=%.1f raw_shape=%s action_shape=%s "
             "delta=%.4f first=%s last=%s",
             step_index,
@@ -474,10 +476,10 @@ def run_warmup_and_start(config: ConfigDict, runtime: RuntimeState, session: Ses
     reset_ik_solver(config, runtime)
     session.action_chunk = None
     session.chunk_index = 0
+    _anchor_buffer_to_current_qpos(runtime)
 
     if skip_warmup:
         logger.info("Eval fast-path: skipping per-trial warmup")
-        _anchor_buffer_to_current_qpos(runtime)
         start_inference_loop(config, runtime, session)
         return True
 
@@ -487,7 +489,7 @@ def run_warmup_and_start(config: ConfigDict, runtime: RuntimeState, session: Ses
             if runtime.infer_strategy is None:
                 chunk = fetch_action_chunk(config, runtime, session.selected_task, session)
             else:
-                chunk = runtime.infer_strategy.take_or_fetch_chunk(
+                chunk = runtime.infer_strategy.prepare_warmup_chunk(
                     session.selected_task,
                     partial(_loop_fetch_chunk, config, runtime, session),
                 )
@@ -508,11 +510,6 @@ def run_warmup_and_start(config: ConfigDict, runtime: RuntimeState, session: Ses
     runtime._eval_warmup_done = True
     runtime.setup_stage = ""
 
-    # Anchor the smooth buffer to the robot's actual position so the first
-    # async chunk blends from where the robot really is, not from the
-    # warmup-predicted future position that was never executed.
-    _anchor_buffer_to_current_qpos(runtime)
-
     start_inference_loop(config, runtime, session)
     return True
 
@@ -520,9 +517,8 @@ def run_warmup_and_start(config: ConfigDict, runtime: RuntimeState, session: Ses
 def _anchor_buffer_to_current_qpos(runtime: RuntimeState) -> None:
     """Anchor the smooth buffer to the robot's actual qpos.
 
-    After warmup, the buffer holds a predicted future position that was never
-    executed.  Without anchoring, the first async chunk blends from that
-    phantom position, causing a visible jump.
+    Warmup integrates its first prediction against this measured position so the
+    first published action does not jump from an unexecuted prediction.
     """
     if runtime.infer_strategy is None:
         return
@@ -905,11 +901,12 @@ def load_replay_dataset(
         logger.warning("load_replay_dataset: %s", session.last_error)
         return
     try:
-        actions, task = LeRobotDatasetIO(dataset_dir).load_trajectory(episode_id, action_key)
         replay_config = _build_replay_dataset_config(
             config, dataset_dir, episode_id, state_key, action_key, series_state_key, video_keys
         )
         source = DatasetTransport(replay_config, runtime.robot, dataset_dir, episode_id)
+        actions = source.get_action_trajectory()
+        task = source.current_task
     except Exception as error:
         session.last_error = f"Cannot load episode {episode_id}: {error}"
         logger.warning("load_replay_dataset: %s", session.last_error)

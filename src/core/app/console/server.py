@@ -9,31 +9,43 @@ from the robot's URDF, served via /api/scene + /api/meshes).
 
 from __future__ import annotations
 
+import concurrent.futures
+import copy
 import dataclasses
 import datetime as _dt
 import gzip
+import hashlib
 import json
 import logging
+import multiprocessing
 import os
 import random
 import re
+import subprocess
 import threading
 import time
+from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
 import cv2
+import imageio_ffmpeg
 import numpy as np
 from tqdm import tqdm
 
+from core.app.command_catalog import control_command_catalog
+from core.app.console.transform_worker import build_transform_blob
 from core.app.handlers import (
     _resolve_runtime_path,
+    build_policy_observation,
     eval_episode_dir,
     eval_model_name,
     rollout_save_status,
 )
+from core.app.handlers.io import load_replay_dataset
+from core.app.rl import build_rl_critic_observation, rl_live_series
 from core.app.state import (
     RuntimeState,
     SessionMode,
@@ -43,7 +55,7 @@ from core.app.state import (
 )
 from core.config import ConfigDict
 from core.utils.lerobot import LeRobotDatasetIO
-from transport.base import ObservationSource
+from transport.base import HilStatus, ObservationSource
 from transport.dataset import DatasetTransport
 
 logger = logging.getLogger(__name__)
@@ -58,6 +70,267 @@ _TRANSPORT_ONLINE_WINDOW_SECONDS = 2.0
 # Transports that talk to a real arm: they track receipt freshness, so "no message
 # yet" means offline (not merely "configured"). debug/dataset are not in this set.
 _LIVE_TRANSPORT_TYPES = {"zmq", "ros1", "ros2"}
+_VIDEO_CACHE_CONTROL = "public, max-age=3600"
+_VIDEO_FASTSTART_CACHE_ENV = "EVA_VIDEO_CACHE_DIR"
+_VIDEO_FASTSTART_LOCK = threading.Lock()
+_VIDEO_POSTER_LOCK = threading.Lock()
+_TRANSFORM_EXECUTOR: concurrent.futures.ProcessPoolExecutor | None = None
+_TRANSFORM_EXECUTOR_LOCK = threading.Lock()
+_TRACE_EVENT_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,96}$")
+_REVIEW_DATA_CACHE_MAX = 8
+_REVIEW_DATA_CACHE_LOCK = threading.RLock()
+
+
+@dataclasses.dataclass(frozen=True)
+class _CachedReviewEpisode:
+    series: dict
+    video_keys: dict[str, str]
+    scene_qpos: np.ndarray
+    fps: int
+    task: str
+
+
+_REVIEW_DATA_CACHE: OrderedDict[tuple[str, int], _CachedReviewEpisode] = OrderedDict()
+
+
+def _trace_json(value: Any, limit: int = 1600) -> str:
+    """Compact, bounded JSON for diagnostic logs without large control payloads."""
+    try:
+        encoded = json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
+    except (TypeError, ValueError):
+        encoded = repr(value)
+    return encoded if len(encoded) <= limit else encoded[:limit] + "…"
+
+
+def _post_body_summary(body: dict) -> dict:
+    """Keep routing evidence while excluding large vectors and free-form text."""
+    summary: dict[str, Any] = {}
+    for key, value in body.items():
+        if key in {"qpos", "actions", "state", "image", "images"}:
+            summary[key] = f"<{len(value) if hasattr(value, '__len__') else '?'} values>"
+        elif key in {"note", "annotation"}:
+            summary[key] = f"<{len(str(value))} chars>"
+        elif isinstance(value, (dict, list, tuple)):
+            summary[key] = _trace_json(value, 240)
+        else:
+            summary[key] = value
+    return summary
+
+
+def _command_summary(command: str) -> str:
+    if command.startswith(("web:manual_qpos:", "web:update_infer_params:")):
+        return command.split(":", 2)[0] + ":" + command.split(":", 2)[1] + ":<payload>"
+    return command if len(command) <= 240 else command[:240] + "…"
+
+
+def _get_transform_executor() -> concurrent.futures.ProcessPoolExecutor:
+    global _TRANSFORM_EXECUTOR
+    with _TRANSFORM_EXECUTOR_LOCK:
+        if _TRANSFORM_EXECUTOR is None:
+            _TRANSFORM_EXECUTOR = concurrent.futures.ProcessPoolExecutor(
+                max_workers=1,
+                mp_context=multiprocessing.get_context("spawn"),
+            )
+        return _TRANSFORM_EXECUTOR
+
+
+def _is_native_urdf_scene(scene: object) -> bool:
+    cls = type(scene)
+    return cls.__module__ == "robots.utils" and cls.__name__ == "UrdfScene"
+
+
+def _compute_transform_blob(
+    scene: object,
+    qpos: np.ndarray,
+    robot_type: str,
+    gripper_open: float | None,
+    gripper_close: float | None,
+    batch_loading: threading.Event | None = None,
+) -> bytes:
+    """Compute a batch outside the web process when using the production scene."""
+    qpos = np.ascontiguousarray(qpos, dtype=np.float32)
+    started = time.monotonic()
+    if _is_native_urdf_scene(scene):
+        try:
+            raw = (
+                _get_transform_executor()
+                .submit(
+                    build_transform_blob,
+                    robot_type,
+                    gripper_open,
+                    gripper_close,
+                    qpos,
+                )
+                .result(timeout=120)
+            )
+            logger.info(
+                "[TRANSFORM_BATCH] mode=worker frames=%d bytes=%d elapsed_ms=%.1f",
+                len(qpos),
+                len(raw),
+                (time.monotonic() - started) * 1000.0,
+            )
+            return raw
+        except Exception:
+            logger.exception("[TRANSFORM_BATCH] worker failed; falling back in-process")
+
+    if batch_loading is not None:
+        batch_loading.set()
+    try:
+        raw = scene.all_transforms_blob(qpos)  # type: ignore[attr-defined]
+    finally:
+        if batch_loading is not None:
+            batch_loading.clear()
+    logger.info(
+        "[TRANSFORM_BATCH] mode=in_process frames=%d bytes=%d elapsed_ms=%.1f",
+        len(qpos),
+        len(raw),
+        (time.monotonic() - started) * 1000.0,
+    )
+    return raw
+
+
+def _prewarm_transform_worker(config: ConfigDict, runtime: RuntimeState) -> None:
+    """Start and initialize the isolated URDF worker without delaying web startup."""
+    started = time.monotonic()
+    empty = np.empty((0, int(runtime.robot.total_action_dim)), dtype=np.float32)
+    future = _get_transform_executor().submit(
+        build_transform_blob,
+        str(config.robot.type),
+        config.robot.gripper_open,
+        config.robot.gripper_close,
+        empty,
+    )
+
+    def report(done: concurrent.futures.Future) -> None:
+        try:
+            done.result()
+        except Exception:
+            logger.exception("[TRANSFORM_WORKER] prewarm failed")
+            return
+        logger.info(
+            "[TRANSFORM_WORKER] prewarm complete elapsed_ms=%.1f",
+            (time.monotonic() - started) * 1000.0,
+        )
+
+    future.add_done_callback(report)
+
+
+def _mp4_atom_offsets(path: Path) -> dict[bytes, int]:
+    offsets: dict[bytes, int] = {}
+    size = path.stat().st_size
+    with path.open("rb") as f:
+        offset = 0
+        while offset + 8 <= size:
+            f.seek(offset)
+            header = f.read(8)
+            if len(header) != 8:
+                break
+            atom_size = int.from_bytes(header[:4], "big")
+            atom_type = header[4:8]
+            header_size = 8
+            if atom_size == 1:
+                large = f.read(8)
+                if len(large) != 8:
+                    break
+                atom_size = int.from_bytes(large, "big")
+                header_size = 16
+            elif atom_size == 0:
+                atom_size = size - offset
+            if atom_size < header_size:
+                break
+            offsets.setdefault(atom_type, offset)
+            offset += atom_size
+    return offsets
+
+
+def _mp4_needs_faststart(path: Path) -> bool:
+    if path.suffix.lower() != ".mp4":
+        return False
+    offsets = _mp4_atom_offsets(path)
+    moov = offsets.get(b"moov")
+    mdat = offsets.get(b"mdat")
+    return moov is not None and mdat is not None and moov > mdat
+
+
+def _video_faststart_cache_path(path: Path) -> Path:
+    stat = path.stat()
+    digest = hashlib.sha256(
+        f"{path.resolve()}\0{stat.st_size}\0{stat.st_mtime_ns}".encode()
+    ).hexdigest()[:24]
+    cache_root_env = os.environ.get(_VIDEO_FASTSTART_CACHE_ENV)
+    cache_root = (
+        Path(cache_root_env)
+        if cache_root_env
+        else _resolve_runtime_path("work_dirs/.video_faststart")
+    )
+    return cache_root / f"{path.stem}-{digest}.mp4"
+
+
+def _video_poster_cache_path(path: Path) -> Path:
+    stat = path.stat()
+    digest = hashlib.sha256(
+        f"{path.resolve()}\0{stat.st_size}\0{stat.st_mtime_ns}".encode()
+    ).hexdigest()[:24]
+    cache_root_env = os.environ.get(_VIDEO_FASTSTART_CACHE_ENV)
+    cache_root = (
+        Path(cache_root_env)
+        if cache_root_env
+        else _resolve_runtime_path("work_dirs/.video_faststart")
+    )
+    return cache_root / f"{path.stem}-{digest}.jpg"
+
+
+def _ensure_faststart_video(path: Path) -> Path:
+    if not _mp4_needs_faststart(path):
+        return path
+    out = _video_faststart_cache_path(path)
+    with _VIDEO_FASTSTART_LOCK:
+        if out.exists() and out.stat().st_size > 0 and not _mp4_needs_faststart(out):
+            return out
+        out.parent.mkdir(parents=True, exist_ok=True)
+        tmp = out.with_suffix(".tmp.mp4")
+        cmd = [
+            imageio_ffmpeg.get_ffmpeg_exe(),
+            "-y",
+            "-i",
+            str(path),
+            "-c",
+            "copy",
+            "-movflags",
+            "+faststart",
+            str(tmp),
+        ]
+        try:
+            subprocess.run(cmd, check=True, capture_output=True)
+        except subprocess.CalledProcessError as exc:
+            stderr = exc.stderr.decode("utf-8", errors="replace") if exc.stderr else str(exc)
+            raise RuntimeError(f"faststart remux failed for {path}: {stderr}") from exc
+        tmp.replace(out)
+        if _mp4_needs_faststart(out):
+            raise RuntimeError(f"faststart remux did not move moov atom for {path}")
+        return out
+
+
+def _ensure_video_poster(path: Path) -> Path:
+    out = _video_poster_cache_path(path)
+    with _VIDEO_POSTER_LOCK:
+        if out.exists() and out.stat().st_size > 0:
+            return out
+        out.parent.mkdir(parents=True, exist_ok=True)
+        cap = cv2.VideoCapture(str(path))
+        try:
+            ok, frame = cap.read()
+        finally:
+            cap.release()
+        if not ok or frame is None:
+            raise RuntimeError(f"could not read first video frame for {path}")
+        ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 82])
+        if not ok:
+            raise RuntimeError(f"could not encode first video frame for {path}")
+        tmp = out.with_suffix(".tmp.jpg")
+        tmp.write_bytes(buf.tobytes())
+        tmp.replace(out)
+        return out
 
 
 def _pick_video(videos: dict[str, Path], cam: str) -> Path | None:
@@ -97,6 +370,97 @@ def _infer_replay_video_key(dataset_dir: Path, cam: str) -> str:
     return match or image.get("default") or ""
 
 
+def _open_review_episode(
+    ctx: ConsoleContext,
+    dataset_dir: str | Path,
+    episode_index: int,
+) -> tuple[DatasetTransport, dict[str, str]]:
+    """Open one saved episode without attaching it to shared console runtime state.
+
+    Args:
+        ctx: Active console context supplying robot and config definitions.
+        dataset_dir: Resolved LeRobot dataset directory.
+        episode_index: Zero-based saved episode index.
+
+    Returns:
+        source: Dataset transport positioned on the requested episode.
+        video_keys: Camera observation keys mapped to dataset video keys.
+    """
+    runtime = ctx.runtime
+    config = runtime.active_config or ctx.config
+    inferred = LeRobotDatasetIO(dataset_dir).infer_keys()
+    state_key = (inferred.get("state") or {}).get("default") or "observations.state.qpos"
+    action_key = (inferred.get("action") or {}).get("default") or "action"
+    image = inferred.get("image") or {}
+    candidates = image.get("candidates") or []
+    video_keys = {
+        camera.observation_key: match
+        for camera in runtime.robot.observation_schema.cameras
+        if (match := _match_video_key(candidates, camera.observation_key)) is not None
+    }
+    if not video_keys and image.get("default"):
+        camera = runtime.robot.observation_schema.cameras[0].observation_key
+        video_keys[camera] = str(image["default"])
+
+    review_config = copy.deepcopy(config)
+    review_config.transport.dataset_dir = dataset_dir
+    review_config.transport.episode_id = episode_index
+    review_config.transport.dataset_keys = ConfigDict(
+        state_key=state_key,
+        action_key=action_key,
+        video_keys=video_keys,
+    )
+    return (
+        DatasetTransport(review_config, runtime.robot, dataset_dir, episode_index),
+        video_keys,
+    )
+
+
+def _cached_review_episode(
+    ctx: ConsoleContext,
+    dataset_dir: str | Path,
+    episode_index: int,
+) -> _CachedReviewEpisode:
+    """Read one stateless review episode once and cache its non-video data.
+
+    Args:
+        ctx: Active console context supplying robot and dataset key configuration.
+        dataset_dir: Resolved LeRobot dataset directory.
+        episode_index: Zero-based saved episode index.
+
+    Returns:
+        Cached state/action series, camera mapping, and scene qpos rows.
+    """
+    key = (str(Path(dataset_dir).resolve()), int(episode_index))
+    with _REVIEW_DATA_CACHE_LOCK:
+        cached = _REVIEW_DATA_CACHE.get(key)
+        if cached is not None:
+            _REVIEW_DATA_CACHE.move_to_end(key)
+            return cached
+
+    source, video_keys = _open_review_episode(ctx, dataset_dir, episode_index)
+    try:
+        series = source.series()
+        scene_qpos = np.asarray(
+            [source.get_scene_qpos(index) for index in range(source.n_steps)],
+            dtype=np.float32,
+        )
+    finally:
+        source.close()
+    cached = _CachedReviewEpisode(
+        series, dict(video_keys), scene_qpos, source.fps, source.current_task
+    )
+    with _REVIEW_DATA_CACHE_LOCK:
+        existing = _REVIEW_DATA_CACHE.get(key)
+        if existing is not None:
+            _REVIEW_DATA_CACHE.move_to_end(key)
+            return existing
+        _REVIEW_DATA_CACHE[key] = cached
+        while len(_REVIEW_DATA_CACHE) > _REVIEW_DATA_CACHE_MAX:
+            _REVIEW_DATA_CACHE.popitem(last=False)
+    return cached
+
+
 def _ensure_ckpt_order(config: ConfigDict, runtime: RuntimeState) -> None:
     eval_cfg = config.eval
     if eval_cfg is None or not eval_cfg.checkpoints or runtime.ckpt_order:
@@ -119,6 +483,7 @@ class ConsoleContext:
     scene_cache_key: object | None = None  # last qpos signature fed to scene.transforms
     scene_cache: dict | None = None  # cached transforms payload for that signature
     scene_log_key: object | None = None
+    scene_batch_loading: threading.Event = dataclasses.field(default_factory=threading.Event)
     scene_pbar: tqdm | None = None  # collection-replay playback progress bar
     active_tab: str = "debug"
     output_dir: str = ""  # results root; debug results land in <output_dir>/console/
@@ -182,6 +547,33 @@ def _serialize_eval(ctx: ConsoleContext) -> dict:
     }
 
 
+def _serialize_rl(ctx: ConsoleContext) -> dict:
+    """Return the configured RL workspace choices and storage contract."""
+    config = ctx.runtime.active_config or ctx.config
+    rl_cfg = config.rl
+    if rl_cfg is None:
+        return {"enabled": False}
+    return {
+        "enabled": True,
+        "backend_ready": True,
+        "cli_mode": str(rl_cfg.cli_mode),
+        "inference_strategy": str(rl_cfg.inference_strategy),
+        "tasks": [str(task) for task in rl_cfg.tasks],
+        "policies": [
+            {"slot": slot, "name": str(model.name)}
+            for slot, model in enumerate(rl_cfg.policies)
+        ],
+        "critics": [
+            {"slot": slot, "name": str(model.name), "type": str(model.type)}
+            for slot, model in enumerate(rl_cfg.critics)
+        ],
+        "data": {
+            "format": str(rl_cfg.data.format),
+            "dataset_dir": _resolve_dataset_dir(str(rl_cfg.data.storage.log_dir)),
+        },
+    }
+
+
 def _serialize_gripper_controls(ctx: ConsoleContext) -> list[dict[str, str]]:
     gripper_groups = [g for g in ctx.runtime.robot.actuator_groups if g.gripper_index is not None]
     if len(gripper_groups) == 0:
@@ -197,8 +589,7 @@ def _serialize_gripper_controls(ctx: ConsoleContext) -> list[dict[str, str]]:
 def _serialize_manual_qpos_limits(ctx: ConsoleContext) -> list[dict[str, float]]:
     config = ctx.runtime.active_config or ctx.config
     limits = [
-        {"min": -3.2, "max": 3.2, "step": 0.005}
-        for _ in range(ctx.runtime.robot.total_action_dim)
+        {"min": -3.2, "max": 3.2, "step": 0.005} for _ in range(ctx.runtime.robot.total_action_dim)
     ]
     gripper_min = float(min(config.robot.gripper_open, config.robot.gripper_close))
     gripper_max = float(max(config.robot.gripper_open, config.robot.gripper_close))
@@ -264,8 +655,12 @@ def _serialize_config(ctx: ConsoleContext) -> dict:
         "publish_mode": "joint",
         "publish_rate": config.inference_cfg.publish_rate,
         "inference_rate": config.inference_cfg.inference_rate,
-        "hil_control_modes": ["absolute", "relative"],
-        "hil_control_mode": ctx.runtime.hil_control_mode,
+        "control_channel": {
+            "enabled": bool((config.get("control_channel") or {}).get("enabled", False)),
+            "host": str((config.get("control_channel") or {}).get("host", "127.0.0.1")),
+            "port": int((config.get("control_channel") or {}).get("port", 5757)),
+            "commands": control_command_catalog(),
+        },
         "collection": {
             "enabled": bool(config.collection.schema.columns),
             "fps": None,
@@ -274,6 +669,7 @@ def _serialize_config(ctx: ConsoleContext) -> dict:
             ),
         },
         "eval": _serialize_eval(ctx),
+        "rl": _serialize_rl(ctx),
         "run_id": Path(ctx.output_dir).name,
     }
 
@@ -284,6 +680,11 @@ def _serialize_status(ctx: ConsoleContext) -> dict:
     s = ctx.session
     r = ctx.runtime
     config = r.active_config or ctx.config
+    hil_status = (
+        r.transport.hil_status()
+        if hasattr(r.transport, "hil_status")
+        else HilStatus(supported=False, error="Transport does not support HIL")
+    )
     elapsed_ms = 0
     if s.status.value == "running" and s.run_start_time > 0:
         elapsed_ms = int((time.monotonic() - s.run_start_time) * 1000)
@@ -322,6 +723,20 @@ def _serialize_status(ctx: ConsoleContext) -> dict:
     else:
         transport_connected = bool(config.transport.type)
     image_min_hz = reader.image_min_hz()
+    critic_status = (
+        r.rl_critic_runner.status()
+        if r.rl_critic_runner is not None
+        else {
+            "connected": False,
+            "metadata": {},
+            "last_request_ms": 0.0,
+            "last_error": r.rl_critic_error,
+            "coalesced_requests": 0,
+            "samples": 0,
+        }
+    )
+    policy_samples = sum(1 for sample in r.rl_live_samples if sample[3] == "policy")
+    intervention_samples = len(r.rl_live_samples) - policy_samples
     return {
         "robot_type": config.robot.type,
         "transport_type": config.transport.type,
@@ -375,13 +790,16 @@ def _serialize_status(ctx: ConsoleContext) -> dict:
         "collection_teleop_armed": r.collection_teleop_armed,
         "collection_teleop_active": r.collection_teleop_active,
         "rollout_intervention_active": r.rollout_intervention_active,
+        "rollout_intervention_enabled": r.rollout_intervention_enabled,
+        "hil_supported": hil_status.supported,
+        "hil_active": hil_status.active,
+        "hil_error": hil_status.error,
         "rollout_intervention_active_frames": (
             0
             if r.rollout_intervention_active_segment is None
             else len(r.rollout_intervention_active_segment.frames)
         ),
         "rollout_intervention_segments": len(r.rollout_intervention_segments),
-        "hil_control_mode": r.hil_control_mode,
         "rollout": rollout_save_status(config, r),
         "collect": (
             r.episode_logger.status_snapshot(format_task_label(s.selected_collect_task))
@@ -395,6 +813,20 @@ def _serialize_status(ctx: ConsoleContext) -> dict:
         "ckpt_label": ctx.ckpt_label(r.active_ckpt_slot),
         "clip_id": r.current_clip_id,
         "cell": r.current_cell,
+        "rl": {
+            "active": r.rl_active,
+            "selected_policy_slot": r.rl_selected_policy_slot,
+            "selected_critic_slot": r.rl_selected_critic_slot,
+            "critic_connected": critic_status["connected"],
+            "critic_metadata": critic_status["metadata"],
+            "critic_last_request_ms": critic_status["last_request_ms"],
+            "critic_error": critic_status["last_error"],
+            "coalesced_requests": critic_status["coalesced_requests"],
+            "critic_samples": critic_status["samples"],
+            "policy_samples": policy_samples,
+            "intervention_samples": intervention_samples,
+            "replay_episode": r.rl_replay_episode_id,
+        },
     }
 
 
@@ -535,6 +967,11 @@ def _serialize_scene(ctx: ConsoleContext) -> dict:
     # Cache by qpos signature so a static arm doesn't re-run forward kinematics each poll.
     if ctx.scene is None:
         return {"available": False, "arms": {}}
+    # Whole-episode FK has priority over high-rate live scene polling. Return the last
+    # rendered pose while the batch owns the mutable yourdfpy graph; otherwise dozens
+    # of poll threads can starve the batch before it acquires the scene lock.
+    if ctx.scene_batch_loading.is_set():
+        return ctx.scene_cache or {"available": False, "arms": {}, "loading": True}
     reader = _observation_reader(ctx)
     session = ctx.session
     collection_qpos, collection_frame_index = _active_collection_replay_qpos(ctx.runtime)
@@ -658,6 +1095,12 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     timeout = 30
 
+    def _request_trace_id(self) -> str:
+        supplied = self.headers.get("X-EVA-Trace-ID", "").strip()
+        if supplied and len(supplied) <= 96 and _TRACE_EVENT_RE.fullmatch(supplied):
+            return supplied
+        return f"srv-{random.getrandbits(40):010x}"
+
     def log_message(self, format: str, *args) -> None:  # noqa: A002
         """Silence the default per-request access log (unless CONSOLE_ACCESS_LOG is set)."""
         if os.environ.get("CONSOLE_ACCESS_LOG"):
@@ -674,6 +1117,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
     def _send_empty(self, status: int) -> None:
         # HTTP/1.1 requires a framed body even for errors; without Content-Length a
         # keep-alive client would block waiting for a body that never comes.
+        self._response_status = status
         self.send_response(status)
         self.send_header("Content-Length", "0")
         self.end_headers()
@@ -689,6 +1133,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
 
     def _send_json(self, status: int, payload: dict | list) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        self._response_status = status
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -756,6 +1201,11 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
 
     def _enqueue(self, command: str) -> None:
         assert self.ctx.runtime.command_queue is not None
+        logger.info(
+            "[COMMAND_ENQUEUE] trace=%s command=%s",
+            getattr(self, "_active_trace_id", "none"),
+            _command_summary(command),
+        )
         self.ctx.runtime.command_queue.put(command)
 
     def _invalidate_scene_cache(self) -> None:
@@ -805,80 +1255,27 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             {"ok": True, "episode": episode_index, "frames": int(qpos.shape[0])},
         )
 
-    def _start_episode_review(self, body: dict) -> None:
-        runtime = self.ctx.runtime
-        config = runtime.active_config or self.ctx.config
+    def _post_review_episode(self, body: dict) -> None:
         dataset_dir = _resolve_dataset_dir(str(body.get("dataset_dir", "")).strip())
         episode_index = int(body.get("episode", 0))
         try:
-            inferred = LeRobotDatasetIO(dataset_dir).infer_keys()
-            state_key = (inferred.get("state") or {}).get("default") or "observations.state.qpos"
-            action_key = (inferred.get("action") or {}).get("default") or "action"
-            image = inferred.get("image") or {}
-            candidates = image.get("candidates") or []
-            video_keys: dict[str, str] = {}
-            for camera in runtime.robot.observation_schema.cameras:
-                cam_key = camera.observation_key
-                match = _match_video_key(candidates, cam_key)
-                if match is not None:
-                    video_keys[cam_key] = match
-            if not video_keys and image.get("default"):
-                video_keys[runtime.robot.observation_schema.cameras[0].observation_key] = str(
-                    image["default"]
-                )
-            import copy
-            review_config = copy.deepcopy(config)
-            review_config.transport.dataset_dir = dataset_dir
-            review_config.transport.episode_id = episode_index
-            review_config.transport.dataset_keys = ConfigDict(
-                state_key=state_key,
-                action_key=action_key,
-                video_keys=video_keys,
-            )
-            source = DatasetTransport(review_config, runtime.robot, dataset_dir, episode_index)
-            qpos = np.asarray(
-                [source.get_scene_qpos(i) for i in range(source.n_steps)], dtype=np.float32
-            )
-            fps = source.fps
-            task = source.current_task
-            source.close()
+            cached = _cached_review_episode(self.ctx, dataset_dir, episode_index)
+            payload = {
+                "ok": True,
+                "episode": episode_index,
+                "frames": len(cached.scene_qpos),
+                "fps": cached.fps,
+                "task": cached.task,
+                "video_keys": cached.video_keys,
+                **cached.series,
+            }
         except Exception as error:
             self._send_json(404, {"ok": False, "error": str(error)})
             return
-        if len(qpos) == 0:
+        if payload["frames"] <= 0:
             self._send_json(404, {"ok": False, "error": "episode has no frames"})
             return
-        runtime.collection_replay_qpos = qpos
-        runtime.collection_replay_episode = episode_index
-        runtime.collection_replay_started = 0.0
-        runtime.collection_replay_fps = max(
-            1, int(round(fps or self.ctx.config.inference_cfg.publish_rate))
-        )
-        self._invalidate_scene_cache()
-        self._send_json(
-            200,
-            {
-                "ok": True,
-                "episode": episode_index,
-                "frames": int(qpos.shape[0]),
-                "fps": runtime.collection_replay_fps,
-                "task": task,
-                "video_keys": video_keys,
-            },
-        )
-
-    def _start_review_replay(self, body: dict) -> None:
-        runtime = self.ctx.runtime
-        episode_index = int(body.get("episode", runtime.collection_replay_episode or 0))
-        if (
-            runtime.collection_replay_qpos is None
-            or runtime.collection_replay_episode != episode_index
-        ):
-            self._send_json(404, {"ok": False, "error": "review episode unavailable"})
-            return
-        runtime.collection_replay_started = time.monotonic()
-        self._invalidate_scene_cache()
-        self._send_json(200, {"ok": True, "episode": episode_index})
+        self._send_json(200, payload)
 
     def _eval_start(self, body: dict) -> None:
         # EVAL tab "RUN": bind a fresh clip_id + prompt/trial to this run. The recorder
@@ -1080,6 +1477,16 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         since = self._query_int("since", 0)
         self._send_json(200, _serialize_live_series(self.ctx, max(since, 0)))
 
+    def _get_rl_series(self) -> None:
+        if not self._require_rl_active():
+            return
+        since = self._query_int("since", 0)
+        critic_since = self._query_int("critic_since", 0)
+        self._send_json(
+            200,
+            rl_live_series(self.ctx.runtime, max(since, 0), max(critic_since, 0)),
+        )
+
     def _sync_preview_to_active_model(self) -> None:
         # Keep the preview pointed at the active model's dataset (it changes on ckpt
         # switch). The logger already roots there; mirror that path into the preview.
@@ -1175,6 +1582,31 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         arms = ctx.scene.transforms(qpos)  # type: ignore[attr-defined]
         self._send_json(200, {"available": True, "arms": arms})
 
+    def _transform_range(self) -> tuple[int, int] | None:
+        start = self._query_int("start", -1)
+        count = self._query_int("count", -1)
+        if start < 0 and count < 0:
+            return None
+        if start < 0 or count <= 0:
+            self._send_json(400, {"available": False, "error": "invalid transform range"})
+            return (-1, -1)
+        return start, count
+
+    def _send_transform_blob(self, raw: bytes, start: int, count: int, total: int) -> None:
+        use_gzip = "gzip" in self.headers.get("Accept-Encoding", "").lower()
+        body = gzip.compress(raw) if use_gzip else raw
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("X-EVA-Transform-Start", str(start))
+        self.send_header("X-EVA-Transform-Count", str(count))
+        self.send_header("X-EVA-Transform-Total", str(total))
+        self.send_header("Cache-Control", "no-store")
+        if use_gzip:
+            self.send_header("Content-Encoding", "gzip")
+        self.end_headers()
+        self.wfile.write(body)
+
     def _get_replay_transforms(self) -> None:
         # Whole-episode URDF world transforms in one binary blob, so the console can
         # play a replay locally (one fetch + local frame cursor) instead of an FK +
@@ -1189,6 +1621,32 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         if n <= 0:
             self._send_json(200, {"available": False})
             return
+        transform_range = self._transform_range()
+        if transform_range == (-1, -1):
+            return
+        if transform_range is not None:
+            start, count = transform_range
+            end = min(n, start + count)
+            if start >= n:
+                self._send_json(404, {"available": False, "error": "transform frame out of range"})
+                return
+            seq = np.stack(
+                [
+                    np.asarray(replay.get_scene_qpos(index), dtype=np.float32)  # type: ignore[attr-defined]
+                    for index in range(start, end)
+                ]
+            )
+            effective = ctx.runtime.active_config or ctx.config
+            raw = _compute_transform_blob(
+                scene,
+                seq,
+                str(effective.robot.type),
+                effective.robot.gripper_open,
+                effective.robot.gripper_close,
+                ctx.scene_batch_loading,
+            )
+            self._send_transform_blob(raw, start, end - start, n)
+            return
         key = (id(scene), id(replay), int(getattr(replay, "episode_id", -1)), n)
         with type(self)._xf_lock:
             cache = type(self)._xf_cache
@@ -1197,21 +1655,79 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                 seq = np.stack(
                     [np.asarray(replay.get_scene_qpos(i), dtype=np.float32) for i in range(n)]  # type: ignore[attr-defined]
                 )
-                raw = scene.all_transforms_blob(seq)  # type: ignore[attr-defined]
+                effective = ctx.runtime.active_config or ctx.config
+                raw = _compute_transform_blob(
+                    scene,
+                    seq,
+                    str(effective.robot.type),
+                    effective.robot.gripper_open,
+                    effective.robot.gripper_close,
+                    ctx.scene_batch_loading,
+                )
                 entry = (raw, gzip.compress(raw))
                 # Bound the cache to the two most recent episodes.
                 if len(cache) >= 2:
                     cache.pop(next(iter(cache)))
                 cache[key] = entry
-        use_gzip = "gzip" in self.headers.get("Accept-Encoding", "").lower()
-        body = entry[1] if use_gzip else entry[0]
-        self.send_response(200)
-        self.send_header("Content-Type", "application/octet-stream")
-        self.send_header("Content-Length", str(len(body)))
-        if use_gzip:
-            self.send_header("Content-Encoding", "gzip")
-        self.end_headers()
-        self.wfile.write(body)
+        self._send_transform_blob(entry[0], 0, n, n)
+
+    def _get_review_transforms(self) -> None:
+        dataset_dir = _resolve_dataset_dir(self._query_str("dataset_dir"))
+        episode_index = self._query_int("episode", -1)
+        scene = self.ctx.scene
+        if scene is None or episode_index < 0:
+            self._send_json(404, {"ok": False, "error": "review transforms unavailable"})
+            return
+        try:
+            cached = _cached_review_episode(self.ctx, dataset_dir, episode_index)
+            n = len(cached.scene_qpos)
+            if n <= 0:
+                self._send_json(404, {"ok": False, "error": "episode has no frames"})
+                return
+            transform_range = self._transform_range()
+            if transform_range == (-1, -1):
+                return
+            if transform_range is not None:
+                start, count = transform_range
+                end = min(n, start + count)
+                if start >= n:
+                    self._send_json(
+                        404, {"available": False, "error": "transform frame out of range"}
+                    )
+                    return
+                effective = self.ctx.runtime.active_config or self.ctx.config
+                raw = _compute_transform_blob(
+                    scene,
+                    cached.scene_qpos[start:end],
+                    str(effective.robot.type),
+                    effective.robot.gripper_open,
+                    effective.robot.gripper_close,
+                    self.ctx.scene_batch_loading,
+                )
+                self._send_transform_blob(raw, start, end - start, n)
+                return
+            key = (id(scene), str(Path(dataset_dir).resolve()), episode_index, n)
+            with type(self)._xf_lock:
+                cache = type(self)._xf_cache
+                entry = cache.get(key)
+                if entry is None:
+                    effective = self.ctx.runtime.active_config or self.ctx.config
+                    raw = _compute_transform_blob(
+                        scene,
+                        cached.scene_qpos,
+                        str(effective.robot.type),
+                        effective.robot.gripper_open,
+                        effective.robot.gripper_close,
+                        self.ctx.scene_batch_loading,
+                    )
+                    entry = (raw, gzip.compress(raw))
+                    if len(cache) >= 4:
+                        cache.pop(next(iter(cache)))
+                    cache[key] = entry
+        except Exception as error:
+            self._send_json(404, {"ok": False, "error": str(error)})
+            return
+        self._send_transform_blob(entry[0], 0, n, n)
 
     def _get_replay_video(self) -> None:
         # Stream the loaded replay dataset's recorded mp4 for one camera (HTTP Range),
@@ -1242,6 +1758,33 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             return
         self._send_video(video)
 
+    def _get_replay_poster(self) -> None:
+        cam = self._query_str("cam")
+        dataset_dir = self._query_str("dataset_dir")
+        episode = self._query_int("episode", -1)
+        video_key = self._query_str("video_key")
+        if dataset_dir and episode >= 0:
+            root = _resolve_runtime_path(dataset_dir)
+            if not video_key:
+                video_key = _infer_replay_video_key(root, cam)
+            videos = LeRobotDatasetIO(root).episode_video_paths(
+                episode, {cam or video_key: video_key}
+            )
+            video = _pick_video(videos, cam)
+            if video is None:
+                self._send_empty(404)
+                return
+            self._send_video_poster(video)
+            return
+
+        replay = self.ctx.runtime.replay_source
+        videos = replay.video_paths() if (replay and hasattr(replay, "video_paths")) else {}  # type: ignore[attr-defined]
+        video = _pick_video(videos, cam)
+        if video is None:
+            self._send_empty(404)
+            return
+        self._send_video_poster(video)
+
     def _get_replay_frame(self) -> None:
         self._point_preview_for_request()
         ep = self._query_int("episode_index", -1)
@@ -1254,19 +1797,24 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         self._point_preview_for_request()
         ep = self._query_int("episode_index", -1)
         preview = self.ctx.preview
-        raw = preview.transforms_blob(ep) if (preview and ep >= 0) else None
-        if raw is None:
-            self._send_json(200, {"available": False})
+        transform_range = self._transform_range()
+        if transform_range == (-1, -1):
             return
-        use_gzip = "gzip" in self.headers.get("Accept-Encoding", "").lower()
-        body = gzip.compress(raw) if use_gzip else raw
-        self.send_response(200)
-        self.send_header("Content-Type", "application/octet-stream")
-        self.send_header("Content-Length", str(len(body)))
-        if use_gzip:
-            self.send_header("Content-Encoding", "gzip")
-        self.end_headers()
-        self.wfile.write(body)
+        start = count = None
+        if transform_range is not None:
+            start, count = transform_range
+        raw = (
+            preview.transforms_blob(ep, start=start, count=count)
+            if (preview and ep >= 0)
+            else None
+        )
+        if raw is None:
+            self._send_json(404, {"available": False})
+            return
+        total = len(preview.series(ep)["state"]) if preview and ep >= 0 else 0
+        actual_start = 0 if start is None else start
+        actual_count = total - actual_start if count is None else min(count, total - actual_start)
+        self._send_transform_blob(raw, actual_start, actual_count, total)
 
     def _get_episode_video(self) -> None:
         self._point_preview_for_request()
@@ -1291,6 +1839,12 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
     def _send_video(self, path: Path) -> None:
         # Stream an mp4 honoring HTTP Range so <video> can seek; whole-file otherwise.
         try:
+            try:
+                path = _ensure_faststart_video(path)
+            except RuntimeError as exc:
+                logger.error("%s", exc)
+                self._send_json(500, {"error": str(exc)})
+                return
             size = path.stat().st_size
             rng = self.headers.get("Range", "")
             start, end = 0, size - 1
@@ -1299,8 +1853,14 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                 s, e = m.group(1), m.group(2)
                 if s:
                     start = int(s)
-                if e:
-                    end = min(int(e), size - 1)
+                    if e:
+                        end = min(int(e), size - 1)
+                elif e:
+                    suffix_len = int(e)
+                    start = max(size - suffix_len, 0)
+                    end = size - 1
+                else:
+                    start = size
                 if start > end or start >= size:
                     self.send_response(416)
                     self.send_header("Content-Range", f"bytes */{size}")
@@ -1313,7 +1873,8 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(length))
             if m:
                 self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
-            self.send_header("Cache-Control", "no-store")
+            self.send_header("Cache-Control", _VIDEO_CACHE_CONTROL)
+            self.send_header("ETag", f'"{path.stat().st_mtime_ns:x}-{size:x}"')
             self.end_headers()
             with path.open("rb") as f:
                 f.seek(start)
@@ -1327,25 +1888,234 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             return
 
+    def _send_video_poster(self, path: Path) -> None:
+        try:
+            try:
+                poster = _ensure_video_poster(path)
+            except RuntimeError as exc:
+                logger.error("%s", exc)
+                self._send_json(500, {"error": str(exc)})
+                return
+            body = poster.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "image/jpeg")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", _VIDEO_CACHE_CONTROL)
+            self.send_header("ETag", f'"{poster.stat().st_mtime_ns:x}-{len(body):x}"')
+            self.end_headers()
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            return
+
     def do_POST(self) -> None:
         """Route a POST to a constant-command enqueue or a body-driven handler."""
         path = urlparse(self.path).path
         body = self._read_json_body()
-        # Constant control verbs: enqueue and ack. Everything else routes to a method
-        # that owns its own response (custom command arg, runtime mutation, or payload).
-        cmd = _POST_COMMANDS.get(path)
-        if cmd is not None:
-            self._enqueue(cmd)
-            self._send_json(200, {"ok": True})
-            return
-        handler = _POST_ROUTES.get(path)
-        if handler is None:
-            self._send_empty(404)
-            return
-        handler(self, body)
+        trace_id = self._request_trace_id()
+        self._active_trace_id = trace_id
+        started = time.monotonic()
+        self._response_status = None
+        if path != "/api/client_trace":
+            logger.info(
+                "[HTTP_POST_BEGIN] trace=%s path=%s body=%s",
+                trace_id,
+                path,
+                _trace_json(_post_body_summary(body)),
+            )
+        try:
+            # Constant control verbs: enqueue and ack. Everything else routes to a method
+            # that owns its own response (custom command arg, runtime mutation, or payload).
+            cmd = _POST_COMMANDS.get(path)
+            if cmd is not None:
+                self._enqueue(cmd)
+                self._send_json(200, {"ok": True})
+                return
+            handler = _POST_ROUTES.get(path)
+            if handler is None:
+                self._send_empty(404)
+                return
+            handler(self, body)
+        except Exception:
+            logger.exception("[HTTP_POST_ERROR] trace=%s path=%s", trace_id, path)
+            raise
+        finally:
+            if path != "/api/client_trace":
+                logger.info(
+                    "[HTTP_POST_END] trace=%s path=%s status=%s elapsed_ms=%.1f",
+                    trace_id,
+                    path,
+                    self._response_status,
+                    (time.monotonic() - started) * 1000.0,
+                )
 
     def _enqueue_ok(self, command: str) -> None:
         self._enqueue(command)
+        self._send_json(200, {"ok": True})
+
+    def _require_rl_active(self) -> bool:
+        if self.ctx.active_tab == "rl":
+            return True
+        self._send_json(409, {"ok": False, "error": "RL tab is not active"})
+        return False
+
+    def _post_rl_select_task(self, body: dict) -> None:
+        if not self._require_rl_active():
+            return
+        self._enqueue_ok(f"web:rl_select_task:{body.get('task', '')}")
+
+    def _post_rl_select_policy(self, body: dict) -> None:
+        if not self._require_rl_active():
+            return
+        self._enqueue_ok(f"web:rl_select_policy:{int(body['slot'])}")
+
+    def _post_rl_select_critic(self, body: dict) -> None:
+        if not self._require_rl_active():
+            return
+        self._enqueue_ok(f"web:rl_select_critic:{int(body['slot'])}")
+
+    def _post_rl_command(self, command: str) -> None:
+        if not self._require_rl_active():
+            return
+        self._enqueue_ok(command)
+
+    def _post_rl_setup(self, _body: dict) -> None:
+        self._post_rl_command("web:rl_setup")
+
+    def _post_rl_run(self, _body: dict) -> None:
+        self._post_rl_command("web:run")
+
+    def _post_rl_intervene(self, _body: dict) -> None:
+        self._post_rl_command("web:halt")
+
+    def _post_rl_accept(self, _body: dict) -> None:
+        self._post_rl_command("web:run")
+
+    def _post_rl_abandon(self, _body: dict) -> None:
+        self._post_rl_command("web:rollout_intervention_abandon")
+
+    def _post_rl_hil_enabled(self, body: dict) -> None:
+        if not self._require_rl_active():
+            return
+        enabled = "1" if bool(body.get("enabled", False)) else "0"
+        self._enqueue_ok(f"web:rollout_intervention_enabled:{enabled}")
+
+    def _post_rl_save(self, _body: dict) -> None:
+        self._post_rl_command("web:rollout_save")
+
+    def _post_rl_reset(self, _body: dict) -> None:
+        self._post_rl_command("web:console_reset")
+
+    def _post_rl_review_episode(self, body: dict) -> None:
+        if not self._require_rl_active():
+            return
+        runtime = self.ctx.runtime
+        with runtime.rl_replay_lock:
+            runtime.rl_replay_generation += 1
+            request_generation = runtime.rl_replay_generation
+        dataset_dir = _resolve_dataset_dir(str(body.get("dataset_dir", "")).strip())
+        episode_index = int(body.get("episode", 0))
+        try:
+            source, video_keys = _open_review_episode(self.ctx, dataset_dir, episode_index)
+            series = source.series()
+        except Exception as error:
+            self._send_json(404, {"ok": False, "error": str(error)})
+            return
+        if source.n_steps <= 0:
+            source.close()
+            self._send_json(404, {"ok": False, "error": "episode has no frames"})
+            return
+        with runtime.rl_replay_lock:
+            if request_generation != runtime.rl_replay_generation:
+                source.close()
+                self._send_json(409, {"ok": False, "error": "Replay request superseded"})
+                return
+            old_sources = runtime.rl_replay_sources
+            runtime.rl_replay_sources = [source]
+            runtime.rl_replay_source = source
+            runtime.rl_replay_dataset_dir = dataset_dir
+            runtime.rl_replay_episode_id = episode_index
+            runtime.rl_replay_timestamps = [float(value) for value in series["timestamp"]]
+            if runtime.rl_critic_runner is not None:
+                runtime.rl_critic_runner.reset_series()
+        for old_source in old_sources:
+            old_source.close()
+        self._send_json(
+            200,
+            {
+                "ok": True,
+                "episode": episode_index,
+                "frames": source.n_steps,
+                "fps": source.fps,
+                "task": source.current_task,
+                "video_keys": video_keys,
+                **series,
+            },
+        )
+
+    def _post_rl_replay_critic(self, body: dict) -> None:
+        if not self._require_rl_active():
+            return
+        runtime = self.ctx.runtime
+        runner = runtime.rl_critic_runner
+        if runner is None:
+            self._send_json(409, {"ok": False, "error": "Critic is not connected"})
+            return
+        with runtime.rl_replay_lock:
+            source = runtime.rl_replay_source
+            if source is None:
+                self._send_json(409, {"ok": False, "error": "No RL replay episode is selected"})
+                return
+            frame_index = int(body["frame"])
+            if frame_index < 0 or frame_index >= source.n_steps:
+                self._send_json(400, {"ok": False, "error": "Replay frame is out of range"})
+                return
+            metadata = runtime.policy_metadata or {}
+            horizon = runtime.rl_critic_action_horizon or max(1, int(metadata.get("chunk_size", 1)))
+            timestamp = runtime.rl_replay_timestamps[frame_index]
+            config = runtime.active_config or self.ctx.config
+            replay_generation = runtime.rl_replay_generation
+
+            def build_request() -> tuple[dict, np.ndarray]:
+                with runtime.rl_replay_lock:
+                    if (
+                        replay_generation != runtime.rl_replay_generation
+                        or source is not runtime.rl_replay_source
+                    ):
+                        raise RuntimeError("RL replay episode changed before Critic frame decode")
+                    source.seek(frame_index)
+                    frame = source.get_frame()
+                    if frame is None:
+                        raise RuntimeError(f"RL replay frame is unavailable: {frame_index}")
+                    observation = build_policy_observation(
+                        frame, source.current_task, config, runtime
+                    )
+                    trajectory = source.get_action_trajectory()
+                    actions = trajectory[frame_index : frame_index + horizon]
+                    if len(actions) < horizon:
+                        actions = np.concatenate(
+                            [actions, np.repeat(trajectory[-1:], horizon - len(actions), axis=0)],
+                            axis=0,
+                        )
+                    return build_rl_critic_observation(runtime, observation), actions
+
+        runner.submit_builder(build_request, timestamp, "replay")
+        self._send_json(200, {"ok": True, "frame": frame_index})
+
+    def _post_client_trace(self, body: dict) -> None:
+        client_id = str(body.get("client_id", "unknown"))[:96]
+        event = str(body.get("event", ""))[:96]
+        seq = body.get("seq", 0)
+        details = body.get("details")
+        if not _TRACE_EVENT_RE.fullmatch(event):
+            self._send_json(400, {"ok": False, "error": "invalid trace event"})
+            return
+        logger.info(
+            "[UI_TRACE] client=%s seq=%s event=%s details=%s",
+            client_id,
+            seq,
+            event,
+            _trace_json(details if isinstance(details, dict) else {}),
+        )
         self._send_json(200, {"ok": True})
 
     # --- POST route handlers (body-derived command arg / payload / mutation) ---
@@ -1372,7 +2142,43 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
 
     def _post_load_replay_dataset(self, body: dict) -> None:
         self._clear_collection_replay()
-        self._enqueue_ok("web:load_replay_dataset:" + json.dumps(body))
+        runtime = self.ctx.runtime
+        session = self.ctx.session
+        keys = body.get("keys") or {}
+        dataset_dir = str(body.get("dataset_dir", "")).strip()
+        episode = int(body.get("episode", 0))
+        load_replay_dataset(
+            dataset_dir,
+            episode,
+            runtime.active_config or self.ctx.config,
+            session,
+            runtime,
+            state_key=str(keys.get("state", "")),
+            action_key=str(keys.get("action", "")),
+            video_keys=body.get("video_keys") or {},
+            action_mode=str(body.get("action_mode", "")),
+        )
+        if session.last_error or runtime.replay_source is None:
+            error = session.last_error or "replay dataset was not mounted"
+            self._send_json(400, {"ok": False, "error": error})
+            return
+        replay_keys = runtime.replay_source._config.transport.dataset_keys  # type: ignore[attr-defined]
+        self._send_json(
+            200,
+            {
+                "ok": True,
+                "dataset_dir": runtime.replay_dataset_dir,
+                "episode": runtime.replay_episode_id,
+                "n_episodes": runtime.replay_n_episodes,
+                "frames": int(getattr(runtime.replay_source, "n_steps", 0) or 0),
+                "fps": runtime.replay_fps,
+                "task": runtime.replay_task,
+                "state_key": str(replay_keys.state_key),
+                "action_key": runtime.replay_action_key,
+                "action_mode": runtime.replay_action_mode,
+                "video_keys": dict(replay_keys.video_keys),
+            },
+        )
 
     def _post_set_replay_fps(self, body: dict) -> None:
         self._enqueue_ok(f"web:set_replay_fps:{int(body.get('fps', 10))}")
@@ -1389,8 +2195,9 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
     def _post_update_infer_params(self, body: dict) -> None:
         self._enqueue_ok("web:update_infer_params:" + json.dumps(body))
 
-    def _post_rollout_intervention_mode(self, body: dict) -> None:
-        self._enqueue_ok(f"web:rollout_intervention_mode:{body.get('mode', '')}")
+    def _post_rollout_intervention_enabled(self, body: dict) -> None:
+        enabled = 1 if bool(body.get("enabled", False)) else 0
+        self._enqueue_ok(f"web:rollout_intervention_enabled:{enabled}")
 
     def _post_operator_action(self, body: dict) -> None:
         intent = str(body.get("intent", "")).strip().lower()
@@ -1454,6 +2261,61 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         else:
             self._send_json(404, {"ok": False, "error": "episode not found in dataset"})
 
+    def _post_collect_qc_mark(self, body: dict) -> None:
+        episode_value = body.get("episode")
+        if (
+            isinstance(episode_value, int)
+            and not isinstance(episode_value, bool)
+            and episode_value >= 0
+        ):
+            episode = episode_value
+        elif isinstance(episode_value, str) and episode_value.isascii() and episode_value.isdigit():
+            episode = int(episode_value)
+        else:
+            self._send_json(
+                400,
+                {
+                    "ok": False,
+                    "error": "collection episode must be a non-negative integer",
+                },
+            )
+            return
+        verdict = str(body.get("verdict", ""))
+        if verdict not in {"", "pass", "fail"}:
+            self._send_json(
+                400,
+                {"ok": False, "error": f"unsupported QC verdict: {verdict}"},
+            )
+            return
+        logger_obj = self.ctx.runtime.episode_logger
+        if logger_obj is None:
+            self._send_json(
+                409,
+                {"ok": False, "error": "collection recording is unavailable"},
+            )
+            return
+        task = str(body.get("task", ""))
+        active_task = format_task_label(self.ctx.session.selected_collect_task)
+        if task != active_task:
+            self._send_json(
+                409,
+                {"ok": False, "error": "collection review task is no longer active"},
+            )
+            return
+        ok = logger_obj.mark_collection_qc(
+            task,
+            episode,
+            verdict,
+            str(body.get("note", "")),
+        )
+        if not ok:
+            self._send_json(
+                409,
+                {"ok": False, "error": "collection episode is not saved"},
+            )
+            return
+        self._send_json(200, {"ok": True, "episode": episode, "verdict": verdict})
+
     def _post_annotate(self, body: dict) -> None:
         # Write/overwrite an episode's language annotation directly into the lerobot
         # dataset (episodes.jsonl key + per-frame parquet column + info.json feature).
@@ -1489,7 +2351,6 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         arg = f"{action}:{side}" if side in ("l", "r") else action
         self._enqueue_ok(f"web:init_gripper:{arg}")
 
-
 # Exact-path GET routes (prefix routes — camera/assets/meshes — are handled inline in
 # do_GET because they own a path subtree). Values are unbound handler methods.
 _GET_ROUTES = {
@@ -1505,8 +2366,11 @@ _GET_ROUTES = {
     "/api/replay_series": ConsoleRequestHandler._get_replay_series,
     "/api/replay_scene_frame": ConsoleRequestHandler._get_replay_scene_frame,
     "/api/replay_transforms": ConsoleRequestHandler._get_replay_transforms,
+    "/api/review_transforms": ConsoleRequestHandler._get_review_transforms,
     "/api/replay_video": ConsoleRequestHandler._get_replay_video,
+    "/api/replay_poster": ConsoleRequestHandler._get_replay_poster,
     "/api/live_series": ConsoleRequestHandler._get_live_series,
+    "/api/rl/series": ConsoleRequestHandler._get_rl_series,
     "/api/replay_frame": ConsoleRequestHandler._get_replay_frame,
     "/api/episode_transforms": ConsoleRequestHandler._get_episode_transforms,
     "/api/episode_video": ConsoleRequestHandler._get_episode_video,
@@ -1540,16 +2404,30 @@ _POST_COMMANDS = {
 # POST endpoints needing a body-derived command arg, a runtime mutation, or a custom
 # response. Each handler owns its own _send_json. Values are unbound (self, body) methods.
 _POST_ROUTES = {
+    "/api/client_trace": ConsoleRequestHandler._post_client_trace,
+    "/api/rl/select_task": ConsoleRequestHandler._post_rl_select_task,
+    "/api/rl/select_policy": ConsoleRequestHandler._post_rl_select_policy,
+    "/api/rl/select_critic": ConsoleRequestHandler._post_rl_select_critic,
+    "/api/rl/setup": ConsoleRequestHandler._post_rl_setup,
+    "/api/rl/run": ConsoleRequestHandler._post_rl_run,
+    "/api/rl/intervene": ConsoleRequestHandler._post_rl_intervene,
+    "/api/rl/accept": ConsoleRequestHandler._post_rl_accept,
+    "/api/rl/abandon": ConsoleRequestHandler._post_rl_abandon,
+    "/api/rl/hil_enabled": ConsoleRequestHandler._post_rl_hil_enabled,
+    "/api/rl/save": ConsoleRequestHandler._post_rl_save,
+    "/api/rl/reset": ConsoleRequestHandler._post_rl_reset,
+    "/api/rl/review_episode": ConsoleRequestHandler._post_rl_review_episode,
+    "/api/rl/replay_critic": ConsoleRequestHandler._post_rl_replay_critic,
     "/api/collect_replay": ConsoleRequestHandler._start_collection_replay,
     "/api/exit_collect_replay": ConsoleRequestHandler._post_exit_collection_replay,
-    "/api/review_episode": ConsoleRequestHandler._start_episode_review,
-    "/api/review_replay_start": ConsoleRequestHandler._start_review_replay,
+    "/api/review_episode": ConsoleRequestHandler._post_review_episode,
     "/api/select_task": ConsoleRequestHandler._post_select_task,
     "/api/select_collect_task": ConsoleRequestHandler._post_select_collect_task,
     "/api/select_episode": ConsoleRequestHandler._post_select_episode,
     "/api/tab_switch": ConsoleRequestHandler._post_tab_switch,
     "/api/inspect_dataset": ConsoleRequestHandler._post_inspect_dataset,
     "/api/qc_mark": ConsoleRequestHandler._post_qc_mark,
+    "/api/collect_qc_mark": ConsoleRequestHandler._post_collect_qc_mark,
     "/api/annotate": ConsoleRequestHandler._post_annotate,
     "/api/episode_annotation": ConsoleRequestHandler._post_episode_annotation,
     "/api/load_replay_dataset": ConsoleRequestHandler._post_load_replay_dataset,
@@ -1558,7 +2436,7 @@ _POST_ROUTES = {
     "/api/select_mode": ConsoleRequestHandler._post_select_mode,
     "/api/select_strategy": ConsoleRequestHandler._post_select_strategy,
     "/api/update_infer_params": ConsoleRequestHandler._post_update_infer_params,
-    "/api/rollout_intervention_mode": ConsoleRequestHandler._post_rollout_intervention_mode,
+    "/api/rollout_intervention_enabled": ConsoleRequestHandler._post_rollout_intervention_enabled,
     "/api/operator_action": ConsoleRequestHandler._post_operator_action,
     "/api/manual_qpos": ConsoleRequestHandler._post_manual_qpos,
     "/api/manual_send": ConsoleRequestHandler._post_manual_send,
@@ -1573,6 +2451,53 @@ _POST_ROUTES = {
 }
 
 
+def build_console_context(
+    config: ConfigDict,
+    runtime: RuntimeState,
+    session: SessionState,
+    output_dir: str = "",
+    *,
+    with_scene: bool = True,
+    with_obs_reader: bool = True,
+    with_preview: bool = True,
+) -> ConsoleContext:
+    """Build the shared ConsoleContext and attach it to ``runtime.console_ctx``.
+
+    The heavy pieces are opt-out so a headless run can skip them: ``with_scene``
+    (URDF 3D scene / forward kinematics), ``with_obs_reader`` (an extra visualization
+    SUB stream) and ``with_preview`` (RESULT-tab episode playback). Headless passes
+    all False, keeping only the light state the ZMQ control-channel queries read.
+    """
+    scene: object | None = None
+    if with_scene:
+        try:
+            from robots.utils import UrdfScene
+
+            scene = UrdfScene(
+                runtime.robot,
+                gripper_open=config.robot.gripper_open,
+                gripper_close=config.robot.gripper_close,
+            )
+        except Exception as exc:
+            logger.warning("UrdfScene unavailable; 3D canvas disabled: %s", exc)
+    _ensure_ckpt_order(config, runtime)
+    ctx = ConsoleContext(
+        config=config,
+        runtime=runtime,
+        session=session,
+        obs_reader=runtime.transport.create_observation_reader() if with_obs_reader else None,
+        scene=scene,
+        output_dir=output_dir,
+    )
+    # RESULT-tab playback reads recorded episodes under <output_dir>/episodes.
+    if with_preview and output_dir:
+        from core.app.console.episode_preview import EpisodePreview
+
+        ctx.preview = EpisodePreview(config, Path(output_dir))
+    runtime.console_ctx = ctx
+    return ctx
+
+
 def start_console_server(
     config: ConfigDict,
     runtime: RuntimeState,
@@ -1582,31 +2507,7 @@ def start_console_server(
     output_dir: str = "",
 ) -> threading.Thread:
     """Launch a daemon HTTP server thread bound to ``host:port``."""
-    scene: object | None = None
-    try:
-        from robots.utils import UrdfScene
-
-        scene = UrdfScene(
-            runtime.robot,
-            gripper_open=config.robot.gripper_open,
-            gripper_close=config.robot.gripper_close,
-        )
-    except Exception as exc:
-        logger.warning("UrdfScene unavailable; 3D canvas disabled: %s", exc)
-    _ensure_ckpt_order(config, runtime)
-    ctx = ConsoleContext(
-        config=config,
-        runtime=runtime,
-        session=session,
-        obs_reader=runtime.transport.create_observation_reader(),
-        scene=scene,
-        output_dir=output_dir,
-    )
-    # RESULT-tab playback reads recorded episodes under <output_dir>/episodes.
-    if output_dir:
-        from core.app.console.episode_preview import EpisodePreview
-
-        ctx.preview = EpisodePreview(config, Path(output_dir))
+    ctx = build_console_context(config, runtime, session, output_dir)
     ConsoleRequestHandler.ctx = ctx
     server = ThreadingHTTPServer((host, port), ConsoleRequestHandler)
 
@@ -1618,4 +2519,6 @@ def start_console_server(
 
     thread = threading.Thread(target=serve, name="eva-console-server", daemon=True)
     thread.start()
+    if str(config.transport.type) in _LIVE_TRANSPORT_TYPES:
+        _prewarm_transform_worker(config, runtime)
     return thread

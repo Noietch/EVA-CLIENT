@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 import types
 from collections import deque
 from pathlib import Path
@@ -15,6 +16,7 @@ import transport.ros2 as ros2
 import transport.utils as transport_utils
 from core.config import load_config
 from core.registry import ROBOT_REGISTRY
+from core.types import CollectionRawImage, Observation
 
 _CONFIGS_DIR = Path(__file__).resolve().parents[2] / "configs"
 _R1LITE_COLLECTION = _CONFIGS_DIR / "02_collection" / "r1lite.py"
@@ -167,6 +169,104 @@ def test_ros2_camera_subscriptions_use_deeper_qos(monkeypatch):
     assert seen_camera_topics == camera_topics
 
 
+def test_ros2_camera_subscription_keeps_raw_capture_deque_independent(monkeypatch):
+    node = _FakeNode()
+    runtime = types.SimpleNamespace(
+        node=node,
+        cv_bridge=object(),
+        image_type=object,
+        compressed_image_type=object,
+        joint_state_type=_FakeJointState,
+        pose_stamped_type=object,
+    )
+    monkeypatch.setattr(ros2, "get_ros2_runtime", lambda node_name: runtime)
+    monkeypatch.setattr(ros2, "_make_live_qos", lambda depth=10: object())
+
+    config = load_config(_R1LITE_COLLECTION)
+    robot = ROBOT_REGISTRY.build(config.robot.type)
+    transport = ros2.Ros2Transport(config, robot)
+    camera = robot.observation_schema.cameras[0]
+    callback = _subscription_callback(node, transport._camera_topics[camera.name])
+
+    callback(_compressed_msg(1, b"before collection"))
+
+    assert len(transport._camera_deques[camera.name]) == 1
+    assert len(transport._collection_camera_deques[camera.name]) == 0
+
+    transport.start_collection()
+    callback(_compressed_msg(2, b"during collection"))
+
+    assert len(transport._camera_deques[camera.name]) == 2
+    assert len(transport._collection_camera_deques[camera.name]) == 1
+    transport._camera_deques[camera.name].popleft()
+    assert len(transport._collection_camera_deques[camera.name]) == 1
+
+    transport.stop_collection()
+
+    assert len(transport._collection_camera_deques[camera.name]) == 0
+
+
+def test_ros2_collection_raw_releases_consumed_camera_messages(monkeypatch):
+    node = _FakeNode()
+    runtime = types.SimpleNamespace(
+        node=node,
+        cv_bridge=object(),
+        image_type=object,
+        compressed_image_type=object,
+        joint_state_type=_FakeJointState,
+        pose_stamped_type=object,
+    )
+    monkeypatch.setattr(ros2, "get_ros2_runtime", lambda node_name: runtime)
+    monkeypatch.setattr(ros2, "_make_live_qos", lambda depth=10: object())
+
+    config = load_config(_R1LITE_COLLECTION)
+    robot = ROBOT_REGISTRY.build(config.robot.type)
+    transport = ros2.Ros2Transport(config, robot)
+    camera = robot.observation_schema.cameras[0]
+    callback = _subscription_callback(node, transport._camera_topics[camera.name])
+    transport.start_collection()
+    callback(_compressed_msg(1, b"one"))
+    callback(_compressed_msg(2, b"two"))
+    callback(_compressed_msg(3, b"three"))
+
+    snapshot = transport.acquire_collection_raw()
+
+    assert snapshot is not None
+    assert len(transport._collection_camera_deques[camera.name]) == 1
+    assert transport._collection_camera_deques[camera.name][0].data == b"three"
+
+
+def test_ros2_hil_relay_switch_keeps_collection_camera_capture_active(monkeypatch):
+    node = _FakeNode()
+    runtime = types.SimpleNamespace(
+        node=node,
+        cv_bridge=object(),
+        image_type=object,
+        compressed_image_type=object,
+        joint_state_type=_FakeJointState,
+        pose_stamped_type=object,
+    )
+    monkeypatch.setattr(ros2, "get_ros2_runtime", lambda node_name: runtime)
+    monkeypatch.setattr(ros2, "_make_live_qos", lambda depth=10: object())
+
+    config = load_config(_R1LITE_COLLECTION)
+    robot = ROBOT_REGISTRY.build(config.robot.type)
+    transport = ros2.Ros2Transport(config, robot)
+    camera = robot.observation_schema.cameras[0]
+    callback = _subscription_callback(node, transport._camera_topics[camera.name])
+    transport.start_collection()
+
+    transport.set_hil_relay_enabled(True)
+    callback(_compressed_msg(1, b"hil"))
+    transport.set_hil_relay_enabled(False)
+    callback(_compressed_msg(2, b"policy"))
+
+    assert [msg.data for msg in transport._collection_camera_deques[camera.name]] == [
+        b"hil",
+        b"policy",
+    ]
+
+
 def test_ros2_camera_subscriptions_report_minimum_image_hz(monkeypatch):
     node = _FakeNode()
     runtime = types.SimpleNamespace(
@@ -232,6 +332,58 @@ def test_ros2_hil_relay_subscriptions_use_depth_one_qos(monkeypatch):
     }
 
 
+def test_ros2_hil_relay_is_disabled_until_enabled(monkeypatch):
+    node = _FakeNode()
+    runtime = types.SimpleNamespace(
+        node=node,
+        cv_bridge=object(),
+        image_type=object,
+        compressed_image_type=object,
+        joint_state_type=_FakeJointState,
+        pose_stamped_type=object,
+    )
+    monkeypatch.setattr(ros2, "get_ros2_runtime", lambda node_name: runtime)
+    monkeypatch.setattr(ros2, "_make_live_qos", lambda depth=10: object())
+
+    config = load_config(_R1LITE_COLLECTION)
+    robot = ROBOT_REGISTRY.build(config.robot.type)
+    transport = ros2.Ros2Transport(config, robot)
+    transport._group_state_deques["left_arm"].append(_stamped_msg(1, [10, 20, 30, 40, 50, 60]))
+    callback = _subscription_callback(node, "/eva/hil/input_joint_state_arm_left")
+
+    callback(_stamped_msg(2, [1, 2, 3, 4, 5, 6]))
+
+    published = node.publishers_by_topic["/motion_target/target_joint_state_arm_left"].messages
+    assert published == []
+
+
+def test_ros2_hil_relay_publishes_after_enable(monkeypatch):
+    node = _FakeNode()
+    runtime = types.SimpleNamespace(
+        node=node,
+        cv_bridge=object(),
+        image_type=object,
+        compressed_image_type=object,
+        joint_state_type=_FakeJointState,
+        pose_stamped_type=object,
+    )
+    monkeypatch.setattr(ros2, "get_ros2_runtime", lambda node_name: runtime)
+    monkeypatch.setattr(ros2, "_make_live_qos", lambda depth=10: object())
+
+    config = load_config(_R1LITE_COLLECTION)
+    robot = ROBOT_REGISTRY.build(config.robot.type)
+    transport = ros2.Ros2Transport(config, robot)
+    transport.set_hil_control_mode("absolute")
+    transport.set_hil_relay_enabled(True)
+    transport._group_state_deques["left_arm"].append(_stamped_msg(1, [10, 20, 30, 40, 50, 60]))
+    callback = _subscription_callback(node, "/eva/hil/input_joint_state_arm_left")
+
+    callback(_stamped_msg(2, [1, 2, 3, 4, 5, 6]))
+
+    published = node.publishers_by_topic["/motion_target/target_joint_state_arm_left"].messages
+    np.testing.assert_allclose(published[0].position, [1, 2, 3, 4, 5, 6])
+
+
 def test_ros2_hil_relative_relay_anchors_slave_to_first_cat_frame(monkeypatch):
     node = _FakeNode()
     runtime = types.SimpleNamespace(
@@ -248,6 +400,7 @@ def test_ros2_hil_relative_relay_anchors_slave_to_first_cat_frame(monkeypatch):
     config = load_config(_R1LITE_COLLECTION)
     robot = ROBOT_REGISTRY.build(config.robot.type)
     transport = ros2.Ros2Transport(config, robot)
+    transport.set_hil_relay_enabled(True)
     transport.set_hil_control_mode("relative")
     transport._group_state_deques["left_arm"].append(_stamped_msg(1, [10, 20, 30, 40, 50, 60]))
     callback = _subscription_callback(node, "/eva/hil/input_joint_state_arm_left")
@@ -276,6 +429,7 @@ def test_ros2_hil_relay_does_not_write_collection_action_qpos(monkeypatch):
     config = load_config(_R1LITE_COLLECTION)
     robot = ROBOT_REGISTRY.build(config.robot.type)
     transport = ros2.Ros2Transport(config, robot)
+    transport.set_hil_relay_enabled(True)
     transport.set_hil_control_mode("relative")
     transport._group_state_deques["left_arm"].append(_stamped_msg(1, [10, 20, 30, 40, 50, 60]))
     callback = _subscription_callback(node, "/eva/hil/input_joint_state_arm_left")
@@ -305,6 +459,7 @@ def test_ros2_hil_relay_restamps_commands_with_local_clock(monkeypatch):
     config = load_config(_R1LITE_COLLECTION)
     robot = ROBOT_REGISTRY.build(config.robot.type)
     transport = ros2.Ros2Transport(config, robot)
+    transport.set_hil_relay_enabled(True)
     transport.set_hil_control_mode("relative")
     transport._group_state_deques["left_arm"].append(
         _stamped_msg(100, [10, 20, 30, 40, 50, 60])
@@ -352,7 +507,7 @@ def test_ros2_collection_action_qpos_subscribes_motion_target_when_hil_enabled(m
     np.testing.assert_allclose(samples[0].position, [1, 2, 3, 4, 5, 6])
 
 
-def test_ros2_does_not_subscribe_hil_when_intervention_disabled(monkeypatch):
+def test_ros2_subscribes_hil_topic_when_configured(monkeypatch):
     node = _FakeNode()
     runtime = types.SimpleNamespace(
         node=node,
@@ -366,13 +521,12 @@ def test_ros2_does_not_subscribe_hil_when_intervention_disabled(monkeypatch):
     monkeypatch.setattr(ros2, "_make_live_qos", lambda depth=10: object())
 
     config = load_config(_R1LITE_COLLECTION)
-    config.rollout.intervention.enabled = False
     robot = ROBOT_REGISTRY.build(config.robot.type)
     ros2.Ros2Transport(config, robot)
 
     subscribed_topics = {topic for _msg_type, topic, _callback, _qos in node.subscriptions}
-    assert "/eva/hil/input_joint_state_arm_left" not in subscribed_topics
-    assert "/eva/hil/input_joint_state_arm_right" not in subscribed_topics
+    assert "/eva/hil/input_joint_state_arm_left" in subscribed_topics
+    assert "/eva/hil/input_joint_state_arm_right" in subscribed_topics
     assert "/motion_target/target_joint_state_arm_left" in subscribed_topics
     assert "/motion_target/target_joint_state_arm_right" in subscribed_topics
 
@@ -393,6 +547,7 @@ def test_ros2_hil_relative_relay_anchors_to_last_command_target(monkeypatch):
     config = load_config(_R1LITE_COLLECTION)
     robot = ROBOT_REGISTRY.build(config.robot.type)
     transport = ros2.Ros2Transport(config, robot)
+    transport.set_hil_relay_enabled(True)
     transport.set_hil_control_mode("relative")
     transport.publish_action(
         np.array(
@@ -440,6 +595,7 @@ def test_ros2_hil_relay_does_not_publish_gripper_target(monkeypatch):
     config = load_config(_R1LITE_COLLECTION)
     robot = ROBOT_REGISTRY.build(config.robot.type)
     transport = ros2.Ros2Transport(config, robot)
+    transport.set_hil_relay_enabled(True)
     transport._group_state_deques["left_arm"].append(_stamped_msg(1, [10, 20, 30, 40, 50, 60]))
     transport._group_gripper_deques["left_arm"].append(_stamped_msg(1, [77]))
     callback = _subscription_callback(node, "/eva/hil/input_joint_state_arm_left")
@@ -448,6 +604,72 @@ def test_ros2_hil_relay_does_not_publish_gripper_target(monkeypatch):
 
     published = node.publishers_by_topic["/motion_target/target_position_gripper_left"].messages
     assert published == []
+
+
+def test_ros2_hil_frame_uses_last_gripper_command_when_collection_frame_missing(monkeypatch):
+    node = _FakeNode()
+    runtime = types.SimpleNamespace(
+        node=node,
+        cv_bridge=object(),
+        image_type=object,
+        compressed_image_type=object,
+        joint_state_type=_FakeJointState,
+        pose_stamped_type=object,
+    )
+    monkeypatch.setattr(ros2, "get_ros2_runtime", lambda node_name: runtime)
+    monkeypatch.setattr(ros2, "_make_live_qos", lambda depth=10: object())
+
+    config = load_config(_R1LITE_COLLECTION)
+    robot = ROBOT_REGISTRY.build(config.robot.type)
+    transport = ros2.Ros2Transport(config, robot)
+    transport.get_collection_frame = lambda: None
+    transport.get_frame = lambda: Observation(
+        images={}, state_qpos=np.zeros(robot.total_action_dim, dtype=np.float32), timestamp=1.0
+    )
+    transport._last_group_joint_commands = {
+        "left_arm": np.zeros(6, dtype=np.float32),
+        "right_arm": np.zeros(6, dtype=np.float32),
+    }
+    transport._last_group_gripper_commands = {"left_arm": 0.0, "right_arm": 100.0}
+    transport._latest_group_qpos = lambda group: np.full(group.dof, 100.0, dtype=np.float32)
+
+    frame = transport.get_hil_frame()
+
+    assert frame is not None
+    assert frame.action_qpos is not None
+    np.testing.assert_allclose(frame.action_qpos[[6, 13]], [0.0, 100.0])
+
+
+def test_ros2_hil_reorders_named_full_group_and_publishes_split_gripper(monkeypatch):
+    node = _FakeNode()
+    runtime = types.SimpleNamespace(
+        node=node,
+        cv_bridge=object(),
+        image_type=object,
+        compressed_image_type=object,
+        joint_state_type=_FakeJointState,
+        pose_stamped_type=object,
+    )
+    monkeypatch.setattr(ros2, "get_ros2_runtime", lambda node_name: runtime)
+    monkeypatch.setattr(ros2, "_make_live_qos", lambda depth=10: object())
+
+    config = load_config(_R1LITE_COLLECTION)
+    robot = ROBOT_REGISTRY.build(config.robot.type)
+    transport = ros2.Ros2Transport(config, robot)
+    transport.set_hil_control_mode("absolute")
+    transport.set_hil_relay_enabled(True)
+    transport._group_state_deques["left_arm"].append(_stamped_msg(1, [0, 0, 0, 0, 0, 0]))
+    transport._group_gripper_deques["left_arm"].append(_stamped_msg(1, [100]))
+    callback = _subscription_callback(node, "/eva/hil/input_joint_state_arm_left")
+    message = _stamped_msg(2, [7, 6, 5, 4, 3, 2, 1])
+    message.name = list(reversed(robot.actuator_groups[0].joint_names))
+
+    callback(message)
+
+    arm = node.publishers_by_topic["/motion_target/target_joint_state_arm_left"].messages
+    gripper = node.publishers_by_topic["/motion_target/target_position_gripper_left"].messages
+    np.testing.assert_allclose(arm[-1].position, [1, 2, 3, 4, 5, 6])
+    np.testing.assert_allclose(gripper[-1].position, [7])
 
 
 def test_ros2_hil_relative_relay_keeps_gripper_absolute(monkeypatch):
@@ -672,7 +894,7 @@ def test_ros2_collection_raw_batch_merges_gripper_topics(monkeypatch):
         lambda _camera_name, _msg: np.zeros((2, 2, 3), dtype=np.uint8),
     )
     for camera in transport._collection_camera_specs():
-        transport._camera_deques[camera.name].append(_compressed_msg(1, b"jpeg"))
+        transport._collection_camera_deques[camera.name].append(_compressed_msg(1, b"jpeg"))
     transport._collection_qpos_deques["left_arm"].append(_stamped_msg(1, [0, 1, 2, 3, 4, 5]))
     transport._collection_qpos_deques["right_arm"].append(
         _stamped_msg(1, [10, 11, 12, 13, 14, 15])
@@ -692,6 +914,73 @@ def test_ros2_collection_raw_batch_merges_gripper_topics(monkeypatch):
         batch.vectors["state_qpos:right_arm"][0].value,
         np.array([10, 11, 12, 13, 14, 15, 43], dtype=np.float32),
     )
+
+
+def test_ros2_collection_snapshot_keeps_compressed_bytes_not_ros_image_messages(monkeypatch):
+    node = _FakeNode()
+    runtime = types.SimpleNamespace(
+        node=node,
+        cv_bridge=object(),
+        image_type=object,
+        compressed_image_type=object,
+        joint_state_type=_FakeJointState,
+        pose_stamped_type=object,
+    )
+    monkeypatch.setattr(ros2, "get_ros2_runtime", lambda node_name: runtime)
+    monkeypatch.setattr(ros2, "_make_live_qos", lambda depth=10: object())
+
+    config = load_config(_R1LITE_COLLECTION)
+    robot = ROBOT_REGISTRY.build(config.robot.type)
+    transport = ros2.Ros2Transport(config, robot)
+    camera = transport._collection_camera_specs()[0]
+    message = _compressed_msg(1, b"jpeg payload")
+    transport._collection_camera_deques[camera.name].append(message)
+
+    snapshot = transport.acquire_collection_raw()
+
+    assert snapshot is not None
+    batch = snapshot.decode_raw()
+    image = batch.images[camera.observation_key][0].value
+    assert isinstance(image, CollectionRawImage)
+    assert image.encoded == b"jpeg payload"
+    assert image.decoder.__closure__ is None
+    assert image.decoder.__defaults__ == (b"jpeg payload",)
+
+
+def test_ros2_live_gripper_consumer_holds_collection_deque_lock(monkeypatch):
+    node = _FakeNode()
+    runtime = types.SimpleNamespace(
+        node=node,
+        cv_bridge=object(),
+        image_type=object,
+        compressed_image_type=object,
+        joint_state_type=_FakeJointState,
+        pose_stamped_type=object,
+    )
+    monkeypatch.setattr(ros2, "get_ros2_runtime", lambda node_name: runtime)
+    monkeypatch.setattr(ros2, "_make_live_qos", lambda depth=10: object())
+
+    config = load_config(_R1LITE_COLLECTION)
+    robot = ROBOT_REGISTRY.build(config.robot.type)
+    transport = ros2.Ros2Transport(config, robot)
+    messages = transport._group_gripper_deques["left_arm"]
+    messages.extend([_stamped_msg(1), _stamped_msg(2), _stamped_msg(3)])
+    started = threading.Event()
+    finished = threading.Event()
+
+    def consume_live_gripper() -> None:
+        started.set()
+        transport._pop_latest_before(messages, 3.0)
+        finished.set()
+
+    thread = threading.Thread(target=consume_live_gripper)
+    with transport._deque_guard():
+        thread.start()
+        assert started.wait(timeout=1.0)
+        assert not finished.wait(timeout=0.05)
+    thread.join(timeout=1.0)
+
+    assert finished.is_set()
 
 
 def test_ros2_collection_operator_gripper_action_seed_is_latched(monkeypatch):
@@ -875,7 +1164,7 @@ def test_ros2_collection_raw_action_qpos_is_complete_from_seeded_gripper(monkeyp
     transport._group_gripper_deques["right_arm"].append(_stamped_msg(1, [0]))
     transport.clear_collection_backlog()
     for camera in transport._collection_camera_specs():
-        transport._camera_deques[camera.name].append(_compressed_msg(2, b"jpeg"))
+        transport._collection_camera_deques[camera.name].append(_compressed_msg(2, b"jpeg"))
     transport._collection_qpos_deques["left_arm"].append(_stamped_msg(2, [0, 1, 2, 3, 4, 5]))
     transport._collection_qpos_deques["right_arm"].append(
         _stamped_msg(2, [10, 11, 12, 13, 14, 15])

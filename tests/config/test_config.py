@@ -22,9 +22,6 @@ def _write_config(path: Path, body: str) -> Path:
     return path
 
 
-# --- resolve_video_key ---
-
-
 def test_resolve_video_key_default_convention():
     assert resolve_video_key(ConfigDict(video_keys={}), "cam_high") == "observation.images.cam_high"
 
@@ -32,9 +29,6 @@ def test_resolve_video_key_default_convention():
 def test_resolve_video_key_explicit_override():
     keys = ConfigDict(video_keys={"cam_high": "videos.top"})
     assert resolve_video_key(keys, "cam_high") == "videos.top"
-
-
-# --- transport.base.resolve_topics ---
 
 
 def test_resolve_topics_builds_camera_and_group_maps():
@@ -57,17 +51,9 @@ def test_resolve_topics_empty_raises():
         resolve_topics({})
 
 
-# --- TRANSPORT_REGISTRY ---
-
-
 def test_transport_registry_only_exposes_supported_backends():
-    # "debug" is a test-only backend the web harness registers at import time; exclude it
-    # so this assertion is order-independent of whether that harness has been imported.
     available = [name for name in TRANSPORT_REGISTRY.available() if name != "debug"]
     assert available == ["dataset", "ros1", "ros2", "zmq"]
-
-
-# --- load_config end-to-end (real presets) ---
 
 
 def test_load_deploy_config_resolves_spaces_and_defaults():
@@ -76,10 +62,77 @@ def test_load_deploy_config_resolves_spaces_and_defaults():
     assert cfg.policy.type == "openpi_rtc"
     assert cfg.policy.backend_options["latency_k"] == 4
     assert cfg.inference_cfg.publish_rate > 0
-    assert cfg.manual_cfg.publish_rate == 15
     assert not cfg.inference_cfg.obs_space.is_eef()
     assert cfg.eval_cfg is None
-    assert cfg.eval is None  # runtime compatibility alias for eval_cfg
+    assert cfg.eval is None
+    assert cfg.rl_cfg is None
+    assert cfg.rl is None
+
+
+def test_rl_config_exposes_preview_models_and_lerobot_storage():
+    cfg = load_config(_CONFIGS_DIR / "04_rl" / "r1lite_rl.py")
+
+    assert cfg.rl.cli_mode == "real"
+    assert cfg.rl.inference_strategy == "async"
+    assert cfg.rl.data.format == "lerobot"
+    assert cfg.rl.policies[0].name == "r1lite_openpi_qpos"
+    assert cfg.rl.policies[0].config.policy.type == "openpi"
+    assert cfg.rl.policies[0].config.policy.host == "127.0.0.1"
+    assert cfg.rl.policies[0].config.policy.port == 9000
+    assert cfg.rl.critics[0].name == "r1lite_critic"
+
+
+@pytest.mark.parametrize(
+    ("filename", "robot_type"),
+    [
+        ("agibot_g2_rl.py", "agibot_g2"),
+        ("arx_r5_rl.py", "arx_r5"),
+        ("dual_agilex_piper_rl.py", "agilex_piper"),
+        ("dual_franka_rl.py", "dual_franka"),
+        ("r1lite_rl.py", "r1_lite"),
+        ("ur5e_rl.py", "ur5e"),
+    ],
+)
+def test_all_robot_rl_templates_load(filename: str, robot_type: str):
+    cfg = load_config(_CONFIGS_DIR / "04_rl" / filename)
+
+    assert cfg.robot.type == robot_type
+    assert cfg.rl.policies[0].config.robot.type == robot_type
+    assert cfg.rl.inference_strategy == "async"
+    assert cfg.rl.critics[0].type == "websocket"
+    assert cfg.rl.data.format == "lerobot"
+    assert cfg.rl.intervention.control_mode == "relative"
+
+
+def test_rl_local_config_pattern_is_ignored():
+    gitignore = (_CONFIGS_DIR.parent / ".gitignore").read_text(encoding="utf-8")
+
+    assert "configs/01_deploy/*/*.local.py" in gitignore
+    assert "configs/04_rl/*.local.py" in gitignore
+
+
+def test_r1lite_local_rl_config_loads_when_present():
+    path = _CONFIGS_DIR / "04_rl" / "r1lite_rl.local.py"
+    if not path.exists():
+        pytest.skip("machine-local RL config is not checked into the repository")
+
+    cfg = load_config(path)
+
+    assert cfg.rl.cli_mode == "real"
+    assert cfg.rl.inference_strategy == "async"
+    assert cfg.rl.policies[0].config.robot.gripper_threshold == 50.0
+
+
+def test_rl_config_rejects_unimplemented_transition_storage(tmp_path):
+    config = tmp_path / "rl_transition.py"
+    config.write_text(
+        "_base_ = ['"
+        + str((_CONFIGS_DIR / "04_rl" / "r1lite_rl.py").resolve())
+        + "']\nrl_cfg = dict(data=dict(format='transition'))\n"
+    )
+
+    with pytest.raises(ValueError, match="rl.data.format must be 'lerobot'"):
+        load_config(config)
 
 
 def test_load_eef_config_builds_eef_space():
@@ -93,7 +146,74 @@ def test_load_collection_config_exposes_schema():
     assert cfg.collection.schema.robot_type == "arx_r5"
     assert set(cfg.collection.schema.columns) == {"qpos", "eef", "action_qpos", "action_eef"}
     assert cfg.collection.schema.cameras["cam_high"] == "observation.images.cam_high"
-    assert cfg.collection.storage.log_dir  # explicit or derived, never empty
+    assert cfg.collection.storage.log_dir
+
+
+@pytest.mark.parametrize(
+    "robot_name",
+    ["r1lite", "ur5e", "arx_r5", "dual_agilex_piper"],
+)
+def test_deploy_configs_enable_relative_hil_rollout(robot_name: str):
+    cfg = load_config(_CONFIGS_DIR / "01_deploy" / robot_name / "openpi_qpos.py")
+    assert cfg.rollout.storage.enabled is True
+    assert "enabled" not in cfg.rollout.intervention
+    assert cfg.rollout.intervention.control_mode == "relative"
+
+
+@pytest.mark.parametrize("robot_name", ["dual_franka", "agibot_g2"])
+def test_deploy_configs_without_leader_keep_hil_disabled(robot_name: str):
+    cfg = load_config(_CONFIGS_DIR / "01_deploy" / robot_name / "openpi_qpos.py")
+    assert cfg.rollout.storage.enabled is False
+    assert cfg.rollout.intervention.control_mode == "absolute"
+
+
+def test_rollout_config_parses(tmp_path):
+    cfg_path = _write_config(
+        tmp_path / "rollout.py",
+        "rollout = dict(\n"
+        "    storage=dict(enabled=True, log_dir='work_dirs/rollout/test', fps=15),\n"
+        "    intervention=dict(control_mode='relative'),\n"
+        ")\n",
+    )
+    cfg = load_config(cfg_path)
+    assert cfg.rollout.storage.enabled is True
+    assert cfg.rollout.storage.log_dir == "work_dirs/rollout/test"
+    assert cfg.rollout.storage.fps == 15
+    assert cfg.rollout.intervention.control_mode == "relative"
+
+
+def test_r1lite_collection_configures_common_recording():
+    cfg = load_config(_CONFIGS_DIR / "02_collection" / "r1lite.py")
+    assert "gate" not in cfg.collection
+    assert cfg.collection.storage.image_height == 360
+    assert cfg.collection.storage.image_width == 640
+    assert cfg.rollout.storage.image_height == 360
+    assert cfg.rollout.storage.image_width == 640
+    assert cfg.rollout.intervention.control_mode == "relative"
+
+
+def test_operator_control_defaults_disabled():
+    cfg = load_config(_CONFIGS_DIR / "00_base" / "defaults.py")
+
+    assert cfg.operator_control.enabled is False
+    assert cfg.operator_control.action_topic == "/eva/operator_action"
+
+
+def test_r1lite_enables_operator_control():
+    cfg = load_config(_CONFIGS_DIR / "01_deploy" / "r1lite" / "openpi_qpos.py")
+
+    assert "hardware" not in cfg
+    assert cfg.operator_control.enabled is True
+    assert cfg.operator_control.action_topic == "/eva/operator_action"
+    assert cfg.rollout.storage.image_height == 360
+    assert cfg.rollout.storage.image_width == 640
+
+
+def test_r1lite_collection_enables_operator_control():
+    cfg = load_config(_CONFIGS_DIR / "02_collection" / "r1lite.py")
+
+    assert cfg.operator_control.enabled is True
+    assert cfg.operator_control.action_topic == "/eva/operator_action"
 
 
 def test_load_eval_config_resolves_checkpoints():
@@ -103,11 +223,8 @@ def test_load_eval_config_resolves_checkpoints():
     assert len(cfg.eval.checkpoints) == 2
     for checkpoint in cfg.eval.checkpoints:
         resolved = checkpoint["config"]
-        assert isinstance(resolved, ConfigDict)  # config ref expanded into a full ConfigDict
+        assert isinstance(resolved, ConfigDict)
         assert resolved.policy.port == checkpoint["port"]
-
-
-# --- derived fields + validation (synthetic .py over real defaults) ---
 
 
 def test_collection_log_dir_derives_from_filename(tmp_path):
@@ -148,19 +265,30 @@ def test_collection_schema_requires_cameras(tmp_path):
         load_config(cfg_path)
 
 
-# --- preset smoke tests ---
-
-
 @pytest.mark.parametrize(
     "preset",
-    sorted(
-        str(p)
-        for p in _CONFIGS_DIR.glob("01_deploy/**/*.py")
-        if not p.name.startswith("_")
-    ),
+    sorted(str(p) for p in _CONFIGS_DIR.glob("01_deploy/**/*.py") if not p.name.startswith("_")),
 )
 def test_all_deploy_presets_load_without_error(preset):
     cfg = load_config(preset)
     assert cfg.robot.type
     assert cfg.inference_cfg.publish_rate > 0
-    assert cfg.manual_cfg.publish_rate == 15
+
+
+@pytest.mark.parametrize(
+    "preset",
+    sorted(str(p) for p in _CONFIGS_DIR.glob("02_collection/*.py")),
+)
+def test_all_collection_presets_load_without_error(preset):
+    cfg = load_config(preset)
+    assert cfg.collection.schema.robot_type
+    assert set(cfg.collection.schema.columns) == {"qpos", "eef", "action_qpos", "action_eef"}
+
+
+@pytest.mark.parametrize(
+    "preset",
+    sorted(str(p) for p in _CONFIGS_DIR.glob("03_evaluation/*.py")),
+)
+def test_all_eval_presets_load_without_error(preset):
+    cfg = load_config(preset)
+    assert cfg.eval is not None

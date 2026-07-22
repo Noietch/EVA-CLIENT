@@ -40,7 +40,7 @@ from core.app.handlers.utils import (
     reset_run_state,
     reset_session_progress,
 )
-from core.app.operator_control import resolve_operator_event
+from core.app.operator_control import resolve_operator_action
 from core.app.state import (
     OutputTarget,
     RuntimeState,
@@ -370,11 +370,25 @@ def publish_real_action_with_preview(
     should_preview = runtime.transport.has_sim_publishers() and (
         session is None or session.pending_real_chunk is None
     )
+    started = time.monotonic()
     if should_preview:
         publish_action(runtime, action, target=OutputTarget.SIM.value)
+    preview_done = time.monotonic()
     publish_action(runtime, action, target=OutputTarget.REAL.value)
+    real_done = time.monotonic()
     if session is not None:
         record_executed_action(config, session, action, runtime)
+    record_done = time.monotonic()
+    if record_done - started >= 0.02:
+        logger.warning(
+            "[CONTROL_TIMING] stage=dispatch preview_ms=%.1f real_publish_ms=%.1f "
+            "record_ms=%.1f total_ms=%.1f step=%d",
+            (preview_done - started) * 1000.0,
+            (real_done - preview_done) * 1000.0,
+            (record_done - real_done) * 1000.0,
+            (record_done - started) * 1000.0,
+            session.step_index if session is not None else -1,
+        )
 
 
 def publish_action_chunk(
@@ -441,8 +455,8 @@ def handle_motion_command(
 
     ``halt`` interrupts and is consumed. Verbs that change mode/prompt/episode/ckpt or
     request a reset also interrupt, but are re-queued so the main loop applies them once
-    it unwinds — this is what lets a mode switch abort an in-progress setup. All other
-    commands are ignored during the motion.
+    it unwinds — this is what lets a mode switch abort an in-progress setup. The RL HIL
+    enable switch is applied in place because it must remain responsive during sync waits.
 
     Returns:
         True when the motion should be interrupted, False to keep going.
@@ -454,27 +468,12 @@ def handle_motion_command(
     # is what lets a mode switch abort an in-progress setup instead of being dropped.
     raw_verb = command.strip().lower().removeprefix("web:")
     verb, _, arg = raw_verb.partition(":")
-    if verb == "operator_button":
-        button, _, source = arg.partition(":")
-        resolved_command = resolve_operator_event(
-            config,
-            runtime,
-            session,
-            button=button,
-            source=source or "cat",
-        )
-        return (
-            resolved_command is not None
-            and resolved_command != command
-            and handle_motion_command(resolved_command, config, runtime, session)
-        )
     if verb == "operator_action":
-        intent, _, source = arg.partition(":")
-        resolved_command = resolve_operator_event(
-            config,
+        action, _, source = arg.partition(":")
+        resolved_command = resolve_operator_action(
             runtime,
             session,
-            intent=intent,
+            action,
             source=source or "ui",
         )
         return (
@@ -482,6 +481,14 @@ def handle_motion_command(
             and resolved_command != command
             and handle_motion_command(resolved_command, config, runtime, session)
         )
+    if verb == "rollout_intervention_enabled":
+        enabled = arg not in {"", "0", "false", "off"}
+        if runtime.rollout_intervention_active:
+            session.last_error = "Stop or resume the active intervention before changing HIL"
+        else:
+            runtime.rollout_intervention_enabled = enabled
+            session.last_error = ""
+        return False
     if verb == "rollout_stop":
         was_running = session.status is SessionStatus.RUNNING and session.mode in (
             SessionMode.REAL,
@@ -492,6 +499,19 @@ def handle_motion_command(
         if was_running and not is_replay(runtime):
             mark_rollout_save_ready(runtime, "stop")
         return True
+    if verb == "rollout_save":
+        was_running = session.status is SessionStatus.RUNNING and session.mode in (
+            SessionMode.REAL,
+            SessionMode.SIM,
+        )
+        if not was_running or is_replay(runtime):
+            return False
+        session.interrupt_requested = True
+        mark_rollout_save_ready(runtime, "save")
+        if runtime.command_queue is not None:
+            runtime.command_queue.put(command)
+        logger.info("Rollout save requested; stopping current motion")
+        return True
     if verb == "halt":
         was_running = session.status is SessionStatus.RUNNING and session.mode in (
             SessionMode.REAL,
@@ -501,7 +521,7 @@ def handle_motion_command(
         logger.info("Interrupt requested; stopping current motion")
         if was_running and not is_replay(runtime):
             mark_rollout_save_ready(runtime, "stop")
-            if session.mode is SessionMode.REAL and config.rollout.intervention.enabled:
+            if session.mode is SessionMode.REAL and runtime.rollout_intervention_enabled:
                 start_rollout_intervention(config, runtime, session)
         return True
     if verb == "stop" and runtime.web_phase == "running":
@@ -953,22 +973,38 @@ def publish_next_action(config: ConfigDict, runtime: RuntimeState, session: Sess
 
     # Continuous mode: pop individual actions from the buffer
     if strategy is not None and strategy.is_loop_running():
+        started = time.monotonic()
         action = strategy.pop_next_action()
+        pop_done = time.monotonic()
         if action is None:
             return False  # buffer empty, skip this tick
         action = apply_gripper_control_overrides(runtime, action, session)
-        logger.info(
+        override_done = time.monotonic()
+        logger.debug(
             "[PUBLISH_ACTION] mode=%s strategy=loop step=%d action=%s",
             session.mode.value,
             session.step_index,
             _format_diag_vector(action),
         )
+        log_done = time.monotonic()
         if sim_only:
             publish_action(runtime, action, target=OutputTarget.SIM.value)
             session.sim_preview_qpos = action.copy()
             record_executed_action(config, session, action, runtime)
         else:
             publish_real_action_with_preview(config, runtime, action, session=session)
+        publish_done = time.monotonic()
+        if publish_done - started >= 0.02:
+            logger.warning(
+                "[CONTROL_TIMING] stage=publish_next pop_ms=%.1f override_ms=%.1f "
+                "action_log_ms=%.1f dispatch_ms=%.1f total_ms=%.1f step=%d",
+                (pop_done - started) * 1000.0,
+                (override_done - pop_done) * 1000.0,
+                (log_done - override_done) * 1000.0,
+                (publish_done - log_done) * 1000.0,
+                (publish_done - started) * 1000.0,
+                session.step_index,
+            )
         session.step_index += 1
         return True
 
@@ -978,7 +1014,7 @@ def publish_next_action(config: ConfigDict, runtime: RuntimeState, session: Sess
     action = apply_gripper_control_overrides(
         runtime, session.action_chunk[session.chunk_index], session
     )
-    logger.info(
+    logger.debug(
         "[PUBLISH_ACTION] mode=%s strategy=chunk step=%d chunk=%d/%d action=%s",
         session.mode.value,
         session.step_index,
@@ -1195,11 +1231,10 @@ def update_inference_params(
         spec = strategies[key]
         merged = dict(spec.get("args") or {})
         merged.update({k: v for k, v in args.items() if v is not None})
-        strategies[key] = StrategyYamlSpec(
-            type=spec["type"], args=cast(StrategyYamlArgs, merged)
-        )
+        strategies[key] = StrategyYamlSpec(type=spec["type"], args=cast(StrategyYamlArgs, merged))
 
     import copy
+
     new_config = copy.deepcopy(config)
     new_config.inference_cfg.inference_rate = float(
         params.get("inference_rate", config.inference_cfg.inference_rate)
@@ -1311,9 +1346,7 @@ def select_task(
         return
     session.selected_task = task
     reset_run_state(config, runtime, session)
-    logger.info(
-        "Selected task %s; status is now unset", format_task_label(session.selected_task)
-    )
+    logger.info("Selected task %s; status is now unset", format_task_label(session.selected_task))
 
 
 __all__ = [

@@ -9,9 +9,7 @@ policy = dict(
 
 inference_cfg = dict(
     publish_rate=15,
-    debug_tasks=[
-        'first scoop up the black foam and place it in the box, then scoop up the phone and place it in the box, and finally pick up the lid, put it on the box, and press it down firmly',  # noqa: E501
-    ],
+    debug_tasks=['placeholder task — replace with the real task prompt'],
 )
 
 inference_strategies = {

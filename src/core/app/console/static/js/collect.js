@@ -1,16 +1,18 @@
 // collect.js: data-collection tab (collect) + QC/annotation review &
 // stage-video playback control (review).
-import { $, S, apiGet, apiPost } from "./core.js";
+import { $, LIVE, S, apiGet, apiPost, clientTrace } from "./core.js";
+import { updateScrub } from "./charts.js";
 import { collectTaskValue, setPanel, applyStatus, uiMode } from "./run.js";
-import { refreshCameraStreams, replayVideos } from "./replay.js";
+import {
+  exitReplayMode, loadReviewPlayback, refreshCameraStreams, replayStop,
+} from "./replay.js";
 import { setActiveTab } from "./main.js";
 
 // ===== collect =====
 
 async function startCollectFromTab() {
     if (S.reviewKind === "collect") {
-      clearReviewPlayback();
-      refreshCameraStreams();
+      returnReviewToLive();
     }
     const task = collectTaskValue();
     if (task && task !== S.STATUS.selected_collect_task) {
@@ -50,7 +52,9 @@ function collectIssueText(item) {
     if (item.error) return item.error;
     if (item.qc_verdict) return `qc ${item.qc_verdict}`;
     if (!issues.length) return item.status || "ok";
-    return issues.map((x) => x.code || x.detail || "issue").join(", ");
+    return issues.map((issue) => (
+      `${issue.code || "issue"}${Number(issue.count || 1) > 1 ? ` ×${issue.count}` : ""}`
+    )).join(", ");
   }
 
 function savedEpisodeId(item) {
@@ -62,14 +66,8 @@ function savedEpisodeId(item) {
 function selectCollectEpisode(item) {
     const episode = savedEpisodeId(item);
     if (episode == null) return;
-    const replay = S.STATUS.collection_replay || {};
-    const switchActiveReview = S.reviewKind === "collect" && replay.active &&
-      replay.episode_index !== episode && reviewEpisodeId !== episode;
     S.collectReplayEpisode = episode;
-    if (switchActiveReview) {
-      reviewEpisode("collect", item);
-      return;
-    }
+    reviewEpisode("collect", item);
     renderCollect();
   }
 
@@ -89,40 +87,10 @@ function selectCollectEpisodePointer(event, item) {
 function selectedCollectEpisodeItem() {
     const episode = S.collectReplayEpisode;
     if (episode == null) return null;
+    if (reviewTask !== collectTaskValue()) return null;
     const collect = S.STATUS.collect || {};
     const items = (collect.episodes || []).concat(collect.queue || []);
-    return items.find((item) => savedEpisodeId(item) === episode) ||
-      { status: "saved", episode_index: episode };
-  }
-
-function startCollectReplay(item) {
-    const episode = savedEpisodeId(item);
-    if (episode == null) return;
-    S.collectReplayEpisode = episode;
-    reviewEpisode("collect", item);
-  }
-
-function startSelectedCollectReplay() {
-    const item = selectedCollectEpisodeItem();
-    if (!item) return;
-    startCollectReplay(item);
-  }
-
-async function stopCollectReplay() {
-    clearReviewPlayback();
-    pauseStageVideos();
-    await apiPost("/api/exit_collect_replay");
-    refreshCameraStreams();
-    applyStatus(await apiGet("/api/status"));
-  }
-
-async function toggleSelectedCollectReplay() {
-    const replay = S.STATUS.collection_replay || {};
-    if (replay.playing) {
-      await stopCollectReplay();
-      return;
-    }
-    startSelectedCollectReplay();
+    return items.find((item) => savedEpisodeId(item) === episode) || null;
   }
 
 function renderCollectTiles(items) {
@@ -246,17 +214,18 @@ function renderRolloutSaveList(items) {
 function renderRolloutSave() {
     const panel = $("rollout-save-panel");
     if (!panel) return;
-    const hideRolloutSave = ["sim", "step"].includes(uiMode(S.STATUS.cli_mode));
+    const rollout = S.STATUS.rollout || {};
+    const episodes = rollout.episodes || [];
+    const queue = rollout.queue || [];
+    const items = episodes.concat(queue);
+    const hideRolloutSave = ["sim", "step"].includes(uiMode(S.STATUS.cli_mode)) &&
+      items.length === 0 && S.reviewKind !== "rollout";
     panel.style.display = hideRolloutSave ? "none" : "";
     if (hideRolloutSave) return;
-    const rollout = S.STATUS.rollout || {};
     const enabled = !!rollout.enabled;
     const saveReady = !!rollout.save_ready;
     const saveBlocked = !!rollout.save_blocked_by_intervention;
     const running = S.STATUS.session_status === "running";
-    const episodes = rollout.episodes || [];
-    const queue = rollout.queue || [];
-    const items = episodes.concat(queue);
     const progress = Math.max(0, Math.min(1, Number(rollout.progress || 0)));
     const savedComplete = enabled && !saveReady && queue.length === 0 && episodes.length > 0;
 
@@ -273,19 +242,15 @@ function renderRolloutSave() {
           ? `continue or abandon intervention · active ${activeInterventionFrames}f · accepted ${acceptedInterventions}`
           : (saveReady ? `ready after ${rollout.reason || "stop"}` : ""))
       : "rollout saving is disabled";
-    $("b-rollout-save").disabled = !enabled || !saveReady || running || saveBlocked;
+    const hasFrames = Number(rollout.current_episode_frames || 0) > 0;
+    $("b-rollout-save").disabled = !enabled || (!saveReady && !running) || !hasFrames || saveBlocked;
     $("b-rollout-qc-pass").disabled = !enabled || S.rolloutSaveEpisode == null;
     $("b-rollout-qc-fail").disabled = !enabled || S.rolloutSaveEpisode == null;
 
     renderRolloutSaveTiles(items);
     renderRolloutSaveList(items);
 
-    const replay = S.STATUS.collection_replay || {};
-    if (S.reviewKind === "rollout" && replay.active && replay.episode_index != null) {
-      S.rolloutSaveEpisode = replay.episode_index;
-      $("rollout-review-title").textContent = `episode ${replay.episode_index} · replay`;
-      syncReviewVideosToFrame(replay.frame_index);
-    } else if (S.rolloutSaveEpisode == null) {
+    if (S.rolloutSaveEpisode == null) {
       $("rollout-review-title").textContent = "no rollout selected";
     }
   }
@@ -308,8 +273,6 @@ function renderCollect() {
     const episodes = collect.episodes || [];
     const queue = collect.queue || [];
     const items = episodes.concat(queue);
-    const replay = S.STATUS.collection_replay || {};
-    const replayActive = !!replay.playing;
     const progress = Math.max(0, Math.min(1, Number(collect.progress || 0)));
 
     const collectFps = S.CFG && S.CFG.collection ? S.CFG.collection.fps : null;
@@ -339,17 +302,10 @@ function renderCollect() {
     toggle.classList.toggle("primary", !collecting);
     toggle.querySelector(".rec-label").textContent = collecting ? "END / SAVE" : "START RECORD";
     $("b-collect-cancel").disabled = !collecting;
-    $("b-collect-qc-pass").disabled =
-      !enabled || collecting || queue.length > 0 || S.collectReplayEpisode == null;
-    $("b-goto-qc").disabled =
-      !enabled || collecting || queue.length > 0 || S.collectReplayEpisode == null;
-    const replayToggle = $("b-collect-replay-toggle");
-    replayToggle.disabled = replayActive
-      ? false
-      : (!enabled || collecting || S.collectReplayEpisode == null);
-    replayToggle.classList.toggle("primary", !replayActive);
-    replayToggle.classList.toggle("collect-replay-stop", replayActive);
-    replayToggle.textContent = replayActive ? "STOP ■" : "REPLAY ▶";
+    const selectedEpisode = selectedCollectEpisodeItem();
+    const selectedEpisodeSaved = savedEpisodeId(selectedEpisode) != null;
+    $("b-collect-qc-pass").disabled = !enabled || !selectedEpisodeSaved;
+    $("b-goto-qc").disabled = !enabled || !selectedEpisodeSaved;
     $("b-collect-note-save").disabled = S.collectReplayEpisode == null;
 
     const recordState = collecting || (hasPrompt && !S.collectArmEnabled)
@@ -364,29 +320,20 @@ function renderCollect() {
     renderCollectTiles(items);
     renderCollectList(items);
 
-    const replayFill = $("collect-replay-fill");
-    const replayFrame = $("collect-replay-frame");
     const replayStatus = $("collect-replay-status");
-    if (S.reviewKind === "collect" && replay.active && replay.episode_index != null) {
-      S.collectReplayEpisode = replay.episode_index;
-      replayStatus.textContent = `episode ${replay.episode_index} · replay`;
+    if (S.reviewKind === "collect" && LIVE.replayOwner === "collect") {
+      replayStatus.textContent = LIVE.replayError
+        ? `episode ${S.collectReplayEpisode} · error · ${LIVE.replayError}`
+        : (LIVE.replayLoading
+            ? `episode ${S.collectReplayEpisode} · loading`
+            : `episode ${S.collectReplayEpisode} · review`);
       replayStatus.style.display = S.ACTIVE_TAB === "collect" ? "" : "none";
-      syncReviewVideosToFrame(replay.frame_index);
-      const total = Number(replay.total_frames || 0);
-      const frame = Number(replay.frame_index || 0);
-      const pct = total > 0 ? Math.max(0, Math.min(1, frame / (total - 1 || 1))) : 0;
-      if (replayFill) replayFill.style.width = `${pct * 100}%`;
-      if (replayFrame) replayFrame.textContent = total > 0 ? `${frame + 1} / ${total}` : "—";
     } else if (S.collectReplayEpisode != null) {
       replayStatus.textContent = `episode ${S.collectReplayEpisode} selected`;
       replayStatus.style.display = S.ACTIVE_TAB === "collect" ? "" : "none";
-      if (replayFill) replayFill.style.width = "0%";
-      if (replayFrame) replayFrame.textContent = "—";
     } else if (S.collectReplayEpisode == null) {
       replayStatus.textContent = "";
       replayStatus.style.display = "none";
-      if (replayFill) replayFill.style.width = "0%";
-      if (replayFrame) replayFrame.textContent = "—";
     }
   }
 
@@ -396,11 +343,9 @@ function dotClass(kind) { return "dot " + kind; }
 
 let reviewDatasetDir = "";
 
+let reviewTask = "";
+
 let reviewEpisodeId = null;
-
-let reviewVideoKeys = {};
-
-let reviewFps = 10;
 
 let reviewRequestId = 0;
 
@@ -425,6 +370,10 @@ function reviewNoteFor(kind) {
     return $("collect-qc-note");
   }
 
+function episodeQcEndpoint(kind) {
+    return kind === "collect" ? "/api/collect_qc_mark" : "/api/qc_mark";
+  }
+
 function reviewActiveInCurrentTab() {
     return (S.reviewKind === "collect" && S.ACTIVE_TAB === "collect") ||
       (S.reviewKind === "rollout" && S.ACTIVE_TAB === "debug");
@@ -433,154 +382,61 @@ function reviewActiveInCurrentTab() {
 function clearReviewPlayback() {
     reviewRequestId += 1;
     S.reviewKind = "";
-    reviewVideoKeys = {};
     reviewDatasetDir = "";
+    reviewTask = "";
     reviewEpisodeId = null;
-    reviewFps = 10;
   }
 
-function setVideosLoading(videos, on, text) {
-    videos.forEach((v) => {
-      const cell = v.closest(".cam-cell");
-      if (!cell) return;
-      cell.classList.toggle("loading", on);
-      const label = cell.querySelector(".cam-loading span:last-child");
-      if (label && text) label.textContent = text;
-    });
+function showReviewError(kind, message) {
+    LIVE.replayOwner = kind;
+    LIVE.replayMode = true;
+    LIVE.replayLoading = false;
+    LIVE.replayError = message;
+    replayStop();
+    const title = reviewTitleFor(kind);
+    const error = reviewErrorFor(kind);
+    if (title) title.textContent = `episode ${reviewEpisodeId} · error`;
+    if (error) error.textContent = message;
+    updateScrub();
   }
 
-function setStageVideoLoading(on, text) {
-    setVideosLoading(replayVideos(), on, text);
+function returnReviewToLive() {
+    S.collectReplayEpisode = null;
+    S.rolloutSaveEpisode = null;
+    S.rlQcEpisode = null;
+    clearReviewPlayback();
+    exitReplayMode();
+    refreshCameraStreams();
+    renderCollect();
   }
 
-function videoReady(v) {
-    return v.error || v.readyState >= 3;
+function reviewEpisode(kind, item) {
+    return kind === "rollout" ? reviewRolloutEpisode(item) : reviewCollectEpisode(item);
   }
 
-function waitForVideoReady(v) {
-    if (videoReady(v)) return Promise.resolve();
-    return new Promise((resolve) => {
-      let done = false;
-      let timer = null;
-      const finish = () => {
-        if (done) return;
-        done = true;
-        v.removeEventListener("canplay", finish);
-        v.removeEventListener("canplaythrough", finish);
-        v.removeEventListener("error", finish);
-        if (timer !== null) clearTimeout(timer);
-        resolve();
-      };
-      v.addEventListener("canplay", finish);
-      v.addEventListener("canplaythrough", finish);
-      v.addEventListener("error", finish);
-      timer = setTimeout(finish, 8000);
-      try { v.load(); } catch (e) { finish(); }
-      if (videoReady(v)) finish();
-    });
-  }
-
-function waitForBrowserPaint() {
-    return new Promise((resolve) => {
-      requestAnimationFrame(() => requestAnimationFrame(resolve));
-    });
-  }
-
-async function waitForVideoPainted(v) {
-    if (v.error) return;
-    await waitForVideoReady(v);
-    await new Promise((resolve) => {
-      let done = false;
-      let timer = null;
-      const finish = () => {
-        if (done) return;
-        done = true;
-        if (timer !== null) clearTimeout(timer);
-        requestAnimationFrame(resolve);
-      };
-      timer = setTimeout(finish, 500);
-      if (typeof v.requestVideoFrameCallback === "function") {
-        try {
-          v.requestVideoFrameCallback(finish);
-          return;
-        } catch (e) {}
-      }
-      requestAnimationFrame(() => requestAnimationFrame(finish));
-    });
-  }
-
-async function waitForStageVideosReady(kind) {
-    const videos = replayVideos();
-    if (!videos.length) return;
-    setVideosLoading(videos, true, "loading video");
-    await Promise.all(videos.map((v) => waitForVideoReady(v)));
-  }
-
-async function waitForStageVideosPainted(kind) {
-    const videos = replayVideos();
-    if (!videos.length) return;
-    setVideosLoading(videos, true, "rendering video");
-    await Promise.all(videos.map((v) => waitForVideoPainted(v)));
-    await waitForBrowserPaint();
-    setVideosLoading(videos, false, "");
-  }
-
-function playStageVideos() {
-    replayVideos().forEach((v) => {
-      if (!v.error) v.play().catch(() => {});
-    });
-  }
-
-function pauseStageVideos() {
-    replayVideos().forEach((v) => v.pause());
-  }
-
-function renderReviewVideos(videoKeys) {
-    const strip = $("cam-strip");
-    if (!strip) return;
-    const configured = (S.CFG && S.CFG.camera_keys) || [];
-    const keys = configured.length ? configured : Object.keys(videoKeys || {});
-    strip.innerHTML = keys.map((k) => {
-      const params = new URLSearchParams({
-        dataset_dir: reviewDatasetDir,
-        episode: String(reviewEpisodeId),
-        cam: k,
-      });
-      const videoKey = (videoKeys || {})[k];
-      if (videoKey) params.set("video_key", videoKey);
-      return `<div class="cam-cell"><div class="cam-lbl">${k}</div>` +
-        `<video class="cam" data-key="${k}" muted playsinline preload="auto" ` +
-        `src="/api/replay_video?${params.toString()}" ` +
-        `onerror="this.closest('.cam-cell').style.display='none'"></video>` +
-        `<div class="cam-loading"><span class="spinner"></span><span>loading video</span></div></div>`;
-    }).join("") || '<div class="cam-empty">no camera video</div>';
-  }
-
-function syncReviewVideosToFrame(frameIndex) {
-    if (!reviewActiveInCurrentTab()) return;
-    const frame = Number(frameIndex);
-    if (!isFinite(frame)) return;
-    const t = Math.max(0, frame) / Math.max(1, reviewFps || 10);
-    replayVideos().forEach((v) => {
-      if (Math.abs((v.currentTime || 0) - t) > 0.12) {
-        try { v.currentTime = t; } catch (e) {}
-      }
-    });
-  }
-
-async function reviewEpisode(kind, item) {
+async function reviewCollectEpisode(item) {
     const episode = savedEpisodeId(item);
     if (episode == null) return;
     const requestId = ++reviewRequestId;
-    if (kind === "rollout") S.rolloutSaveEpisode = episode;
-    else S.collectReplayEpisode = episode;
-    S.reviewKind = kind;
-    reviewDatasetDir = reviewDatasetFor(kind);
+    clientTrace("review.collect.select", {
+      episode,
+      request_id: requestId,
+      dataset_dir: reviewDatasetFor("collect"),
+    });
+    exitReplayMode();
+    S.collectReplayEpisode = episode;
+    reviewTask = collectTaskValue();
+    S.reviewKind = "collect";
+    reviewDatasetDir = reviewDatasetFor("collect");
     reviewEpisodeId = episode;
-    reviewVideoKeys = {};
-    const title = reviewTitleFor(kind);
+    LIVE.replayOwner = "collect";
+    LIVE.replayMode = true;
+    LIVE.replayLoading = true;
+    LIVE.replayError = "";
+    updateScrub();
+    const title = reviewTitleFor("collect");
     if (title) title.textContent = `episode ${episode} · loading`;
-    const err = reviewErrorFor(kind);
+    const err = reviewErrorFor("collect");
     if (err) err.textContent = "";
     const r = await apiPost("/api/review_episode", {
       dataset_dir: reviewDatasetDir,
@@ -588,33 +444,58 @@ async function reviewEpisode(kind, item) {
     });
     if (requestId !== reviewRequestId) return;
     if (!r.ok) {
-      if (err) err.textContent = r.error || "review failed";
-      if (title) title.textContent = `episode ${episode} · unavailable`;
-      clearReviewPlayback();
-      refreshCameraStreams();
+      clientTrace("review.collect.error", { episode, request_id: requestId, error: r.error || "review failed" });
+      showReviewError("collect", r.error || "review failed");
       return;
     }
-    reviewVideoKeys = r.video_keys || {};
-    reviewFps = Math.max(1, Number(r.fps) || 10);
-    renderReviewVideos(reviewVideoKeys);
-    setStageVideoLoading(true, "loading video");
-    await waitForStageVideosReady("review");
+    const started = await loadReviewPlayback({ ...r, dataset_dir: reviewDatasetDir }, "collect");
     if (requestId !== reviewRequestId) return;
-    syncReviewVideosToFrame(0);
-    await waitForStageVideosPainted("review");
-    if (requestId !== reviewRequestId) return;
-    const start = await apiPost("/api/review_replay_start", {
+    if (!started) {
+      clientTrace("review.collect.error", {
+        episode, request_id: requestId, error: LIVE.replayError || "review playback failed",
+      });
+      showReviewError("collect", LIVE.replayError || "review playback failed");
+      return;
+    }
+    clientTrace("review.collect.ready", { episode, request_id: requestId, frames: LIVE.n });
+    if (title) title.textContent = `episode ${episode} · review`;
+  }
+
+async function reviewRolloutEpisode(item) {
+    const episode = savedEpisodeId(item);
+    if (episode == null) return;
+    const requestId = ++reviewRequestId;
+    exitReplayMode();
+    S.rolloutSaveEpisode = episode;
+    S.reviewKind = "rollout";
+    reviewTask = "";
+    reviewDatasetDir = reviewDatasetFor("rollout");
+    reviewEpisodeId = episode;
+    LIVE.replayOwner = "rollout";
+    LIVE.replayMode = true;
+    LIVE.replayLoading = true;
+    LIVE.replayError = "";
+    updateScrub();
+    const title = reviewTitleFor("rollout");
+    const err = reviewErrorFor("rollout");
+    if (title) title.textContent = `episode ${episode} · loading`;
+    if (err) err.textContent = "";
+    const r = await apiPost("/api/review_episode", {
+      dataset_dir: reviewDatasetDir,
       episode: String(reviewEpisodeId),
     });
     if (requestId !== reviewRequestId) return;
-    if (!start.ok) {
-      if (err) err.textContent = start.error || "review start failed";
-      if (title) title.textContent = `episode ${episode} · unavailable`;
+    if (!r.ok) {
+      showReviewError("rollout", r.error || "review failed");
       return;
     }
-    playStageVideos();
+    const started = await loadReviewPlayback({ ...r, dataset_dir: reviewDatasetDir }, "rollout");
+    if (requestId !== reviewRequestId) return;
+    if (!started) {
+      showReviewError("rollout", LIVE.replayError || "review playback failed");
+      return;
+    }
     if (title) title.textContent = `episode ${episode} · review`;
-    applyStatus(await apiGet("/api/status"));
   }
 
 async function submitEpisodeQc(kind, verdict) {
@@ -623,14 +504,26 @@ async function submitEpisodeQc(kind, verdict) {
     S.reviewKind = kind;
     reviewDatasetDir = reviewDatasetFor(kind);
     reviewEpisodeId = episode;
-    const r = await apiPost("/api/qc_mark", {
+    clientTrace("review.qc.begin", { kind, episode, verdict, dataset_dir: reviewDatasetDir });
+    const r = await apiPost(episodeQcEndpoint(kind), {
       dataset_dir: reviewDatasetDir,
+      task: reviewTask,
       episode: String(reviewEpisodeId),
       verdict,
       note: reviewNoteFor(kind).value || "",
     });
     const title = reviewTitleFor(kind);
-    if (title) title.textContent = r.ok ? `episode ${episode} · ${verdict}` : `episode ${episode} · QC failed`;
+    const status = kind === "rollout" ? $("rollout-save-err") : $("collect-qc-status");
+    clientTrace("review.qc.end", {
+      kind, episode, verdict, ok: !!r.ok, error: r.error || "",
+    });
+    if (!r.ok) {
+      if (title) title.textContent = `episode ${episode} · QC failed`;
+      if (status) status.textContent = `✗ ${r.error || "QC failed"}`;
+      return;
+    }
+    if (title) title.textContent = `episode ${episode} · ${verdict}`;
+    if (status) status.textContent = `episode ${episode} marked ${verdict}`;
     applyStatus(await apiGet("/api/status"));
   }
 
@@ -642,8 +535,9 @@ async function submitEpisodeNote(kind) {
     reviewDatasetDir = reviewDatasetFor(kind);
     reviewEpisodeId = episode;
     if (status) status.textContent = "saving…";
-    const r = await apiPost("/api/qc_mark", {
+    const r = await apiPost(episodeQcEndpoint(kind), {
       dataset_dir: reviewDatasetDir,
+      task: reviewTask,
       episode: String(reviewEpisodeId),
       verdict: "",
       note: reviewNoteFor(kind).value || "",
@@ -694,9 +588,7 @@ function openBatchQc(dir, episode) {
 
 export {
   collectConfigured, collectEnabled, dotClass, renderCollect,
-  renderRolloutSave, savedEpisodeId, startCollectFromTab, toggleSelectedCollectReplay,
-  clearReviewPlayback, loadAnnotation, pauseStageVideos, playStageVideos,
-  reviewActiveInCurrentTab, reviewEpisode, saveAnnotation, setStageVideoLoading,
-  submitEpisodeNote, submitEpisodeQc, submitQc, syncReviewVideosToFrame,
-  waitForStageVideosPainted, waitForStageVideosReady,
+  renderRolloutSave, returnReviewToLive, savedEpisodeId, startCollectFromTab,
+  clearReviewPlayback, loadAnnotation, reviewActiveInCurrentTab, reviewEpisode,
+  saveAnnotation, submitEpisodeNote, submitEpisodeQc, submitQc,
 };
