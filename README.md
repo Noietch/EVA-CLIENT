@@ -59,7 +59,7 @@
   <video src="https://github.com/user-attachments/assets/63a48ff6-5889-49f0-adaa-61cff1e4a55a" controls muted></video>
 </p>
 
-* **[2026-07] Headless CLI + ZMQ control channel.** Run the full deploy / eval / RL / collect loop from a single `.py` config without the browser — in-process inference, no web server. Every console button (start / stop / next episode / mark PASS·FAIL / trigger HIL takeover, …) is mirrored on a ZMQ REQ/REP socket so headless runs and external scripts drive the same state machine as the web UI. Suited to on-robot boxes and batch eval. See [`docs/console.md`](./docs/console.md) (headless mode), [`docs/control-channel.md`](./docs/control-channel.md) (protocol), and [`examples/control_channel/eva_ctl.py`](./examples/control_channel/eva_ctl.py) (client).
+* **[2026-07] Headless CLI + ZMQ control channel.** Drive the full deploy / eval / RL / collect loop from a single `.py` config without the browser — every console button (incl. HIL takeover) mirrored on a ZMQ socket. See [`docs/console.md`](./docs/console.md) and [`docs/control-channel.md`](./docs/control-channel.md).
 * **[2026-07] EVA-Client is open-sourced!**
 * **[2026-07] Paper, docs, and project page are live!** Read the [Technical Report](https://colalab.net/projects/eva-client/paper/EVA_Client_Report.pdf), browse the [Documentation](https://colalab.net/projects/eva-client/docs/introduction.html) ([中文](https://colalab.net/projects/eva-client/docs/introduction.zh.html)), and visit the [Project Page](https://colalab.net/projects/eva-client/).
 
