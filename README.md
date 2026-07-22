@@ -37,7 +37,7 @@
 * **[2026-07-22] New RL Workspace.** EVA-Client now supports human-in-the-loop (HIL) intervention during policy rollouts and real-time value-curve visualization.
 
 <p align="center">
-  <video src="https://github.com/user-attachments/assets/63a48ff6-5889-49f0-adaa-61cff1e4a55a" controls muted></video>
+  <video src="https://github.com/user-attachments/assets/62883016-1d5c-4688-9c39-740810b36b86" controls muted></video>
 </p>
 
 * **[2026-07-18] Headless CLI + ZMQ control channel.** Drive the full deploy / eval / RL / collect loop from a single `.py` config without the browser — every console button (incl. HIL takeover) mirrored on a ZMQ socket. See [`docs/console.md`](./docs/console.md) and [`docs/control-channel.md`](./docs/control-channel.md).
