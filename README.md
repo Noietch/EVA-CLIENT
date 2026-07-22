@@ -20,6 +20,7 @@
 
 <p align="center">
   <b>Jump to:</b>&nbsp;
+  <a href="#-whats-new">What's NEW</a> ·
   <a href="#-what-you-get">What you get</a> ·
   <a href="#-robot-zoo--compatibility">Robot zoo</a> ·
   <a href="#-protocols--middleware">Protocols</a> ·
@@ -28,6 +29,20 @@
   <a href="#%EF%B8%8F-roadmap">Roadmap</a> ·
   <a href="#-citation">Cite</a>
 </p>
+
+---
+
+## 🔥 What's NEW!
+
+* **[2026-07-22] New RL Workspace.** EVA-Client now supports human-in-the-loop (HIL) intervention during policy rollouts and real-time value-curve visualization.
+
+<p align="center">
+  <video src="https://github.com/user-attachments/assets/63a48ff6-5889-49f0-adaa-61cff1e4a55a" controls muted></video>
+</p>
+
+* **[2026-07-18] Headless CLI + ZMQ control channel.** Drive the full deploy / eval / RL / collect loop from a single `.py` config without the browser — every console button (incl. HIL takeover) mirrored on a ZMQ socket. See [`docs/console.md`](./docs/console.md) and [`docs/control-channel.md`](./docs/control-channel.md).
+* **[2026-07-03] EVA-Client is open-sourced!**
+* **[2026-07-03] Paper, docs, and project page are live!** Read the [Technical Report](https://colalab.net/projects/eva-client/paper/EVA_Client_Report.pdf), browse the [Documentation](https://colalab.net/projects/eva-client/docs/introduction.html) ([中文](https://colalab.net/projects/eva-client/docs/introduction.zh.html)), and visit the [Project Page](https://colalab.net/projects/eva-client/).
 
 ---
 
@@ -48,20 +63,6 @@
   from the COLLECT tab — background saver, in-tab QC PASS/FAIL replay, camera
   streams encoded to mp4, per-frame green/red quality flags. Teleop demos and
   model rollouts share one on-disk layout.
-
----
-
-## 🔥 What's NEW!
-
-* **[2026-07] New RL Workspace.** EVA-Client now supports human-in-the-loop (HIL) intervention during policy rollouts and real-time value-curve visualization.
-
-<p align="center">
-  <video src="https://github.com/user-attachments/assets/63a48ff6-5889-49f0-adaa-61cff1e4a55a" controls muted></video>
-</p>
-
-* **[2026-07] Headless CLI + ZMQ control channel.** Drive the full deploy / eval / RL / collect loop from a single `.py` config without the browser — every console button (incl. HIL takeover) mirrored on a ZMQ socket. See [`docs/console.md`](./docs/console.md) and [`docs/control-channel.md`](./docs/control-channel.md).
-* **[2026-07] EVA-Client is open-sourced!**
-* **[2026-07] Paper, docs, and project page are live!** Read the [Technical Report](https://colalab.net/projects/eva-client/paper/EVA_Client_Report.pdf), browse the [Documentation](https://colalab.net/projects/eva-client/docs/introduction.html) ([中文](https://colalab.net/projects/eva-client/docs/introduction.zh.html)), and visit the [Project Page](https://colalab.net/projects/eva-client/).
 
 ---
 
