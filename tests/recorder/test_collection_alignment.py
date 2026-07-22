@@ -23,6 +23,43 @@ def _sample(timestamp: float, value) -> CollectionRawSample:
     return CollectionRawSample(timestamp=timestamp, value=value)
 
 
+def test_alignment_builds_each_image_timeline_once():
+    timestamp_reads = 0
+
+    class _CountingSample:
+        def __init__(self, timestamp: float) -> None:
+            self._timestamp = timestamp
+            self.value = np.zeros((2, 2, 3), dtype=np.uint8)
+
+        @property
+        def timestamp(self) -> float:
+            nonlocal timestamp_reads
+            timestamp_reads += 1
+            return self._timestamp
+
+    count = 400
+    end = (count - 1) / 100.0
+    state = np.zeros(3, dtype=np.float32)
+    batch = CollectionRawBatch(
+        images={"cam_high": [_CountingSample(index / 100.0) for index in range(count)]},
+        vectors={
+            "state_qpos": [_sample(0.0, state), _sample(end, state)],
+        },
+    )
+
+    frames, _report = align_collection_samples(
+        batch,
+        robot=_robot(),
+        camera_keys=("cam_high",),
+        vector_fields=("state_qpos",),
+        fps=100.0,
+        image_skew_sec=0.006,
+    )
+
+    assert len(frames) == count
+    assert timestamp_reads < 5000
+
+
 def test_align_collection_samples_interpolates_vectors_on_fixed_grid():
     batch = CollectionRawBatch(
         images={
@@ -189,6 +226,37 @@ def test_align_collection_samples_reports_image_skew_over_one_hz_tolerance():
     assert [issue.code for issue in report.issues] == ["image_skew_exceeded"]
     assert "cam_high" in report.issues[0].detail
     assert "0.100000" in report.issues[0].detail
+
+
+def test_align_collection_samples_aggregates_repeated_camera_skew_issues():
+    batch = CollectionRawBatch(
+        images={
+            "cam_high": [
+                _sample(0.0, np.zeros((2, 2, 3), dtype=np.uint8)),
+                _sample(0.4, np.ones((2, 2, 3), dtype=np.uint8)),
+            ]
+        },
+        vectors={
+            "state_qpos": [
+                _sample(0.0, np.zeros(3, dtype=np.float32)),
+                _sample(0.4, np.ones(3, dtype=np.float32)),
+            ],
+        },
+    )
+
+    _frames, report = align_collection_samples(
+        batch,
+        robot=_robot(),
+        camera_keys=("cam_high",),
+        vector_fields=("state_qpos",),
+        fps=10.0,
+        image_skew_sec=0.05,
+    )
+
+    assert len(report.issues) == 1
+    assert report.issues[0].code == "image_skew_exceeded"
+    assert "on 3 frames" in report.issues[0].detail
+    assert "max 0.200000s" in report.issues[0].detail
 
 
 def test_align_collection_samples_reports_raw_image_gap_stats():

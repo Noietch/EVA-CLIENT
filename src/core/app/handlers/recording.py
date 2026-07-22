@@ -5,6 +5,8 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import queue
+import time
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +15,7 @@ import numpy as np
 from core.app.collection_capture import start_collection_capture, stop_collection_capture
 from core.app.handlers.imaging import prepare_image
 from core.app.handlers.utils import _resolve_runtime_path
+from core.app.rl import record_rl_sample
 from core.app.state import (
     RuntimeState,
     SessionMode,
@@ -29,6 +32,7 @@ logger = logging.getLogger(__name__)
 
 
 COLLECT_STEP_MAX_RAW_SNAPSHOTS = 16
+ROLLOUT_STEP_MAX_RAW_SNAPSHOTS = 1
 
 
 def state_to_eef(config: ConfigDict, runtime: RuntimeState, qpos_state: np.ndarray) -> np.ndarray:
@@ -48,10 +52,14 @@ def state_to_eef(config: ConfigDict, runtime: RuntimeState, qpos_state: np.ndarr
     """
     if not config.inference_cfg.obs_space.is_eef():
         return qpos_state
+    return _qpos_to_eef(config, runtime, qpos_state)
+
+
+def _qpos_to_eef(config: ConfigDict, runtime: RuntimeState, qpos: np.ndarray) -> np.ndarray:
     from core.app.handlers.io import ensure_ik_solver
 
     solver = ensure_ik_solver(config, runtime)
-    return solver.fk_chunk(qpos_state[np.newaxis, :])[0]
+    return solver.fk_chunk(qpos[np.newaxis, :])[0]
 
 
 def _fill_record_eef(
@@ -72,14 +80,20 @@ def _fill_record_eef(
         frame: observation to fill in place; reads frame.state_qpos.
         action: [Da] executed/teleop action in joint space, mapped to action_eef.
     """
-    if not config.inference_cfg.obs_space.is_eef():
+    obs_is_eef = config.inference_cfg.obs_space.is_eef()
+    action_is_eef = config.inference_cfg.action_space.is_eef()
+    if not obs_is_eef and not action_is_eef:
         return
     if frame.state_qpos is None:
         raise RuntimeError("EEF recording requires state_qpos but the frame has none")
-    if frame.state_eef is None:
+    if obs_is_eef and frame.state_eef is None:
         frame.state_eef = state_to_eef(config, runtime, frame.state_qpos)
-    if frame.action_eef is None:
-        frame.action_eef = state_to_eef(config, runtime, np.asarray(action, dtype=np.float32))
+    if action_is_eef and frame.action_eef is None:
+        frame.action_eef = _qpos_to_eef(
+            config,
+            runtime,
+            np.asarray(action, dtype=np.float32),
+        )
 
 
 def build_policy_observation(
@@ -137,6 +151,25 @@ def _is_collection_config(config: ConfigDict) -> bool:
     return bool((coll.get("schema") or {}).get("columns"))
 
 
+def _recording_space(config: ConfigDict) -> str:
+    inference_cfg = config.get("inference_cfg")
+    if inference_cfg is None:
+        return "qpos"
+    action_space = inference_cfg.get("action_space")
+    return "eef" if action_space is not None and action_space.is_eef() else "qpos"
+
+
+def _gripper_recording_config(
+    config: ConfigDict,
+) -> tuple[float | None, float | None, float | None]:
+    robot = config.get("robot") or {}
+    return (
+        robot.get("gripper_open"),
+        robot.get("gripper_close"),
+        robot.get("gripper_threshold"),
+    )
+
+
 def resolve_storage(config: ConfigDict) -> ConfigDict | None:
     """Return the active recording storage block: ``eval.storage`` for eval configs,
     else ``collection.storage`` for collection configs, else None (no recording).
@@ -160,6 +193,7 @@ def maybe_build_episode_logger(config: ConfigDict, runtime: RuntimeState) -> Non
         return
     collection = config.collection
     storage = collection.storage
+    gripper_open, gripper_close, gripper_threshold = _gripper_recording_config(config)
     runtime.episode_logger = EpisodeLogger(
         log_dir=_resolve_runtime_path(storage.log_dir),
         robot=runtime.robot,
@@ -174,12 +208,22 @@ def maybe_build_episode_logger(config: ConfigDict, runtime: RuntimeState) -> Non
         eval_mode=False,
         save_image_height=storage.get("image_height"),
         save_image_width=storage.get("image_width"),
+        recording_space=_recording_space(config),
+        gripper_open=gripper_open,
+        gripper_close=gripper_close,
+        gripper_threshold=gripper_threshold,
     )
 
 
-def rollout_save_log_dir(config: ConfigDict) -> Path:
+def _rollout_storage(config: ConfigDict, runtime: RuntimeState | None = None) -> ConfigDict:
+    if runtime is not None and runtime.rl_active and config.rl is not None:
+        return config.rl.data.storage
+    return config.rollout.storage
+
+
+def rollout_save_log_dir(config: ConfigDict, runtime: RuntimeState | None = None) -> Path:
     """Return the rollout save dataset dir, separate from collection/eval datasets."""
-    storage = config.rollout.storage
+    storage = _rollout_storage(config, runtime)
     if storage.log_dir:
         return _resolve_runtime_path(storage.log_dir)
     return _resolve_runtime_path(
@@ -192,6 +236,7 @@ def maybe_build_rollout_episode_logger(config: ConfigDict, runtime: RuntimeState
     storage = config.rollout.storage
     if not storage.enabled or runtime.rollout_episode_logger is not None:
         return
+    gripper_open, gripper_close, gripper_threshold = _gripper_recording_config(config)
     runtime.rollout_episode_logger = EpisodeLogger(
         log_dir=rollout_save_log_dir(config),
         robot=runtime.robot,
@@ -203,6 +248,10 @@ def maybe_build_rollout_episode_logger(config: ConfigDict, runtime: RuntimeState
         save_queue_max=storage.save_queue_max,
         save_image_height=storage.get("image_height"),
         save_image_width=storage.get("image_width"),
+        recording_space=_recording_space(config),
+        gripper_open=gripper_open,
+        gripper_close=gripper_close,
+        gripper_threshold=gripper_threshold,
     )
 
 
@@ -210,6 +259,7 @@ def begin_rollout_save_episode(
     config: ConfigDict, runtime: RuntimeState, session: SessionState
 ) -> None:
     """Start an in-memory rollout that can be saved after stop/reset."""
+    stop_collection_capture(runtime)
     maybe_build_rollout_episode_logger(config, runtime)
     logger_obj = runtime.rollout_episode_logger
     if logger_obj is None:
@@ -222,7 +272,18 @@ def begin_rollout_save_episode(
     runtime.rollout_intervention_active_segment = None
     runtime.rollout_intervention_segments = []
     runtime.rollout_intervention_next_segment_index = 0
+    runtime.rollout_exclusion_active = None
+    runtime.rollout_exclusions = []
+    runtime.rollout_raw_snapshots = queue.Queue()
+    runtime.rollout_policy_actions = []
+    runtime.transport.start_collection()
+    runtime.transport.clear_collection_backlog()
     logger_obj.start_episode(task=format_task_label(session.selected_task))
+    start_collection_capture(
+        runtime,
+        fps=config.inference_cfg.publish_rate,
+        max_raw_snapshots_per_tick=ROLLOUT_STEP_MAX_RAW_SNAPSHOTS,
+    )
 
 
 def mark_rollout_save_ready(runtime: RuntimeState, reason: str) -> None:
@@ -230,7 +291,16 @@ def mark_rollout_save_ready(runtime: RuntimeState, reason: str) -> None:
     logger_obj = runtime.rollout_episode_logger
     if logger_obj is None or not logger_obj.has_active_episode:
         return
-    if logger_obj.active_frame_count <= 0:
+    buffered_frames = (
+        logger_obj.active_frame_count
+        + len(runtime.rollout_policy_actions)
+        + runtime.rollout_raw_snapshots.qsize()
+        + sum(
+            len(segment.frames)
+            for segment in runtime.rollout_intervention_segments
+        )
+    )
+    if buffered_frames <= 0:
         logger_obj.cancel_episode("empty rollout")
         runtime.rollout_save_ready = False
         runtime.rollout_save_reason = ""
@@ -239,31 +309,142 @@ def mark_rollout_save_ready(runtime: RuntimeState, reason: str) -> None:
     runtime.rollout_save_reason = reason
 
 
-def save_rollout_episode(runtime: RuntimeState, session: SessionState) -> None:
-    """Persist the stopped rollout through its dedicated EpisodeLogger."""
+def _close_rollout_exclusion(runtime: RuntimeState, end_time: float) -> None:
+    active = runtime.rollout_exclusion_active
+    if active is None:
+        return
+    reason, start_time = active
+    runtime.rollout_exclusions.append((reason, start_time, end_time))
+    runtime.rollout_exclusion_active = None
+    logger.info(
+        "[ROLLOUT_EXCLUSION] reason=%s start=%.6f end=%.6f duration_ms=%.1f",
+        reason,
+        start_time,
+        end_time,
+        (end_time - start_time) * 1000.0,
+    )
+
+
+def save_rollout_episode(runtime: RuntimeState, session: SessionState) -> bool:
+    """Persist the stopped rollout through its dedicated EpisodeLogger.
+
+    Args:
+        runtime: Active runtime containing the rollout logger and transport.
+        session: Session receiving any save error.
+
+    Returns:
+        True when the episode was queued or written, otherwise False.
+    """
     logger_obj = runtime.rollout_episode_logger
     if logger_obj is None:
         session.last_error = "Rollout save is disabled"
-        return
+        return False
     if not runtime.rollout_save_ready or not logger_obj.has_active_episode:
         session.last_error = "Stop or reset before saving the rollout"
-        return
+        return False
+    stop_collection_capture(runtime)
+    logger_obj.release_unused_memory()
+    runtime.transport.stop_collection()
+    _close_rollout_exclusion(runtime, time.time())
+    intervention_ranges = []
+    for segment in runtime.rollout_intervention_segments:
+        if not segment.frames:
+            continue
+        start = segment.frames[0].timestamp
+        end = segment.frames[-1].timestamp
+        if start is None or end is None:
+            continue
+        intervention_ranges.append((segment.segment_index, float(start), float(end)))
+    snapshot_count = 0
+    while True:
+        try:
+            snapshot = runtime.rollout_raw_snapshots.get_nowait()
+        except queue.Empty:
+            break
+        intervention = False
+        segment_index = -1
+        for candidate_index, start, end in intervention_ranges:
+            if start <= snapshot.timestamp <= end:
+                intervention = True
+                segment_index = candidate_index
+                break
+        logger_obj.ingest_raw_episode_snapshot(
+            snapshot,
+            intervention=intervention,
+            segment_index=segment_index,
+        )
+        snapshot_count += 1
+    for timestamp, action, state_qpos, state_eef, action_eef in runtime.rollout_policy_actions:
+        logger_obj.ingest_policy_action(
+            action,
+            state_qpos,
+            timestamp,
+            state_eef=state_eef,
+            action_eef=action_eef,
+        )
+    logger.info(
+        "[ROLLOUT_CAPTURE] finalize policy_actions=%d raw_snapshots=%d intervention_frames=%d",
+        len(runtime.rollout_policy_actions),
+        snapshot_count,
+        sum(len(segment.frames) for segment in runtime.rollout_intervention_segments),
+    )
+    if runtime.rollout_policy_actions:
+        logger.info(
+            "[ROLLOUT_CAPTURE] policy_time_range start=%.6f end=%.6f",
+            runtime.rollout_policy_actions[0][0],
+            runtime.rollout_policy_actions[-1][0],
+        )
     if logger_obj.active_frame_count <= 0:
         logger_obj.cancel_episode("empty rollout")
         runtime.rollout_save_ready = False
         runtime.rollout_save_reason = ""
         session.last_error = "No rollout frames to save"
-        return
+        return False
     logger_obj.set_rollout_intervention_segments(runtime.rollout_intervention_segments)
+    if runtime.rollout_exclusions:
+        logger_obj.set_episode_meta(
+            excluded_ranges=[
+                {
+                    "reason": reason,
+                    "start_time": start_time,
+                    "end_time": end_time,
+                }
+                for reason, start_time, end_time in runtime.rollout_exclusions
+            ]
+        )
     saved = logger_obj.end_episode()
     if not saved:
         session.last_error = "No rollout frames to save"
-        return
+        return False
     runtime.rollout_save_ready = False
     runtime.rollout_save_reason = ""
     runtime.rollout_intervention_segments = []
     runtime.rollout_intervention_next_segment_index = 0
+    runtime.rollout_exclusion_active = None
+    runtime.rollout_exclusions = []
+    runtime.rollout_raw_snapshots = queue.Queue()
+    runtime.rollout_policy_actions = []
     session.last_error = ""
+    return True
+
+
+def discard_rollout_episode(runtime: RuntimeState) -> None:
+    """Discard the complete in-flight rollout without writing an episode."""
+    logger_obj = runtime.rollout_episode_logger
+    stop_collection_capture(runtime)
+    if logger_obj is not None and logger_obj.has_active_episode:
+        logger_obj.cancel_episode("user reset")
+    runtime.transport.stop_collection()
+    runtime.rollout_save_ready = False
+    runtime.rollout_save_reason = ""
+    runtime.rollout_intervention_pre_qpos = None
+    runtime.rollout_intervention_active_segment = None
+    runtime.rollout_intervention_segments = []
+    runtime.rollout_intervention_next_segment_index = 0
+    runtime.rollout_exclusion_active = None
+    runtime.rollout_exclusions = []
+    runtime.rollout_raw_snapshots = queue.Queue()
+    runtime.rollout_policy_actions = []
 
 
 def _load_saved_episode_history(dataset_dir: Path) -> list[dict[str, Any]]:
@@ -293,12 +474,12 @@ def _rollout_intervention_save_status(runtime: RuntimeState) -> dict[str, Any]:
 
 def rollout_save_status(config: ConfigDict, runtime: RuntimeState) -> dict[str, Any]:
     """Return queue/progress state for the rollout save panel."""
-    dataset_path = rollout_save_log_dir(config)
+    dataset_path = rollout_save_log_dir(config, runtime)
     dataset_dir = str(dataset_path)
     saved_history = _load_saved_episode_history(dataset_path)
     logger_obj = runtime.rollout_episode_logger
-    storage = config.rollout.storage
-    if not storage.enabled:
+    storage = _rollout_storage(config, runtime)
+    if not bool(storage.get("enabled", True)):
         return {
             "enabled": False,
             "dataset_dir": dataset_dir,
@@ -339,7 +520,12 @@ def rollout_save_status(config: ConfigDict, runtime: RuntimeState) -> dict[str, 
     snapshot["dataset_dir"] = dataset_dir
     snapshot["episodes"] = saved_history
     snapshot["completed_episodes"] = len(saved_history)
-    snapshot["save_ready"] = bool(runtime.rollout_save_ready and logger_obj.active_frame_count > 0)
+    buffered_frames = (
+        logger_obj.active_frame_count
+        + len(runtime.rollout_policy_actions)
+        + runtime.rollout_raw_snapshots.qsize()
+    )
+    snapshot["save_ready"] = bool(runtime.rollout_save_ready and buffered_frames > 0)
     snapshot["reason"] = runtime.rollout_save_reason
     if snapshot["save_ready"]:
         snapshot["pipeline_state"] = "READY_TO_SAVE"
@@ -413,6 +599,7 @@ def rebuild_eval_episode_logger(config: ConfigDict, runtime: RuntimeState) -> No
             prev.finalize()
         except Exception:
             logger.exception("Failed finalizing previous eval logger")
+    gripper_open, gripper_close, gripper_threshold = _gripper_recording_config(config)
     runtime.episode_logger = EpisodeLogger(
         log_dir=target,
         robot=runtime.robot,
@@ -425,6 +612,10 @@ def rebuild_eval_episode_logger(config: ConfigDict, runtime: RuntimeState) -> No
         eval_mode=True,
         save_image_height=storage.get("image_height"),
         save_image_width=storage.get("image_width"),
+        recording_space=_recording_space(config),
+        gripper_open=gripper_open,
+        gripper_close=gripper_close,
+        gripper_threshold=gripper_threshold,
     )
 
 
@@ -446,30 +637,41 @@ def start_rollout_intervention(
     """Enable teleop takeover for a paused normal rollout."""
     if runtime.rollout_intervention_active:
         return True
-    if not config.rollout.intervention.enabled:
+    if not runtime.rollout_intervention_enabled:
+        session.last_error = "Rollout HIL is off"
         return False
-    if not runtime.transport.supports_collection():
-        session.last_error = "Rollout teleop intervention recording is not available"
+    hil_status = runtime.transport.hil_status()
+    if not hil_status.supported:
+        session.last_error = hil_status.error or "Transport does not support HIL"
         return False
     pre_qpos = runtime.transport.get_latest_qpos()
     if pre_qpos is None:
         session.last_error = "Cannot start rollout intervention without joint feedback"
         return False
-    runtime.transport.reset_hil_control()
-    runtime.transport.start_collection()
-    runtime.transport.clear_collection_backlog()
+    # Keep the raw capture runner active through HIL so camera streams remain continuous.
     if runtime.infer_strategy is not None:
         runtime.infer_strategy.reset()
+    started = runtime.transport.start_hil_control(runtime.hil_control_mode)
+    if not started.supported or not started.active or started.error:
+        session.last_error = started.error or "HIL takeover did not activate"
+        return False
+    intervention_start_time = time.time()
+    _close_rollout_exclusion(runtime, intervention_start_time)
     runtime.rollout_intervention_pre_qpos = np.asarray(pre_qpos, dtype=np.float32).copy()
     runtime.rollout_intervention_active_segment = RolloutInterventionSegment(
         segment_index=runtime.rollout_intervention_next_segment_index,
         start_policy_frame_index=session.step_index,
         pre_intervention_qpos=runtime.rollout_intervention_pre_qpos.copy(),
+        start_time=intervention_start_time,
     )
     runtime.rollout_intervention_next_segment_index += 1
     runtime.rollout_intervention_active = True
     session.last_error = ""
-    logger.info("Rollout teleop intervention started")
+    logger.info(
+        "Rollout teleop intervention started policy_actions=%d queued_raw_snapshots=%d",
+        len(runtime.rollout_policy_actions),
+        runtime.rollout_raw_snapshots.qsize(),
+    )
     return True
 
 
@@ -483,9 +685,15 @@ def stop_rollout_intervention(
     """Disable rollout teleop takeover before policy resume or cleanup."""
     if not runtime.rollout_intervention_active:
         return True
-    runtime.transport.stop_collection()
+    stopped = runtime.transport.stop_hil_control()
+    if required and (stopped.active or stopped.error):
+        session.last_error = stopped.error or "HIL takeover did not stop"
+        return False
     runtime.rollout_intervention_active = False
-    logger.info("Rollout teleop intervention stopped")
+    logger.info(
+        "Rollout teleop intervention stopped queued_raw_snapshots=%d",
+        runtime.rollout_raw_snapshots.qsize(),
+    )
     _ = config, required
     return True
 
@@ -523,7 +731,18 @@ def _record_rollout_intervention_frame(
         segment.invalid_reason = "Intervention frame has no state"
         session.last_error = segment.invalid_reason
         return False
-    segment.frames.append(_copy_observation(frame))
+    copied = _copy_observation(frame)
+    segment.frames.append(copied)
+    state = copied.state_qpos if copied.state_qpos is not None else copied.state_eef
+    action = copied.action_qpos if copied.action_qpos is not None else copied.action_eef
+    record_rl_sample(
+        runtime,
+        state,
+        action,
+        "intervention",
+        timestamp=copied.timestamp,
+        segment_index=segment.segment_index,
+    )
     return True
 
 
@@ -534,15 +753,13 @@ def record_rollout_intervention_step(runtime: RuntimeState, session: SessionStat
     segment = runtime.rollout_intervention_active_segment
     if segment is None or segment.invalid_reason:
         return False
-    frame = runtime.transport.get_collection_frame()
+    frame = runtime.transport.get_hil_frame()
     if frame is None:
         return False
     return _record_rollout_intervention_frame(runtime, session, frame)
 
 
-def accept_rollout_intervention_segment(
-    runtime: RuntimeState, session: SessionState
-) -> bool:
+def accept_rollout_intervention_segment(runtime: RuntimeState, session: SessionState) -> bool:
     """Keep the active intervention segment so rollout SAVE can write it later."""
     segment = runtime.rollout_intervention_active_segment
     if segment is None:
@@ -607,9 +824,7 @@ def rollback_rollout_intervention(
     return True
 
 
-def collect_start_teleop(
-    config: ConfigDict, runtime: RuntimeState, session: SessionState
-) -> bool:
+def collect_start_teleop(config: ConfigDict, runtime: RuntimeState, session: SessionState) -> bool:
     """Enter collect teleoperation without opening a recording episode."""
     runtime.collection_replay_qpos = None
     runtime.collection_replay_episode = None
@@ -626,6 +841,7 @@ def collect_start_teleop(
         session.last_error = "Transport does not support collection frames"
         return False
     runtime.transport.reset_hil_control()
+    runtime.transport.set_hil_relay_enabled(True)
     runtime.transport.start_collection()
     runtime.collection_teleop_active = True
     runtime.last_collection_timestamp = None
@@ -640,6 +856,7 @@ def collect_start_teleop(
 def collect_stop_teleop(config: ConfigDict, runtime: RuntimeState, session: SessionState) -> None:
     """Leave collect teleoperation; callers close any active recording episode first."""
     stop_collection_capture(runtime)
+    runtime.transport.set_hil_relay_enabled(False)
     runtime.transport.stop_collection()
     runtime.collection_teleop_active = False
     runtime.last_collection_timestamp = None
@@ -747,11 +964,11 @@ def collect_cancel(runtime: RuntimeState, session: SessionState) -> None:
 
 
 def _active_loggers(runtime: RuntimeState) -> list:
-    """The episode logger currently built (skips None)."""
+    """Return loggers with an open episode."""
     return [
         logger_obj
         for logger_obj in (runtime.episode_logger, runtime.rollout_episode_logger)
-        if logger_obj is not None
+        if logger_obj is not None and logger_obj.has_active_episode
     ]
 
 
@@ -765,19 +982,71 @@ def record_executed_action(
     _ = config, session
     if runtime is None:
         return
+    state_qpos = (
+        runtime.transport.get_latest_qpos()
+        if hasattr(runtime.transport, "get_latest_qpos")
+        else None
+    )
+    record_rl_sample(runtime, state_qpos, action, "policy")
     loggers = _active_loggers(runtime)
     if not loggers:
         return
-    snapshot = runtime.transport.acquire_collection_raw()
-    if snapshot is None:
+    rollout_logger = runtime.rollout_episode_logger
+    runner = getattr(runtime, "collection_capture_runner", None)
+    rollout_timestamp = None
+    if rollout_logger in loggers:
+        rollout_timestamp = time.time()
+        _close_rollout_exclusion(runtime, rollout_timestamp)
+    if rollout_logger in loggers and runner is None:
+        assert rollout_logger is not None
+        snapshot = runtime.transport.acquire_collection_raw()
+        while snapshot is None:
+            snapshot = runtime.transport.acquire_collection_raw()
+        rollout_logger.ingest_raw_episode_snapshot(snapshot, action, state_qpos)
         return
-    state_qpos = runtime.transport.get_latest_qpos()
+    if rollout_logger in loggers:
+        assert rollout_timestamp is not None
+        timestamp = rollout_timestamp
+        state_eef = None
+        action_eef = None
+        if config.inference_cfg.obs_space.is_eef() and state_qpos is not None:
+            state_eef = state_to_eef(config, runtime, np.asarray(state_qpos, dtype=np.float32))
+        if config.inference_cfg.action_space.is_eef():
+            action_eef = _qpos_to_eef(
+                config,
+                runtime,
+                np.asarray(action, dtype=np.float32),
+            )
+        runtime.rollout_policy_actions.append(
+            (
+                timestamp,
+                np.asarray(action, dtype=np.float32).copy(),
+                state_qpos,
+                state_eef,
+                action_eef,
+            )
+        )
+        count = len(runtime.rollout_policy_actions)
+        if count == 1 or count % 100 == 0:
+            logger.info("[ROLLOUT_CAPTURE] policy_action_count=%d timestamp=%.6f", count, timestamp)
     for logger_obj in loggers:
-        logger_obj.ingest_raw_episode_snapshot(snapshot, action, state_qpos)
+        if logger_obj is rollout_logger:
+            continue
+        snapshot = runtime.transport.acquire_collection_raw()
+        if snapshot is None:
+            logger.warning("Collection raw snapshot missing at action capture")
+            continue
+        if state_qpos is None:
+            logger_obj.ingest_raw_episode_snapshot(snapshot, action)
+        else:
+            logger_obj.ingest_raw_episode_snapshot(snapshot, action, state_qpos)
 
 
 __all__ = [
     "COLLECT_STEP_MAX_RAW_SNAPSHOTS",
+    "ROLLOUT_STEP_MAX_RAW_SNAPSHOTS",
+    "start_collection_capture",
+    "stop_collection_capture",
     "state_to_eef",
     "_fill_record_eef",
     "build_policy_observation",
@@ -788,6 +1057,7 @@ __all__ = [
     "begin_rollout_save_episode",
     "mark_rollout_save_ready",
     "save_rollout_episode",
+    "discard_rollout_episode",
     "_load_saved_episode_history",
     "rollout_save_status",
     "enable_default_recording",

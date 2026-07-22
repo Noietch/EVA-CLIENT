@@ -19,6 +19,8 @@ eval_cfg = dict(
             port=9000,
         ),
     ],
+    shuffle_ckpts=False,
+    shuffle_seed=42,
     enable_ssh_forward=False,
     # To forward each checkpoint port to a remote inference server, fill in your
     # own endpoint below and set enable_ssh_forward=True.

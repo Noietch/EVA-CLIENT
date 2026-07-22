@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 STATIC_DIR = Path(__file__).resolve().parents[3] / "src" / "core" / "app" / "console" / "static"
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 def console_source() -> str:
@@ -18,6 +19,69 @@ def console_source() -> str:
     parts += [p.read_text() for p in sorted(STATIC_DIR.glob("js/*.js"))]
     parts += [p.read_text() for p in sorted(STATIC_DIR.glob("css/*.css"))]
     return "\n".join(parts)
+
+
+def test_replay_perf_probe_measures_from_user_click_to_visible_videos():
+    source = (REPO_ROOT / "tests" / "manual" / "replay_perf_probe.py").read_text()
+
+    assert "Input.dispatchMouseEvent" in source
+    assert "Page.captureScreenshot" in source
+    assert "--headless=new" not in source
+    assert "ignoredVideos = new WeakSet" in source
+    assert "state.start = performance.now();" in source
+    assert "el.click();" not in source
+    assert "visible" in source
+    assert "VIDEOS_VISIBLE_READY_EXPR" in source
+    assert "start_probe(cdp)" not in source
+
+
+def test_replay_perf_probe_repeats_all_user_visible_review_paths():
+    source = (REPO_ROOT / "tests" / "manual" / "replay_perf_probe.py").read_text()
+
+    assert "--replay-next-count" in source
+    assert "--collect-count" in source
+    assert "--debug-count" in source
+    assert "--max-visible-ms" in source
+    assert "select_clickable_tile" in source
+    assert 'human_click_target_and_start_probe(cdp, target, f"collect-tile-{i}")' in source
+    assert 'human_click_and_start_probe(cdp, "#b-collect-replay-toggle")' not in source
+    assert "summarize_resources" in source
+    assert "replay-next-" in source
+    assert "collect-" in source
+    assert "debug-" in source
+
+
+def test_replay_and_review_abort_obsolete_video_downloads_before_replacing_strip():
+    html = console_source()
+
+    assert "function replaceCamStripContent(html)" in html
+    assert 'v.removeAttribute("src");' in html
+    assert "try { v.load(); } catch (e) {}" in html
+    assert "function mountEpisodeVideos({ datasetDir, episodeId, videoKeys })" in html
+    assert "replaceCamStripContent(cams.map((k) => {" in html
+    assert "replaceCamStripContent('<div class=\"cam-empty\">awaiting frame…</div>');" in html
+
+
+def test_replay_and_review_cells_show_real_video_poster_before_video_canplay():
+    html = console_source()
+
+    assert "/api/replay_poster?${params.toString()}" in html
+    assert 'class="cam cam-poster"' in html
+    assert 'class="cam cam-video"' in html
+    assert "onload=\"this.closest('.cam-cell').classList.remove('loading')\"" in html
+    assert ".cam-cell.video-ready .cam-poster" in html
+    assert ".cam-cell.video-ready .cam-video" in html
+
+
+def test_video_loading_overlay_does_not_cover_loaded_poster():
+    html = console_source()
+    start = html.index("function setVideosLoading(videos, on, text)")
+    body = html[start : html.index("function setStageVideoLoading", start)]
+
+    assert 'const poster = cell.querySelector(".cam-poster");' in body
+    assert "const posterReady =" in body
+    assert "const videoPainted =" in body
+    assert 'cell.classList.toggle("loading", on && !posterReady && !videoPainted);' in body
 
 
 def test_scene3d_initialization_errors_are_rendered_in_overlay():
@@ -50,6 +114,55 @@ def test_console_post_requests_are_serialized():
     assert "let postQueue = Promise.resolve();" in html
     assert "const result = postQueue.catch(() => {}).then(request);" in html
     assert "postQueue = result.then(() => undefined, () => undefined);" in html
+
+
+def test_console_controls_expose_shared_command_templates():
+    html = console_source()
+
+    assert "function setCommandMetadata(node, command, template = false)" in html
+    assert '"b-collect-toggle": "web:operator_action:{intent}:ui"' in html
+    assert 'setCommandMetadata(task, "web:rl_select_task:{task}", true);' in html
+    assert 'setCommandMetadata(policy, "web:rl_select_policy:{slot}", true);' in html
+    assert 'setCommandMetadata(critic, "web:rl_select_critic:{slot}", true);' in html
+    assert 'setCommandMetadata(sw, "web:gripper:{side}:{state}:{lock}", true);' in html
+    assert '"rl-b-qc-pass": "web:qc_mark' not in html
+
+
+def test_rl_policy_selection_waits_for_backend_confirmation_before_auto_setup():
+    html = console_source()
+
+    assert "let rlPendingPolicy = null;" in html
+    assert "rlPendingPolicy = policy.value;" in html
+    assert 'else if (rlPendingPolicy == null) {\n    S.rlPolicy = "";' in html
+    assert "const selectionConfirmed = status.selected_task === S.rlTask" in html
+    assert "if (selectionConfirmed && !setup && !setupBusy && !setupError) scheduleRlSetup();" in html
+    assert 'status.is_setup_done || status.setup_stage' in html
+
+
+def test_rl_tab_does_not_force_generic_sim_mode_before_rl_setup():
+    html = console_source()
+
+    assert 'S.ACTIVE_TAB !== "rl" && (!S.STATUS || !S.STATUS.cli_mode' in html
+
+
+def test_rl_saved_data_render_is_keyed_instead_of_rebuilt_on_every_status_poll():
+    html = console_source()
+
+    assert 'let rlSavedRenderKey = "";' in html
+    assert "function renderSavedData(items, force = false)" in html
+    assert "if (!force && key === rlSavedRenderKey) return;" in html
+    assert "quality_issue_count: item.quality_issue_count" in html
+    assert "renderSavedData(items);" in html
+
+
+def test_rl_save_gives_immediate_feedback_and_blocks_duplicate_actions_until_setup():
+    html = console_source()
+
+    assert "let rlSaveSetupPending = false;" in html
+    assert 'setupMsg.textContent = "SAVE · QUEUING DATA…";' in html
+    assert 'intervention || rlSaveSetupPending;' in html
+    assert 'if (rlSaveSetupPending) return;' in html
+    assert 'rlSaveSetupPending = true;\n  renderRlStatus(S.STATUS || {});' in html
 
 
 def test_telemetry_bar_renders_image_hz_metric():
@@ -133,52 +246,158 @@ def test_collect_qc_does_not_jump_to_replay_tab():
     assert '"b-goto-qc").onclick = () => openBatchQc(' not in html
 
 
+def test_collect_tile_click_starts_review_immediately():
+    html = console_source()
+    start = html.index("function selectCollectEpisode(item)")
+    body = html[start : html.index("function selectRolloutSaveEpisode", start)]
+
+    assert 'reviewEpisode("collect", item);' in body
+    assert "switchActiveReview" not in body
+
+
+def test_collect_review_uses_shared_local_replay_engine():
+    html = console_source()
+
+    assert "async function loadReviewPlayback(info, owner)" in html
+    assert "function installReplaySeries(series)" in html
+    assert "LIVE.replayOwner = owner;" in html
+    assert "replayTransformsUrl = `/api/review_transforms?${params.toString()}`;" in html
+    assert "const videosReady = waitForStageVideosReady();" in html
+    assert "const transformsReady = loadReplayTransformChunk(" in html
+    assert "const [videosOk, transformsOk] = await Promise.all([videosReady, transformsReady]);" in html
+    assert "await waitForStageVideosPainted();" in html
+    assert "seekReplay(0);" in html
+    assert "replayPlay();" in html
+
+
+def test_collect_review_has_explicit_local_return_to_live():
+    html = console_source()
+
+    assert 'id="review-return-live"' in html
+    assert 'id="b-collect-replay-toggle"' not in html
+    assert '$("review-return-live").onclick = returnReviewToLive;' in html
+    assert 'apiPost("/api/exit_collect_replay")' not in html
+
+
+def test_collect_review_controls_remain_available_during_real_collection():
+    html = console_source()
+
+    assert 'const hardwareOwnsCursor = LIVE.replayOwner === "replay" && realRun;' in html
+    assert "LIVE.replayMode && !LIVE.replayLoading && !hardwareOwnsCursor" in html
+
+
+def test_return_to_live_clears_selected_history_locally():
+    html = console_source()
+    start = html.index("function returnReviewToLive()")
+    body = html[start : html.index("function reviewEpisode", start)]
+
+    assert "S.collectReplayEpisode = null;" in body
+    assert "clearReviewPlayback();" in body
+    assert "exitReplayMode();" in body
+    assert "refreshCameraStreams();" in body
+    assert "apiPost(" not in body
+
+
+def test_collect_review_is_not_driven_by_collection_replay_status():
+    html = console_source()
+    start = html.index("function renderCollect()")
+    body = html[start : html.index("function dotClass", start)]
+
+    assert "S.STATUS.collection_replay" not in body
+    assert 'LIVE.replayOwner === "collect"' in html
+    assert "if (strip && !LIVE.replayMode)" in html
+
+
 def test_review_episode_uses_selected_dataset_episode_and_video_query():
     html = console_source()
 
     assert "reviewDatasetDir" in html
     assert "reviewEpisodeId" in html
-    assert 'function renderReviewVideos(videoKeys) {\n    const strip = $("cam-strip");' in html
-    assert "dataset_dir: reviewDatasetDir," in html
-    assert "episode: String(reviewEpisodeId)," in html
-    assert 'src="/api/replay_video?${params.toString()}"' in html
+    assert "function mountEpisodeVideos({ datasetDir, episodeId, videoKeys })" in html
+    assert "dataset_dir: datasetDir," in html
+    assert "episode: String(episodeId)," in html
+    assert 'data-src="/api/replay_video?${params.toString()}"' in html
     assert 'id="collect-review-videos"' not in html
     assert 'id="rollout-review-videos"' not in html
     assert "collectReplayEpisode" in html
     assert "latestEpisodeIndex" not in html
 
 
-def test_review_episode_videos_follow_collection_replay_frame():
+def test_review_episode_videos_are_not_seeked_by_status_poll_during_playback():
     html = console_source()
 
-    assert "function syncReviewVideosToFrame(frameIndex)" in html
-    assert "syncReviewVideosToFrame(replay.frame_index);" in html
-    assert 'reviewKind === "collect" && replay.active' in html
+    render_collect_start = html.index("function renderCollect()")
+    render_collect_end = html.index("function dotClass", render_collect_start)
+    render_collect = html[render_collect_start:render_collect_end]
+    render_rollout_start = html.index("function renderRolloutSave()")
+    render_rollout_end = html.index("function renderCollect()", render_rollout_start)
+    render_rollout = html[render_rollout_start:render_rollout_end]
+
+    assert "function syncReviewVideosToFrame(frameIndex)" not in html
+    assert "replay.frame_index" not in render_collect
+    assert "replay.frame_index" not in render_rollout
+    assert 'LIVE.replayOwner === "collect"' in html
 
 
-def test_review_episode_waits_for_video_before_starting_motion():
+def test_review_episode_gates_playback_on_all_videos_and_first_transform_chunk():
     html = console_source()
 
-    assert "function waitForStageVideosReady(kind)" in html
-    assert "function waitForStageVideosPainted(kind)" in html
-    assert 'setStageVideoLoading(true, "loading video")' in html
-    assert 'await waitForStageVideosReady("review");' in html
-    assert "syncReviewVideosToFrame(0);" in html
-    assert 'await waitForStageVideosPainted("review");' in html
-    assert 'apiPost("/api/review_replay_start"' in html
-    assert "playStageVideos();" in html
-    assert html.index('await waitForStageVideosPainted("review");') < html.index(
-        'apiPost("/api/review_replay_start"'
-    )
+    assert "function waitForStageVideosReady()" in html
+    assert "function waitForStageVideosPainted()" in html
+    local_start = html.index("async function loadReviewPlayback(info, owner)")
+    local_body = html[local_start : html.index("function replayApplyTransformFrame", local_start)]
+    assert "const videosReady = waitForStageVideosReady();" in local_body
+    assert "const transformsReady = loadReplayTransformChunk(" in local_body
+    assert "const [videosOk, transformsOk] = await Promise.all([videosReady, transformsReady]);" in local_body
+    assert local_body.index("await waitForStageVideosPainted();") < local_body.index("replayPlay();")
+    assert local_body.index("seekReplay(0);") < local_body.index("replayPlay();")
+
+    rollout_start = html.index("async function reviewRolloutEpisode(item)")
+    rollout_body = html[rollout_start : html.index("async function submitEpisodeQc", rollout_start)]
+    assert 'apiPost("/api/review_episode"' in rollout_body
+    assert 'loadReviewPlayback({ ...r, dataset_dir: reviewDatasetDir }, "rollout")' in rollout_body
+    assert 'apiPost("/api/review_replay_start"' not in rollout_body
+
+
+def test_replay_scrub_marks_rollout_intervention_ranges():
+    html = console_source()
+
+    assert "LIVE.intervention = series.intervention || [];" in html
+    assert "function interventionTrackGradient()" in html
+    assert 'const color = active ? "var(--intervention)" : "var(--policy)";' in html
+    assert 'range.classList.toggle("has-intervention", !!controlTrack);' in html
+    assert 'LIVE.replayOwner = "rollout";' in html
+    assert 'loadReviewPlayback({ ...r, dataset_dir: reviewDatasetDir }, "rollout")' in html
+    assert "S.rolloutSaveEpisode = null;" in html
+
+
+def test_browser_diagnostics_trace_api_errors_and_review_nodes():
+    html = console_source()
+
+    assert "function clientTrace(event, details = {}, traceId = null)" in html
+    assert 'fetch("/api/client_trace"' in html
+    assert 'clientTrace("api.post.begin"' in html
+    assert 'clientTrace("api.post.end"' in html
+    assert 'clientTrace("api.post.error"' in html
+    assert 'window.addEventListener("error"' in html
+    assert 'window.addEventListener("unhandledrejection"' in html
+    assert 'clientTrace("review.collect.select"' in html
+    assert 'clientTrace("review.playback.begin"' in html
+    assert 'clientTrace("review.transforms.end"' in html
+    assert 'clientTrace("review.qc.end"' in html
 
 
 def test_video_paint_wait_uses_browser_rendered_frame_before_motion():
     html = console_source()
+    start = html.index("async function waitForVideoPainted(v)")
+    body = html[start : html.index("async function waitForStageVideosReady", start)]
 
     assert "function waitForVideoPainted(v)" in html
     assert "requestVideoFrameCallback" in html
     assert "requestAnimationFrame" in html
     assert "await waitForStageVideosPainted" in html
+    assert "setTimeout(finish, 500)" not in body
+    assert "!v.paused && typeof v.requestVideoFrameCallback" in body
 
 
 def test_replay_waits_for_canplay_instead_of_loadeddata():
@@ -190,23 +409,60 @@ def test_replay_waits_for_canplay_instead_of_loadeddata():
     assert "v.readyState >= 3" in body
     assert '"canplay"' in body
     assert '"loadeddata"' not in body
+    assert "setTimeout(finish, 8000)" not in body
 
 
 def test_replay_playback_buffers_until_video_has_future_data():
     html = console_source()
 
-    assert "master.readyState < 3" in html
-    assert "master.readyState < 2" not in html
+    assert "return v.error || v.readyState >= 3;" in html
+    assert "videos.every((v) => !v.error && v.readyState >= 3)" in html
+    assert "waitForStageVideosReady()" in html
+
+
+def test_replay_keeps_slave_cameras_on_the_master_clock():
+    html = console_source()
+    sync_start = html.index("function syncReplayVideos(frame, master = null, force = false)")
+    sync_body = html[sync_start : html.index("let _replayUrdfSeq", sync_start)]
+    play_start = html.index("function replayPlay()")
+    play_body = html[play_start : html.index("function replayStop()", play_start)]
+    seek_start = html.index("function seekReplay(i, syncVideos = true)")
+    seek_body = html[seek_start : html.index("function setReplayCursorFrame", seek_start)]
+
+    assert "const softTolerance = 0.2 / replayVideoFps;" in sync_body
+    assert "const hardTolerance = 0.75 / replayVideoFps;" in sync_body
+    assert "replayVideoFps = Math.max(1, Number(s.replay_fps) || REPLAY_DEFAULT_FPS);" in html
+    assert "replayVideoFps = Math.max(1, Number(info.fps) || REPLAY_DEFAULT_FPS);" in html
+    assert "if (v === master) return;" in sync_body
+    assert "force || Math.abs(drift) > hardTolerance" in sync_body
+    assert "v.playbackRate = drift < 0 ? 1.08 : 0.92;" in sync_body
+    assert "syncReplayVideos(framePos, master);" in play_body
+    assert "await alignStageVideos(LIVE.cursor);" in play_body
+    assert "syncReplayVideos(LIVE.cursor, null, true);" in seek_body
+    assert "const master = replayMasterVideo();" in play_body
+    assert "replayFrameAtTime(master.currentTime)" in play_body
 
 
 def test_replay_local_play_clock_drives_smooth_playback():
     html = console_source()
+    load_start = html.index("async function loadReplaySeries()")
+    load_body = html[load_start : html.index("function installReplaySeries", load_start)]
+    set_frame_start = html.index("function replaySetUrdfFrame(frame)")
+    set_frame_body = html[set_frame_start : html.index("function exitReplayMode", set_frame_start)]
 
-    # The whole-episode transforms blob is fetched once and decoded locally.
-    assert 'await fetch("/api/replay_transforms")' in html
+    # Transform chunks are fetched on demand and decoded locally.
+    assert 'url.searchParams.set("start", String(start));' in html
+    assert 'url.searchParams.set("count", String(count));' in html
     assert 'magic !== "EVAXFRM1"' in html
     assert "function replayApplyTransformFrame(frame)" in html
-    # Local play clock + scrub play button, no per-frame network in the fast path.
+    assert "REPLAY_XF_LOADING" in html
+    assert "if (REPLAY_XF_LOADING) return;" not in set_frame_body
+    assert "let replayUrdfInFlight = false;" in html
+    assert "let replayUrdfPendingFrame = null;" in html
+    assert "if (replayUrdfInFlight) {" in set_frame_body
+    assert "replayUrdfPendingFrame = i;" in set_frame_body
+    assert "resetReplayUrdfRequests();" in load_body
+    # Presented video clock + scrub play button, no per-frame network in the fast path.
     assert "function replayPlay()" in html
     assert "function replayStop()" in html
     assert 'onclick="replayToggle()"' in html
@@ -219,37 +475,135 @@ def test_replay_local_play_clock_drives_smooth_playback():
     assert "function drawReplayCharts(force = false)" in html
     assert "now - _lastReplayChartDraw < 100" in html
     assert "LIVE.replayLoading = true;" in html
-    assert 'await waitForStageVideosReady("replay");' in html
-    assert "seekReplay(0);" in html
-    assert 'await waitForStageVideosPainted("replay");' in html
-    assert html.index("seekReplay(0);") < html.index('await waitForStageVideosPainted("replay");')
-    assert html.index('await waitForStageVideosPainted("replay");') < html.index(
-        "LIVE.replayLoading = false;"
-    )
+    assert load_body.index("mountReplayVideos();") < load_body.index('apiGet("/api/replay_series")')
+    assert "loadReplayTransformChunk(" in load_body
+    assert "seekReplay(0);" in load_body
+    assert 'await waitForStageVideosReady("replay");' not in load_body
+    assert 'await waitForStageVideosPainted("replay");' not in load_body
+    assert "await transformsReady" not in load_body
+    assert load_body.index("seekReplay(0);") < load_body.rindex("LIVE.replayLoading = false;")
     assert "if (LIVE.replayLoading) return;" in html
     assert "const master = replayMasterVideo();" in html
-    assert "targetTime = master.currentTime || 0;" in html
-    assert "const framePos = replayFrameAtTime(targetTime);" in html
+    assert "const framePos = Math.max(cursor, replayFrameAtTime(master.currentTime));" in html
     assert "setReplayCursorFrame(framePos, false);" in html
     assert "function syncRealReplayVisual(frame)" in html
     assert "function realReplayVisualFrame()" in html
     assert "REAL_REPLAY_MAX_EXTRAPOLATE_S" in html
+    assert "if (reportedFrame > realReplayReportedFrame)" in html
+    assert "realReplayAnchorFrame = Math.max(reportedFrame, cursor);" in html
+    assert "const frame = Math.max(cursor, replayFrameAtTime(anchorTime + elapsed));" in html
     assert "setReplayCursorFrame(frame, false);" in html
     assert "syncReplayVideos(frame);" in html
+
+
+def test_replay_prefetches_before_chunk_boundary_and_counts_missing_urdf_frames():
+    html = console_source()
+    set_frame_start = html.index("function replaySetUrdfFrame(frame)")
+    set_frame_body = html[set_frame_start : html.index("function exitReplayMode", set_frame_start)]
+    sync_start = html.index("function recordReplaySync(frame)")
+    sync_body = html[sync_start : html.index("function replayFallbackDt", sync_start)]
+
+    assert "if (nextStart < LIVE.n)" in set_frame_body
+    assert "prefetchReplayTransformChunk(replayLoadSeq, nextStart);" in set_frame_body
+    assert "function prefetchReplayTransformChunk(loadSeq, start)" in html
+    assert "start + count / 2" not in set_frame_body
+    assert "metrics.urdfMissingSamples += 1;" in sync_body
+    assert "? (LIVE.playing ? LIVE.n : 0)" in sync_body
+
+
+def test_replay_load_does_not_prebuffer_video_before_user_playback():
+    html = console_source()
+    load_start = html.index("async function loadReplaySeries()")
+    load_body = html[load_start : html.index("function installReplaySeries", load_start)]
+    play_start = html.index("function replayPlay()")
+    play_body = html[play_start : html.index("function replayStop", play_start)]
+
+    assert 'await waitForStageVideosReady("replay");' not in load_body
+    assert 'await waitForStageVideosPainted("replay");' not in load_body
+    assert "waitForStageVideosReady()" in play_body
+    assert "video.play()" in play_body
+
+
+def test_replay_load_does_not_compute_full_transforms_before_user_playback():
+    html = console_source()
+    load_start = html.index("async function loadReplaySeries()")
+    load_body = html[load_start : html.index("function installReplaySeries", load_start)]
+    play_start = html.index("function replayPlay()")
+    play_body = html[play_start : html.index("function replayStop", play_start)]
+
+    assert "loadReplayTransforms" not in html
+    assert "loadReplayTransformChunk(" in load_body
+    assert "loadReplayTransformChunk(" in play_body
+
+
+def test_replay_load_mounts_videos_from_load_response_without_status_poll():
+    html = console_source()
+    confirm_start = html.index("const confirm = async () => {")
+    confirm_body = html[confirm_start : html.index("// QC deep-link", confirm_start)]
+
+    assert 'import { maybeSyncReplayPlayer, loadMountedReplaySeries, replayStop } from "./replay.js";' in html
+    assert "const hasInspectedDir = replayInspectedDir === dir;" in confirm_body
+    assert "const loadKeys = hasInspectedDir" in confirm_body
+    assert "const loadVideoKeys = hasInspectedDir ? S.replayVideoKeys : {};" in confirm_body
+    assert "inspectDataset(dir)" not in confirm_body
+    assert 'const load = await apiPost("/api/load_replay_dataset"' in html
+    assert "if (!load.ok) {" in html
+    assert "await loadMountedReplaySeries(load);" in html
+    assert "function loadMountedReplaySeries(info)" in html
+    assert 'replayLoadedDatasetDir = info.dataset_dir || "";' in html
+    assert "replayLoadedEpisodeId = Number(info.episode || 0);" in html
+    assert "replayLoadedVideoKeys = { ...(info.video_keys || {}) };" in html
+    assert "return loadReplaySeries();" in html
+
+
+def test_replay_status_poll_does_not_remount_during_explicit_load():
+    html = console_source()
+    confirm_start = html.index("const confirm = async () => {")
+    confirm_body = html[confirm_start : html.index("// QC deep-link", confirm_start)]
+    maybe_start = html.index("function maybeSyncReplayPlayer(s)")
+    maybe_body = html[maybe_start : html.index("function loadMountedReplaySeries", maybe_start)]
+
+    assert "replayLoadPending: false" in html
+    assert "S.replayLoadPending = true;" in confirm_body
+    assert "S.replayLoadPending = false;" in confirm_body
+    assert "if (S.replayLoadPending) return;" in maybe_body
+
+
+def test_replay_tab_skips_live_frame_and_scene_polling_until_videos_load():
+    html = console_source()
+    frame_start = html.index("async function pollFrame()")
+    frame_body = html[frame_start : html.index("let liveSeriesPolling", frame_start)]
+    scene_start = html.index("async function pollScene()")
+    scene_body = html[scene_start : html.index("function loop", scene_start)]
+
+    assert 'if (S.ACTIVE_TAB === "replay") return;' in frame_body
+    assert frame_body.index('if (S.ACTIVE_TAB === "replay") return;') < frame_body.index(
+        "framePolling = true;"
+    )
+    assert 'if (S.ACTIVE_TAB === "replay" || LIVE.replayMode) return;' in scene_body
+    assert scene_body.index('if (S.ACTIVE_TAB === "replay" || LIVE.replayMode) return;') < (
+        scene_body.index("const now = performance.now();")
+    )
 
 
 def test_replay_page_uses_qc_style_frame_playback_not_chunks():
     html = console_source()
 
-    assert '<div class="panel-h"><span class="step-badge">2</span>CONFIG &amp; SETUP<span class="sel-chip" id="replay-mode-chip"></span></div>' in html
-    assert '<div class="sub-h">MODE</div>\n            <div class="row-2" id="replay-mode-list"></div>' in html
+    assert (
+        '<div class="panel-h"><span class="step-badge">2</span>CONFIG &amp; SETUP<span class="sel-chip" id="replay-mode-chip"></span></div>'
+        in html
+    )
+    assert (
+        '<div class="sub-h">MODE</div>\n            <div class="row-2" id="replay-mode-list"></div>'
+        in html
+    )
     assert 'id="replay-auto-setup-msg"' in html
     assert '<div class="panel-h"><span class="step-badge">4</span>CONTROL</div>' in html
     assert 'id="b-replay-step"' not in html
     assert 'id="b-replay-commit"' not in html
     assert 'id="b-replay-halt"' not in html
     assert 'id="replay-tune-exec-steps"' not in html
-    assert 'if (replayIsLocalMode()) {' in html
+    assert "if (replayIsLocalMode()) {" in html
     assert 'apiPost("/api/run")' in html
     assert 'apiPost("/api/halt")' in html
     assert 'uiMode(s.cli_mode) === "real"' in html
@@ -269,22 +623,27 @@ def test_replay_setup_controls_are_guarded_for_console_boot():
     assert 'id="b-replay-setup-pause"' in html
     assert 'id="b-replay-setup-resume"' in html
     assert 'id="b-replay-setup-retry"' in html
-    assert 'const replaySetupRow = document.querySelector("#replay-panel-config .auto-setup-row");' in html
-    assert 'if (replaySetupRow) {' in html
+    assert (
+        'const replaySetupRow = document.querySelector("#replay-panel-config .auto-setup-row");'
+        in html
+    )
+    assert "if (replaySetupRow) {" in html
     assert 'if ($("b-replay-setup-pause")) $("b-replay-setup-pause").onclick = pauseSetup;' in html
-    assert 'if ($("b-replay-setup-resume")) $("b-replay-setup-resume").onclick = resumeSetup;' in html
+    assert (
+        'if ($("b-replay-setup-resume")) $("b-replay-setup-resume").onclick = resumeSetup;' in html
+    )
     assert 'if ($("b-replay-setup-retry")) $("b-replay-setup-retry").onclick = retrySetup;' in html
 
 
 def test_replay_scene_interpolates_fractional_transform_frames():
     html = console_source()
 
-    assert "function setMeshInterpolatedTarget(mesh, floats, o0, o1, a)" in html
+    assert "function setMeshInterpolatedTarget(mesh, floats, o0, o1, a, immediate = false)" in html
     assert "const frame0 = Math.floor(frame);" in html
     assert "const frame1 = Math.min(frame0 + 1, nFrames - 1);" in html
     assert "u.tPos.copy(_p0).lerp(_p1, a);" in html
     assert "u.tQuat.copy(_q0).slerp(_q1, a);" in html
-    assert "setMeshInterpolatedTarget(mesh, floats, o0, base1 + g * 16, a);" in html
+    assert "setMeshInterpolatedTarget(mesh, floats, o0, base1 + g * 16, a, immediate);" in html
 
 
 def test_result_replay_uses_local_clock_and_default_all_chart_dims():
@@ -298,12 +657,23 @@ def test_result_replay_uses_local_clock_and_default_all_chart_dims():
     assert "requestAnimationFrame(tpPlayFrame)" in html
     assert "TP.raf = null" in html
     assert 'preload="auto"' in html
-    assert "master && master.readyState < 3" in html
-    assert "drawSeriesChart($(\"tp-achart-cv\"), TP.series.action, TP.playTime, TP.dimsOnA, TP.i);" in html
-    assert "drawSeriesChart($(\"tp-chart-cv\"), TP.series.state, TP.playTime, TP.dimsOn, TP.i);" in html
+    assert "const camerasReady = TP.camerasReady;" in html
+    assert "await camerasReady;" in html
+    assert "tpSeekVideos(frame);" in html
+    assert (
+        'drawSeriesChart($("tp-achart-cv"), TP.series.action, TP.playTime, TP.dimsOnA, TP.i);'
+        in html
+    )
+    assert (
+        'drawSeriesChart($("tp-chart-cv"), TP.series.state, TP.playTime, TP.dimsOn, TP.i);' in html
+    )
     assert "const dimsOn = {}; for (let d = 0; d < sd; d++) dimsOn[d] = true;" in html
     assert "const dimsOnA = {}; for (let d = 0; d < ad; d++) dimsOnA[d] = true;" in html
-    result_body = html[html.index("function tpSetup(") : html.index("function tpVideos()", html.index("function tpSetup("))]
+    result_body = html[
+        html.index("function tpSetup(") : html.index(
+            "function tpVideos()", html.index("function tpSetup(")
+        )
+    ]
     assert "d < 7" not in result_body
 
 
@@ -331,22 +701,72 @@ def test_batch_qc_requires_selected_episode():
     assert "collectReplayEpisode == null" in html
 
 
+def test_collection_qc_gates_on_selected_saved_episode_not_global_queue():
+    html = console_source()
+    start = html.index('const toggle = $("b-collect-toggle")')
+    body = html[start : html.index('$("b-collect-note-save").disabled', start)]
+
+    assert "const selectedEpisode = selectedCollectEpisodeItem();" in body
+    assert "const selectedEpisodeSaved = savedEpisodeId(selectedEpisode) != null;" in body
+    assert '$("b-collect-qc-pass").disabled = !enabled || !selectedEpisodeSaved;' in body
+    assert '$("b-goto-qc").disabled = !enabled || !selectedEpisodeSaved;' in body
+    assert "collecting || !selectedEpisodeSaved" not in body
+    assert "queue.length > 0" not in body
+
+    selected_start = html.index("function selectedCollectEpisodeItem()")
+    selected_body = html[selected_start : html.index("function renderCollectTiles", selected_start)]
+    assert "if (reviewTask !== collectTaskValue()) return null;" in selected_body
+    assert "return items.find((item) => savedEpisodeId(item) === episode) || null;" in selected_body
+    assert '{ status: "saved", episode_index: episode }' not in selected_body
+
+
+def test_collection_qc_uses_collection_endpoint_without_changing_other_qc_paths():
+    html = console_source()
+
+    assert "function episodeQcEndpoint(kind)" in html
+    assert 'return kind === "collect" ? "/api/collect_qc_mark" : "/api/qc_mark";' in html
+    assert html.count("apiPost(episodeQcEndpoint(kind), {") == 2
+    assert 'let reviewTask = "";' in html
+    assert "reviewTask = collectTaskValue();" in html
+    assert "task: reviewTask," in html
+    assert 'apiPost("/api/qc_mark", {' in html
+
+
+def test_failed_collect_qc_remains_visible_without_refreshing_review():
+    html = console_source()
+    start = html.index("async function submitEpisodeQc(kind, verdict)")
+    body = html[start : html.index("async function submitEpisodeNote", start)]
+
+    assert "if (!r.ok) {" in body
+    assert 'status.textContent = `✗ ${r.error || "QC failed"}`;' in body
+    assert body.index("if (!r.ok) {") < body.index("applyStatus(await apiGet")
+    assert "return;" in body
+
+
 def test_manual_qc_fail_marks_episode_tile_red():
     html = console_source()
 
     assert 'item.qc_verdict === "fail"' in html
 
 
+def test_rl_manual_qc_pass_overrides_automatic_quality_tone():
+    html = console_source()
+    start = html.index("function episodeTone(item)")
+    body = html[start : html.index("function episodeIssue", start)]
+
+    assert body.index('item.qc_verdict === "pass"') < body.index('item.quality === "red"')
+
+
 def test_saved_collect_episode_is_gray_until_manual_qc():
     html = console_source()
     start = html.index("function collectTone(item)")
-    body = html[start:html.index("function collectIssueText", start)]
+    body = html[start : html.index("function collectIssueText", start)]
 
     assert 'if (item.qc_verdict === "pass") return "cq-ok";' in body
     assert 'if (item.qc_verdict === "fail") return "cq-fail";' in body
     assert 'item.quality === "green"' not in body
     assert 'if (item.quality === "red") return "cq-fail";' in body
-    assert 'if (savedEpisodeId(item) != null' not in body
+    assert "if (savedEpisodeId(item) != null" not in body
     assert body.rstrip().endswith('return "cq-queued";\n  }')
     assert "Green means saved" not in html
     assert "Pass green / fail red" in html
@@ -360,46 +780,52 @@ def test_selected_batch_qc_episode_is_highlighted():
     assert 'episode === S.collectReplayEpisode ? " selected" : ""' in html
 
 
-def test_collect_queue_click_switches_active_review_episode():
+def test_collect_queue_click_reviews_selected_episode_immediately():
     html = console_source()
     start = html.index("function selectCollectEpisode(item)")
-    body = html[start:html.index("function selectRolloutSaveEpisode", start)]
+    body = html[start : html.index("function selectRolloutSaveEpisode", start)]
 
-    assert "const replay = S.STATUS.collection_replay || {};" in body
-    assert 'S.reviewKind === "collect" && replay.active' in body
+    assert "S.collectReplayEpisode = episode;" in body
     assert 'reviewEpisode("collect", item);' in body
+    assert "switchActiveReview" not in body
+
+
+def test_rollout_saved_episode_list_stays_visible_for_debug_review_in_sim():
+    html = console_source()
+    start = html.index("function renderRolloutSave()")
+    body = html[start : html.index("function renderCollect()", start)]
+
+    assert "const hideRolloutSave =" in body
+    assert 'items.length === 0 && S.reviewKind !== "rollout"' in body
+    assert 'panel.style.display = hideRolloutSave ? "none" : "";' in body
 
 
 def test_collect_review_ignores_stale_async_switches():
     html = console_source()
-    start = html.index("async function reviewEpisode(kind, item)")
-    body = html[start:html.index("async function submitEpisodeQc", start)]
+    start = html.index("async function reviewCollectEpisode(item)")
+    body = html[start : html.index("async function submitEpisodeQc", start)]
 
     assert "let reviewRequestId = 0;" in html
     assert "const requestId = ++reviewRequestId;" in body
     assert "requestId !== reviewRequestId" in body
+    assert body.index("exitReplayMode();") < body.index('apiPost("/api/review_episode"')
 
 
-def test_collect_replay_toggle_starts_and_stops_selected_episode():
+def test_collect_review_starts_from_selection_and_returns_to_live_explicitly():
     html = console_source()
 
     assert "function selectCollectEpisode(item)" in html
-    assert 'id="b-collect-replay-toggle"' in html
-    assert 'id="b-collect-replay-start"' not in html
-    assert 'id="b-collect-replay-stop"' not in html
-    assert "function toggleSelectedCollectReplay()" in html
-    assert "function stopCollectReplay()" in html
+    assert 'id="b-collect-replay-toggle"' not in html
+    assert 'id="review-return-live"' in html
+    assert "function returnReviewToLive()" in html
     assert "function selectCollectEpisodePointer(event, item)" in html
     assert "tile.onpointerdown = (event) => selectCollectEpisodePointer(event, item);" in html
     assert "row.onpointerdown = (event) => selectCollectEpisodePointer(event, item);" in html
     assert "tile.onclick = () => selectCollectEpisode(item);" in html
     assert "row.onclick = () => selectCollectEpisode(item);" in html
-    assert '$("b-collect-replay-toggle").onclick = () => toggleSelectedCollectReplay();' in html
-    assert "if (replay.playing)" in html
-    assert "const replayActive = !!replay.playing;" in html
-    assert 'replayToggle.classList.toggle("collect-replay-stop", replayActive);' in html
-    assert ".btn.collect-replay-stop { color: var(--danger); }" in html
-    assert 'replayToggle.textContent = replayActive ? "STOP ■" : "REPLAY ▶";' in html
+    assert '$("review-return-live").onclick = returnReviewToLive;' in html
+    assert "exitReplayMode();" in html
+    assert "refreshCameraStreams();" in html
     assert "ondblclick" not in html
     assert "double-click to replay" not in html
 
@@ -408,7 +834,10 @@ def test_collect_fourth_stage_is_quality_check():
     html = console_source()
 
     assert '<div class="panel-h"><span class="step-badge">4</span>QUALITY CHECK</div>' in html
-    assert 'const collectReplayActive = S.reviewKind === "collect" || collectReplay.active;' in html
+    assert (
+        'const collectReplayActive = S.reviewKind === "collect" && LIVE.replayOwner === "collect";'
+        in html
+    )
     assert 'collectReplayActive ? "QUALITY CHECK" : "COLLECT"' in html
 
 
@@ -422,35 +851,36 @@ def test_stopped_run_button_switches_to_continue_icon():
     assert ': (intervention ? "RESUME ▶" : (continueRun ? "CONTINUE ▶▶" : "RUN ▶"));' in html
 
 
-def test_rollout_intervention_abandon_controls_are_wired():
+def test_debug_rollout_intervention_controls_are_removed_for_rl_migration():
+    html = console_source()
+
+    assert 'id="b-rollout-intervention-abandon"' not in html
+    assert 'id="rollout-save-panel"' not in html
+    assert 'id="view-rl"' in html
+    assert "STOP / INTERVENE" in html
+    assert ">ABANDON</button>" in html
+
+
+def test_hil_control_mode_is_config_only_not_wired():
     html = console_source()
     server_source = (
         Path(__file__).resolve().parents[3] / "src" / "core" / "app" / "console" / "server.py"
     ).read_text()
 
-    assert 'id="b-rollout-intervention-abandon"' in html
-    assert 'apiPost("/api/operator_action", { intent: "cancel" })' in html
-    assert (
-        '"/api/rollout_intervention_abandon": "web:rollout_intervention_abandon"'
-        in server_source
-    )
-    assert '"/api/rollout_stop": "web:rollout_stop"' in server_source
-    assert "save_blocked_by_intervention" in html
-    assert "accepted_intervention_segments" in html
+    assert 'id="hil-control-mode"' not in html
+    assert 'apiPost("/api/rollout_intervention_mode"' not in html
+    assert "hil_control_modes" not in html
+    assert '"/api/rollout_intervention_mode"' not in server_source
 
 
-def test_debug_hil_control_mode_is_wired():
+def test_hil_toggle_is_wired_only_in_rl_workspace():
     html = console_source()
-    server_source = (
-        Path(__file__).resolve().parents[3] / "src" / "core" / "app" / "console" / "server.py"
-    ).read_text()
 
-    assert 'id="hil-control-mode"' in html
-    assert 'apiPost("/api/rollout_intervention_mode"' in html
-    assert "hil_control_mode" in html
-    assert "hil_control_modes" in html
-    assert '"hil_control_mode": r.hil_control_mode' in server_source
-    assert '"/api/rollout_intervention_mode"' in server_source
+    assert 'id="hil-intervention-enable"' not in html
+    assert 'aria-label="Enable RL HIL intervention"' in html
+    assert 'id="rl-hil-enable" disabled aria-label="Enable RL HIL intervention"' in html
+    assert 'apiPost("/api/rl/hil_enabled"' in html
+    assert 'class="rl-preview-banner"' not in html
 
 
 def test_operator_action_api_is_wired():
@@ -462,20 +892,14 @@ def test_operator_action_api_is_wired():
     assert 'self._enqueue_ok(f"web:operator_action:{intent}:ui")' in server_source
 
 
-def test_collect_and_rollout_controls_use_operator_action():
+def test_collect_uses_operator_action_and_debug_has_no_rollout_save_handler():
     html = console_source()
 
     assert 'apiPost("/api/operator_action", { intent: "start" })' in html
     assert 'apiPost("/api/operator_action", { intent: "accept" })' in html
     assert 'apiPost("/api/operator_action", { intent: "cancel" })' in html
-    assert (
-        '$("b-rollout-save").onclick = () => '
-        'apiPost("/api/operator_action", { intent: "accept" });'
-    ) in html
-    assert (
-        '$("b-rollout-intervention-abandon").onclick = () => '
-        'apiPost("/api/operator_action", { intent: "cancel" });'
-    ) in html
+    assert '$("b-rollout-save").onclick' not in html
+    assert '$("b-rollout-intervention-abandon").onclick' not in html
 
 
 def test_step_control_has_single_dynamic_instruction_line():
@@ -492,8 +916,10 @@ def test_tab_order_places_manual_and_collect_before_replay():
     manual = html.index('data-tab="manual"><span class="idx">02</span> MANUAL')
     collect = html.index('data-tab="collect"><span class="idx">03</span> COLLECT')
     replay = html.index('data-tab="replay"><span class="idx">04</span> REPLAY')
+    rl = html.index('data-tab="rl"><span class="idx">05</span> RL')
+    eval_tab = html.index('data-tab="eval"><span class="idx">06</span> EVAL')
 
-    assert debug < manual < collect < replay
+    assert debug < manual < collect < replay < rl < eval_tab
 
 
 def test_task_and_strategy_controls_are_dropdown_selects():
@@ -501,18 +927,15 @@ def test_task_and_strategy_controls_are_dropdown_selects():
 
     assert (
         '<select class="choice-select task-select" id="prompt-list" '
-        'aria-label="Task"></select>'
-        in html
+        'aria-label="Task"></select>' in html
     )
     assert (
         '<select class="choice-select task-select" id="collect-prompt-list" '
-        'aria-label="Collection task"></select>'
-        in html
+        'aria-label="Collection task"></select>' in html
     )
     assert (
         '<select class="choice-select task-select" id="eval-prompt-list" '
-        'aria-label="Evaluation task"></select>'
-        in html
+        'aria-label="Evaluation task"></select>' in html
     )
     assert (
         '<select class="choice-select task-select" id="eval-model-list" aria-label="Evaluation model"></select>'
@@ -528,20 +951,20 @@ def test_eval_model_selector_is_dropdown():
     html = console_source()
 
     assert 'if (list.tagName === "SELECT") {' in html
-    assert 'opt.value = String(slot);' in html
-    assert 'list.onchange = () => {' in html
-    assert 'const slot = Number(list.value);' in html
+    assert "opt.value = String(slot);" in html
+    assert "list.onchange = () => {" in html
+    assert "const slot = Number(list.value);" in html
     assert "if (evalBusy() || EVAL_SWITCHING)" in html
     assert "evalSwitchCkpt(slot);" in html
     assert 'if (list && list.tagName === "SELECT") list.disabled = true;' in html
     assert 'if (modelList && modelList.tagName === "SELECT") modelList.disabled = lockCkpt;' in html
     assert "-webkit-appearance: none" in html
-    assert "background-image: url(\"data:image/svg+xml" in html
+    assert 'background-image: url("data:image/svg+xml' in html
     assert 'placeholder.textContent = "SELECT TASK";' in html
     assert 'apiPost("/api/select_task", { task });' in html
     assert 'apiPost("/api/select_collect_task", { task });' in html
     assert 'const opt = document.createElement("option");' in html
-    assert 'sl.onchange = () => {' in html
+    assert "sl.onchange = () => {" in html
     assert 'apiPost("/api/select_strategy", { strategy: key });' in html
 
 
@@ -556,31 +979,26 @@ def test_collect_start_requires_motion_switch():
     assert "|| !S.collectArmEnabled" in html
     assert "function disarmCollectArm()" in html
     assert 'if (tab !== "collect") disarmCollectArm();' in html
-    assert "collect_teleop_armed: tab === \"collect\" && S.collectArmEnabled" in html
-    assert "collect_teleop_armed: S.ACTIVE_TAB === \"collect\" && S.collectArmEnabled" in html
-    assert (
-        'apiPost("/api/tab_switch", {' in html
-    )
-    assert (
-        'S.collectArmEnabled = enabled && S.ACTIVE_TAB === "collect";'
-        in html
-    )
+    assert 'collect_teleop_armed: tab === "collect" && S.collectArmEnabled' in html
+    assert 'collect_teleop_armed: S.ACTIVE_TAB === "collect" && S.collectArmEnabled' in html
+    assert 'apiPost("/api/tab_switch", {' in html
+    assert 'S.collectArmEnabled = enabled && S.ACTIVE_TAB === "collect";' in html
 
 
 def test_collect_task_selection_refreshes_record_gate_immediately():
     html = console_source()
 
     assert (
-        'S.STATUS.selected_collect_task = task;\n'
+        "S.STATUS.selected_collect_task = task;\n"
         '        apiPost("/api/select_collect_task", { task });\n'
         '        mark("collect-prompt-list", "prompt", task);\n'
-        '        renderCollect();'
+        "        renderCollect();"
     ) in html
     assert (
-        'S.STATUS.selected_collect_task = p;\n'
+        "S.STATUS.selected_collect_task = p;\n"
         '        apiPost("/api/select_collect_task", { task: p });\n'
         '        mark("collect-prompt-list", "prompt", p);\n'
-        '        renderCollect();'
+        "        renderCollect();"
     ) in html
 
 
@@ -603,7 +1021,9 @@ def test_eval_task_select_defaults_to_configured_task():
     assert "eval-model-chip" not in html
     assert "eval-prompt-n" not in html
     assert "eval-model-n" not in html
-    assert html.index('host.classList.toggle("has-value", !!label);') < html.index("if (!chip) return;")
+    assert html.index('host.classList.toggle("has-value", !!label);') < html.index(
+        "if (!chip) return;"
+    )
 
 
 def test_eval_unscored_trial_hint_is_english_and_not_shown_after_save_next():
@@ -616,8 +1036,7 @@ def test_eval_unscored_trial_hint_is_english_and_not_shown_after_save_next():
     assert "EVAL_SHOW_UNSCORABLE_HINT && EVAL_PROMPT && !scorable" in html
     assert (
         "EVAL_SHOW_UNSCORABLE_HINT = false;\n"
-        "        EVAL_TRIAL = saved < n ? saved + 1 : saved;"
-        in html
+        "        EVAL_TRIAL = saved < n ? saved + 1 : saved;" in html
     )
 
 
@@ -630,23 +1049,176 @@ def test_eval_stop_latches_stopping_until_backend_settles():
     assert 'apiPost("/api/eval_stop").catch' in html
 
 
-def test_debug_manual_collect_hide_action_state_charts():
+def test_live_views_hide_charts_and_collect_review_reveals_them():
     html = console_source()
 
     assert '<div class="stage no-series" id="stage">' in html
     assert ".stage.no-series .stage-charts" in html
     assert ".stage.no-series .stage-scrub" in html
-    assert 'const showSeries = S.ACTIVE_TAB === "replay";' in html
+    assert 'const showSeries = tab === "rl" || tab === "replay" ||' in html
+    assert 'tab === "collect" && LIVE.replayOwner === "collect"' in html
     assert 'stage.classList.toggle("no-series", !showSeries);' in html
     assert 'if (LIVE.replayMode || S.ACTIVE_TAB !== "replay" || liveSeriesPolling) return;' in html
     assert "loop(pollLiveSeries, 200);" not in html
 
 
+def test_rl_workspace_has_eval_style_workflow_and_hides_data_config():
+    html = console_source()
+
+    for panel in (
+        "rl-panel-task",
+        "rl-panel-models",
+        "rl-panel-data",
+        "rl-panel-setup",
+        "rl-panel-rollout",
+        "rl-panel-saved",
+        "rl-panel-gripper",
+    ):
+        assert f'id="{panel}"' in html
+    assert 'id="rl-policy-list"' in html
+    assert 'id="rl-critic-list"' in html
+    assert 'id="rl-critic-choice" style="display:none"' in html
+    assert '<option value="lerobot" selected>LeRobot</option>' in html
+    assert '<option value="transition" disabled>Transition · backend later</option>' in html
+    for control in (
+        "rl-b-setup",
+        "rl-b-run",
+        "rl-b-reset",
+        "rl-b-intervene",
+        "rl-b-accept",
+        "rl-b-abandon",
+        "rl-b-save",
+        "rl-b-replay",
+    ):
+        assert f'id="{control}"' in html
+    assert 'apiPost("/api/rl/setup")' in html
+    assert 'apiPost("/api/rl/reset")' in html
+    assert 'fetch("/api/rl/replay_critic"' in html
+    assert "let rlCriticPendingFrame = null;" in html
+    assert "function flushRlCriticQueue()" in html
+    assert "if (generation === rlCriticGeneration) flushRlCriticQueue();" in html
+    assert '!rollout.save_ready || intervention' in html
+    assert '!rollout.save_ready || !hasFrames' not in html
+    assert 'id="rl-save-count"' in html
+    assert 'id="rl-save-expand"' in html
+    assert 'id="rl-save-list"' in html
+    assert 'rl-save-tiles .collect-tile::after' not in html
+    assert 'CRITIC · OPTIONAL' in html
+    assert 'Select task and Policy; Critic is optional' in html
+    assert 'const selected = !!S.rlTask && S.rlPolicy !== "";' in html
+    assert 'ROBOT + POLICY READY · CRITIC OPTIONAL' in html
+    assert 'const setupError = status.last_error || status.policy_error;' in html
+    assert 'POLICY OFFLINE · SETUP REQUIRED' in html
+    assert 'retry.style.display = setupError && !setup ? "" : "none";' in html
+    assert 'Select <b>task and Policy</b>' in html
+    assert 'SETUP starts <b>automatically</b>' in html
+    assert 'Select <b>task, Policy, and Critic</b>' not in html
+    assert 'LIVE.replayOwner !== "rl" || !S.STATUS.rl?.critic_connected' in html
+    assert 'id="rl-auto-setup-msg"' in html
+    assert 'id="rl-panel-data" data-st="done" hidden' in html
+    assert 'id="rl-control-source-value">IDLE</span>' in html
+    assert ".rl-source-value::before" in html
+    assert "#rl-stage-col {\n    min-height: 0; overflow: hidden;" in html
+    assert "#view-rl .stage.rl-replay .stage-charts" in html
+    assert 'scheduleRlSetup();' in html
+    assert 'else S.rlCritic = "";' in html
+    assert 'criticChoice.style.display = setup ? "" : "none";' in html
+    assert 'stage.classList.toggle("rl-critic-active", !!S.rlCritic && !!rl.active);' in html
+    assert '$("gb-step").textContent = `STEP ${guideStep}/4`;' in html
+    assert html.index('id="rl-panel-gripper"') < html.index('id="rl-panel-saved"')
+
+
+def test_rl_stage_has_prominent_critic_curve_and_control_source_legend():
+    html = console_source()
+
+    assert 'id="stage-critic"' in html
+    assert 'id="chart-critic-cv"' in html
+    assert 'id="critic-latest"' in html
+    assert 'openChartModal("c")' in html
+    assert 'class="control-legend"' in html
+    assert 'class="critic-source-legend"' in html
+    assert 'LIVE.criticSource' in html
+    assert 'drawSourceBands(ctx, ts, source' in html
+    assert 'data-source="intervention"' in html
+    assert "--policy:   #2563EB" in html
+    assert "--intervention: #FF4D00" in html
+
+
+def test_rl_saved_episode_click_switches_replay_immediately_and_latest_wins():
+    html = console_source()
+
+    assert "let replayRequestId = 0;" in html
+    assert "function selectSavedEpisode(item, items)" in html
+    assert "replaySelectedEpisode();" in html
+    assert "if (LIVE.replayMode && LIVE.replayOwner === \"rl\") exitReplayMode();" in html
+    assert "requestId !== replayRequestId || S.ACTIVE_TAB !== \"rl\"" in html
+    assert "if (replayVideoAbortController) replayVideoAbortController.abort();" in html
+    assert "replayVideoAbortController = new AbortController();" in html
+    assert "async function loadReplaySeries()" in html
+    assert "const loadSeq = ++replayLoadSeq;" in html
+    assert "replayStop();" in html
+    assert "S.replayLoadPending = true;" in html
+    assert "let rlReplayRequestPending = false;" in html
+    assert "clearRlCriticSeries();" in html
+    assert "seriesPolling || rlReplayRequestPending" in html
+    assert "if (rlReplayRequestPending && selectedEpisode === id) return;" in html
+
+
+def test_rl_replay_disables_manual_scrub_when_critic_is_selected():
+    html = console_source()
+
+    assert "function rlReplayScrubLocked()" in html
+    assert "range.disabled = LIVE.replayLoading || LIVE.n === 0 || rlReplayScrubLocked();" in html
+    assert "if (rlReplayScrubLocked()) return;" in html
+
+
+def test_replay_exposes_three_video_and_urdf_sync_metrics():
+    html = console_source()
+
+    assert "window.__evaReplaySync = LIVE.replaySync;" in html
+    assert "maxVideoSkewSec" in html
+    assert "maxUrdfFrameSkew" in html
+    assert "maxFrameGapMs" in html
+    assert "recordReplaySync(frac);" in html
+    assert "hardVideoSeeks" in html
+    assert "playbackRateCorrections" in html
+    assert "sync: { ...LIVE.replaySync, videoSkewSamples: undefined }" in html
+
+
+def test_replay_uses_presented_master_video_clock_without_continuous_seeking():
+    html = console_source()
+
+    replay_start = html.index("async function replayPlay()")
+    replay_body = html[replay_start : html.index("function replayStop()", replay_start)]
+    assert "const master = replayMasterVideo();" in replay_body
+    assert "replayFrameAtTime(master.currentTime)" in replay_body
+    assert "syncReplayVideos(framePos, master);" in replay_body
+    assert "playT0 + (performance.now() - wall0)" not in replay_body
+    assert "const hardTolerance = 0.75 / replayVideoFps;" in html
+    assert "v.playbackRate = drift < 0 ? 1.08 : 0.92;" in html
+
+
+def test_live_charts_bound_draw_work_to_canvas_resolution():
+    html = console_source()
+
+    assert "const maxDrawPoints = Math.max(64, Math.floor(W * 2));" in html
+    assert "for (const i of indices)" in html
+    assert "indices.forEach((i, point)" in html
+    assert 'else if (tab === "rl") host = $("rl-stage-col");' in html
+    assert 'criticCursor, ["#E8590C"]' in html
+    assert "criticGeneration" in html
+    assert "if (criticGeneration !== LIVE.criticGeneration) return;" in html
+    assert 'ctx.fillText(`${(elapsed * ratio).toFixed(1)}s`' in html
+    assert ".stage-critic {\n    display: none; flex: 0 0 190px; min-height: 190px;\n  }" in html
+    assert ".stage.rl-live .stage-charts" in html
+    assert "stage.classList.toggle(\"rl-live\"" in html
+
+
 def test_replay_charts_use_series_dimension_names():
     html = console_source()
 
-    assert "LIVE.actionNames = r.action_names || [];" in html
-    assert "LIVE.stateNames = r.state_names || [];" in html
+    assert "LIVE.actionNames = series.action_names || [];" in html
+    assert "LIVE.stateNames = series.state_names || [];" in html
     assert 'const names = tag === "a" ? LIVE.actionNames : LIVE.stateNames;' in html
     assert 'el.textContent = names[d] || ((tag === "a" ? "a" : "q") + d);' in html
 
@@ -663,8 +1235,8 @@ def test_replay_chart_dimension_names_are_scrollable():
 def test_replay_series_key_tracks_action_mode_and_key():
     html = console_source()
 
-    assert "s.replay_action_mode || \"\"" in html
-    assert "s.replay_action_key || \"\"" in html
+    assert 's.replay_action_mode || ""' in html
+    assert 's.replay_action_key || ""' in html
     assert "S.replaySeriesKey = null;" in html
 
 
@@ -675,5 +1247,19 @@ def test_replay_video_src_uses_loaded_dataset_episode_and_video_key():
     assert "dataset_dir: replayLoadedDatasetDir," in html
     assert "episode: String(replayLoadedEpisodeId)," in html
     assert 'if (videoKey) params.set("video_key", videoKey);' in html
-    assert 'src="/api/replay_video?${params.toString()}"' in html
+    assert 'data-src="/api/replay_video?${params.toString()}"' in html
     assert 'src="/api/replay_video?cam=${encodeURIComponent(k)}"' not in html
+
+
+def test_replay_and_review_defer_video_network_until_playback_needs_it():
+    html = console_source()
+    media_start = html.index("function mountEpisodeVideos({ datasetDir, episodeId, videoKeys })")
+    media_body = html[media_start : html.index("function mountReplayVideos", media_start)]
+    ready_start = html.index("function waitForVideoReady(v)")
+    ready_body = html[ready_start : html.index("function waitForBrowserPaint", ready_start)]
+
+    assert 'src="/api/replay_poster?${params.toString()}"' in media_body
+    assert '`src="/api/replay_video?${params.toString()}"' not in media_body
+    assert 'data-src="/api/replay_video?${params.toString()}"' in media_body
+    assert "function ensureVideoSource(v)" in html
+    assert "ensureVideoSource(v);" in ready_body

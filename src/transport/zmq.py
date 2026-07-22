@@ -30,7 +30,7 @@ from core.config import ConfigDict
 from core.registry import TRANSPORT_REGISTRY
 from core.types import CollectionRawBatch, CollectionRawSample, Observation, RawCollectionSnapshot
 from robots.base import Robot
-from transport.base import TransportBridge
+from transport.base import HilStatus, TransportBridge
 from transport.utils import ImageRateTracker, StreamFreshness
 
 logger = logging.getLogger(__name__)
@@ -38,9 +38,12 @@ logger = logging.getLogger(__name__)
 _PACKER = msgpack_numpy.Packer()
 COLLECTION_START_TARGET = "collect_start"
 COLLECTION_STOP_TARGET = "collect_stop"
+HIL_START_TARGET = "hil_start"
+HIL_STOP_TARGET = "hil_stop"
 COLLECTION_CONTROL_REPEATS = 5
 COLLECTION_CONTROL_INTERVAL_S = 0.02
 COLLECTION_SOCKET_DRAIN_MAX = 64
+HIL_ACK_TIMEOUT_S = 1.0
 
 
 # --- wire protocol -------------------------------------------------------------
@@ -66,6 +69,9 @@ class WireObservation:
     action: np.ndarray | None = None
     eef: dict[str, np.ndarray] | None = None
     action_eef: np.ndarray | None = None
+    hil_supported: bool = False
+    hil_active: bool = False
+    hil_error: str = ""
 
 
 @dataclasses.dataclass
@@ -81,6 +87,7 @@ class WireAction:
     t: float
     action: np.ndarray
     target: str = "real"
+    mode: str | None = None
 
 
 def pack_observation(obs: WireObservation) -> bytes:
@@ -106,6 +113,10 @@ def pack_observation(obs: WireObservation) -> bytes:
         payload["eef"] = {k: np.asarray(v, dtype=np.float32) for k, v in obs.eef.items()}
     if obs.action_eef is not None:
         payload["action_eef"] = np.asarray(obs.action_eef, dtype=np.float32)
+    payload["hil_supported"] = bool(obs.hil_supported)
+    payload["hil_active"] = bool(obs.hil_active)
+    if obs.hil_error:
+        payload["hil_error"] = str(obs.hil_error)
     return _PACKER.pack(payload)
 
 
@@ -132,18 +143,22 @@ def unpack_observation(payload: bytes) -> WireObservation:
         action=None if action is None else np.asarray(action, dtype=np.float32),
         eef=(None if eef is None else {k: np.asarray(v, dtype=np.float32) for k, v in eef.items()}),
         action_eef=None if action_eef is None else np.asarray(action_eef, dtype=np.float32),
+        hil_supported=bool(raw.get("hil_supported", False)),
+        hil_active=bool(raw.get("hil_active", False)),
+        hil_error=str(raw.get("hil_error", "")),
     )
 
 
 def pack_action(action: WireAction) -> bytes:
     """Serialize a WireAction (t, float32 action vector, target) to msgpack bytes."""
-    return _PACKER.pack(
-        {
-            "t": float(action.t),
-            "action": np.asarray(action.action, dtype=np.float32),
-            "target": action.target,
-        }
-    )
+    payload = {
+        "t": float(action.t),
+        "action": np.asarray(action.action, dtype=np.float32),
+        "target": action.target,
+    }
+    if action.mode is not None:
+        payload["mode"] = action.mode
+    return _PACKER.pack(payload)
 
 
 def unpack_action(payload: bytes) -> WireAction:
@@ -153,6 +168,7 @@ def unpack_action(payload: bytes) -> WireAction:
         t=float(raw["t"]),
         action=np.asarray(raw["action"], dtype=np.float32),
         target=str(raw.get("target", "real")),
+        mode=None if raw.get("mode") is None else str(raw["mode"]),
     )
 
 
@@ -260,6 +276,16 @@ class _ObservationReader:
             if camera.observation_key not in self._disabled_cameras
         )
         return self._image_rate.min_hz(keys)
+
+    def hil_status(self) -> HilStatus:
+        observation = self._drain_latest()
+        if observation is None:
+            return HilStatus(supported=False, error="No hardware status received")
+        return HilStatus(
+            supported=observation.hil_supported,
+            active=observation.hil_active,
+            error=observation.hil_error,
+        )
 
     def clear_collection_backlog(self) -> float | None:
         """Drain the socket and drop queued collection frames captured pre-recording."""
@@ -438,26 +464,26 @@ class _ObservationReader:
         return self._wire_to_observation(wire_obs)
 
     def _drain_raw_collection(self) -> bytes | None:
-        """Pop all queued SUB messages as raw bytes, return the oldest unconsumed.
+        """Drain a bounded socket batch and return only its newest raw payload.
 
-        The main thread does zero msgpack work here: it only moves bytes off the
-        socket into a backlog and hands back one payload. Decoding happens later
-        through the snapshot's raw-batch closure on the ingest thread.
+        The capture clock defines the stored frame rate, so retaining older full
+        observations would create latency and pin duplicate image payloads. Decoding
+        still happens later through the snapshot's raw-batch closure.
         """
         with self._lock:
             got_message = False
+            latest = self._raw_collection_queue[-1] if self._raw_collection_queue else None
+            self._raw_collection_queue.clear()
             for _ in range(COLLECTION_SOCKET_DRAIN_MAX):
                 try:
                     payload = self._sub.recv(self._zmq.NOBLOCK)
                 except self._zmq.Again:
                     break
                 got_message = True
-                self._raw_collection_queue.append(payload)
+                latest = payload
             if got_message:
                 self._freshness.mark()
-            if not self._raw_collection_queue:
-                return None
-            return self._raw_collection_queue.popleft()
+            return latest
 
     def acquire_collection_raw(self) -> RawCollectionSnapshot | None:
         """Capture one raw collection payload and expose it as timestamped streams.
@@ -574,6 +600,58 @@ class ZmqTransport(TransportBridge):
     def get_latest_qpos(self) -> np.ndarray | None:
         """Latest joint state [qpos_dim] float32 from the dedicated qpos reader."""
         return self._qpos_reader.get_latest_qpos()
+
+    def hil_status(self) -> HilStatus:
+        """Return the latest HIL capability reported by the execution node."""
+        return self._qpos_reader.hil_status()
+
+    def _send_hil_control(self, target: str, mode: str | None = None) -> None:
+        action = np.zeros(self._robot.total_action_dim, dtype=np.float32)
+        for attempt in range(COLLECTION_CONTROL_REPEATS):
+            self._pub.send(
+                pack_action(
+                    WireAction(
+                        t=time.monotonic(),
+                        action=action,
+                        target=target,
+                        mode=mode,
+                    )
+                )
+            )
+            if attempt + 1 < COLLECTION_CONTROL_REPEATS:
+                time.sleep(COLLECTION_CONTROL_INTERVAL_S)
+
+    def _wait_hil_state(self, active: bool) -> HilStatus:
+        deadline = time.monotonic() + HIL_ACK_TIMEOUT_S
+        last = self.hil_status()
+        while time.monotonic() < deadline:
+            last = self.hil_status()
+            if last.error or (last.supported and last.active is active):
+                return last
+            time.sleep(0.01)
+        return HilStatus(
+            supported=last.supported,
+            active=last.active,
+            error=f"HIL {'start' if active else 'stop'} acknowledgement timed out",
+        )
+
+    def start_hil_control(self, mode: str) -> HilStatus:
+        status = self.hil_status()
+        if not status.supported:
+            return status
+        self._send_hil_control(HIL_START_TARGET, mode)
+        return self._wait_hil_state(True)
+
+    def stop_hil_control(self) -> HilStatus:
+        status = self.hil_status()
+        if not status.supported:
+            return status
+        self._send_hil_control(HIL_STOP_TARGET)
+        return self._wait_hil_state(False)
+
+    def get_hil_frame(self) -> Observation | None:
+        """Return the next action-bearing observation produced during HIL."""
+        return self._collection_reader.get_collection_frame()
 
     def seconds_since_last_recv(self) -> float | None:
         """Freshest receipt age across all readers, or None if none have received."""

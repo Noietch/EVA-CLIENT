@@ -23,6 +23,7 @@ import pyarrow.parquet as pq
 from core.recorder.collection_alignment import (
     CollectionAlignmentReport,
     align_collection_samples,
+    image_skew_tolerance_sec,
 )
 from core.recorder.episode import (
     _COLLECTION_VECTOR_FIELDS,
@@ -237,10 +238,7 @@ class CollectionEpisodeWriter:
             self._merge_raw_batch(snapshot.decode_raw())
 
     def _image_skew_tolerance_sec(self) -> float:
-        fps = float(self._logger._fps)
-        if fps <= 1.0:
-            return 0.5 / fps
-        return 1.0 / (2.0 * (fps - 1.0))
+        return image_skew_tolerance_sec(float(self._logger._fps))
 
     def _align_raw_records(self) -> None:
         self._records = []

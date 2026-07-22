@@ -53,6 +53,7 @@ class CollectionRawImage:
     """A lazily decoded raw collection image sample."""
 
     decoder: Callable[[], np.ndarray | None]
+    encoded: bytes | None = None
     _decoded: np.ndarray | None = dataclasses.field(default=None, init=False, repr=False)
     _decoded_once: bool = dataclasses.field(default=False, init=False, repr=False)
 
@@ -66,6 +67,11 @@ class CollectionRawImage:
             self._decoded_once = True
         assert self._decoded is not None
         return self._decoded
+
+    def release_decoded(self) -> None:
+        """Release the decoded pixels while retaining the raw decoder."""
+        self._decoded = None
+        self._decoded_once = False
 
 
 @dataclasses.dataclass
@@ -105,6 +111,7 @@ class RolloutInterventionSegment:
     segment_index: int
     start_policy_frame_index: int
     pre_intervention_qpos: np.ndarray
+    start_time: float | None = None
     frames: list[Observation] = dataclasses.field(default_factory=list)
     resume_policy_frame_index: int | None = None
     invalid_reason: str = ""

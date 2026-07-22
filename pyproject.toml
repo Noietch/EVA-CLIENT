@@ -1,9 +1,9 @@
 [project]
 name = "eva-client"
 version = "0.1.0"
-description = "A unified framework for deployment, evaluation, and data collection on real robots."
+description = "Unified robot debugging client for VLA inference serving."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.12"
 dependencies = [
     "addict>=2.4.0",
     "av>=17.1.0",

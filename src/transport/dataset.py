@@ -41,11 +41,7 @@ def _is_eef_key(key: str) -> bool:
 
 def _eef_dimension_names(robot: Robot, vector_dim: int) -> list[str]:
     per_arm_dim = vector_dim // len(robot.arm_groups)
-    return [
-        f"{group.name}.{dim}"
-        for group in robot.arm_groups
-        for dim in _EEF_DIMS[:per_arm_dim]
-    ]
+    return [f"{group.name}.{dim}" for group in robot.arm_groups for dim in _EEF_DIMS[:per_arm_dim]]
 
 
 class _FrameSource:
@@ -234,6 +230,23 @@ class DatasetTransport(TransportBridge):
         table = pq.read_table(str(parquet_path))
         self._obs_state = np.array(table.column(keys.state_key).to_pylist(), dtype=np.float32)
         self._actions = np.array(table.column(keys.action_key).to_pylist(), dtype=np.float32)
+        if "control_source" in table.column_names:
+            self._control_source = [
+                str(value) for value in table.column("control_source").to_pylist()
+            ]
+        elif "intervention" in table.column_names:
+            self._control_source = [
+                "intervention" if value else "policy"
+                for value in table.column("intervention").to_pylist()
+            ]
+        else:
+            self._control_source = ["policy"] * len(self._actions)
+        self._intervention = [value == "intervention" for value in self._control_source]
+        self._intervention_segment_index = (
+            [int(value) for value in table.column("intervention_segment_index").to_pylist()]
+            if "intervention_segment_index" in table.column_names
+            else [-1] * len(self._actions)
+        )
         series_state_key = keys.get("series_state_key", "")
         self._series_state = (
             np.array(table.column(series_state_key).to_pylist(), dtype=np.float32)
@@ -276,7 +289,6 @@ class DatasetTransport(TransportBridge):
             if video_path is None:
                 logger.warning("Video not found for camera %s", cam_key)
                 continue
-            self._caps[cam_key] = _FrameSource(video_path)
             self._video_paths[cam_key] = video_path
 
         self._episode_id = episode_id
@@ -294,7 +306,7 @@ class DatasetTransport(TransportBridge):
             self._dataset_dir,
             episode_id,
             self._n_steps,
-            list(self._caps.keys()),
+            list(self._video_paths.keys()),
         )
 
     def reload_episode(self, episode_id: int) -> None:
@@ -329,7 +341,18 @@ class DatasetTransport(TransportBridge):
 
     def available_camera_keys(self) -> tuple[str, ...]:
         """Camera observation keys that actually have a video stream this episode."""
-        return tuple(cam_key for cam_key in self._camera_keys if cam_key in self._caps)
+        return tuple(cam_key for cam_key in self._camera_keys if cam_key in self._video_paths)
+
+    def _frame_source(self, cam_key: str) -> _FrameSource | None:
+        cap = self._caps.get(cam_key)
+        if cap is not None:
+            return cap
+        video_path = self._video_paths.get(cam_key)
+        if video_path is None:
+            return None
+        cap = _FrameSource(video_path)
+        self._caps[cam_key] = cap
+        return cap
 
     def get_action_trajectory(self) -> np.ndarray:
         """Full recorded action sequence [n_steps, action_dim] float32 for replay."""
@@ -358,6 +381,9 @@ class DatasetTransport(TransportBridge):
             "action": self._actions.tolist(),
             "state_names": self._state_names,
             "action_names": self._action_names,
+            "control_source": self._control_source,
+            "intervention": self._intervention,
+            "intervention_segment_index": self._intervention_segment_index,
         }
 
     def video_paths(self) -> dict[str, Path]:
@@ -460,9 +486,9 @@ class DatasetTransport(TransportBridge):
             dataset lacks are filled with black frames) and the recorded state
             [state_dim] float32, or None if shut down or past the last frame.
         """
-        if self._shutdown.is_set():
-            return None
         with self._lock:
+            if self._shutdown.is_set():
+                return None
             idx = self._frame_index
             if idx >= self._n_steps:
                 return None
@@ -482,7 +508,7 @@ class DatasetTransport(TransportBridge):
             w = self._config.transport.image_width
             images: dict[str, np.ndarray] = {}
             for cam_key in self._camera_keys:
-                cap = self._caps.get(cam_key)
+                cap = self._frame_source(cam_key)
                 frame = cap.read_at(idx) if cap is not None else None
                 if frame is not None:
                     images[cam_key] = frame
@@ -507,9 +533,9 @@ class DatasetTransport(TransportBridge):
             BGR uint8 array [H, W, 3], or None if the camera/frame is unavailable.
             The returned array is read-only (caller must not mutate it).
         """
-        if self._shutdown.is_set():
-            return None
         with self._lock:
+            if self._shutdown.is_set():
+                return None
             idx = self._frame_index
             if idx >= self._n_steps:
                 return None
@@ -520,7 +546,7 @@ class DatasetTransport(TransportBridge):
             cached = self._frame_cache.get(key)
             if cached is not None:
                 return cached
-            cap = self._caps.get(key)
+            cap = self._frame_source(key)
             frame = cap.read_at(idx) if cap is not None else None
             if frame is None:
                 h = self._config.transport.image_height
@@ -562,9 +588,10 @@ class DatasetTransport(TransportBridge):
     def close(self) -> None:
         """Mark shut down and release all per-camera video captures."""
         self._shutdown.set()
-        for cap in self._caps.values():
-            cap.release()
-        self._caps.clear()
+        with self._lock:
+            for cap in self._caps.values():
+                cap.release()
+            self._caps.clear()
         logger.debug("Dataset transport closed")
 
     def is_shutdown(self) -> bool:

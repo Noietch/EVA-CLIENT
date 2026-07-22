@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import struct
+import threading
+import types
 
 import numpy as np
 
@@ -40,6 +42,23 @@ def test_all_transforms_blob_roundtrip_matches_transforms():
             np.testing.assert_allclose(mats[f, g], np.asarray(arms[part][geom]), rtol=0, atol=1e-5)
 
 
+def test_all_transforms_blob_holds_scene_lock_for_entire_batch():
+    scene = object.__new__(UrdfScene)
+    scene._lock = threading.RLock()
+    lock_owned_before_each_frame: list[bool] = []
+
+    def fake_transforms(self, _qpos):
+        lock_owned_before_each_frame.append(self._lock._is_owned())
+        with self._lock:
+            return {"arm": {"geom": np.eye(4).tolist()}}
+
+    scene.transforms = types.MethodType(fake_transforms, scene)
+
+    scene.all_transforms_blob(np.zeros((3, 1), dtype=np.float32))
+
+    assert lock_owned_before_each_frame == [True, True, True, True]
+
+
 def test_arx_r5_dual_arm_scene_keeps_shared_urdf_parts_separate():
     scene = UrdfScene(ROBOT_REGISTRY.build("arx_r5"))
 
@@ -59,5 +78,7 @@ def test_arx_r5_dual_arm_scene_keeps_shared_urdf_parts_separate():
     arms = scene.transforms(None)
     assert set(arms) == {"left_arm", "right_arm"}
     assert set(arms["left_arm"]) == set(arms["right_arm"])
-    np.testing.assert_allclose(np.asarray(arms["left_arm"]["base_link.STL"])[:3, 3], [-0.25, 0.0, 0.0])
-    np.testing.assert_allclose(np.asarray(arms["right_arm"]["base_link.STL"])[:3, 3], [0.25, 0.0, 0.0])
+    left_base = np.asarray(arms["left_arm"]["base_link.STL"])[:3, 3]
+    right_base = np.asarray(arms["right_arm"]["base_link.STL"])[:3, 3]
+    np.testing.assert_allclose(left_base, [-0.25, 0.0, 0.0])
+    np.testing.assert_allclose(right_base, [0.25, 0.0, 0.0])

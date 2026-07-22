@@ -29,6 +29,7 @@ transport = dict(
     node_name="eva_client",
     dataset_dir="",
     episode_id=0,
+    convert_bgr_to_rgb=True,
     image_height=224,
     image_width=224,
     resize_pad=True,
@@ -44,7 +45,6 @@ transport = dict(
         video_keys={},  # empty -> fallback to "observation.images.{cam}" pattern
     ),
     topics={},  # ros1/ros2 topic mapping; set per-robot in deploy configs ({} for deep-merge)
-    ssh=dict(host="", user="", port=0),
 )
 
 policy = dict(
@@ -109,17 +109,29 @@ rollout = dict(
         async_save=True,
     ),
     intervention=dict(
-        enabled=False,
         control_mode="absolute",
     ),
 )
 
 operator_control = dict(
     enabled=False,
-    button_topic="/eva/operator_button",
+    action_topic="/eva/operator_action",
+)
+
+# ZMQ control channel: exposes every console button (web:* commands) + read-only
+# status/config/frame queries over a REP socket, for a simulator to drive automated
+# evaluation. Disabled by default; host stays local unless a deploy opens it up.
+control_channel = dict(
+    enabled=False,
+    host="127.0.0.1",
+    port=5757,
 )
 
 eval_cfg = {}  # Empty dict marks a non-eval config; eval configs fill this block.
+
+# RL workspace configuration. Empty keeps the RL tab unavailable; dedicated RL
+# launch configs provide tasks, policy/critic choices, and data settings.
+rl_cfg = {}
 # Eval block template (see configs/03_evaluation/*); fill eval_cfg to turn a deploy preset
 # into an eval run:
 #   eval_cfg = dict(
@@ -151,10 +163,6 @@ inference_cfg = dict(
     publish_rate=30,
     setup_warmup_chunks=2,
     debug_tasks=["pour soybean", "put cup"],
-)
-
-manual_cfg = dict(
-    publish_rate=15,
 )
 
 # Multi-preset strategy dict, switchable from the frontend. Each entry =

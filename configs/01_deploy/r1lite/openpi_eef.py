@@ -25,9 +25,7 @@ inference_cfg = dict(
         include_gripper=True,
     ),
     publish_rate=15,
-    debug_tasks=[
-        'move the white box from the left to the center, then pick up the yellow-red mango on the right and place it inside the box',  # noqa: E501
-    ],
+    debug_tasks=['placeholder task — replace with the real EEF task prompt'],
 )
 
 inference_strategies = {

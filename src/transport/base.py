@@ -32,6 +32,15 @@ logger = logging.getLogger(__name__)
 _COLLECTION_DEQUE_MAX = 2000
 
 
+@dataclasses.dataclass(frozen=True)
+class HilStatus:
+    """Current hardware-in-the-loop takeover capability and state."""
+
+    supported: bool
+    active: bool = False
+    error: str = ""
+
+
 class ObservationSource(Protocol):
     """Read-only observation access used by auxiliary consumers (e.g. the console
     visualization). A transport may hand out a dedicated source so those consumers
@@ -184,6 +193,28 @@ class TransportBridge(abc.ABC):
         _ = mode
         return None
 
+    def set_hil_relay_enabled(self, enabled: bool) -> None:
+        """Enable or disable backend HIL input relay when supported."""
+        _ = enabled
+        return None
+
+    def hil_status(self) -> HilStatus:
+        """Return the backend's current HIL capability and activation state."""
+        return HilStatus(supported=False, error="Transport does not support HIL")
+
+    def start_hil_control(self, mode: str) -> HilStatus:
+        """Request HIL takeover and return the confirmed backend state."""
+        _ = mode
+        return self.hil_status()
+
+    def stop_hil_control(self) -> HilStatus:
+        """Stop HIL takeover and return the confirmed backend state."""
+        return self.hil_status()
+
+    def get_hil_frame(self) -> Observation | None:
+        """Return the next state/action frame produced during HIL takeover."""
+        return None
+
     def record_collection_gripper_action(
         self, group_name: str, value: float, stamp: Any | None = None
     ) -> None:
@@ -219,7 +250,8 @@ class GroupTopics:
     remaining fields are backend-specific and stay None where unused:
     ``sim_command_topic`` (ros1 sim visualizer), ``eef_state_topic`` (PoseStamped
     EEF feedback, both backends), ``gripper_state_topic`` / ``gripper_command_topic``
-    (ros2 split-gripper topics).
+    (ros2 split-gripper topics), and ``hil_input_topic`` (operator joint input
+    relayed only while HIL takeover is active).
     """
 
     state_topic: str
@@ -228,6 +260,7 @@ class GroupTopics:
     eef_state_topic: str | None = None
     gripper_state_topic: str | None = None
     gripper_command_topic: str | None = None
+    hil_input_topic: str | None = None
 
 
 def resolve_topics(topics_cfg: Any) -> tuple[dict[str, str], dict[str, GroupTopics]]:
@@ -348,6 +381,7 @@ class _RosTransportBase(TransportBridge):
     _freshness: StreamFreshness
     _image_rate: ImageRateTracker
     _camera_deques: dict[str, collections.deque]
+    _collection_camera_deques: dict[str, collections.deque]
     _collection_qpos_deques: dict[str, collections.deque]
     _collection_eef_deques: dict[str, collections.deque]
     _collection_action_qpos_deques: dict[str, collections.deque]
@@ -478,10 +512,14 @@ class _RosTransportBase(TransportBridge):
             if camera.observation_key in cameras or camera.name in cameras
         ]
 
+    def _collection_capture_camera_deques(self) -> dict[str, collections.deque]:
+        return getattr(self, "_collection_camera_deques", self._camera_deques)
+
     def _collection_images(self, frame_time: float) -> dict[str, np.ndarray] | None:
         images: dict[str, np.ndarray] = {}
+        camera_deques = self._collection_capture_camera_deques()
         for camera in self._collection_camera_specs():
-            deque = self._camera_deques.get(camera.name)
+            deque = camera_deques.get(camera.name)
             if deque is None:
                 return None
             msg = self._collection_latest_msg(deque, frame_time)
@@ -495,11 +533,12 @@ class _RosTransportBase(TransportBridge):
 
     def _collection_frame_time(self) -> float | None:
         primary_camera = self._collection_cfg.primary_camera
+        camera_deques = self._collection_capture_camera_deques()
         if primary_camera:
             for camera in self._robot.observation_schema.cameras:
                 if primary_camera not in (camera.observation_key, camera.name):
                     continue
-                deque = self._camera_deques.get(camera.name)
+                deque = camera_deques.get(camera.name)
                 if deque is None or len(deque) == 0:
                     return None
                 return self._stamp_to_sec(deque[-1])
@@ -507,7 +546,7 @@ class _RosTransportBase(TransportBridge):
 
         required: list[collections.deque] = []
         for camera in self._collection_camera_specs():
-            deque = self._camera_deques.get(camera.name)
+            deque = camera_deques.get(camera.name)
             if deque is None:
                 return None
             required.append(deque)
@@ -600,15 +639,13 @@ class _RosTransportBase(TransportBridge):
 
     def _collection_raw_streams(self) -> list[tuple[str, str, str, Any, collections.deque]]:
         streams: list[tuple[str, str, str, Any, collections.deque]] = []
-        columns = self._config.collection.schema.columns
-        if not columns:
-            return self._raw_episode_streams()
-
+        camera_deques = self._collection_capture_camera_deques()
         for camera in self._collection_camera_specs():
-            deque = self._camera_deques.get(camera.name)
+            deque = camera_deques.get(camera.name)
             if deque is not None:
                 streams.append(("image", camera.observation_key, camera.name, camera, deque))
 
+        columns = self._config.collection.schema.columns
         if "qpos" in columns:
             for group in self._robot.actuator_groups:
                 deque = self._collection_qpos_deques.get(group.name)
@@ -629,23 +666,6 @@ class _RosTransportBase(TransportBridge):
                 deque = self._collection_action_eef_deques.get(group.name)
                 if deque is not None:
                     streams.append(("vector", "action_eef", group.name, group, deque))
-        return streams
-
-    def _raw_episode_streams(self) -> list[tuple[str, str, str, Any, collections.deque]]:
-        streams: list[tuple[str, str, str, Any, collections.deque]] = []
-        for camera in self._robot.observation_schema.cameras:
-            deque = self._camera_deques.get(camera.name)
-            if deque is not None:
-                streams.append(("image", camera.observation_key, camera.name, camera, deque))
-        group_state_deques = getattr(self, "_group_state_deques", {})
-        for group_name in self._robot.observation_schema.state_composition:
-            deque = group_state_deques.get(group_name)
-            if deque is None:
-                continue
-            group = next(
-                group for group in self._robot.actuator_groups if group.name == group_name
-            )
-            streams.append(("vector", "state_qpos", group.name, group, deque))
         return streams
 
     def _collection_raw_context_streams(self) -> list[tuple[str, collections.deque]]:
@@ -694,11 +714,7 @@ class _RosTransportBase(TransportBridge):
                     batch.images.setdefault(field, []).append(
                         CollectionRawSample(
                             timestamp=self._stamp_to_sec(msg),
-                            value=CollectionRawImage(
-                                lambda camera_name=source.name, raw_msg=msg: (
-                                    self._decode_image_msg(camera_name, raw_msg)
-                                )
-                            ),
+                            value=self._deferred_collection_image(source.name, msg),
                         )
                     )
                 continue
@@ -718,6 +734,13 @@ class _RosTransportBase(TransportBridge):
                     CollectionRawSample(timestamp=timestamp, value=value.astype(np.float32))
                 )
         return batch
+
+    def _deferred_collection_image(self, camera_name: str, msg: Any) -> CollectionRawImage:
+        return CollectionRawImage(
+            lambda camera_name=camera_name, raw_msg=msg: self._decode_image_msg(
+                camera_name, raw_msg
+            )
+        )
 
     def _collection_fresh_messages(
         self,
@@ -771,6 +794,8 @@ class _RosTransportBase(TransportBridge):
 
     def acquire_collection_raw(self) -> RawCollectionSnapshot | None:
         """O(1) capture of raw collection stream messages since the previous tick."""
+        if not self._config.collection.schema.columns:
+            return None
         streams = self._collection_raw_streams()
         if not streams:
             return None
@@ -812,8 +837,15 @@ class _RosTransportBase(TransportBridge):
                     snapshot_timestamp,
                 )
 
+        batch: CollectionRawBatch | None = None
+
         def decode_raw() -> CollectionRawBatch:
-            return self._collection_raw_batch_from_msgs(new_messages, pinned_streams)
+            nonlocal batch
+            if batch is None:
+                batch = self._collection_raw_batch_from_msgs(new_messages, pinned_streams)
+                new_messages.clear()
+                pinned_streams.clear()
+            return batch
 
         return RawCollectionSnapshot(
             timestamp=snapshot_timestamp,

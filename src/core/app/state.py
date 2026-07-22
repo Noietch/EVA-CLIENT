@@ -16,7 +16,7 @@ import numpy as np
 
 from core.config import ConfigDict
 from core.recorder.episode import EpisodeLogger
-from core.types import RolloutInterventionSegment
+from core.types import RawCollectionSnapshot, RolloutInterventionSegment
 from policy_client.base import PolicyClient
 from robots.base import Robot
 from strategy.base_strategy import BaseInferStrategy
@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from tqdm import tqdm
 
     from core.app.collection_capture import CollectionCaptureRunner
+    from critic_client.runner import CriticRunner
     from transport.dataset import DatasetTransport
 
 logger = logging.getLogger(__name__)
@@ -149,6 +150,8 @@ class RuntimeState:
         last_collection_timestamp: Timestamp of the last recorded collection frame.
         collection_capture_runner: Background raw snapshot capture loop for the
             active collection episode.
+        rollout_raw_snapshots: Raw snapshots buffered for policy rollout recording.
+        rollout_policy_actions: Policy actions captured independently from raw snapshots.
         collection_replay_qpos: qpos sequence loaded for collection replay.
         collection_replay_episode: Episode index currently loaded for collection replay.
         collection_replay_started: Monotonic timestamp when collection replay started.
@@ -206,6 +209,10 @@ class RuntimeState:
         rollout_intervention_active_segment: Temporary segment being captured.
         rollout_intervention_segments: Accepted segments saved with the rollout.
         rollout_intervention_next_segment_index: Monotonic segment id inside the rollout.
+        rollout_intervention_enabled: Runtime HIL ON/OFF gate for rollout halt.
+        rollout_exclusion_active: Reason and source timestamp for a rollout interval
+            excluded until the first policy action is published.
+        rollout_exclusions: Completed excluded intervals removed when saving rollout data.
         hil_control_mode: HIL relay mode, either "absolute" or "relative".
     """
 
@@ -224,6 +231,12 @@ class RuntimeState:
     collection_teleop_active: bool = False
     last_collection_timestamp: float | None = None
     collection_capture_runner: CollectionCaptureRunner | None = None
+    rollout_raw_snapshots: queue.Queue[RawCollectionSnapshot] = dataclasses.field(
+        default_factory=queue.Queue
+    )
+    rollout_policy_actions: list[
+        tuple[float, np.ndarray, np.ndarray | None, np.ndarray | None, np.ndarray | None]
+    ] = dataclasses.field(default_factory=list)
     collection_replay_qpos: np.ndarray | None = None
     collection_replay_episode: int | None = None
     collection_replay_started: float = 0.0
@@ -260,7 +273,32 @@ class RuntimeState:
         default_factory=list
     )
     rollout_intervention_next_segment_index: int = 0
+    rollout_intervention_enabled: bool = False
+    rollout_exclusion_active: tuple[str, float] | None = None
+    rollout_exclusions: list[tuple[str, float, float]] = dataclasses.field(default_factory=list)
     hil_control_mode: str = "absolute"
+    rl_active: bool = False
+    rl_selected_policy_slot: int | None = None
+    rl_selected_critic_slot: int | None = None
+    rl_critic_runner: CriticRunner | None = None
+    rl_critic_action_horizon: int | None = None
+    rl_critic_error: str = ""
+    rl_pending_critic_observation: dict | None = None
+    rl_pending_critic_action: np.ndarray | None = None
+    rl_pending_critic_timestamp: float | None = None
+    rl_live_samples: list[tuple[float, np.ndarray, np.ndarray, str, int]] = (
+        dataclasses.field(default_factory=list)
+    )
+    rl_replay_source: DatasetTransport | None = None
+    rl_replay_sources: list[DatasetTransport] = dataclasses.field(default_factory=list)
+    rl_replay_lock: threading.Lock = dataclasses.field(default_factory=threading.Lock)
+    rl_replay_generation: int = 0
+    rl_replay_dataset_dir: str = ""
+    rl_replay_episode_id: int | None = None
+    rl_replay_timestamps: list[float] = dataclasses.field(default_factory=list)
+    # Shared ConsoleContext, set by start_console_server. The ZMQ control channel reads
+    # it so external callers see the exact tab/arm/collect state the web console does.
+    console_ctx: Any | None = None
     # EVAL-tab INIT panel: when init_qpos is set, the arm's reset target becomes this
     # recorded start pose instead of robot.initial_qpos (home). init_ready latches once
     # the operator clicks DONE, gating RUN until the arm is positioned + gripper set.

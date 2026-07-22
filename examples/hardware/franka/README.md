@@ -12,7 +12,7 @@ frames, and consumes EVA `WireAction` commands.
 
 - `node.py`: real Franka ZMQ execution node — action/observation loop.
 - `robot.py`: dual Franka hardware adapter backed by `franky`.
-- `camera.py`: Orbbec camera adapter backed by the Orbbec Python SDK.
+- `camera.py`: Orbbec SDK camera source.
 - `run_hardware.sh`: launcher for the real node (IPs, disabled arms, env).
 - `fake_node.py` / `run_fake_node.sh`: software-only fake node over ZMQ
   (built on `examples/hardware/fake_common.py`); needs no SDK and no real arms.
@@ -36,26 +36,28 @@ pyzmq
 msgpack / msgpack-numpy
 ```
 
-The `franka` extra installs the project's default real robot control dependency:
+The `franka` extra adds the real robot control dependency:
 
 ```text
 franky-control==1.1.1
 ```
 
-Before running on real hardware, verify that the `franky-control` version
-matches the Franka hardware version and robot software stack. Use the Franka
-compatibility matrix to check the required robot system image and libfranka
-versions, then follow the franky installation guide:
+`pyorbbecsdk` is not declared in `pyproject.toml`. It is expected to already be
+available on the real Franka robot host that has the Orbbec SDK installed. The
+node imports `pyorbbecsdk` lazily, so deployments with all Orbbec cameras
+disabled can still start without that package.
 
-- Franka compatibility matrix: <https://frankarobotics.github.io/docs/compatibility.html>
-- franky installation instructions: <https://github.com/TimSchneider42/franky#installing-franky>
-
-For Orbbec cameras, install the Orbbec Python SDK from:
-<https://github.com/orbbec/pyorbbecsdk>.
+```bash
+bash examples/hardware/franka/run_hardware.sh \
+  --disabled-camera cam_high \
+  --disabled-camera cam_left_wrist \
+  --disabled-camera cam_right_wrist
+```
 
 ## Run the Fake Node (no hardware)
 
-For development without arms or camera drivers, the fake node speaks the same ZMQ protocol:
+For development without arms or the SDK, the fake node speaks the same ZMQ
+protocol:
 
 ```bash
 bash examples/hardware/franka/run_fake_node.sh
@@ -78,30 +80,26 @@ config, so its state/camera layout matches the real one.
 
 ## Run on Real Hardware
 
-Start the hardware node on the robot host:
+Run it on the robot host before starting EVA:
 
 ```bash
 bash examples/hardware/franka/run_hardware.sh
-```
-
-Then start EVA from another shell:
-
-```bash
 eva --config configs/01_deploy/dual_franka/openpi_qpos.py --web-port 8080
 ```
 
-### EVA Config
+By default `run_hardware.sh` reads `configs/01_deploy/dual_franka/openpi_qpos.py`
+and starts the known Franka workcell Orbbec cameras that are not listed in
+`transport.disabled_cameras`:
 
-By default `run_hardware.sh` reads `configs/01_deploy/dual_franka/openpi_qpos.py`.
-Use `EVA_CONFIG` if the EVA config lives elsewhere:
-
-```bash
-EVA_CONFIG=/path/to/config.yaml bash examples/hardware/franka/run_hardware.sh
+```text
+cam_high        <- Orbbec Femto Bolt CL8R353009V
+cam_right_wrist <- Orbbec Gemini 335 CP053530008B
+cam_left_wrist  <- optional, no default serial
 ```
 
-### Arm IPs
+Use `EVA_CONFIG=/path/to/config.yaml` if the EVA config lives elsewhere.
 
-Default robot IPs:
+Default arm IPs:
 
 - `left_arm`: `172.16.0.2`
 - `right_arm`: `172.16.0.3`
@@ -112,8 +110,6 @@ Override them with environment variables:
 LEFT_ROBOT_IP=172.16.0.12 RIGHT_ROBOT_IP=172.16.0.13 \
   bash examples/hardware/franka/run_hardware.sh
 ```
-
-### Disabled Arms
 
 If one arm is intentionally absent or powered off, disable it explicitly so the
 node does not try to connect or command it:
@@ -162,10 +158,16 @@ The 16D action/state layout is:
 
 ## Cameras
 
-The hardware node starts the Orbbec cameras that are not listed in
-`transport.disabled_cameras`. Default camera keys and serial numbers are
-configured in `DEFAULT_FRANKA_ORBBEC_CAMERAS` in
-`examples/hardware/franka/camera.py`.
+The Orbbec camera selector can be either a serial number or `index:N`.
+CLI camera specs override defaults or add optional cameras. Resolution and FPS
+are shared across configured cameras:
+
+```bash
+bash examples/hardware/franka/run_hardware.sh \
+  --orbbec-camera cam_left_wrist=<LEFT_WRIST_SERIAL> \
+  --orbbec-resolution 1280x720 \
+  --orbbec-fps 30
+```
 
 If a camera is not connected, add its key to the EVA config so both EVA and the
 hardware node skip it:
@@ -179,7 +181,7 @@ transport:
 
 ## Teleop Collection
 
-Not yet implemented. `node.py` currently handles only deploy —
+Not yet implemented (还在整理). `node.py` currently handles only deploy —
 publishing observations and executing actions — and does not respond to EVA's
 collection start/stop control actions or read any leader device.
 `configs/02_collection/dual_franka.py` defines the recording schema (cameras,

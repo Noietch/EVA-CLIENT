@@ -2,6 +2,9 @@
 import { $, LIVE, RT_COLORS, S } from "./core.js";
 import { replayStop, seekReplay } from "./replay.js";
 
+let interventionTrackSource = null;
+let interventionTrackCache = "";
+
 function buildLiveDims() {
     const da = LIVE.action.length ? LIVE.action[0].length : 0;
     const ds = LIVE.state.length ? LIVE.state[0].length : 0;
@@ -47,21 +50,44 @@ function drawLiveCharts() {
     const ts = LIVE.replayMode && LIVE.playTime.length === LIVE.n ? LIVE.playTime : LIVE.timestamp;
     drawSeriesChart($("chart-action-cv"), LIVE.action, ts, LIVE.dimsOnA, cursor);
     drawSeriesChart($("chart-state-cv"), LIVE.state, ts, LIVE.dimsOnS, cursor);
+    const critic = LIVE.criticValue.map((value) => [value]);
+    const criticCursor = LIVE.criticValue.length ? LIVE.criticValue.length - 1 : null;
+    drawSeriesChart(
+      $("chart-critic-cv"), critic, LIVE.criticTimestamp, { 0: true }, criticCursor, ["#E8590C"], LIVE.criticSource,
+    );
+    const latest = $("critic-latest");
+    if (latest) {
+      latest.textContent = LIVE.criticValue.length
+        ? Number(LIVE.criticValue[LIVE.criticValue.length - 1]).toFixed(4)
+        : "—";
+    }
     if (S.chartModalWhich) {
-      const mat = S.chartModalWhich === "a" ? LIVE.action : LIVE.state;
-      const dimsOn = S.chartModalWhich === "a" ? LIVE.dimsOnA : LIVE.dimsOnS;
-      drawSeriesChart($("chart-modal-cv"), mat, ts, dimsOn, cursor);
+      const isCritic = S.chartModalWhich === "c";
+      const mat = isCritic ? critic : (S.chartModalWhich === "a" ? LIVE.action : LIVE.state);
+      const dimsOn = isCritic ? { 0: true } : (S.chartModalWhich === "a" ? LIVE.dimsOnA : LIVE.dimsOnS);
+      drawSeriesChart(
+        $("chart-modal-cv"),
+        mat,
+        isCritic ? LIVE.criticTimestamp : ts,
+        dimsOn,
+        isCritic ? criticCursor : cursor,
+        isCritic ? ["#E8590C"] : RT_COLORS,
+        isCritic ? LIVE.criticSource : null,
+      );
     }
   }
 
 function openChartModal(which) {
     S.chartModalWhich = which;
+    const isCritic = which === "c";
     const nd = which === "a"
       ? (LIVE.action.length ? LIVE.action[0].length : 0)
-      : (LIVE.state.length ? LIVE.state[0].length : 0);
+      : (which === "s" ? (LIVE.state.length ? LIVE.state[0].length : 0) : 0);
     const dimsOn = which === "a" ? LIVE.dimsOnA : LIVE.dimsOnS;
-    $("chart-modal-title").textContent = which === "a" ? "ACTION" : "STATE";
-    renderLiveDims("chart-modal-dims", nd, dimsOn, which === "a" ? "a" : "s");
+    $("chart-modal-title").textContent = which === "a" ? "ACTION" : (which === "s" ? "STATE" : "CRITIC VALUE");
+    $("chart-modal-all").style.display = isCritic ? "none" : "";
+    if (isCritic) $("chart-modal-dims").innerHTML = "";
+    else renderLiveDims("chart-modal-dims", nd, dimsOn, which === "a" ? "a" : "s");
     $("chart-modal").classList.add("on");
     requestAnimationFrame(drawLiveCharts);
   }
@@ -80,6 +106,30 @@ function setScrubValue(frac) {
     range.style.setProperty("--pct", pct.toFixed(2) + "%");
   }
 
+function interventionTrackGradient() {
+    if (interventionTrackSource === LIVE.intervention) return interventionTrackCache;
+    interventionTrackSource = LIVE.intervention;
+    if (LIVE.intervention.length !== LIVE.n || !LIVE.intervention.some(Boolean)) {
+      interventionTrackCache = "";
+      return interventionTrackCache;
+    }
+    const stops = [];
+    let start = 0;
+    let active = !!LIVE.intervention[0];
+    for (let i = 1; i <= LIVE.n; i++) {
+      const next = i < LIVE.n ? !!LIVE.intervention[i] : !active;
+      if (i < LIVE.n && next === active) continue;
+      const from = (start / LIVE.n * 100).toFixed(3);
+      const to = (i / LIVE.n * 100).toFixed(3);
+      const color = active ? "var(--intervention)" : "var(--policy)";
+      stops.push(`${color} ${from}%`, `${color} ${to}%`);
+      start = i;
+      active = next;
+    }
+    interventionTrackCache = `linear-gradient(to right, ${stops.join(", ")})`;
+    return interventionTrackCache;
+  }
+
 function updateScrubText() {
     const idx = LIVE.replayMode && LIVE.cursorFrac != null
       ? LIVE.cursorFrac
@@ -91,22 +141,48 @@ function updateScrubText() {
     $("scrub-time").textContent = t.toFixed(1) + "s";
   }
 
+function rlReplayScrubLocked() {
+    const rl = (S.STATUS && S.STATUS.rl) || {};
+    return LIVE.replayMode && LIVE.replayOwner === "rl"
+      && (S.rlCritic !== "" || rl.selected_critic_slot != null);
+  }
+
 function updateScrub() {
     const range = $("scrub-range"), stateEl = $("scrub-state"), bar = $("stage-scrub");
     if (!range) return;
+    const stage = $("stage");
+    if (stage && S.ACTIVE_TAB === "collect") {
+      stage.classList.toggle("no-series", LIVE.replayOwner !== "collect");
+    } else if (stage && S.ACTIVE_TAB === "debug") {
+      stage.classList.toggle("no-series", LIVE.replayOwner !== "rollout");
+    }
     range.max = String(Math.max(LIVE.n - 1, 0));
     range.step = "0.01";   // fine step so the thumb can glide between frames
+    const controlTrack = interventionTrackGradient();
+    range.style.setProperty("--control-track", controlTrack);
+    range.classList.toggle("has-intervention", !!controlTrack);
     // The local play button only makes sense in REPLAY mode; a REAL run owns the cursor
     // (chase-the-hardware), so hide it there to keep playback authority with the robot.
     const playBtn = $("scrub-play");
     if (playBtn) {
       const realRun = S.STATUS && S.STATUS.session_status === "running" && S.STATUS.cli_mode === "real";
-      playBtn.style.display = (LIVE.replayMode && !LIVE.replayLoading && !realRun) ? "" : "none";
+      const hardwareOwnsCursor = LIVE.replayOwner === "replay" && realRun;
+      playBtn.style.display = (LIVE.replayMode && !LIVE.replayLoading && !hardwareOwnsCursor)
+        ? ""
+        : "none";
+    }
+    const returnLive = $("review-return-live");
+    if (returnLive) {
+      returnLive.style.display = ["collect", "rollout", "rl"].includes(LIVE.replayOwner) ? "" : "none";
     }
     if (LIVE.replayMode) {
       bar.classList.remove("live");
-      stateEl.textContent = "REPLAY";
-      range.disabled = LIVE.n === 0;
+      stateEl.textContent = LIVE.replayOwner === "collect"
+        ? `REVIEW · EPISODE ${S.collectReplayEpisode}`
+        : (LIVE.replayOwner === "rollout"
+            ? `REVIEW · EPISODE ${S.rolloutSaveEpisode}`
+            : (LIVE.replayOwner === "rl" ? `REVIEW · EPISODE ${S.rlQcEpisode}` : "REPLAY"));
+      range.disabled = LIVE.replayLoading || LIVE.n === 0 || rlReplayScrubLocked();
       setScrubValue(LIVE.cursorFrac != null ? LIVE.cursorFrac : LIVE.cursor);
     } else if (LIVE.following) {
       bar.classList.add("live");
@@ -124,6 +200,7 @@ function updateScrub() {
   }
 
 function onScrubInput(v) {
+    if (rlReplayScrubLocked()) return;
     const i = Math.max(0, Math.min(Math.round(parseFloat(v) || 0), LIVE.n - 1));
     if (LIVE.replayMode) {
       if (LIVE.playing) replayStop();   // manual scrub takes over from the play clock
@@ -139,6 +216,9 @@ function onScrubInput(v) {
 function resetLiveSeries() {
     LIVE.timestamp = []; LIVE.playTime = []; LIVE.action = []; LIVE.state = []; LIVE.n = 0;
     LIVE.actionNames = []; LIVE.stateNames = [];
+    LIVE.controlSource = []; LIVE.intervention = []; LIVE.interventionSegmentIndex = [];
+    LIVE.criticTimestamp = []; LIVE.criticValue = []; LIVE.criticSource = [];
+    LIVE.criticGeneration += 1;
     LIVE.dimsOnA = {}; LIVE.dimsOnS = {}; LIVE.dimsBuilt = false;
     LIVE.following = true; LIVE.cursor = 0;
     renderLiveDims("chart-action-dims", 0, LIVE.dimsOnA, "a");
@@ -157,7 +237,7 @@ function timeAtIndex(ts, idx) {
     return t0 + (t1 - t0) * a;
   }
 
-function drawSeriesChart(cv, mat, ts, dimsOn, cursorIdx) {
+function drawSeriesChart(cv, mat, ts, dimsOn, cursorIdx, colors = RT_COLORS, source = null) {
     const rect = cv.getBoundingClientRect();
     if (rect.width < 2 || rect.height < 2) return;
     const dpr = Math.min(window.devicePixelRatio, 2);
@@ -173,8 +253,13 @@ function drawSeriesChart(cv, mat, ts, dimsOn, cursorIdx) {
       ctx.fillText(n ? "no dims" : "awaiting data…", pad + 6, H / 2);
       return;
     }
+    const maxDrawPoints = Math.max(64, Math.floor(W * 2));
+    const stride = Math.max(1, Math.ceil((n - 1) / Math.max(1, maxDrawPoints - 1)));
+    const indices = [];
+    for (let i = 0; i < n; i += stride) indices.push(i);
+    if (indices[indices.length - 1] !== n - 1) indices.push(n - 1);
     let lo = Infinity, hi = -Infinity;
-    for (const d of dims) for (let i = 0; i < n; i++) { const v = mat[i][d]; if (v < lo) lo = v; if (v > hi) hi = v; }
+    for (const d of dims) for (const i of indices) { const v = mat[i][d]; if (v < lo) lo = v; if (v > hi) hi = v; }
     if (!isFinite(lo)) { lo = -1; hi = 1; }
     if (hi - lo < 1e-6) { hi += 1; lo -= 1; }
     const t0 = ts[0], t1 = ts[n - 1] || (t0 + 1);
@@ -182,18 +267,55 @@ function drawSeriesChart(cv, mat, ts, dimsOn, cursorIdx) {
     const Y = (v) => H - pad - (H - 2 * pad) * (v - lo) / (hi - lo);
     ctx.fillStyle = "rgba(0,0,0,0.45)"; ctx.font = "9px monospace";
     ctx.fillText(hi.toFixed(2), 2, pad + 4); ctx.fillText(lo.toFixed(2), 2, H - pad);
+    const elapsed = Math.max(0, t1 - t0);
+    ctx.save();
+    ctx.strokeStyle = "rgba(0,0,0,0.08)";
+    ctx.fillStyle = "rgba(0,0,0,0.45)";
+    ctx.font = "9px monospace";
+    ctx.textAlign = "center";
+    for (const ratio of [0, 0.5, 1]) {
+      const x = pad + (W - 2 * pad) * ratio;
+      ctx.beginPath(); ctx.moveTo(x, pad); ctx.lineTo(x, H - pad); ctx.stroke();
+      ctx.fillText(`${(elapsed * ratio).toFixed(1)}s`, x, H - 4);
+    }
+    ctx.restore();
+    drawSourceBands(ctx, ts, source, n, pad, W, H, t0, t1, X);
     ctx.save();
     ctx.globalAlpha = 0.6;           // soften the trace lines; legend chips stay vivid
     ctx.lineJoin = "round";
     for (const d of dims) {
-      ctx.strokeStyle = RT_COLORS[d % RT_COLORS.length]; ctx.lineWidth = 1.4; ctx.beginPath();
-      for (let i = 0; i < n; i++) { const x = X(ts[i]), y = Y(mat[i][d]); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }
+      ctx.strokeStyle = colors[d % colors.length]; ctx.lineWidth = 1.4; ctx.beginPath();
+      indices.forEach((i, point) => {
+        const x = X(ts[i]), y = Y(mat[i][d]);
+        point ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+      });
       ctx.stroke();
     }
     ctx.restore();
     if (cursorIdx != null && cursorIdx >= 0 && cursorIdx < n) {
       const xc = X(timeAtIndex(ts, cursorIdx));
       ctx.strokeStyle = "rgba(0,0,0,0.5)"; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(xc, pad); ctx.lineTo(xc, H - pad); ctx.stroke();
+    }
+  }
+
+function drawSourceBands(ctx, ts, source, n, pad, W, H, t0, t1, X) {
+    if (!source || source.length !== n) return;
+    let start = 0;
+    let active = source[0];
+    for (let i = 1; i <= n; i++) {
+      const next = i < n ? source[i] : null;
+      if (i < n && next === active) continue;
+      const from = Number(ts[start]);
+      const to = i < n ? Number(ts[i]) : t1;
+      const color = active === "intervention"
+        ? "rgba(255, 77, 0, 0.10)"
+        : (active === "policy" ? "rgba(37, 99, 235, 0.07)" : "");
+      if (color && Number.isFinite(from) && Number.isFinite(to) && to >= from) {
+        ctx.fillStyle = color;
+        ctx.fillRect(X(from), pad, Math.max(0, X(to) - X(from)), H - 2 * pad);
+      }
+      start = i;
+      active = next;
     }
   }
 export { buildLiveDims, closeChartModal, drawLiveCharts, drawSeriesChart, liveDimsAll, onScrubInput, openChartModal, resetLiveSeries, updateScrub };

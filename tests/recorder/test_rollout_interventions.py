@@ -45,7 +45,7 @@ def _logger(
         dataset_keys=ConfigDict(
             state_key="observations.state.qpos",
             eef_key="observations.state.eef",
-            action_key="action",
+            action_key="action.qpos",
             video_keys={},
         ),
         async_save=False,
@@ -68,7 +68,7 @@ def _read_jsonl(path):
 
 def test_rollout_save_merges_intervention_into_episode_table(tmp_path):
     logger = _logger(tmp_path)
-    keys = ConfigDict(state_key="observations.state.qpos", action_key="action")
+    keys = ConfigDict(state_key="observations.state.qpos", action_key="action.qpos")
     segment = RolloutInterventionSegment(
         segment_index=0,
         start_policy_frame_index=1,
@@ -101,12 +101,17 @@ def test_rollout_save_merges_intervention_into_episode_table(tmp_path):
         np.array([0.6, 0.6, 0.6], dtype=np.float32),
         timestamp=0.1,
     )
+    logger.record_step(
+        _obs(np.array([0.7, 0.7, 0.7], dtype=np.float32), 4),
+        np.array([0.8, 0.8, 0.8], dtype=np.float32),
+        timestamp=0.4,
+    )
     logger.set_rollout_intervention_segments([segment])
 
     assert logger.end_episode() is True
 
     rollout_table = pq.read_table(str(tmp_path / "data" / "chunk-000" / "episode_000000.parquet"))
-    assert rollout_table.num_rows == 4
+    assert rollout_table.num_rows == 5
     np.testing.assert_allclose(
         np.array(rollout_table.column(keys.state_key).to_pylist(), dtype=np.float32),
         np.array(
@@ -115,6 +120,7 @@ def test_rollout_save_merges_intervention_into_episode_table(tmp_path):
                 [0.1, 0.1, 0.1],
                 [1.0, 1.1, 1.2],
                 [3.0, 3.1, 3.2],
+                [0.7, 0.7, 0.7],
             ],
             dtype=np.float32,
         ),
@@ -127,18 +133,41 @@ def test_rollout_save_merges_intervention_into_episode_table(tmp_path):
                 [0.6, 0.6, 0.6],
                 [2.0, 2.1, 2.2],
                 [4.0, 4.1, 4.2],
+                [0.8, 0.8, 0.8],
             ],
             dtype=np.float32,
         ),
     )
-    assert rollout_table.column("intervention").to_pylist() == [False, False, True, True]
-    assert rollout_table.column("intervention_segment_index").to_pylist() == [-1, -1, 0, 0]
+    assert rollout_table.column("intervention").to_pylist() == [
+        False,
+        False,
+        True,
+        True,
+        False,
+    ]
+    assert rollout_table.column("intervention_segment_index").to_pylist() == [
+        -1,
+        -1,
+        0,
+        0,
+        -1,
+    ]
+    assert rollout_table.column("control_source").to_pylist() == [
+        "policy",
+        "policy",
+        "intervention",
+        "intervention",
+        "policy",
+    ]
     assert not (tmp_path / "interventions").exists()
 
     episodes = _read_jsonl(tmp_path / "meta" / "episodes.jsonl")
     assert episodes[0]["has_intervention"] is True
     assert episodes[0]["intervention_segments"] == 1
     assert episodes[0]["intervention_frames"] == 2
+    assert episodes[0]["intervention_ranges"] == [
+        {"segment_index": 0, "start_frame": 2, "end_frame": 3}
+    ]
 
 
 def test_rollout_intervention_video_uses_episode_writer_when_size_set(tmp_path, monkeypatch):
@@ -191,3 +220,53 @@ def test_rollout_intervention_video_uses_episode_writer_when_size_set(tmp_path, 
     assert episode_shapes == [[(120, 160, 3), (120, 160, 3), (120, 160, 3)]]
     intervention_dir = "/" + "inter" + "ventions/"
     assert not any(intervention_dir in path for path in frame_shapes)
+
+
+def test_rollout_save_removes_explicit_policy_warmup_interval(tmp_path, monkeypatch):
+    written_frames: list[int] = []
+
+    class _Writer:
+        def append_data(self, frame: np.ndarray) -> None:
+            written_frames.append(int(frame[0, 0, 0]))
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(episode_module.imageio, "get_writer", lambda *args, **kwargs: _Writer())
+    logger = _logger(tmp_path)
+    state = np.zeros(_DIM, dtype=np.float32)
+    logger.start_episode("pick")
+    for frame_index in range(6):
+        logger.record_step(
+            _obs(state + frame_index, frame_index),
+            state + frame_index,
+            timestamp=frame_index / 10.0,
+        )
+    logger.set_episode_meta(
+        excluded_ranges=[
+            {
+                "reason": "policy_warmup",
+                "start_time": 0.1,
+                "end_time": 0.4,
+            }
+        ]
+    )
+
+    assert logger.end_episode() is True
+
+    table = pq.read_table(tmp_path / "data" / "chunk-000" / "episode_000000.parquet")
+    assert table.num_rows == 4
+    np.testing.assert_allclose(table.column("capture_time").to_pylist(), [0.0, 0.1, 0.4, 0.5])
+    np.testing.assert_allclose(table.column("timestamp").to_pylist(), [0.0, 0.1, 0.2, 0.3])
+    assert written_frames == [0, 1, 4, 5]
+    episode = _read_jsonl(tmp_path / "meta" / "episodes.jsonl")[0]
+    assert episode["excluded_frames"] == 2
+    assert episode["excluded_ranges"] == [
+        {
+            "reason": "policy_warmup",
+            "start_time": 0.1,
+            "end_time": 0.4,
+            "duration_sec": 0.3,
+            "removed_frames": 2,
+        }
+    ]

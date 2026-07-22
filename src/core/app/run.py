@@ -5,6 +5,7 @@ entry that wires transport, robot, and policy together. Commands arrive over HTT
 
 from __future__ import annotations
 
+import gc
 import json
 import logging
 import queue
@@ -13,11 +14,15 @@ import time
 
 import numpy as np
 
-from core.app.console.server import start_console_server
+from core.app.cli import maybe_start_inference_cli
+from core.app.console.server import build_console_context, start_console_server
+from core.app.control_channel import maybe_start_control_channel
 from core.app.handlers import (
+    ROLLOUT_STEP_MAX_RAW_SNAPSHOTS,
     _anchor_buffer_to_current_qpos,
     accept_rollout_intervention_segment,
     begin_rollout_save_episode,
+    build_policy_observation,
     clear_replay,
     collect_cancel,
     collect_start,
@@ -26,6 +31,7 @@ from core.app.handlers import (
     collect_stop,
     collect_stop_teleop,
     connect_policy,
+    discard_rollout_episode,
     discard_rollout_intervention_segment,
     disconnect_policy,
     enable_default_recording,
@@ -60,16 +66,26 @@ from core.app.handlers import (
     set_gripper_open_close,
     set_manual_qpos,
     set_replay_fps,
+    start_collection_capture,
     start_episode,
     start_inference_loop,
     start_rollout_intervention,
+    stop_collection_capture,
     stop_rollout_intervention,
     toggle_gripper_immediate,
     update_inference_params,
 )
 from core.app.operator_control import (
-    maybe_start_operator_button_listener,
-    resolve_operator_event,
+    maybe_start_operator_action_listener,
+    resolve_operator_action,
+)
+from core.app.rl import (
+    build_rl_active_config,
+    close_rl_critic,
+    close_rl_workspace,
+    connect_rl_critic,
+    reset_rl_series,
+    submit_rl_critic,
 )
 from core.app.state import (
     RuntimeState,
@@ -90,7 +106,40 @@ logger = logging.getLogger(__name__)
 # Halt an active run if the frontend hasn't polled /api/status within this window.
 # The poll cadence is ~250ms, so this tolerates dozens of missed polls before tripping.
 CLIENT_WATCHDOG_TIMEOUT_S = 3.0
-_HIL_CONTROL_MODES = frozenset({"absolute", "relative"})
+
+# Headless heartbeat cadence. While RUNNING we log every beat (proof of life); while
+# idle we log far less often so a parked headless process doesn't spam the log.
+_HEARTBEAT_INTERVAL_S = 5.0
+_HEARTBEAT_IDLE_INTERVAL_S = 30.0
+
+
+def _maybe_log_heartbeat(
+    runtime: RuntimeState,
+    session: SessionState,
+    last_heartbeat: float,
+) -> float:
+    """Emit a throttled one-line status heartbeat; return the (possibly new) timestamp.
+
+    Running: every _HEARTBEAT_INTERVAL_S. Idle: every _HEARTBEAT_IDLE_INTERVAL_S. This
+    is the headless "still alive" signal that the browser's status poll used to give.
+    """
+    running = session.status is SessionStatus.RUNNING
+    interval = _HEARTBEAT_INTERVAL_S if running else _HEARTBEAT_IDLE_INTERVAL_S
+    now = time.monotonic()
+    if now - last_heartbeat < interval:
+        return last_heartbeat
+    logger.info(
+        "[HB] mode=%s status=%s phase=%s step=%d chunk=%d infer=%.1fms policy=%s error=%s",
+        session.mode.value,
+        session.status.value,
+        runtime.web_phase,
+        session.step_index,
+        session.chunk_index,
+        session.last_infer_ms,
+        "ok" if runtime.policy is not None else "none",
+        session.last_error or "-",
+    )
+    return now
 
 
 def _target_loop_rate_hz(
@@ -180,6 +229,7 @@ def _activate_ckpt_slot(
     """
     ckpt = eval_cfg.checkpoints[runtime.ckpt_order[slot]]
     import copy
+
     config = copy.deepcopy(ckpt.config)
     config.eval = eval_cfg
     runtime.active_config = config
@@ -220,13 +270,6 @@ def _should_start_eval_ssh(eval_cfg: ConfigDict | None) -> bool:
     return bool(ssh.get("host") and ssh.get("user") and ssh.get("port", 0) > 0)
 
 
-def _should_start_deploy_ssh(config: ConfigDict) -> bool:
-    if config.eval:
-        return False
-    ssh = config.transport.get("ssh") or {}
-    return bool(ssh.get("host") and ssh.get("user") and ssh.get("port", 0) > 0)
-
-
 def _format_inference_strategy_choices(config: ConfigDict) -> str:
     return "  ".join(f"{i + 1}.{k}" for i, k in enumerate(config.inference_strategies))
 
@@ -247,6 +290,13 @@ def _select_only_inference_strategy_if_needed(
         session,
     )
     return True
+
+
+def _queue_rl_setup_after_reset(runtime: RuntimeState) -> None:
+    if not runtime.rl_active or runtime.rl_selected_policy_slot is None or is_replay(runtime):
+        return
+    assert runtime.command_queue is not None
+    runtime.command_queue.put("web:rl_setup")
 
 
 def _handle_web_command(
@@ -332,6 +382,74 @@ def _handle_web_command(
         stop_rollout_intervention(config, runtime, session, required=False)
         discard_rollout_intervention_segment(runtime)
         select_task(arg, config, session, runtime)
+        return
+
+    if verb == "rl_select_task":
+        rl_cfg = config.rl
+        if rl_cfg is None or arg not in rl_cfg.tasks:
+            session.last_error = f"Unknown RL task: {arg}"
+            return
+        session.selected_task = arg
+        session.last_error = ""
+        reset_session_progress(session)
+        runtime.rl_selected_critic_slot = None
+        close_rl_critic(runtime)
+        return
+
+    if verb == "rl_select_policy":
+        slot = int(arg)
+        rl_cfg = config.rl
+        if rl_cfg is None or slot < 0 or slot >= len(rl_cfg.policies):
+            session.last_error = f"RL policy slot is out of range: {slot}"
+            return
+        runtime.rl_selected_policy_slot = slot
+        session.is_setup_done = False
+        session.last_error = ""
+        runtime.rl_selected_critic_slot = None
+        close_rl_critic(runtime)
+        return
+
+    if verb == "rl_select_critic":
+        slot = int(arg)
+        rl_cfg = config.rl
+        if rl_cfg is None or slot < 0 or slot >= len(rl_cfg.critics):
+            session.last_error = f"RL critic slot is out of range: {slot}"
+            return
+        if not session.is_setup_done or runtime.active_config is None:
+            session.last_error = "RL Critic can only be selected after setup"
+            return
+        runtime.rl_selected_critic_slot = slot
+        if not connect_rl_critic(runtime.active_config, runtime, slot):
+            logger.warning("RL Critic unavailable; continuing without Critic telemetry")
+        session.last_error = ""
+        return
+
+    if verb == "rl_setup":
+        policy_slot = runtime.rl_selected_policy_slot
+        if not runtime.rl_active:
+            session.last_error = "RL tab is not active"
+            return
+        if session.selected_task is None or policy_slot is None:
+            session.last_error = "Select an RL task and Policy before setup"
+            return
+        if session.is_setup_done and runtime.policy is not None:
+            logger.info("[RL_SETUP] already complete; ignoring duplicate setup request")
+            return
+        active = build_rl_active_config(config, policy_slot)
+        runtime.active_config = active
+        config = active
+        reset_session_progress(session)
+        select_mode(SessionMode(config.rl.cli_mode), config, session, runtime)
+        runtime.selected_inference_strategy_key = None
+        strategy = str(config.rl.inference_strategy)
+        if strategy not in config.inference_strategies:
+            session.last_error = f"RL inference strategy is not configured: {strategy}"
+            return
+        select_inference_strategy(strategy, config, runtime, session)
+        if not connect_policy(config, runtime, session, force_reconnect=True):
+            session.last_error = runtime.last_policy_error
+            return
+        run_setup(config, runtime, session, fail_fast=True)
         return
 
     if verb == "start":
@@ -483,26 +601,12 @@ def _handle_web_command(
     # --- console verbs (eval-independent; drive the debug mainline directly) ---
 
     if verb == "operator_action":
-        intent, _, source = arg.partition(":")
-        resolved_command = resolve_operator_event(
-            config,
+        action, _, source = arg.partition(":")
+        resolved_command = resolve_operator_action(
             runtime,
             session,
-            intent=intent,
+            action,
             source=source or "ui",
-        )
-        if resolved_command is not None:
-            handle_command(resolved_command, config, runtime, session)
-        return
-
-    if verb == "operator_button":
-        button, _, source = arg.partition(":")
-        resolved_command = resolve_operator_event(
-            config,
-            runtime,
-            session,
-            button=button,
-            source=source or "cat",
         )
         if resolved_command is not None:
             handle_command(resolved_command, config, runtime, session)
@@ -593,12 +697,19 @@ def _handle_web_command(
         runtime.collection_replay_qpos = None
         runtime.collection_replay_episode = None
         if getattr(runtime, "rollout_intervention_active", False):
+            resume_started = time.monotonic()
             segment = getattr(runtime, "rollout_intervention_active_segment", None)
             if segment is not None and segment.invalid_reason:
                 session.last_error = segment.invalid_reason
                 return
+            warmup_exclusion_start = time.time()
+            if segment is not None and segment.frames:
+                last_intervention_time = segment.frames[-1].timestamp
+                if last_intervention_time is not None:
+                    warmup_exclusion_start = float(last_intervention_time)
             if not stop_rollout_intervention(config, runtime, session, required=True):
                 return
+            runtime.rollout_exclusion_active = ("policy_warmup", warmup_exclusion_start)
             if not accept_rollout_intervention_segment(runtime, session):
                 return
             runtime.rollout_save_ready = False
@@ -607,8 +718,20 @@ def _handle_web_command(
             session.chunk_index = 0
             if not run_warmup_and_start(config, runtime, session):
                 return
+            if runtime.collection_capture_runner is None:
+                start_collection_capture(
+                    runtime,
+                    fps=config.inference_cfg.publish_rate,
+                    max_raw_snapshots_per_tick=ROLLOUT_STEP_MAX_RAW_SNAPSHOTS,
+                )
             session.run_start_time = time.monotonic()
             set_status(session, SessionStatus.RUNNING, reason="resume after teleop intervention")
+            logger.info(
+                "[HIL_RESUME] path=warmup transition_ms=%.1f step=%d exclusion_start=%.6f",
+                (time.monotonic() - resume_started) * 1000.0,
+                session.step_index,
+                warmup_exclusion_start,
+            )
             return
         if (
             session.mode in (SessionMode.REAL, SessionMode.SIM)
@@ -637,6 +760,8 @@ def _handle_web_command(
             return
         # Continuous run for real/sim — reuse the 's' dispatch (sets RUNNING; the main
         # loop then publishes). For STEP 's' instead previews one chunk.
+        if runtime.rl_active and session.step_index == 0:
+            reset_rl_series(runtime)
         _dispatch_run(config, runtime, session)
         return
 
@@ -649,7 +774,7 @@ def _handle_web_command(
         _dispatch_halt(config, runtime, session)
         if was_running and not is_replay(runtime):
             mark_rollout_save_ready(runtime, "stop")
-            if session.mode is SessionMode.REAL and config.rollout.intervention.enabled:
+            if session.mode is SessionMode.REAL and runtime.rollout_intervention_enabled:
                 start_rollout_intervention(config, runtime, session)
         return
 
@@ -657,52 +782,80 @@ def _handle_web_command(
         if not getattr(runtime, "rollout_intervention_active", False):
             session.last_error = "No active rollout intervention to abandon"
             return
+        segment = runtime.rollout_intervention_active_segment
+        exclusion_start = time.time()
+        if segment is not None and segment.start_time is not None:
+            exclusion_start = float(segment.start_time)
+        elif segment is not None and segment.frames:
+            first_intervention_time = segment.frames[0].timestamp
+            if first_intervention_time is not None:
+                exclusion_start = float(first_intervention_time)
         if not stop_rollout_intervention(config, runtime, session, required=True):
             return
+        runtime.rollout_exclusion_active = ("abandoned_intervention", exclusion_start)
         if not rollback_rollout_intervention(config, runtime, session):
             discard_rollout_intervention_segment(runtime)
             return
         discard_rollout_intervention_segment(runtime)
+        runtime.transport.clear_collection_backlog()
         runtime.rollout_save_ready = False
         runtime.rollout_save_reason = ""
         session.action_chunk = None
         session.chunk_index = 0
         if not run_warmup_and_start(config, runtime, session):
             return
+        if runtime.collection_capture_runner is None:
+            start_collection_capture(
+                runtime,
+                fps=config.inference_cfg.publish_rate,
+                max_raw_snapshots_per_tick=ROLLOUT_STEP_MAX_RAW_SNAPSHOTS,
+            )
         session.run_start_time = time.monotonic()
         set_status(session, SessionStatus.RUNNING, reason="resume after abandoned intervention")
         return
 
-    if verb == "rollout_intervention_mode":
-        if arg not in _HIL_CONTROL_MODES:
-            allowed = ", ".join(sorted(_HIL_CONTROL_MODES))
-            session.last_error = f"Unsupported HIL control mode {arg!r}; expected: {allowed}"
-            return
+    if verb == "rollout_intervention_enabled":
+        enabled = arg not in {"", "0", "false", "off"}
         if runtime.rollout_intervention_active:
-            session.last_error = "Stop or resume the active intervention before changing HIL mode"
+            session.last_error = "Stop or resume the active intervention before changing HIL"
             return
-        setter = getattr(runtime.transport, "set_hil_control_mode", None)
-        if setter is None:
-            session.last_error = "Transport does not support HIL control mode"
-            return
-        setter(arg)
-        runtime.hil_control_mode = arg
+        runtime.rollout_intervention_enabled = enabled
         session.last_error = ""
         return
 
     if verb == "console_reset":
+        if getattr(runtime, "rollout_intervention_active", False):
+            session.last_error = "Continue or abandon the active intervention before reset"
+            logger.warning("Ignored reset during active rollout intervention")
+            return
         stop_rollout_intervention(config, runtime, session, required=False)
         discard_rollout_intervention_segment(runtime)
         if not is_replay(runtime) and session.mode in (SessionMode.REAL, SessionMode.SIM):
-            mark_rollout_save_ready(runtime, "reset")
+            discard_rollout_episode(runtime)
+        if runtime.rl_active:
+            reset_rl_series(runtime)
+            runtime.rl_selected_critic_slot = None
+            close_rl_critic(runtime)
         run_reset(config, runtime, session)
+        _queue_rl_setup_after_reset(runtime)
         return
 
     if verb == "rollout_save":
         if getattr(runtime, "rollout_intervention_active", False):
             session.last_error = "Continue or abandon the active intervention before saving"
             return
-        save_rollout_episode(runtime, session)
+        if session.status is SessionStatus.RUNNING and session.mode in (
+            SessionMode.REAL,
+            SessionMode.SIM,
+        ):
+            _dispatch_halt(config, runtime, session)
+            mark_rollout_save_ready(runtime, "save")
+        if save_rollout_episode(runtime, session):
+            if runtime.rl_active:
+                runtime.rl_selected_critic_slot = None
+                close_rl_critic(runtime)
+            run_reset(config, runtime, session)
+            _queue_rl_setup_after_reset(runtime)
         return
 
     if verb == "rollout_stop":
@@ -725,6 +878,15 @@ def _handle_web_command(
         # would publish the recorded trajectory instead of querying the policy. Unmount it
         # whenever the destination isn't the REPLAY tab (clear_replay also reconnects the
         # policy that load_replay_dataset dropped).
+        was_rl_active = runtime.rl_active
+        if arg != "rl" and was_rl_active:
+            close_rl_workspace(runtime)
+            runtime.active_config = None
+            runtime.policy = None
+            runtime.policy_metadata = None
+            config = runtime.active_config or config
+        if arg == "rl":
+            runtime.rl_active = True
         if arg != "replay" and runtime.replay_source is not None:
             clear_replay(config, session, runtime)
         if arg != "collect":
@@ -746,6 +908,8 @@ def _handle_web_command(
         set_status(session, SessionStatus.UNSET, reason="tab switch")
         if arg == "collect" and getattr(runtime, "collection_teleop_armed", False):
             collect_start_teleop(config, runtime, session)
+        elif arg == "rl" and config.rl is not None:
+            session.mode = SessionMode(config.rl.cli_mode)
         elif arg == "eval" and config.eval is not None:
             # EVAL runs on the mode fixed by the config (cli_mode, normally REAL); the
             # generic SELECT reset below would force the operator to re-pick a mode that
@@ -882,8 +1046,9 @@ def _dispatch_run(config: ConfigDict, runtime: RuntimeState, session: SessionSta
         if not run_warmup_and_start(config, runtime, session):
             return
         if not is_replay(runtime):
-            start_episode(runtime, session)
             begin_rollout_save_episode(config, runtime, session)
+            if runtime.rollout_episode_logger is None:
+                start_episode(runtime, session)
         session.run_start_time = time.monotonic()
         set_status(session, SessionStatus.RUNNING, reason="start")
         return
@@ -936,12 +1101,18 @@ def run(
     config: ConfigDict,
     web_port: int,
     config_path: str | None = None,
+    headless: bool = False,
 ) -> None:
     """Main entry. Runs the unified console web server.
 
     The console hosts every workflow as a tab (DEBUG/REPLAY/COLLECT/MANUAL/EVAL/RESULT).
     When ``config.eval`` is set, the EVAL/RESULT tabs activate and — if it carries
     checkpoints — blind multi-ckpt SSH forwarding + result sync + bootstrap kick in.
+
+    In ``headless`` mode no web server is started: the HTTP console, 3D scene, camera
+    streams and episode preview are all skipped. Control comes solely over the ZMQ
+    control channel (forced on), and status is surfaced via structured logs + a
+    periodic heartbeat — for low-power / simulator-driven evaluation.
     """
     robot = ROBOT_REGISTRY.build(config.robot.type)
     if config.robot.initial_qpos is not None:
@@ -1002,7 +1173,7 @@ def run(
     prompt_ready.set()
     runtime.command_queue = command_queue
     runtime.prompt_ready = prompt_ready
-    maybe_start_operator_button_listener(config, runtime)
+    maybe_start_operator_action_listener(config, runtime)
     loop_rate = transport.create_rate(config.inference_cfg.publish_rate)
     loop_rate_hz = config.inference_cfg.publish_rate
 
@@ -1019,20 +1190,83 @@ def run(
         if eval_cfg.ssh.get("remote_sync_dir"):
             local_root = resolve_output_dir(config, config_path).parent
             result_syncer = FUNCTIONS.build("result_sync", eval_cfg.ssh, local_root)
-    elif _should_start_deploy_ssh(config):
-        # Deploy (non-eval): forward the policy port to the remote inference server.
-        free_local_ports([web_port, config.policy.port])
-        ssh_proc = FUNCTIONS.build("ssh_forward", config.transport.ssh, [config.policy.port])
     else:
         free_local_ports([web_port])
 
-    start_console_server(config, runtime, session, port=web_port, output_dir=output_dir)
-    logger.info("Console web server started on port %d", web_port)
+    if headless:
+        # Low-power path: no HTTP server, no 3D scene / camera streams / preview.
+        # Build a light ConsoleContext so the ZMQ control-channel queries still work,
+        # and force the control channel on (it is the ONLY control entry with no web).
+        build_console_context(
+            config,
+            runtime,
+            session,
+            output_dir=output_dir,
+            with_scene=False,
+            with_obs_reader=False,
+            with_preview=False,
+        )
+        channel_cfg = config.get("control_channel") or {}
+        if not channel_cfg.get("enabled", False):
+            # Headless with no channel would be uncontrollable — force it on.
+            config.control_channel = ConfigDict(
+                {**dict(channel_cfg), "enabled": True}
+            )
+        maybe_start_control_channel(config, runtime)
+        ch = config.control_channel
+        disp_host = "127.0.0.1" if ch.get("host") == "0.0.0.0" else ch.get("host", "127.0.0.1")
+        logger.info(
+            "HEADLESS mode: web disabled; control entry = ZMQ tcp://%s:%d",
+            disp_host,
+            int(ch.get("port", 5757)),
+        )
+        # Second entry: an in-process interactive CLI when stdin is a terminal. Both it
+        # and the ZMQ channel feed the same command_queue, so a human at the terminal and
+        # a simulator over ZMQ drive the same session. Skipped when backgrounded/piped.
+        # Select REAL synchronously here (before the CLI banner) so its [CMD]/[STATUS]
+        # logs land now, not asynchronously on top of the freshly-printed "eva> " prompt.
+        select_mode(SessionMode.REAL, config, session, runtime)
+        maybe_start_inference_cli(config, runtime, session)
+    else:
+        start_console_server(config, runtime, session, port=web_port, output_dir=output_dir)
+        logger.info("Console web server started on port %d", web_port)
+        # Optional ZMQ control channel — must start AFTER the console server so it can
+        # share runtime.console_ctx. No-op unless control_channel.enabled.
+        maybe_start_control_channel(config, runtime)
     # An eval config bootstraps the eval state machine (connect ckpt policy, select
     # mode/strategy); plain console configs stay idle until the operator drives a tab.
     if config.eval:
         command_queue.put("web:bootstrap")
 
+    gc_started: dict[int, float] = {}
+
+    def log_gc_timing(phase: str, info: dict[str, int]) -> None:
+        generation = int(info["generation"])
+        now = time.monotonic()
+        if phase == "start":
+            gc_started[generation] = now
+            return
+        started = gc_started.pop(generation)
+        elapsed_ms = (now - started) * 1000.0
+        if elapsed_ms >= 20.0:
+            logger.warning(
+                "[GC_TIMING] generation=%d duration_ms=%.1f collected=%d "
+                "uncollectable=%d raw_snapshots=%d policy_actions=%d",
+                generation,
+                elapsed_ms,
+                int(info["collected"]),
+                int(info["uncollectable"]),
+                runtime.rollout_raw_snapshots.qsize(),
+                len(runtime.rollout_policy_actions),
+            )
+
+    gc.callbacks.append(log_gc_timing)
+    last_running_tick: float | None = None
+    rl_critic_sync_waiting = False
+    # Headless heartbeat: no browser polls /api/status, so a periodic one-line status
+    # log is the "still alive" signal. State transitions already log via set_status /
+    # set_phase; this fills the gaps during a long RUNNING stretch.
+    last_heartbeat = 0.0
     try:
         while session.status is not SessionStatus.EXIT and not transport.is_shutdown():
             # Multi-ckpt: a switch_ckpt swaps in the active ckpt's full config.
@@ -1054,6 +1288,17 @@ def run(
                 session.mode in (SessionMode.REAL, SessionMode.SIM)
                 and session.status is SessionStatus.RUNNING
             ):
+                running_tick = time.monotonic()
+                if (
+                    last_running_tick is not None
+                    and running_tick - last_running_tick >= 0.1
+                ):
+                    logger.warning(
+                        "[CONTROL_TIMING] stage=main_loop_gap duration_ms=%.1f step=%d",
+                        (running_tick - last_running_tick) * 1000.0,
+                        session.step_index,
+                    )
+                last_running_tick = running_tick
                 # Client-liveness watchdog: the frontend polls /api/status every ~250ms,
                 # so a stale timestamp means the operator's browser crashed or the network
                 # dropped. Halt the run rather than keep commanding the real robot blind.
@@ -1063,9 +1308,61 @@ def run(
                     _dispatch_halt(effective, runtime, session)
                 else:
                     publish_next_action(effective, runtime, session)
+            else:
+                last_running_tick = None
 
             if getattr(runtime, "rollout_intervention_active", False):
-                record_rollout_intervention_step(runtime, session)
+                if record_rollout_intervention_step(runtime, session):
+                    segment = runtime.rollout_intervention_active_segment
+                    assert segment is not None and segment.frames
+                    frame = segment.frames[-1]
+                    critic_frame = frame
+                    required_camera_keys = {
+                        camera.observation_key
+                        for camera in runtime.robot.observation_schema.cameras
+                    }
+                    if not required_camera_keys.issubset(frame.images):
+                        critic_frame = runtime.transport.get_frame()
+                        if critic_frame is None or not required_camera_keys.issubset(
+                            critic_frame.images
+                        ):
+                            if not rl_critic_sync_waiting:
+                                logger.warning(
+                                    "[RL_CRITIC] waiting for synchronized intervention "
+                                    "observation with cameras=%s",
+                                    sorted(required_camera_keys),
+                                )
+                            rl_critic_sync_waiting = True
+                            critic_frame = None
+                        else:
+                            if rl_critic_sync_waiting:
+                                logger.info(
+                                    "[RL_CRITIC] synchronized intervention observation resumed"
+                                )
+                            rl_critic_sync_waiting = False
+                    else:
+                        rl_critic_sync_waiting = False
+                    action = (
+                        frame.action_eef
+                        if effective.inference_cfg.action_space.is_eef()
+                        else frame.action_qpos
+                    )
+                    if action is None:
+                        raise ValueError("Intervention frame is missing the configured action")
+                    if critic_frame is not None:
+                        observation = build_policy_observation(
+                            critic_frame,
+                            session.selected_task or "",
+                            effective,
+                            runtime,
+                        )
+                        submit_rl_critic(
+                            runtime,
+                            observation,
+                            np.asarray(action, dtype=np.float32)[None, :],
+                            "intervention",
+                            timestamp=frame.timestamp,
+                        )
 
             if session.mode is SessionMode.COLLECT and session.status is SessionStatus.RUNNING:
                 collect_step(effective, runtime)
@@ -1082,9 +1379,15 @@ def run(
                 set_phase(runtime, "ready")
                 runtime.needs_pre_start_reset = True
 
+            if headless:
+                last_heartbeat = _maybe_log_heartbeat(runtime, session, last_heartbeat)
+
             loop_rate.sleep()
     finally:
+        gc.callbacks.remove(log_gc_timing)
+        close_rl_workspace(runtime)
         stop_rollout_intervention(config, runtime, session, required=False)
+        stop_collection_capture(runtime)
         discard_rollout_intervention_segment(runtime)
         end_episode(runtime)
         if runtime.episode_logger is not None:

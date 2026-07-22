@@ -19,6 +19,8 @@ eval_cfg = dict(
             port=9000,
         ),
     ],
+    shuffle_ckpts=False,
+    shuffle_seed=42,
     enable_ssh_forward=False,
     tasks=[
         dict(

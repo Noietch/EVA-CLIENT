@@ -24,8 +24,19 @@ from robots.base import (
     RobotVisConfig,
     VisPart,
 )
-from robots.kinematics.pyroki import PyrokiDualArm, PyrokiSingleArm
 from robots.kinematics.solver import IkError, build_initial_seed
+
+try:
+    from robots.kinematics.pyroki import PyrokiDualArm, PyrokiSingleArm
+except ImportError as exc:
+    _PYROKI_IMPORT_ERROR: ImportError | None = exc
+
+    class PyrokiDualArm:  # type: ignore[no-redef]
+        pass
+
+    PyrokiSingleArm = None  # type: ignore[assignment]
+else:
+    _PYROKI_IMPORT_ERROR = None
 
 
 class AgibotKinematicsSolver(PyrokiDualArm):
@@ -193,6 +204,10 @@ class AgibotG2(Robot):
         )
 
     def build_kinematics(self, **kwargs: Any) -> Any:
+        if _PYROKI_IMPORT_ERROR is not None:
+            raise ImportError("Agibot G2 kinematics requires the PyRoki/JAX dependencies") from (
+                _PYROKI_IMPORT_ERROR
+            )
         return AgibotKinematicsSolver(
             urdf=self.URDF,
             arm_joints=(self.LEFT_ARM, self.RIGHT_ARM),

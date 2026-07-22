@@ -1,10 +1,10 @@
 // run.js: run lifecycle / status / UI-mode / panel orchestration (run);
 // config & tuning panel (config); manual sim/connection control (manual).
-import { $, LIVE, RUN_CONTROLS, S, apiPost } from "./core.js";
+import { $, LIVE, RUN_CONTROLS, S, apiPost, setCommandMetadata } from "./core.js";
 import { updateScrub } from "./charts.js";
 import { collectEnabled, dotClass, renderCollect, renderRolloutSave, loadAnnotation } from "./collect.js";
 import { applyEvalStatus, evalCfg, evalEnabled } from "./eval.js";
-import { maybeSyncReplayPlayer } from "./replay.js";
+import { maybeSyncReplayPlayer, loadMountedReplaySeries, replayStop } from "./replay.js";
 
 // ===== run =====
 
@@ -107,12 +107,30 @@ function applyRunControlStatus(ids, s) {
     $(ids.stepReset).disabled = false;
   }
 
+function syncHilInterventionEnabled(status) {
+    const toggle = $("hil-intervention-enable");
+    const label = $("hil-intervention-label");
+    if (!toggle || !label) return;
+    const enabled = !!status.rollout_intervention_enabled;
+    const supported = !!status.hil_supported;
+    toggle.checked = enabled;
+    toggle.disabled = !supported || !!status.rollout_intervention_active;
+    label.textContent = supported ? (enabled ? "HIL ON" : "HIL OFF") : "HIL N/A";
+    toggle.title = status.hil_error || "Enable rollout HIL intervention";
+    const gate = toggle.closest(".collect-arm-gate");
+    if (gate) {
+      gate.classList.toggle("on", enabled);
+      gate.classList.toggle("disabled", toggle.disabled);
+    }
+  }
+
 function applyStatus(s) {
     S.STATUS = s;
     // RUN follows the live tail; any other state unlocks the scrub bar for history
     // review. Re-entering RUN re-arms following and keeps accumulating. REPLAY owns
     // its own scrub clock (replayMode), so the live-follow toggle is bypassed there.
-    const isRunning = s.session_status === "running";
+    const isRunning = s.session_status === "running" ||
+      (S.ACTIVE_TAB === "rl" && !!s.rollout_intervention_active);
     if (!LIVE.replayMode) {
       if (isRunning && !LIVE.following) { LIVE.following = true; updateScrub(); }
       else if (!isRunning && LIVE.following) { LIVE.following = false; updateScrub(); }
@@ -123,7 +141,7 @@ function applyStatus(s) {
     // Policy link is only meaningful when inference is actually used (a strategy is
     // selected, or the EVAL tab is open). REPLAY/MANUAL/COLLECT never hit the policy
     // server, so the chip stays hidden there instead of showing a misleading DOWN.
-    const policyRelevant = !!s.selected_strategy || S.ACTIVE_TAB === "eval";
+    const policyRelevant = !!s.selected_strategy || ["eval", "rl"].includes(S.ACTIVE_TAB);
     const gbPolicy = $("gb-policy");
     if (gbPolicy) {
       gbPolicy.style.display = policyRelevant ? "" : "none";
@@ -166,7 +184,7 @@ function applyStatus(s) {
     mark("mode-list", "mode", modeMark);
     mark("replay-mode-list", "mode", modeMark);
     mark("strategy-list", "strategy", s.selected_strategy);
-    syncHilControlMode(s);
+    syncHilInterventionEnabled(s);
     updateGuide();
 
     // canvas readout
@@ -341,8 +359,7 @@ function updateGuide() {
     const epTask = $("replay-episode-task");
     if (epTask) epTask.style.display = S.ACTIVE_TAB === "replay" ? "" : "none";
     const collectStatus = $("collect-replay-status");
-    const collectReplay = s.collection_replay || {};
-    const collectReplayActive = S.reviewKind === "collect" || collectReplay.active;
+    const collectReplayActive = S.reviewKind === "collect" && LIVE.replayOwner === "collect";
     const showCollectStatus = S.ACTIVE_TAB === "collect" &&
       (S.collectReplayEpisode != null || collectReplayActive);
     if (collectStatus) collectStatus.style.display = showCollectStatus ? "" : "none";
@@ -350,6 +367,44 @@ function updateGuide() {
     // it on the MANUAL tab, so hide it everywhere else.
     const mConn = $("manual-conn");
     if (mConn && S.ACTIVE_TAB !== "manual") mConn.style.display = "none";
+    if (S.ACTIVE_TAB === "rl") {
+      const hasTask = !!$("rl-task-list").value;
+      const hasPolicy = !!$("rl-policy-list").value;
+      const setup = !!s.is_setup_done && !!s.policy_connected;
+      const running = s.session_status === "running";
+      const intervention = !!s.rollout_intervention_active;
+      const saved = !!(s.rollout && (s.rollout.episodes || []).length);
+      setPanel("rl-panel-task", hasTask ? "done" : "active");
+      setPanel("rl-panel-models", hasPolicy ? "done" : (hasTask ? "active" : "pending"));
+      setPanel("rl-panel-data", "done");
+      setPanel("rl-panel-setup", s.last_error && !setup ? "error" : (setup ? "done" : (hasTask && hasPolicy ? "active" : "pending")));
+      setPanel("rl-panel-rollout", setup ? (running || intervention ? "active" : "done") : "pending");
+      setPanel("rl-panel-saved", saved ? "done" : (setup ? "active" : "pending"));
+      setPanel("rl-panel-gripper", setup ? "done" : "pending");
+      const bar = $("guidebar");
+      if (bar) bar.classList.toggle("done", saved && !running && !intervention);
+      const guideStep = !hasTask || !hasPolicy ? 1 : (!setup ? 2 : (running || intervention ? 4 : 3));
+      $("gb-step").textContent = `STEP ${guideStep}/4`;
+      if (!hasTask || !hasPolicy) {
+        $("gb-msg").innerHTML = "Select <b>task and Policy</b>";
+        $("gb-hint").textContent = "Critic is optional and adds value telemetry when available";
+      } else if (!setup) {
+        $("gb-msg").innerHTML = s.setup_stage
+          ? `SETUP · <b>${String(s.setup_stage).toUpperCase()}</b>`
+          : "SETUP starts <b>automatically</b>";
+        $("gb-hint").textContent = s.last_error || "Critic is optional";
+      } else if (intervention) {
+        $("gb-msg").innerHTML = "HIL intervention is <b>recording</b>";
+        $("gb-hint").textContent = "ACCEPT resumes rollout; ABANDON rolls the segment back";
+      } else if (running) {
+        $("gb-msg").innerHTML = "Rollout is <b>running</b>";
+        $("gb-hint").textContent = "The Critic curve and rollout/intervention track update live";
+      } else {
+        $("gb-msg").innerHTML = saved ? "Saved episode is ready for <b>REPLAY</b>" : "Ready to <b>RUN</b>";
+        $("gb-hint").textContent = "Stop, save, then select an episode to replay";
+      }
+      return;
+    }
     if (S.ACTIVE_TAB === "collect") {
       const collect = s.collect || {};
       const enabled = collectEnabled();
@@ -475,11 +530,14 @@ let replayDefaultKeys = {};
 
 let replayActionCandidates = [];
 
+let replayInspectedDir = "";
+
 function renderPromptButtons(listId) {
     const host = $(listId);
     if (!host) return;
     host.innerHTML = "";
     if (host.tagName === "SELECT") {
+      setCommandMetadata(host, "web:switch_task:{task}", true);
       const placeholder = document.createElement("option");
       placeholder.value = "";
       placeholder.disabled = true;
@@ -506,6 +564,7 @@ function renderPromptButtons(listId) {
       const b = document.createElement("button");
       b.className = "seg";
       b.dataset.prompt = p;
+      setCommandMetadata(b, "web:switch_task:{task}", true);
       b.innerHTML = `<span class="mk">${String(i + 1).padStart(2, "0")}</span><span>${p || "∅ empty"}</span>`;
       b.onclick = () => {
         mark(listId, "prompt", p);
@@ -526,6 +585,7 @@ function renderCollectTaskButtons() {
     if (!host) return;
     host.innerHTML = "";
     if (host.tagName === "SELECT") {
+      setCommandMetadata(host, "web:select_collect_task:{task}", true);
       const placeholder = document.createElement("option");
       placeholder.value = "";
       placeholder.disabled = true;
@@ -554,6 +614,7 @@ function renderCollectTaskButtons() {
       const b = document.createElement("button");
       b.className = "seg";
       b.dataset.prompt = p;
+      setCommandMetadata(b, "web:select_collect_task:{task}", true);
       b.innerHTML = `<span class="mk">${String(i + 1).padStart(2, "0")}</span><span>${p || "∅ empty"}</span>`;
       b.onclick = () => {
         collectTask = p;
@@ -575,11 +636,13 @@ function renderModeButtons(listId) {
     const MODE_LABEL = { real: "REAL", sim: "SIM", step: "STEP", manual: "MANUAL" };
     // MANUAL is its own top-level tab now; keep it out of run-mode pickers.
     const modes = S.CFG.modes.filter((m) => m !== "manual");
+    setCommandMetadata(host, "web:select_mode:{mode}", true);
     host.style.setProperty("--mode-n", modes.length);
     modes.forEach((m) => {
       const b = document.createElement("button");
       b.className = "seg";
       b.dataset.mode = m;
+      setCommandMetadata(b, "web:select_mode:{mode}", true);
       b.innerHTML = `<span>${MODE_LABEL[m] || m}</span>`;
       b.onclick = () => {
         mark(listId, "mode", m);
@@ -591,38 +654,6 @@ function renderModeButtons(listId) {
     });
     // default selection: SIM (fall back to the first available mode)
     mark(listId, "mode", modes.includes("sim") ? "sim" : modes[0]);
-  }
-
-function renderHilControlMode() {
-    const host = $("hil-control-mode");
-    if (!host || !S.CFG) return;
-    host.innerHTML = "";
-    const modes = S.CFG.hil_control_modes || ["absolute", "relative"];
-    host.style.setProperty("--mode-n", modes.length);
-    modes.forEach((mode) => {
-      const b = document.createElement("button");
-      b.className = "seg";
-      b.dataset.hil = mode;
-      b.innerHTML = `<span>${mode === "relative" ? "REL" : "ABS"}</span>`;
-      b.onclick = () => {
-        if (S.STATUS && S.STATUS.rollout_intervention_active) return;
-        mark("hil-control-mode", "hil", mode);
-        S.STATUS.hil_control_mode = mode;
-        apiPost("/api/rollout_intervention_mode", { mode });
-      };
-      host.appendChild(b);
-    });
-    syncHilControlMode(S.STATUS || {});
-  }
-
-function syncHilControlMode(status) {
-    const host = $("hil-control-mode");
-    if (!host || !S.CFG) return;
-    const mode = status.hil_control_mode || S.CFG.hil_control_mode || "absolute";
-    mark("hil-control-mode", "hil", mode);
-    host.querySelectorAll("button").forEach((b) => {
-      b.disabled = !!status.rollout_intervention_active;
-    });
   }
 
 const GRIP_STATE = {};
@@ -648,6 +679,7 @@ function buildGripperCaps(host) {
       const sw = document.createElement("div");
       sw.className = "grip-sw";
       sw.dataset.grip = control.side;
+      setCommandMetadata(sw, "web:gripper:{side}:{state}:{lock}", true);
       const isOpen = GRIP_STATE[control.side] === "open";
       sw.classList.toggle("on", isOpen);
       sw.innerHTML = `<span class="grip-knob">${isOpen ? "open" : "close"}</span>`;
@@ -699,6 +731,23 @@ function renderEvalGripper() {
     buildGripperCaps($("eval-gripper-buttons"));
   }
 
+function renderRlGripper(enabled) {
+    const host = $("rl-gripper-buttons");
+    const state = $("rl-gripper-state");
+    if (!host || !state) return;
+    if (!enabled) {
+      host.innerHTML = "";
+      host.dataset.ready = "";
+      state.style.display = "";
+      return;
+    }
+    if (host.dataset.ready !== "1") {
+      buildGripperCaps(host);
+      host.dataset.ready = "1";
+    }
+    state.style.display = "none";
+  }
+
 function renderConfig() {
     $("t-robot").textContent = S.CFG.robot_type || "—";
     renderGripperButtons();
@@ -708,7 +757,6 @@ function renderConfig() {
     renderCollectTaskButtons();
     renderModeButtons("mode-list");
     renderModeButtons("replay-mode-list");
-    renderHilControlMode();
     // Pick the default run mode on the backend if nothing is chosen yet. Under eval the
     // mode is dictated by the config's cli_mode (e.g. REAL for table_tennis): push that so
     // a directly-entered eval runs on the real arm, instead of the SIM fallback below
@@ -720,7 +768,7 @@ function renderConfig() {
         if (S.STATUS) S.STATUS.cli_mode = wantMode;
         apiPost("/api/select_mode", { mode: wantMode });
       }
-    } else if ((!S.STATUS || !S.STATUS.cli_mode || S.STATUS.cli_mode === "select") && S.CFG.modes.includes("sim")) {
+    } else if (S.ACTIVE_TAB !== "rl" && (!S.STATUS || !S.STATUS.cli_mode || S.STATUS.cli_mode === "select") && S.CFG.modes.includes("sim")) {
       // SIM is the default run mode for the plain console tabs.
       if (S.STATUS) S.STATUS.cli_mode = "sim";
       apiPost("/api/select_mode", { mode: "sim" });
@@ -729,6 +777,7 @@ function renderConfig() {
     $("strategy-h").style.display = "block";
     $("strategy-list").style.display = "block";
     const sl = $("strategy-list"); sl.innerHTML = "";
+    setCommandMetadata(sl, "web:select_strategy:{strategy}", true);
     const placeholder = document.createElement("option");
     placeholder.value = "";
     placeholder.disabled = true;
@@ -813,6 +862,7 @@ function renderReplayConfig() {
         state: r.keys.state.default || "observation.state",
       };
       S.replayVideoKeys = inferReplayVideoKeys(r.keys.image.candidates, r.keys.image.default);
+      replayInspectedDir = dir;
       S.STATUS.replay_n_episodes = r.n_episodes;
       $("replay-episode-n").textContent = r.n_episodes;
       return true;
@@ -835,9 +885,8 @@ function renderReplayConfig() {
         return;
       }
       if (!dir) { $("replay-episode-task").textContent = "✗ fill the dataset dir first"; return; }
-      // One-click load: inspect the dataset (keys + episode count) then load the episode.
-      if (!(await inspectDataset(dir))) return;
-      const total = S.STATUS.replay_n_episodes || 0;
+      const hasInspectedDir = replayInspectedDir === dir;
+      const total = hasInspectedDir ? (S.STATUS.replay_n_episodes || 0) : 0;
       if (total > 0 && id >= total) {
         $("replay-episode-task").textContent = `✗ episode id must be in 0..${total - 1}`;
         return;
@@ -848,14 +897,33 @@ function renderReplayConfig() {
       $("replay-qc-status").textContent = `QC episode ${id}: mark pass / fail`;
       if (S.qcMode) loadAnnotation(dir, id);
       const actionMode = $("replay-key-action-mode").value || "joint";
+      const loadKeys = hasInspectedDir
+        ? { ...replayDefaultKeys, action: replayActionKeyForMode(actionMode) }
+        : {};
+      const loadVideoKeys = hasInspectedDir ? S.replayVideoKeys : {};
       S.replaySeriesKey = null;
-      apiPost("/api/load_replay_dataset", {
-        dataset_dir: dir,
-        episode: id,
-        keys: { ...replayDefaultKeys, action: replayActionKeyForMode(actionMode) },
-        video_keys: S.replayVideoKeys,
-        action_mode: actionMode,
-      });
+      S.replayLoadPending = true;
+      replayStop();
+      try {
+        const load = await apiPost("/api/load_replay_dataset", {
+          dataset_dir: dir,
+          episode: id,
+          keys: loadKeys,
+          video_keys: loadVideoKeys,
+          action_mode: actionMode,
+        });
+        if (!load.ok) {
+          $("replay-episode-task").textContent = `✗ ${load.error || "cannot load episode"}`;
+          return;
+        }
+        if (load.n_episodes != null) {
+          S.STATUS.replay_n_episodes = load.n_episodes;
+          $("replay-episode-n").textContent = load.n_episodes;
+        }
+        await loadMountedReplaySeries(load);
+      } finally {
+        S.replayLoadPending = false;
+      }
       updateGuide();
     };
 
@@ -985,6 +1053,8 @@ function renderManualConn() {
     const btn = $("bm-connect");
     const conn = $("manual-conn");
     const send = $("bm-send");
+    setCommandMetadata(btn, S.realRequested ? "web:disconnect" : "web:connect");
+    setCommandMetadata(send, S.manualDispatching ? "web:halt" : "web:manual_send");
     const capable = !!(S.CFG && S.CFG.manual_capable);
     conn.style.display = "";
     conn.classList.remove("ok", "armed", "err");
@@ -1132,6 +1202,7 @@ export {
   applyRunControlStatus, applyStatus, mark, pauseSetup, replayIsLocalMode, resumeSetup,
   retrySetup, setPanel, startRunFromDebug, syncChip, uiMode, updateGuide,
   applyTune, applyManualTune, collectTaskValue, renderConfig, renderEvalGripper,
+  renderRlGripper,
   enterManualSim, manualConnect, manualDisconnect, manualDispatchToggle,
   renderManualConn, renderManualTarget,
 };

@@ -30,6 +30,7 @@ class StreamActionBuffer:
         self._cur_chunk: deque[np.ndarray] = deque()
         self._k: int = 0
         self._last_action: np.ndarray | None = None
+        self._revision: int = 0
 
     def integrate_new_chunk(
         self,
@@ -38,61 +39,68 @@ class StreamActionBuffer:
         min_m: int = 8,
     ) -> None:
         """Integrate a new inference chunk with latency trim and linear overlap smoothing."""
-        with self._lock:
-            if actions_chunk is None or len(actions_chunk) == 0:
-                return
-            max_k = max(0, int(max_k))
-            min_m = max(1, int(min_m))
+        actions = np.asarray(actions_chunk, dtype=np.float32)
+        if len(actions) == 0:
+            return
+        max_k = max(0, int(max_k))
+        min_m = max(1, int(min_m))
 
-            # Latency trim: drop up to max_k steps from front
-            drop_n = min(self._k, max_k)
-            if drop_n >= len(actions_chunk):
-                return
-            new_chunk = [np.asarray(a, dtype=np.float32).copy() for a in actions_chunk[drop_n:]]
-
-            # Build old sequence for smoothing
-            if len(self._cur_chunk) == 0 and self._last_action is not None:
-                old_list = [self._last_action.copy() for _ in range(min_m)]
-                self._last_action = None
-            else:
+        while True:
+            with self._lock:
+                revision = self._revision
+                consumed = self._k
                 old_list = list(self._cur_chunk)
-                if 0 < len(old_list) < min_m:
-                    tail = np.asarray(old_list[-1], dtype=np.float32).copy()
-                    old_list.extend([tail.copy() for _ in range(min_m - len(old_list))])
-                elif len(old_list) == 0:
-                    self._cur_chunk = deque(new_chunk)
+                last_action = self._last_action
+
+            drop_n = min(consumed, max_k)
+            if drop_n >= len(actions):
+                with self._lock:
+                    if revision != self._revision:
+                        continue
+                    return
+            new = actions[drop_n:].copy()
+            consumed_seed = not old_list and last_action is not None
+            if consumed_seed:
+                assert last_action is not None
+                old = np.repeat(last_action[np.newaxis, :], min_m, axis=0)
+            elif old_list:
+                old = np.stack(old_list)
+                if len(old) < min_m:
+                    padding = np.repeat(old[-1][np.newaxis, :], min_m - len(old), axis=0)
+                    old = np.concatenate((old, padding), axis=0)
+            else:
+                combined = new
+                prepared_chunk = deque(row.copy() for row in combined)
+                with self._lock:
+                    if revision != self._revision:
+                        continue
+                    self._cur_chunk = prepared_chunk
                     self._k = 0
+                    self._revision += 1
                     return
 
-            new_list = list(new_chunk)
-            overlap_len = min(len(old_list), len(new_list))
-            if overlap_len <= 0:
-                self._cur_chunk = deque(new_list)
-                self._k = 0
-                return
-
-            # Trim old if longer than new
-            if len(old_list) > len(new_list):
-                old_list = old_list[: len(new_list)]
-                overlap_len = len(new_list)
-
-            # Linear weights: 100% old at start, 0% old at end
+            overlap_len = min(len(old), len(new))
+            old = old[: len(new)]
             if overlap_len == 1:
-                w_old = np.array([1.0], dtype=np.float32)
+                old_weights = np.ones((1, 1), dtype=np.float32)
             else:
-                w_old = np.linspace(1.0, 0.0, overlap_len, dtype=np.float32)
-            w_new = 1.0 - w_old
-
-            smoothed = [
-                (
-                    w_old[i] * np.asarray(old_list[i], dtype=np.float32)
-                    + w_new[i] * np.asarray(new_list[i], dtype=np.float32)
-                )
-                for i in range(overlap_len)
-            ]
-            combined = smoothed + new_list[overlap_len:]
-            self._cur_chunk = deque(a.copy() for a in combined)
-            self._k = 0
+                old_weights = np.linspace(
+                    1.0, 0.0, overlap_len, dtype=np.float32
+                )[:, np.newaxis]
+            smoothed = old[:overlap_len] * old_weights + new[:overlap_len] * (
+                1.0 - old_weights
+            )
+            combined = np.concatenate((smoothed, new[overlap_len:]), axis=0)
+            prepared_chunk = deque(row.copy() for row in combined)
+            with self._lock:
+                if revision != self._revision:
+                    continue
+                self._cur_chunk = prepared_chunk
+                self._k = 0
+                if consumed_seed:
+                    self._last_action = None
+                self._revision += 1
+                return
 
     def pop_next_action(self) -> np.ndarray | None:
         """Pop and return next action; increment k. Returns None if empty."""
@@ -103,6 +111,7 @@ class StreamActionBuffer:
                 self._last_action = np.asarray(self._cur_chunk[0], dtype=np.float32).copy()
             act = np.asarray(self._cur_chunk.popleft(), dtype=np.float32)
             self._k += 1
+            self._revision += 1
             return act
 
     def has_actions(self) -> bool:
@@ -116,6 +125,7 @@ class StreamActionBuffer:
             self._cur_chunk.clear()
             self._k = 0
             self._last_action = np.asarray(action, dtype=np.float32).copy()
+            self._revision += 1
 
     def reset(self) -> None:
         """Clear the buffer and all latency/smoothing state."""
@@ -123,6 +133,7 @@ class StreamActionBuffer:
             self._cur_chunk.clear()
             self._k = 0
             self._last_action = None
+            self._revision += 1
 
 
 class NaiveActionBuffer:

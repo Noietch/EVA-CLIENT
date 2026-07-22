@@ -34,6 +34,18 @@ def test_r1lite_scene_gripper_uses_config_open_close_range():
     )
 
 
+def test_r1lite_home_qpos_zeroes_arms_and_opens_grippers():
+    robot = ROBOT_REGISTRY.build("r1_lite")
+
+    arm_mask = np.ones(robot.total_action_dim, dtype=bool)
+    arm_mask[list(robot.gripper_indices)] = False
+
+    assert robot.initial_qpos[arm_mask] == pytest.approx(np.zeros(12, dtype=np.float32))
+    assert robot.initial_qpos[list(robot.gripper_indices)] == pytest.approx(
+        np.array([100.0, 100.0], dtype=np.float32)
+    )
+
+
 def test_scene_transforms_serialize_shared_urdf_updates():
     scene = UrdfScene(ROBOT_REGISTRY.build("agilex_piper"))
     active = 0
