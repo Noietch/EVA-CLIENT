@@ -1275,6 +1275,26 @@ def run(
             if target_hz != loop_rate_hz:
                 loop_rate = transport.create_rate(target_hz)
                 loop_rate_hz = target_hz
+            operator_event = transport.poll_operator_event()
+            if operator_event == "collection_record_toggle":
+                if (
+                    runtime.collection_teleop_armed
+                    and runtime.collection_teleop_active
+                    and session.mode is SessionMode.COLLECT
+                ):
+                    intent = (
+                        "accept" if session.status is SessionStatus.RUNNING else "start"
+                    )
+                    command_queue.put(f"web:operator_action:{intent}:i2rt_leader")
+                    logger.info(
+                        "[OPERATOR] source=i2rt_leader event=%s intent=%s",
+                        operator_event,
+                        intent,
+                    )
+                else:
+                    logger.warning(
+                        "[OPERATOR] ignored I2RT leader event outside armed Collection mode"
+                    )
             while True:
                 try:
                     cmd = command_queue.get_nowait()

@@ -1,0 +1,85 @@
+diff --git a/i2rt/robot_models/arm/yam/yam.urdf b/i2rt/robot_models/arm/yam/yam.urdf
+index 019a9b9..3c5ad28 100644
+--- a/i2rt/robot_models/arm/yam/yam.urdf
++++ b/i2rt/robot_models/arm/yam/yam.urdf
+@@ -12,7 +12,7 @@
+                 <mesh filename="assets/base.stl" scale="1 1 1" />
+             </geometry>
+             <material name="0.317647_0.121569_0.498039_0.000000_0.000000">
+-                <color rgba="0.317647 0.121569 0.498039 1" />
++                <color rgba="0.14 0.14 0.16 1" />
+             </material>
+         </visual>
+     </link>
+@@ -28,7 +28,7 @@
+                 <mesh filename="assets/gripper.stl" scale="1 1 1" />
+             </geometry>
+             <material name="0.109804_0.286275_0.011765_0.000000_0.000000">
+-                <color rgba="0.109804 0.286275 0.0117647 1" />
++                <color rgba="0.14 0.14 0.16 1" />
+             </material>
+         </visual>
+     </link>
+@@ -44,7 +44,7 @@
+                 <mesh filename="assets/link1.stl" scale="1 1 1" />
+             </geometry>
+             <material name="0.725490_0.450980_0.317647_0.000000_0.000000">
+-                <color rgba="0.72549 0.45098 0.317647 1" />
++                <color rgba="0.14 0.14 0.16 1" />
+             </material>
+         </visual>
+     </link>
+@@ -60,7 +60,7 @@
+                 <mesh filename="assets/link2.stl" scale="1 1 1" />
+             </geometry>
+             <material name="0.000000_0.400000_0.600000_0.000000_0.000000">
+-                <color rgba="0 0.4 0.6 1" />
++                <color rgba="0.92 0.92 0.92 1" />
+             </material>
+         </visual>
+     </link>
+@@ -76,7 +76,7 @@
+                 <mesh filename="assets/link3.stl" scale="1 1 1" />
+             </geometry>
+             <material name="0.552941_0.580392_0.203922_0.000000_0.000000">
+-                <color rgba="0.552941 0.580392 0.203922 1" />
++                <color rgba="0.92 0.92 0.92 1" />
+             </material>
+         </visual>
+     </link>
+@@ -92,7 +92,7 @@
+                 <mesh filename="assets/link4.stl" scale="1 1 1" />
+             </geometry>
+             <material name="0.545098_0.525490_0.419608_0.000000_0.000000">
+-                <color rgba="0.545098 0.52549 0.419608 1" />
++                <color rgba="0.14 0.14 0.16 1" />
+             </material>
+         </visual>
+     </link>
+@@ -108,7 +108,7 @@
+                 <mesh filename="assets/link5.stl" scale="1 1 1" />
+             </geometry>
+             <material name="0.827451_0.623529_0.784314_0.000000_0.000000">
+-                <color rgba="0.827451 0.623529 0.784314 1" />
++                <color rgba="0.14 0.14 0.16 1" />
+             </material>
+         </visual>
+     </link>
+@@ -124,7 +124,7 @@
+                 <mesh filename="assets/tip_left.stl" scale="1 1 1" />
+             </geometry>
+             <material name="0.596078_0.788235_0.921569_0.000000_0.000000">
+-                <color rgba="0.596078 0.788235 0.921569 1" />
++                <color rgba="0.14 0.14 0.16 1" />
+             </material>
+         </visual>
+     </link>
+@@ -140,7 +140,7 @@
+                 <mesh filename="assets/tip_right.stl" scale="1 1 1" />
+             </geometry>
+             <material name="0.596078_0.788235_0.921569_0.000000_0.000000">
+-                <color rgba="0.596078 0.788235 0.921569 1" />
++                <color rgba="0.14 0.14 0.16 1" />
+             </material>
+         </visual>
+     </link>

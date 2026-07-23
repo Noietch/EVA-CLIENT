@@ -301,7 +301,10 @@ def _publish_manual_real_qpos(
     gripper_mask = np.asarray(runtime.robot.gripper_mask, dtype=bool)
     joint_delta = np.abs(target - start)[~gripper_mask]
     max_delta = float(np.max(joint_delta)) if joint_delta.size else 0.0
-    steps = max(1, int(np.ceil(max_delta / MANUAL_MAX_QPOS_STEP)))
+    manual_step = float(config.inference_cfg.get("manual_max_qpos_step", MANUAL_MAX_QPOS_STEP))
+    if manual_step <= 0:
+        raise ValueError("inference_cfg.manual_max_qpos_step must be positive")
+    steps = max(1, int(np.ceil(max_delta / manual_step)))
     rate = runtime.transport.create_rate(config.inference_cfg.publish_rate)
     trajectory = build_linear_trajectory(start, target, steps + 1)[1:]
     trajectory[:, gripper_mask] = target[gripper_mask]
@@ -311,6 +314,19 @@ def _publish_manual_real_qpos(
             return False
         publish_action(runtime, action, target=OutputTarget.REAL.value)
         session.manual_real_qpos = np.asarray(action, dtype=np.float32).copy()
+        rate.sleep()
+
+    # Some hardware adapters use a bounded outer tracking loop. Repeating the
+    # final MANUAL target gives that loop time to remove static load error while
+    # also keeping the transport watchdog alive. The generic default remains 0.
+    settle_duration = float(config.inference_cfg.get("manual_settle_duration", 0.0))
+    settle_steps = max(0, int(np.ceil(settle_duration * config.inference_cfg.publish_rate)))
+    for _ in range(settle_steps):
+        if poll_motion_commands(config, runtime, session):
+            consume_motion_interrupt(session, session.status)
+            return False
+        publish_action(runtime, target, target=OutputTarget.REAL.value)
+        session.manual_real_qpos = np.asarray(target, dtype=np.float32).copy()
         rate.sleep()
     return True
 

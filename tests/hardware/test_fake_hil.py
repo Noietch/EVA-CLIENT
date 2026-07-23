@@ -25,7 +25,14 @@ def _free_port() -> int:
 
 @pytest.mark.parametrize(
     "robot_name",
-    ["r1_lite", "ur5e", "arx_r5", "agilex_piper"],
+    [
+        "r1_lite",
+        "ur5e",
+        "arx_r5",
+        "agilex_piper",
+        "i2rt_yam",
+        "i2rt_dual_yam",
+    ],
 )
 def test_generic_fake_hil_relative_takeover_for_every_robot(robot_name: str):
     suffix = uuid.uuid4().hex
@@ -87,6 +94,8 @@ def test_generic_fake_reports_hil_unsupported_without_leader_adapter(robot_name:
         ("ur5e", "configs/01_deploy/ur5e/openpi_qpos.py"),
         ("arx_r5", "configs/01_deploy/arx_r5/openpi_qpos.py"),
         ("agilex_piper", "configs/01_deploy/dual_agilex_piper/openpi_qpos.py"),
+        ("i2rt_yam", "configs/01_deploy/i2rt_yam/openpi_qpos.py"),
+        ("i2rt_dual_yam", "configs/01_deploy/i2rt_dual_yam/openpi_qpos.py"),
     ],
 )
 def test_zmq_transport_confirms_fake_hil_and_receives_user_action(

@@ -202,6 +202,10 @@ class TransportBridge(abc.ABC):
         """Return the backend's current HIL capability and activation state."""
         return HilStatus(supported=False, error="Transport does not support HIL")
 
+    def poll_operator_event(self) -> str | None:
+        """Return one edge-triggered hardware operator event, if supported."""
+        return None
+
     def start_hil_control(self, mode: str) -> HilStatus:
         """Request HIL takeover and return the confirmed backend state."""
         _ = mode

@@ -2,7 +2,7 @@
 // polling loop for frame/scene/camera refresh (poll).
 import { $, LIVE, RUN_CONTROLS, S, apiGet, clientTrace, replaceCamStripContent } from "./core.js";
 import { buildLiveDims, drawLiveCharts, resetLiveSeries, updateScrub } from "./charts.js";
-import { applyRunControlStatus, renderManualTarget, uiMode } from "./run.js";
+import { applyRunControlStatus, renderManualCurrent, renderManualTarget, uiMode } from "./run.js";
 
 window.__evaReplaySync = LIVE.replaySync;
 
@@ -1003,6 +1003,7 @@ async function pollFrame() {
       // real-robot position back into the sliders or they snap backward mid-drag.
       if (S.manualActive && uiMode(S.STATUS.cli_mode) === "manual") {
         renderManualTarget(S.STATUS.manual_qpos || (S._manualSlidersBuilt ? null : f.qpos));
+        renderManualCurrent(f.qpos);
       } else if (S._manualSlidersBuilt) {
         S._manualSlidersBuilt = false;
         $("manual-sliders-m").innerHTML = "";

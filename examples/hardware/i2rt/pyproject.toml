@@ -1,0 +1,28 @@
+[project]
+name = "eva-i2rt-hardware"
+version = "0.1.0"
+description = "Isolated I2RT YAM and RealSense D405 execution layer for EVA Client."
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "i2rt",
+    "msgpack==1.1.2",
+    "numpy==2.2.6",
+    "pyrealsense2==2.58.3.10794",
+    "pyzmq==27.1.0",
+]
+
+[tool.uv]
+package = false
+environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+# ruckig 0.15.3 still uses the old cmake.targets key and cannot build with
+# scikit-build-core >=0.10. This mirrors the constraint in the official SDK.
+build-constraint-dependencies = ["scikit-build-core<0.10"]
+
+[tool.uv.sources]
+i2rt = { path = "SDK/i2rt", editable = true }
+
+[[tool.uv.index]]
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true

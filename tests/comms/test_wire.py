@@ -45,6 +45,7 @@ def _build_zmq_transport_with_fake_readers(monkeypatch):
             self.frame = None
             self.collection_frame = None
             self.qpos = None
+            self.operator_event = None
             self.age = None
             self.calls = []
             self.closed = False
@@ -61,6 +62,10 @@ def _build_zmq_transport_with_fake_readers(monkeypatch):
         def get_latest_qpos(self):
             self.calls.append("qpos")
             return self.qpos
+
+        def poll_operator_event(self):
+            self.calls.append("operator_event")
+            return self.operator_event
 
         def seconds_since_last_recv(self):
             return self.age
@@ -528,13 +533,45 @@ def test_zmq_transport_uses_separate_internal_readers(monkeypatch):
     readers[0].frame = "frame"
     readers[1].collection_frame = "collection"
     readers[2].qpos = "qpos"
+    readers[2].operator_event = "collection_record_toggle"
 
     assert transport.get_frame() == "frame"
     assert transport.get_collection_frame() == "collection"
     assert transport.get_latest_qpos() == "qpos"
+    assert transport.poll_operator_event() == "collection_record_toggle"
     assert readers[0].calls == ["frame"]
     assert readers[1].calls == ["collection"]
-    assert readers[2].calls == ["qpos"]
+    assert readers[2].calls == ["qpos", "operator_event"]
+
+
+def test_zmq_operator_event_is_edge_triggered_and_ignores_stale_baseline():
+    observations = iter(
+        [
+            WireObservation(t=1.0, images={}, state={}, operator_event_id=0),
+            WireObservation(
+                t=2.0,
+                images={},
+                state={},
+                operator_event="collection_record_toggle",
+                operator_event_id=1,
+            ),
+            WireObservation(
+                t=3.0,
+                images={},
+                state={},
+                operator_event="collection_record_toggle",
+                operator_event_id=1,
+            ),
+        ]
+    )
+    reader = object.__new__(_ObservationReader)
+    reader._operator_event_initialized = False
+    reader._last_operator_event_id = 0
+    reader._drain_latest = lambda: next(observations)  # type: ignore[method-assign]
+
+    assert reader.poll_operator_event() is None
+    assert reader.poll_operator_event() == "collection_record_toggle"
+    assert reader.poll_operator_event() is None
 
 
 def test_zmq_transport_reports_freshest_reader_and_closes_all_readers(monkeypatch):
@@ -589,11 +626,15 @@ def test_wire_hil_status_and_control_mode_round_trip():
         hil_supported=True,
         hil_active=True,
         hil_error="leader stale",
+        operator_event="collection_record_toggle",
+        operator_event_id=7,
     )
     restored = unpack_observation(pack_observation(observation))
     assert restored.hil_supported is True
     assert restored.hil_active is True
     assert restored.hil_error == "leader stale"
+    assert restored.operator_event == "collection_record_toggle"
+    assert restored.operator_event_id == 7
 
     action = WireAction(
         t=2.0,

@@ -135,8 +135,10 @@ def test_rl_policy_selection_waits_for_backend_confirmation_before_auto_setup():
     assert "rlPendingPolicy = policy.value;" in html
     assert 'else if (rlPendingPolicy == null) {\n    S.rlPolicy = "";' in html
     assert "const selectionConfirmed = status.selected_task === S.rlTask" in html
-    assert "if (selectionConfirmed && !setup && !setupBusy && !setupError) scheduleRlSetup();" in html
-    assert 'status.is_setup_done || status.setup_stage' in html
+    assert (
+        "if (selectionConfirmed && !setup && !setupBusy && !setupError) scheduleRlSetup();" in html
+    )
+    assert "status.is_setup_done || status.setup_stage" in html
 
 
 def test_rl_tab_does_not_force_generic_sim_mode_before_rl_setup():
@@ -160,9 +162,9 @@ def test_rl_save_gives_immediate_feedback_and_blocks_duplicate_actions_until_set
 
     assert "let rlSaveSetupPending = false;" in html
     assert 'setupMsg.textContent = "SAVE · QUEUING DATA…";' in html
-    assert 'intervention || rlSaveSetupPending;' in html
-    assert 'if (rlSaveSetupPending) return;' in html
-    assert 'rlSaveSetupPending = true;\n  renderRlStatus(S.STATUS || {});' in html
+    assert "intervention || rlSaveSetupPending;" in html
+    assert "if (rlSaveSetupPending) return;" in html
+    assert "rlSaveSetupPending = true;\n  renderRlStatus(S.STATUS || {});" in html
 
 
 def test_telemetry_bar_renders_image_hz_metric():
@@ -182,6 +184,17 @@ def test_manual_target_qpos_renders_from_status_without_frame_qpos():
         "renderManualTarget(S.STATUS.manual_qpos || "
         "(S._manualSlidersBuilt ? null : f.qpos));" in html
     )
+
+
+def test_manual_joint_rows_show_target_and_live_current_qpos():
+    html = console_source()
+
+    assert "TARGET / CURRENT QPOS" in html
+    assert 'class="manual-pose-legend">target / current' in html
+    assert 'id="ms-target-${i}"' in html
+    assert 'id="ms-current-${i}"' in html
+    assert "function renderManualCurrent(qpos)" in html
+    assert "renderManualCurrent(f.qpos);" in html
 
 
 def test_manual_sliders_use_configured_qpos_limits():
@@ -264,7 +277,10 @@ def test_collect_review_uses_shared_local_replay_engine():
     assert "replayTransformsUrl = `/api/review_transforms?${params.toString()}`;" in html
     assert "const videosReady = waitForStageVideosReady();" in html
     assert "const transformsReady = loadReplayTransformChunk(" in html
-    assert "const [videosOk, transformsOk] = await Promise.all([videosReady, transformsReady]);" in html
+    assert (
+        "const [videosOk, transformsOk] = await Promise.all([videosReady, transformsReady]);"
+        in html
+    )
     assert "await waitForStageVideosPainted();" in html
     assert "seekReplay(0);" in html
     assert "replayPlay();" in html
@@ -348,8 +364,13 @@ def test_review_episode_gates_playback_on_all_videos_and_first_transform_chunk()
     local_body = html[local_start : html.index("function replayApplyTransformFrame", local_start)]
     assert "const videosReady = waitForStageVideosReady();" in local_body
     assert "const transformsReady = loadReplayTransformChunk(" in local_body
-    assert "const [videosOk, transformsOk] = await Promise.all([videosReady, transformsReady]);" in local_body
-    assert local_body.index("await waitForStageVideosPainted();") < local_body.index("replayPlay();")
+    assert (
+        "const [videosOk, transformsOk] = await Promise.all([videosReady, transformsReady]);"
+        in local_body
+    )
+    assert local_body.index("await waitForStageVideosPainted();") < local_body.index(
+        "replayPlay();"
+    )
     assert local_body.index("seekReplay(0);") < local_body.index("replayPlay();")
 
     rollout_start = html.index("async function reviewRolloutEpisode(item)")
@@ -541,7 +562,10 @@ def test_replay_load_mounts_videos_from_load_response_without_status_poll():
     confirm_start = html.index("const confirm = async () => {")
     confirm_body = html[confirm_start : html.index("// QC deep-link", confirm_start)]
 
-    assert 'import { maybeSyncReplayPlayer, loadMountedReplaySeries, replayStop } from "./replay.js";' in html
+    assert (
+        'import { maybeSyncReplayPlayer, loadMountedReplaySeries, replayStop } from "./replay.js";'
+        in html
+    )
     assert "const hasInspectedDir = replayInspectedDir === dir;" in confirm_body
     assert "const loadKeys = hasInspectedDir" in confirm_body
     assert "const loadVideoKeys = hasInspectedDir ? S.replayVideoKeys : {};" in confirm_body
@@ -1097,22 +1121,22 @@ def test_rl_workspace_has_eval_style_workflow_and_hides_data_config():
     assert "let rlCriticPendingFrame = null;" in html
     assert "function flushRlCriticQueue()" in html
     assert "if (generation === rlCriticGeneration) flushRlCriticQueue();" in html
-    assert '!rollout.save_ready || intervention' in html
-    assert '!rollout.save_ready || !hasFrames' not in html
+    assert "!rollout.save_ready || intervention" in html
+    assert "!rollout.save_ready || !hasFrames" not in html
     assert 'id="rl-save-count"' in html
     assert 'id="rl-save-expand"' in html
     assert 'id="rl-save-list"' in html
-    assert 'rl-save-tiles .collect-tile::after' not in html
-    assert 'CRITIC · OPTIONAL' in html
-    assert 'Select task and Policy; Critic is optional' in html
+    assert "rl-save-tiles .collect-tile::after" not in html
+    assert "CRITIC · OPTIONAL" in html
+    assert "Select task and Policy; Critic is optional" in html
     assert 'const selected = !!S.rlTask && S.rlPolicy !== "";' in html
-    assert 'ROBOT + POLICY READY · CRITIC OPTIONAL' in html
-    assert 'const setupError = status.last_error || status.policy_error;' in html
-    assert 'POLICY OFFLINE · SETUP REQUIRED' in html
+    assert "ROBOT + POLICY READY · CRITIC OPTIONAL" in html
+    assert "const setupError = status.last_error || status.policy_error;" in html
+    assert "POLICY OFFLINE · SETUP REQUIRED" in html
     assert 'retry.style.display = setupError && !setup ? "" : "none";' in html
-    assert 'Select <b>task and Policy</b>' in html
-    assert 'SETUP starts <b>automatically</b>' in html
-    assert 'Select <b>task, Policy, and Critic</b>' not in html
+    assert "Select <b>task and Policy</b>" in html
+    assert "SETUP starts <b>automatically</b>" in html
+    assert "Select <b>task, Policy, and Critic</b>" not in html
     assert 'LIVE.replayOwner !== "rl" || !S.STATUS.rl?.critic_connected' in html
     assert 'id="rl-auto-setup-msg"' in html
     assert 'id="rl-panel-data" data-st="done" hidden' in html
@@ -1120,7 +1144,7 @@ def test_rl_workspace_has_eval_style_workflow_and_hides_data_config():
     assert ".rl-source-value::before" in html
     assert "#rl-stage-col {\n    min-height: 0; overflow: hidden;" in html
     assert "#view-rl .stage.rl-replay .stage-charts" in html
-    assert 'scheduleRlSetup();' in html
+    assert "scheduleRlSetup();" in html
     assert 'else S.rlCritic = "";' in html
     assert 'criticChoice.style.display = setup ? "" : "none";' in html
     assert 'stage.classList.toggle("rl-critic-active", !!S.rlCritic && !!rl.active);' in html
@@ -1137,8 +1161,8 @@ def test_rl_stage_has_prominent_critic_curve_and_control_source_legend():
     assert 'openChartModal("c")' in html
     assert 'class="control-legend"' in html
     assert 'class="critic-source-legend"' in html
-    assert 'LIVE.criticSource' in html
-    assert 'drawSourceBands(ctx, ts, source' in html
+    assert "LIVE.criticSource" in html
+    assert "drawSourceBands(ctx, ts, source" in html
     assert 'data-source="intervention"' in html
     assert "--policy:   #2563EB" in html
     assert "--intervention: #FF4D00" in html
@@ -1150,8 +1174,8 @@ def test_rl_saved_episode_click_switches_replay_immediately_and_latest_wins():
     assert "let replayRequestId = 0;" in html
     assert "function selectSavedEpisode(item, items)" in html
     assert "replaySelectedEpisode();" in html
-    assert "if (LIVE.replayMode && LIVE.replayOwner === \"rl\") exitReplayMode();" in html
-    assert "requestId !== replayRequestId || S.ACTIVE_TAB !== \"rl\"" in html
+    assert 'if (LIVE.replayMode && LIVE.replayOwner === "rl") exitReplayMode();' in html
+    assert 'requestId !== replayRequestId || S.ACTIVE_TAB !== "rl"' in html
     assert "if (replayVideoAbortController) replayVideoAbortController.abort();" in html
     assert "replayVideoAbortController = new AbortController();" in html
     assert "async function loadReplaySeries()" in html
@@ -1208,10 +1232,10 @@ def test_live_charts_bound_draw_work_to_canvas_resolution():
     assert 'criticCursor, ["#E8590C"]' in html
     assert "criticGeneration" in html
     assert "if (criticGeneration !== LIVE.criticGeneration) return;" in html
-    assert 'ctx.fillText(`${(elapsed * ratio).toFixed(1)}s`' in html
+    assert "ctx.fillText(`${(elapsed * ratio).toFixed(1)}s`" in html
     assert ".stage-critic {\n    display: none; flex: 0 0 190px; min-height: 190px;\n  }" in html
     assert ".stage.rl-live .stage-charts" in html
-    assert "stage.classList.toggle(\"rl-live\"" in html
+    assert 'stage.classList.toggle("rl-live"' in html
 
 
 def test_replay_charts_use_series_dimension_names():

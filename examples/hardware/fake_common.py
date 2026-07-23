@@ -76,7 +76,9 @@ _CAMERA_COLORS = {
     "cam_right_wrist": (40, 160, 90),
 }
 _DEFAULT_COLOR = (80, 80, 80)
-_HIL_SUPPORTED_ROBOTS = frozenset({"r1_lite", "ur5e", "arx_r5", "agilex_piper"})
+_HIL_SUPPORTED_ROBOTS = frozenset(
+    {"r1_lite", "ur5e", "arx_r5", "agilex_piper", "i2rt_yam", "i2rt_dual_yam"}
+)
 
 
 def _synth_image(
@@ -167,8 +169,7 @@ class FakeRobotNode:
 
     def _zero_eef_by_group(self) -> dict[str, np.ndarray]:
         return {
-            group.name: np.zeros(_EEF_DOF, dtype=np.float32)
-            for group in self._robot.arm_groups
+            group.name: np.zeros(_EEF_DOF, dtype=np.float32) for group in self._robot.arm_groups
         }
 
     def _read_images(self) -> dict[str, np.ndarray]:
@@ -328,9 +329,7 @@ class FakeRobotNode:
         # recording starts; COLLECT only additionally reports it as action_qpos.
         if self._hil_active:
             if self._hil_mode == "relative":
-                self._qpos = self._hil_robot_anchor + (
-                    self._hil_input - self._hil_input_anchor
-                )
+                self._qpos = self._hil_robot_anchor + (self._hil_input - self._hil_input_anchor)
             else:
                 self._qpos = self._hil_input.copy()
             action_qpos = self._qpos.copy()

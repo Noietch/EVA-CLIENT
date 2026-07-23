@@ -13,6 +13,8 @@ from robots.zoo import (
     agilex_piper,  # noqa: F401
     arx_r5,  # noqa: F401
     dual_franka,  # noqa: F401
+    i2rt_dual_yam,  # noqa: F401
+    i2rt_yam,  # noqa: F401
     r1_lite,  # noqa: F401
     ur5e,  # noqa: F401
 )
