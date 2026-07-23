@@ -77,9 +77,9 @@
 | Dual Franka Panda | Dual 7-DoF arm + gripper | ✅ |
 | Galaxea R1 Lite | Dual 6-DoF arm on torso | ✅ |
 | Universal Robots UR5e | Single 6-DoF arm + gripper | ✅ |
+| I2RT YAM / YAM Cell | Single or dual 6-DoF arm + gripper | ✅ |
 | AgiBot G2 | Dual-arm humanoid (24-DoF body) | ✅ |
 | AgiBot G2 (mobile base) | Humanoid on mobile chassis | 🚧 |
-| YAM | Dual-arm manipulator | 🚧 |
 | Tianji | Dual-arm manipulator | 🚧 |
 | Unitree H1 / G1 | Humanoid | 🚧 |
 | Fourier GR-1 | Humanoid | 📦 |

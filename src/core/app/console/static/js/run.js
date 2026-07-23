@@ -1130,6 +1130,7 @@ function manualDispatchToggle() {
   }
 
 let _manualQpos = [];
+let _manualCurrentQpos = [];
 
 let _manualSendTimer = null;
 
@@ -1164,13 +1165,14 @@ function buildManualSliders(qpos) {
       row.innerHTML =
         `<span class="ms-j">j${String(i).padStart(2, "0")}</span>` +
         `<input type="range" min="${limit.min}" max="${limit.max}" step="${limit.step}" value="${v}" data-j="${i}">` +
-        `<span class="ms-x" id="ms-x-${i}">${v.toFixed(3)}</span>`;
+        `<span class="ms-x"><span id="ms-target-${i}">${v.toFixed(3)}</span>` +
+        `<span class="ms-sep">/</span><span class="ms-current" id="ms-current-${i}">—</span></span>`;
       const range = row.querySelector("input");
       range.oninput = (e) => {
         const idx = i, val = parseFloat(e.target.value);
         _manualQpos[idx] = val;
         _manualEditTs = Date.now();
-        $(`ms-x-${idx}`).textContent = val.toFixed(3);
+        $(`ms-target-${idx}`).textContent = val.toFixed(3);
         sendManualQpos();
       };
       host.appendChild(row);
@@ -1187,8 +1189,17 @@ function syncManualSliders(qpos) {
       if (Math.abs(parseFloat(range.value) - v) > 1e-4) {
         range.value = v;
         _manualQpos[i] = v;
-        const x = $(`ms-x-${i}`); if (x) x.textContent = v.toFixed(3);
+        const x = $(`ms-target-${i}`); if (x) x.textContent = v.toFixed(3);
       }
+    });
+  }
+
+function renderManualCurrent(qpos) {
+    if (!S.manualActive || uiMode(S.STATUS.cli_mode) !== "manual" || !qpos) return;
+    _manualCurrentQpos = qpos.slice();
+    _manualCurrentQpos.forEach((v, i) => {
+      const current = $(`ms-current-${i}`);
+      if (current) current.textContent = Number(v).toFixed(3);
     });
   }
 
@@ -1204,5 +1215,5 @@ export {
   applyTune, applyManualTune, collectTaskValue, renderConfig, renderEvalGripper,
   renderRlGripper,
   enterManualSim, manualConnect, manualDisconnect, manualDispatchToggle,
-  renderManualConn, renderManualTarget,
+  renderManualConn, renderManualCurrent, renderManualTarget,
 };

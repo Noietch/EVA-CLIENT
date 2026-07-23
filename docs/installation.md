@@ -40,6 +40,12 @@ Optional hardware extras:
 | `camera` | Orbbec depth cameras (Linux x86_64/aarch64 + macOS arm64 wheels; Python 3.11) |
 | `viz`    | Faster 3D robot-model loading in the web view                                 |
 
+I2RT YAM uses its own `examples/hardware/i2rt/pyproject.toml` because the
+official SDK and EVA pin different NumPy major versions. Set it up with
+`bash examples/hardware/i2rt/setup_sdk.sh`; see
+[`examples/hardware/i2rt/README.md`](../examples/hardware/i2rt/README.md) for CAN
+and RealSense D405 configuration.
+
 Extras stack: `uv pip install -e ".[dev,ur5e]"`.
 
 Verify the install with no ROS and no policy server:
