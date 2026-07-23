@@ -20,6 +20,7 @@ __pycache__/
 dist/
 build/
 uv.lock
+!examples/hardware/i2rt/uv.lock
 
 # Runtime datasets, logs, and generated work directories.
 datasets/

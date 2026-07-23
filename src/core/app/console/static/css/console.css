@@ -160,10 +160,13 @@
   .toggle-row input { accent-color: var(--signal); cursor: pointer; }
   #view-manual .btn-grid { margin-bottom: 6px; }
   #view-manual .btn.active { border-color: var(--signal); color: var(--signal); }
+  .manual-pose-legend { font-family: var(--mono); font-size: 9px; color: var(--ink-faint); text-align: right; letter-spacing: 0.04em; }
   .manual-sliders { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
-  .manual-sliders .ms-row { display: grid; grid-template-columns: 28px 1fr 56px; align-items: center; gap: 6px; }
+  .manual-sliders .ms-row { display: grid; grid-template-columns: 28px 1fr 116px; align-items: center; gap: 6px; }
   .manual-sliders .ms-j { font-family: var(--mono); font-size: 9px; color: var(--ink-faint); }
   .manual-sliders .ms-x { font-family: var(--mono); font-size: 10px; color: var(--ink); text-align: right; font-variant-numeric: tabular-nums; }
+  .manual-sliders .ms-current { color: var(--ink-dim); }
+  .manual-sliders .ms-sep { color: var(--ink-faint); padding: 0 3px; }
   .manual-sliders input[type=range] { width: 100%; accent-color: var(--signal); }
 
   /* ============ workspace ============ */
