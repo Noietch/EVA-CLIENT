@@ -16,6 +16,8 @@ collection = dict(
         ),
         cameras=dict(
             cam_high="observation.images.cam_high",
+            cam_left_wrist="observation.images.cam_left_wrist",
+            cam_right_wrist="observation.images.cam_right_wrist",
         ),
         columns=dict(
             qpos="observations.state.qpos",

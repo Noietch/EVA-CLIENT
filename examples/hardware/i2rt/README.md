@@ -47,8 +47,8 @@ stream:
 bash examples/hardware/i2rt/run_hardware.sh --list-cameras
 ```
 
-Use the serial reported on the actual machine rather than relying on USB
-enumeration order.
+The hardware launcher binds all three installed D405 cameras by serial rather
+than relying on USB enumeration order.
 
 If a CAN interface is stuck:
 
@@ -67,7 +67,6 @@ LEFT_FOLLOWER_CAN=can_follower_l \
 RIGHT_FOLLOWER_CAN=can_follower_r \
 LEFT_LEADER_CAN=can_leader_l \
 RIGHT_LEADER_CAN=can_leader_r \
-D405_CAM_HIGH_SERIAL=<D405_SERIAL> \
   bash examples/hardware/i2rt/run_hardware.sh
 ```
 
@@ -82,19 +81,19 @@ Then launch EVA:
 eva --config configs/01_deploy/i2rt_dual_yam/openpi_qpos.py --web-port 8080
 ```
 
-Optional wrist D405 variables are `D405_CAM_LEFT_WRIST_SERIAL` and
-`D405_CAM_RIGHT_WRIST_SERIAL`. You can also pass mappings directly:
+The verified default D405 mapping is:
 
-```bash
-bash examples/hardware/i2rt/run_hardware.sh \
-  --camera cam_high=<SERIAL> \
-  --camera cam_left_wrist=<SERIAL> \
-  --camera cam_right_wrist=<SERIAL>
-```
+- `cam_high=260422275306`
+- `cam_left_wrist=260422273576`
+- `cam_right_wrist=260322279472`
 
-The supplied dual-arm EVA config likewise disables both wrist camera keys by
-default. Enable only the keys whose serial mappings are passed to the node, and
-add those keys to the collection schema when recording them.
+All three streams default to `640x480` at 30 FPS. Override the mappings with
+`D405_CAM_HIGH_SERIAL`, `D405_CAM_LEFT_WRIST_SERIAL`, and
+`D405_CAM_RIGHT_WRIST_SERIAL`; override the stream with `D405_CAMERA_WIDTH`,
+`D405_CAMERA_HEIGHT`, `D405_CAMERA_FPS`, and `D405_CAMERA_TIMEOUT_MS`.
+
+The supplied dual-arm EVA deploy and collection configs enable and record all
+three camera keys. The hardware node always starts all three streams.
 
 ## Dual-leader collection and HIL
 
@@ -141,12 +140,11 @@ The correction limit, deadband, settle delay, and startup learning duration have
 matching `I2RT_TRACKING_*` / `I2RT_STARTUP_TRIM_DURATION` variables.
 
 For the currently verified workstation mapping (can2 left follower, can1 right
-follower, can3 left leader, can0 right leader, and D405 serial `260422275306`),
-use the sole hardware launcher directly:
+follower, can3 left leader, can0 right leader, and the three D405 serials listed
+above), use the sole hardware launcher directly:
 
 ```bash
-D405_CAM_HIGH_SERIAL=260422275306 \
-  bash examples/hardware/i2rt/run_hardware.sh
+bash examples/hardware/i2rt/run_hardware.sh
 ```
 
 This defaults to the physical `linear_4310` gripper and starts the left and right
@@ -176,18 +174,3 @@ remains available for a calibrated fourth-joint gain override.
   for the motor-control loop before closing its socket.
 - Linear grippers calibrate by default when no verified limit override is
   supplied. Follow I2RT's requirement to start them fully closed.
-
-## Software-only verification
-
-No SDK, CAN, or D405 is required:
-
-```bash
-.venv/bin/python examples/hardware/i2rt/fake_node.py
-eva --config configs/01_deploy/i2rt_dual_yam/openpi_qpos.py --web-port 8080
-```
-
-The official I2RT simulator can also exercise the real execution-node protocol:
-
-```bash
-I2RT_SIM=1 bash examples/hardware/i2rt/run_hardware.sh
-```

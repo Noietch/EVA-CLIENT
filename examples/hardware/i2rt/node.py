@@ -102,7 +102,6 @@ class I2RTZmqConfig:
     direct_leader_control: bool
     arm_type: str
     gripper_type: str
-    sim: bool
     enable_auto_recovery: bool
     command_timeout_s: float
     idle_mode: str
@@ -187,11 +186,10 @@ class I2RTZmqNode:
         self._last_status_control_count = 0
         self._last_status_observation_count = 0
         logger.info(
-            "I2RT node ready: robot=%s followers=%s leaders=%s sim=%s",
+            "I2RT node ready: robot=%s followers=%s leaders=%s",
             config.robot_name,
             config.follower_can_channels,
             config.leader_can_channels,
-            config.sim,
         )
 
     def stop(self) -> None:
@@ -510,7 +508,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
         default="linear_4310",
     )
-    parser.add_argument("--sim", action="store_true", help="Use I2RT SimRobot; no CAN needed.")
     parser.add_argument("--enable-auto-recovery", action="store_true")
     parser.add_argument(
         "--command-timeout",
@@ -711,7 +708,6 @@ def build_config(args: argparse.Namespace) -> I2RTZmqConfig:
         direct_leader_control=bool(args.direct_leader_control),
         arm_type=args.arm_type,
         gripper_type=args.gripper_type,
-        sim=bool(args.sim),
         enable_auto_recovery=bool(args.enable_auto_recovery),
         command_timeout_s=float(args.command_timeout),
         idle_mode=str(args.idle_mode),

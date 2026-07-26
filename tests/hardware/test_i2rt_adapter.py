@@ -4,6 +4,7 @@ import dataclasses
 import os
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -54,7 +55,6 @@ class _Config:
     leader_can_channels: dict[str, str] = dataclasses.field(default_factory=dict)
     arm_type: str = "yam"
     gripper_type: str = "linear_4310"
-    sim: bool = False
     enable_auto_recovery: bool = False
     command_timeout_s: float = 0.5
     idle_mode: str = "gravity_comp"
@@ -101,32 +101,12 @@ class _FakeYam:
         self.closed = True
 
 
-class _FakeSimYam:
-    def __init__(self) -> None:
-        self.qpos = np.asarray([0.0, 0.2, 0.3, 0.0, 0.0, 0.0, 1.0], dtype=np.float64)
-        self.gravity_comp_count = 0
-
-    def num_dofs(self) -> int:
-        return 7
-
-    def get_joint_pos(self) -> np.ndarray:
-        return self.qpos.copy()
-
-    def command_joint_pos(self, qpos: np.ndarray) -> None:
-        self.qpos = np.asarray(qpos, dtype=np.float64).copy()
-
-    def enable_gravity_comp(self) -> None:
-        self.gravity_comp_count += 1
-
-    def close(self) -> None:
-        pass
-
-
 class _FakeLeader:
     def __init__(self) -> None:
         self.qpos = np.asarray([0.1, 0.4, 0.5, 0.1, 0.1, 0.1], dtype=np.float64)
         self.closed = False
         self.gravity_comp_count = 0
+        self.motor_chain = self
 
     def num_dofs(self) -> int:
         return 6
@@ -137,8 +117,11 @@ class _FakeLeader:
     def command_joint_pos(self, qpos: np.ndarray) -> None:
         self.qpos = np.asarray(qpos, dtype=np.float64).copy()
 
-    def enable_gravity_comp(self) -> None:
+    def enter_gravity_comp_idle(self) -> None:
         self.gravity_comp_count += 1
+
+    def get_same_bus_device_states(self) -> list[SimpleNamespace]:
+        return [SimpleNamespace(position=0.0, io_inputs=(False, False))]
 
     def close(self) -> None:
         self.closed = True
@@ -284,33 +267,12 @@ def test_follower_commands_both_arms_and_watchdog(monkeypatch: pytest.MonkeyPatc
     assert robots_by_channel["can1"].idle_count == 1
 
 
-def test_sim_watchdog_uses_simrobot_gravity_comp_fallback(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    robot = _FakeSimYam()
-    clock = 10.0
-    monkeypatch.setattr("examples.hardware.i2rt.robot.time.monotonic", lambda: clock)
-    followers = I2RTYamFollowers(
-        _Config(sim=True),
-        factory=lambda **_kwargs: robot,
-    )
-    target = np.asarray([0.1, 0.4, 0.5, 0.1, 0.1, 0.1, 0.25] * 2, dtype=np.float32)
-    followers.apply_action(I2RTWireAction(t=clock, action=target, target="real"))
-
-    clock = 10.6
-    followers.watchdog_tick()
-
-    assert robot.gravity_comp_count == 2
-    assert followers.hardware_status() == {"left_arm": "online", "right_arm": "online"}
-
-
 def test_dual_leaders_read_both_arms() -> None:
     leaders_by_channel = {"can2": _FakeLeader(), "can3": _FakeLeader()}
     leaders_by_channel["can3"].qpos += 0.2
     factory_kwargs: list[dict[str, object]] = []
     config = _Config(
         leader_can_channels={"left_arm": "can2", "right_arm": "can3"},
-        sim=True,
     )
 
     def factory(**kwargs: object) -> _FakeLeader:
@@ -340,7 +302,6 @@ def test_dual_leaders_move_to_zero_then_restore_gravity_compensation(
     leaders = I2RTYamLeaders(
         _Config(
             leader_can_channels={"left_arm": "can2", "right_arm": "can3"},
-            sim=True,
             startup_position="zero",
             startup_duration_s=1.0,
         ),
@@ -355,7 +316,7 @@ def test_dual_leaders_move_to_zero_then_restore_gravity_compensation(
 
 def test_single_leader_configuration_is_rejected() -> None:
     leaders = I2RTYamLeaders(
-        _Config(leader_can_channels={"left_arm": "can2"}, sim=True),
+        _Config(leader_can_channels={"left_arm": "can2"}),
         factory=lambda **_kwargs: _FakeLeader(),
     )
 
@@ -652,6 +613,9 @@ def test_d405_specs_and_node_config() -> None:
     with pytest.raises(SystemExit):
         build_arg_parser().parse_args(["--leader-cans", "can2"])
 
+    with pytest.raises(SystemExit):
+        build_arg_parser().parse_args(["--sim"])
+
     direct_without_leaders = build_arg_parser().parse_args(
         ["--direct-leader-control", "--allow-gripper-calibration"]
     )
@@ -663,11 +627,11 @@ def test_d405_specs_and_node_config() -> None:
         build_config(unsafe_args)
 
 
-def test_i2rt_preset_defaults_to_one_d405() -> None:
+def test_i2rt_preset_enables_three_d405_cameras() -> None:
     root = Path(__file__).resolve().parents[2]
     deploy = load_config(root / "configs" / "01_deploy/i2rt_dual_yam/openpi_qpos.py")
 
-    assert deploy.transport.disabled_cameras == ["cam_left_wrist", "cam_right_wrist"]
+    assert deploy.transport.disabled_cameras == []
     assert deploy.inference_cfg.manual_max_qpos_step == pytest.approx(0.005)
     assert deploy.inference_cfg.manual_settle_duration == pytest.approx(2.0)
 
@@ -676,10 +640,14 @@ def test_i2rt_dual_leader_collection_preset() -> None:
     root = Path(__file__).resolve().parents[2]
     collection = load_config(root / "configs" / "02_collection" / "i2rt_dual_yam.py")
 
-    assert collection.transport.disabled_cameras == ["cam_left_wrist", "cam_right_wrist"]
+    assert collection.transport.disabled_cameras == []
     assert collection.inference_cfg.manual_max_qpos_step == pytest.approx(0.005)
     assert collection.inference_cfg.manual_settle_duration == pytest.approx(2.0)
-    assert dict(collection.collection.schema.cameras) == {"cam_high": "observation.images.cam_high"}
+    assert dict(collection.collection.schema.cameras) == {
+        "cam_high": "observation.images.cam_high",
+        "cam_left_wrist": "observation.images.cam_left_wrist",
+        "cam_right_wrist": "observation.images.cam_right_wrist",
+    }
 
 
 def test_run_hardware_defaults_to_dual_leaders_and_gripper_calibration(
@@ -706,11 +674,19 @@ def test_run_hardware_defaults_to_dual_leaders_and_gripper_calibration(
         "I2RT_ALLOW_GRIPPER_CALIBRATION",
         "I2RT_GRIPPER_LIMITS",
         "I2RT_STARTUP_POSITION",
+        "D405_CAM_HIGH_SERIAL",
+        "D405_CAM_LEFT_WRIST_SERIAL",
+        "D405_CAM_RIGHT_WRIST_SERIAL",
+        "D405_CAMERA_WIDTH",
+        "D405_CAMERA_HEIGHT",
+        "D405_CAMERA_FPS",
+        "D405_CAMERA_TIMEOUT_MS",
+        "I2RT_SIM",
+        "ENABLE_I2RT_CAMERAS",
     ):
         env.pop(name, None)
     env.update(
         I2RT_VENV_DIR=str(fake_venv),
-        I2RT_SIM="1",
         I2RT_TEST_ARGS_PATH=str(captured_args),
         LEFT_FOLLOWER_CAN="test_follower_l",
         RIGHT_FOLLOWER_CAN="test_follower_r",
@@ -719,7 +695,7 @@ def test_run_hardware_defaults_to_dual_leaders_and_gripper_calibration(
     )
 
     subprocess.run(
-        ["bash", "examples/hardware/i2rt/run_hardware.sh"],
+        ["bash", "examples/hardware/i2rt/run_hardware.sh", "--help"],
         cwd=root,
         env=env,
         check=True,
@@ -735,4 +711,18 @@ def test_run_hardware_defaults_to_dual_leaders_and_gripper_calibration(
     assert "--direct-leader-control" in args
     startup_index = args.index("--startup-position")
     assert args[startup_index + 1] == "zero"
+    camera_indexes = [index for index, value in enumerate(args) if value == "--camera"]
+    assert [args[index + 1] for index in camera_indexes] == [
+        "cam_high=260422275306",
+        "cam_left_wrist=260422273576",
+        "cam_right_wrist=260322279472",
+    ]
+    camera_width_index = args.index("--camera-width")
+    camera_height_index = args.index("--camera-height")
+    camera_fps_index = args.index("--camera-fps")
+    camera_timeout_index = args.index("--camera-timeout-ms")
+    assert args[camera_width_index + 1] == "640"
+    assert args[camera_height_index + 1] == "480"
+    assert args[camera_fps_index + 1] == "30"
+    assert args[camera_timeout_index + 1] == "3000"
     assert not list((root / "examples/hardware/i2rt").glob("run_*leader.sh"))

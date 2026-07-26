@@ -55,9 +55,6 @@ class I2RTArmConfig(Protocol):
     def gripper_type(self) -> str: ...
 
     @property
-    def sim(self) -> bool: ...
-
-    @property
     def enable_auto_recovery(self) -> bool: ...
 
     @property
@@ -135,7 +132,6 @@ def _sdk_factory(
     channel: str,
     arm_type: str,
     gripper_type: str,
-    sim: bool,
     enable_auto_recovery: bool,
     zero_gravity_mode: bool = True,
     ee_mass: float | None = None,
@@ -157,7 +153,6 @@ def _sdk_factory(
         ee_mass=ee_mass,
         gravity_comp_factor=gravity_comp_factor,
         gripper_limits_override=gripper_limits_override,
-        sim=sim,
         enable_auto_recovery=enable_auto_recovery,
     )
 
@@ -282,7 +277,6 @@ class I2RTYamFollowers:
                 channel=self._config.follower_can_channels[group_name],
                 arm_type=self._config.arm_type,
                 gripper_type=self._config.gripper_type,
-                sim=self._config.sim,
                 enable_auto_recovery=self._config.enable_auto_recovery,
                 zero_gravity_mode=self._config.idle_mode == "gravity_comp",
                 ee_mass=self._config.end_effector_mass,
@@ -305,10 +299,9 @@ class I2RTYamFollowers:
             if self._config.joint4_kp is not None:
                 update_kp_kd = getattr(robot, "update_kp_kd", None)
                 if not callable(update_kp_kd):
-                    if not self._config.sim:
-                        raise AttributeError(
-                            f"{type(robot).__name__} does not support position gain updates"
-                        )
+                    raise AttributeError(
+                        f"{type(robot).__name__} does not support position gain updates"
+                    )
                 else:
                     kp = np.asarray([80.0, 80.0, 80.0, self._config.joint4_kp, 10.0, 10.0])
                     kd = np.asarray([5.0, 5.0, 5.0, 1.5, 1.5, 1.5])
@@ -561,10 +554,6 @@ class I2RTYamFollowers:
                 if callable(enter_idle):
                     enter_idle()
                     continue
-                enable_gravity_comp = getattr(robot, "enable_gravity_comp", None)
-                if self._config.sim and callable(enable_gravity_comp):
-                    enable_gravity_comp()
-                    continue
                 raise AttributeError(
                     f"{type(robot).__name__} has no gravity-compensation idle method"
                 )
@@ -605,9 +594,6 @@ class I2RTYamLeaders:
         self._robots: dict[str, Any] = {}
 
     def _enter_gravity_compensation(self, robot: Any) -> None:
-        if self._config.sim:
-            robot.enable_gravity_comp()
-            return
         robot.enter_gravity_comp_idle()
 
     def connect(self) -> None:
@@ -634,7 +620,6 @@ class I2RTYamLeaders:
                     channel=self._config.leader_can_channels[name],
                     arm_type=self._config.arm_type,
                     gripper_type="yam_teaching_handle",
-                    sim=self._config.sim,
                     enable_auto_recovery=self._config.enable_auto_recovery,
                     zero_gravity_mode=True,
                 )
@@ -697,8 +682,6 @@ class I2RTYamLeaders:
         logger.info("I2RT leaders reached zero and returned to gravity compensation")
 
     def _read_gripper(self, robot: Any) -> float:
-        if self._config.sim:
-            return 1.0
         encoder_states = robot.motor_chain.get_same_bus_device_states()
         if not encoder_states:
             raise RuntimeError("I2RT teaching-handle encoder state is not ready")
@@ -713,9 +696,6 @@ class I2RTYamLeaders:
         """
         buttons: dict[str, tuple[bool, ...]] = {}
         for name, robot in self._robots.items():
-            if self._config.sim:
-                buttons[name] = (False, False)
-                continue
             encoder_states = robot.motor_chain.get_same_bus_device_states()
             if not encoder_states:
                 continue
