@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import dataclasses
+import os
+import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -15,6 +17,7 @@ from examples.hardware.i2rt.node import (
     _RisingEdgeDebouncer,
     build_arg_parser,
     build_config,
+    split_group_eef,
 )
 from examples.hardware.i2rt.robot import (
     I2RTYamFollowers,
@@ -49,7 +52,6 @@ class _Config:
         default_factory=lambda: {"left_arm": "can0", "right_arm": "can1"}
     )
     leader_can_channels: dict[str, str] = dataclasses.field(default_factory=dict)
-    disabled_groups: tuple[str, ...] = ()
     arm_type: str = "yam"
     gripper_type: str = "linear_4310"
     sim: bool = False
@@ -124,12 +126,19 @@ class _FakeLeader:
     def __init__(self) -> None:
         self.qpos = np.asarray([0.1, 0.4, 0.5, 0.1, 0.1, 0.1], dtype=np.float64)
         self.closed = False
+        self.gravity_comp_count = 0
 
     def num_dofs(self) -> int:
         return 6
 
     def get_joint_pos(self) -> np.ndarray:
         return self.qpos.copy()
+
+    def command_joint_pos(self, qpos: np.ndarray) -> None:
+        self.qpos = np.asarray(qpos, dtype=np.float64).copy()
+
+    def enable_gravity_comp(self) -> None:
+        self.gravity_comp_count += 1
 
     def close(self) -> None:
         self.closed = True
@@ -146,17 +155,8 @@ class _FakeSagYam(_FakeYam):
         self.qpos[:6] += self.sag
 
 
-def test_i2rt_robot_registry_layouts() -> None:
-    single = ROBOT_REGISTRY.build("i2rt_yam")
+def test_i2rt_robot_registry_layout() -> None:
     dual = ROBOT_REGISTRY.build("i2rt_dual_yam")
-
-    assert single.total_action_dim == 7
-    assert [group.name for group in single.actuator_groups] == ["arm"]
-    assert single.gripper_indices == (6,)
-    assert [camera.observation_key for camera in single.observation_schema.cameras] == [
-        "cam_high",
-        "cam_wrist",
-    ]
 
     assert dual.total_action_dim == 14
     assert [group.name for group in dual.actuator_groups] == ["left_arm", "right_arm"]
@@ -165,6 +165,66 @@ def test_i2rt_robot_registry_layouts() -> None:
     left_part, right_part = dual.vis_config.parts
     assert left_part.base_position == pytest.approx((0.0, 0.25, 0.0))
     assert right_part.base_position == pytest.approx((0.0, -0.25, 0.0))
+
+
+def test_i2rt_observation_uses_eva_fk_for_state_and_action() -> None:
+    state = {
+        "left_arm": np.asarray([0.0, 0.2, 0.3, 0.0, 0.0, 0.0, 0.4], dtype=np.float32),
+        "right_arm": np.asarray([0.1, 0.3, 0.4, 0.1, 0.1, 0.1, 0.6], dtype=np.float32),
+    }
+    action = np.concatenate([state["left_arm"], state["right_arm"]]).astype(np.float32)
+    action[0] += 0.15
+
+    class _Solver:
+        def __init__(self) -> None:
+            self.inputs: list[np.ndarray] = []
+
+        def fk_chunk(self, chunk: np.ndarray) -> np.ndarray:
+            self.inputs.append(np.asarray(chunk, dtype=np.float32).copy())
+            offset = 10.0 * len(self.inputs)
+            return (np.arange(16, dtype=np.float32) + offset)[np.newaxis, :]
+
+    class _Publisher:
+        payload: bytes | None = None
+
+        def send(self, payload: bytes) -> None:
+            self.payload = payload
+
+    solver = _Solver()
+    publisher = _Publisher()
+    node = object.__new__(I2RTZmqNode)
+    node._config = _Config()
+    node._latest_leader_action = action
+    node._followers = type("_Followers", (), {"read_state": lambda self: state})()
+    node._fk_solver = solver
+    node._cameras = type("_Cameras", (), {"snapshot": lambda self: {}})()
+    node._obs_pub = publisher
+    node._tracking_error = {}
+    node._hil_active = False
+    node._hil_error = ""
+    node._operator_event = ""
+    node._operator_event_id = 0
+    node._published_observations = 0
+
+    node._publish_observation()
+
+    assert publisher.payload is not None
+    observation = unpack_observation(publisher.payload)
+    assert len(solver.inputs) == 2
+    assert solver.inputs[0][0] == pytest.approx(
+        np.concatenate([state["left_arm"], state["right_arm"]])
+    )
+    assert solver.inputs[1][0] == pytest.approx(action)
+    assert observation.eef is not None
+    assert observation.eef["left_arm"] == pytest.approx(np.arange(8) + 10.0)
+    assert observation.eef["right_arm"] == pytest.approx(np.arange(8, 16) + 10.0)
+    assert observation.action_eef == pytest.approx(np.arange(16) + 20.0)
+    assert node._published_observations == 1
+
+
+def test_split_group_eef_rejects_wrong_width() -> None:
+    with pytest.raises(ValueError, match="16-D"):
+        split_group_eef(np.zeros(8, dtype=np.float32), ("left_arm", "right_arm"))
 
 
 def test_i2rt_scene_matches_black_joint_white_arm_finish() -> None:
@@ -244,26 +304,66 @@ def test_sim_watchdog_uses_simrobot_gravity_comp_fallback(
     assert followers.hardware_status() == {"left_arm": "online", "right_arm": "online"}
 
 
-def test_left_only_leader_holds_right_follower_anchor() -> None:
-    leader = _FakeLeader()
+def test_dual_leaders_read_both_arms() -> None:
+    leaders_by_channel = {"can2": _FakeLeader(), "can3": _FakeLeader()}
+    leaders_by_channel["can3"].qpos += 0.2
+    factory_kwargs: list[dict[str, object]] = []
     config = _Config(
-        leader_can_channels={"left_arm": "can2"},
+        leader_can_channels={"left_arm": "can2", "right_arm": "can3"},
         sim=True,
     )
-    leaders = I2RTYamLeaders(config, factory=lambda **_kwargs: leader)
-    anchor = np.asarray(
-        [0.0, 0.3, 0.4, 0.0, 0.0, 0.0, 0.5, 0.2, 0.6, 0.7, 0.1, 0.1, 0.1, 0.8],
-        dtype=np.float32,
+
+    def factory(**kwargs: object) -> _FakeLeader:
+        factory_kwargs.append(kwargs)
+        return leaders_by_channel[str(kwargs["channel"])]
+
+    leaders = I2RTYamLeaders(
+        config,
+        factory=factory,
     )
 
-    action = leaders.read_action(anchor)
+    action = leaders.read_action()
 
-    assert action[:6] == pytest.approx(leader.qpos)
+    assert action[:6] == pytest.approx(leaders_by_channel["can2"].qpos)
     assert action[6] == pytest.approx(1.0)
-    assert action[7:] == pytest.approx(anchor[7:])
+    assert action[7:13] == pytest.approx(leaders_by_channel["can3"].qpos)
+    assert action[13] == pytest.approx(1.0)
+    assert all(kwargs["zero_gravity_mode"] is True for kwargs in factory_kwargs)
+    assert all(leader.gravity_comp_count == 1 for leader in leaders_by_channel.values())
 
 
-def test_collection_maps_leader_delta_onto_follower_anchor() -> None:
+def test_dual_leaders_move_to_zero_then_restore_gravity_compensation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    leaders_by_channel = {"can2": _FakeLeader(), "can3": _FakeLeader()}
+    monkeypatch.setattr("examples.hardware.i2rt.robot.time.sleep", lambda _seconds: None)
+    leaders = I2RTYamLeaders(
+        _Config(
+            leader_can_channels={"left_arm": "can2", "right_arm": "can3"},
+            sim=True,
+            startup_position="zero",
+            startup_duration_s=1.0,
+        ),
+        factory=lambda **kwargs: leaders_by_channel[str(kwargs["channel"])],
+    )
+
+    leaders.move_to_startup_position()
+
+    assert all(leader.qpos == pytest.approx(np.zeros(6)) for leader in leaders_by_channel.values())
+    assert all(leader.gravity_comp_count == 2 for leader in leaders_by_channel.values())
+
+
+def test_single_leader_configuration_is_rejected() -> None:
+    leaders = I2RTYamLeaders(
+        _Config(leader_can_channels={"left_arm": "can2"}, sim=True),
+        factory=lambda **_kwargs: _FakeLeader(),
+    )
+
+    with pytest.raises(RuntimeError, match="requires both"):
+        leaders.read_action()
+
+
+def test_direct_leader_control_captures_anchors_and_commands_follower_delta() -> None:
     follower_anchor = np.asarray(
         [0.0, 0.3, 0.4, 0.0, 0.0, 0.0, 1.0] * 2,
         dtype=np.float32,
@@ -278,31 +378,43 @@ def test_collection_maps_leader_delta_onto_follower_anchor() -> None:
     class _Followers:
         action: np.ndarray | None = None
 
+        def read_state(self) -> dict[str, np.ndarray]:
+            return split_action(follower_anchor, ("left_arm", "right_arm"))
+
         def apply_action(self, action: I2RTWireAction) -> None:
             self.action = action.action.copy()
 
+    class _Leaders:
+        reads = 0
+
+        def read_action(self) -> np.ndarray:
+            self.reads += 1
+            return leader_anchor if self.reads == 1 else leader
+
+        def read_buttons(self) -> dict[str, tuple[bool, bool]]:
+            return {
+                "left_arm": (False, False),
+                "right_arm": (False, False),
+            }
+
     node = object.__new__(I2RTZmqNode)
     node._config = _Config()
-    node._collection_active = True
+    node._collection_active = False
     node._hil_active = False
+    node._direct_leader_control = True
     node._hil_mode = "relative"
     node._hil_error = ""
-    node._follower_anchor = follower_anchor
-    node._leader_anchor = leader_anchor
-    node._leaders = type(
-        "_Leaders",
-        (),
-        {
-            "read_action": lambda self, _anchor: leader,
-            "read_buttons": lambda self: {"left_arm": (False, False)},
-        },
-    )()
+    node._follower_anchor = None
+    node._leader_anchor = None
+    node._next_leader_connect_time = 0.0
+    node._leaders = _Leaders()
     node._followers = _Followers()
     node._leader_control_updates = 0
     node._record_button = _RisingEdgeDebouncer(0.08)
     node._operator_event = ""
     node._operator_event_id = 0
 
+    assert node._ensure_direct_leader_control() is True
     action = node._leader_action()
 
     assert action is not None
@@ -503,14 +615,16 @@ def test_d405_specs_and_node_config() -> None:
 
     args = build_arg_parser().parse_args(
         [
-            "--robot",
-            "i2rt_dual_yam",
             "--follower-can",
             "left_arm=can_follower_l",
             "--follower-can",
             "right_arm=can_follower_r",
             "--camera",
             "cam_high=255323073172",
+            "--leader-cans",
+            "can_leader_l",
+            "can_leader_r",
+            "--direct-leader-control",
             "--allow-gripper-calibration",
         ]
     )
@@ -519,6 +633,11 @@ def test_d405_specs_and_node_config() -> None:
         "left_arm": "can_follower_l",
         "right_arm": "can_follower_r",
     }
+    assert config.leader_can_channels == {
+        "left_arm": "can_leader_l",
+        "right_arm": "can_leader_r",
+    }
+    assert config.direct_leader_control is True
     assert config.cameras[0].serial == "255323073172"
     assert config.control_rate_hz == pytest.approx(200.0)
     assert config.tracking_ki == pytest.approx(0.0)
@@ -530,28 +649,84 @@ def test_d405_specs_and_node_config() -> None:
     with pytest.raises(SystemExit):
         build_arg_parser().parse_args(["--arm-type", "yam_pro"])
 
+    with pytest.raises(SystemExit):
+        build_arg_parser().parse_args(["--leader-cans", "can2"])
+
+    direct_without_leaders = build_arg_parser().parse_args(
+        ["--direct-leader-control", "--allow-gripper-calibration"]
+    )
+    with pytest.raises(ValueError, match="requires --leader-cans"):
+        build_config(direct_without_leaders)
+
     unsafe_args = build_arg_parser().parse_args(["--gripper-type", "linear_4310"])
     with pytest.raises(ValueError, match="requires calibrated"):
         build_config(unsafe_args)
 
 
-@pytest.mark.parametrize(
-    ("robot_name", "disabled_cameras"),
-    [
-        ("i2rt_yam", ["cam_wrist"]),
-        ("i2rt_dual_yam", ["cam_left_wrist", "cam_right_wrist"]),
-    ],
-)
-def test_i2rt_presets_default_to_one_d405(
-    robot_name: str,
-    disabled_cameras: list[str],
-) -> None:
+def test_i2rt_preset_defaults_to_one_d405() -> None:
     root = Path(__file__).resolve().parents[2]
-    deploy = load_config(root / "configs" / "01_deploy" / robot_name / "openpi_qpos.py")
-    collection = load_config(root / "configs" / "02_collection" / f"{robot_name}.py")
+    deploy = load_config(root / "configs" / "01_deploy/i2rt_dual_yam/openpi_qpos.py")
 
-    assert deploy.transport.disabled_cameras == disabled_cameras
-    assert collection.transport.disabled_cameras == disabled_cameras
+    assert deploy.transport.disabled_cameras == ["cam_left_wrist", "cam_right_wrist"]
+    assert deploy.inference_cfg.manual_max_qpos_step == pytest.approx(0.005)
+    assert deploy.inference_cfg.manual_settle_duration == pytest.approx(2.0)
+
+
+def test_i2rt_dual_leader_collection_preset() -> None:
+    root = Path(__file__).resolve().parents[2]
+    collection = load_config(root / "configs" / "02_collection" / "i2rt_dual_yam.py")
+
+    assert collection.transport.disabled_cameras == ["cam_left_wrist", "cam_right_wrist"]
     assert collection.inference_cfg.manual_max_qpos_step == pytest.approx(0.005)
     assert collection.inference_cfg.manual_settle_duration == pytest.approx(2.0)
     assert dict(collection.collection.schema.cameras) == {"cam_high": "observation.images.cam_high"}
+
+
+def test_run_hardware_defaults_to_dual_leaders_and_gripper_calibration(
+    tmp_path: Path,
+) -> None:
+    root = Path(__file__).resolve().parents[2]
+    fake_venv = tmp_path / "venv"
+    fake_bin = fake_venv / "bin"
+    fake_bin.mkdir(parents=True)
+    captured_args = tmp_path / "node-args.txt"
+    fake_python = fake_bin / "python"
+    fake_python.write_text('#!/usr/bin/env bash\nprintf \'%s\\n\' "$@" > "$I2RT_TEST_ARGS_PATH"\n')
+    fake_python.chmod(0o755)
+
+    env = os.environ.copy()
+    for name in (
+        "ENABLE_I2RT_LEADERS",
+        "I2RT_ALLOW_GRIPPER_CALIBRATION",
+        "I2RT_GRIPPER_LIMITS",
+        "I2RT_STARTUP_POSITION",
+    ):
+        env.pop(name, None)
+    env.update(
+        I2RT_VENV_DIR=str(fake_venv),
+        I2RT_SIM="1",
+        I2RT_TEST_ARGS_PATH=str(captured_args),
+        LEFT_FOLLOWER_CAN="test_follower_l",
+        RIGHT_FOLLOWER_CAN="test_follower_r",
+        LEFT_LEADER_CAN="test_leader_l",
+        RIGHT_LEADER_CAN="test_leader_r",
+    )
+
+    subprocess.run(
+        ["bash", "examples/hardware/i2rt/run_hardware.sh"],
+        cwd=root,
+        env=env,
+        check=True,
+    )
+    args = captured_args.read_text().splitlines()
+
+    assert "--allow-gripper-calibration" in args
+    follower_index = args.index("--follower-can")
+    assert args[follower_index + 1] == "left_arm=test_follower_l"
+    assert args[follower_index + 3] == "right_arm=test_follower_r"
+    leader_index = args.index("--leader-cans")
+    assert args[leader_index + 1 : leader_index + 3] == ["test_leader_l", "test_leader_r"]
+    assert "--direct-leader-control" in args
+    startup_index = args.index("--startup-position")
+    assert args[startup_index + 1] == "zero"
+    assert not list((root / "examples/hardware/i2rt").glob("run_*leader.sh"))

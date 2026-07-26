@@ -2,20 +2,34 @@
 
 from __future__ import annotations
 
+from importlib.util import find_spec
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 from core.registry import ROBOT_REGISTRY
-from robots.base import ActuatorGroup, CameraSpec, ObservationSchema, Robot, RobotVisConfig
-from robots.zoo.i2rt_yam import (
-    ARM_JOINTS,
-    ARM_QPOS,
-    JOINT_NAMES,
-    find_i2rt_yam_urdf,
-    make_vis_part,
+from robots.base import (
+    ActuatorGroup,
+    CameraSpec,
+    ObservationSchema,
+    Robot,
+    RobotVisConfig,
+    VisPart,
 )
 
+ARM_JOINTS = ("joint1", "joint2", "joint3", "joint4", "joint5", "joint6")
+JOINT_NAMES = (*ARM_JOINTS, "gripper")
+ARM_QPOS = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+GRIPPER_SEGMENTS = [
+    {"copy": [0, 6]},
+    {
+        "gripper": 6,
+        "range": [0.0, 1.0],
+        "stroke": 0.04695,
+        "fingers": [-1, -1],
+    },
+]
 LEFT_BASE_POSITION = (0.0, 0.25, 0.0)
 RIGHT_BASE_POSITION = (0.0, -0.25, 0.0)
 
@@ -28,12 +42,60 @@ else:
     _PYROKI_IMPORT_ERROR = None
 
 
+def find_yam_urdf() -> Path | None:
+    """Locate the official YAM URDF in the in-tree SDK checkout or installation."""
+    project_root = Path(__file__).resolve().parents[4]
+    checkout = (
+        project_root
+        / "examples"
+        / "hardware"
+        / "i2rt"
+        / "SDK"
+        / "i2rt"
+        / "i2rt"
+        / "robot_models"
+        / "arm"
+        / "yam"
+        / "yam.urdf"
+    )
+    if checkout.is_file():
+        return checkout
+
+    spec = find_spec("i2rt")
+    if spec is None:
+        return None
+    roots = spec.submodule_search_locations or ()
+    for root in roots:
+        installed = Path(root) / "robot_models" / "arm" / "yam" / "yam.urdf"
+        if installed.is_file():
+            return installed
+    return None
+
+
+def make_vis_part(
+    name: str,
+    urdf: Path,
+    base_position: tuple[float, float, float],
+    base_wxyz: tuple[float, float, float, float],
+    qpos_offset: int,
+) -> VisPart:
+    return VisPart.from_segments(
+        name,
+        urdf,
+        base_position,
+        base_wxyz,
+        qpos_offset,
+        7,
+        GRIPPER_SEGMENTS,
+    )
+
+
 @ROBOT_REGISTRY.register("i2rt_dual_yam")
 class I2RTDualYam(Robot):
     """Two I2RT YAM followers: 2 x (6 arm joints + gripper), 14-D action."""
 
     def __init__(self) -> None:
-        urdf = find_i2rt_yam_urdf()
+        urdf = find_yam_urdf()
         vis_config = None
         if urdf is not None:
             vis_config = RobotVisConfig(

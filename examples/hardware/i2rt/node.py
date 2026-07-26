@@ -13,6 +13,8 @@ import time
 import numpy as np
 import zmq
 
+import robots  # noqa: F401  # register EVA robot definitions before registry lookup
+from core.registry import ROBOT_REGISTRY
 from examples.hardware.i2rt.camera import (
     CameraSpec,
     RealSenseCameraCache,
@@ -21,7 +23,6 @@ from examples.hardware.i2rt.camera import (
 )
 from examples.hardware.i2rt.robot import (
     I2RTYamFollowers,
-    I2RTYamKinematics,
     I2RTYamLeaders,
     flatten_state,
     split_action,
@@ -39,16 +40,28 @@ from examples.hardware.i2rt.wire import (
 
 logger = logging.getLogger(__name__)
 
-ROBOT_GROUPS: dict[str, tuple[str, ...]] = {
-    "i2rt_yam": ("arm",),
-    "i2rt_dual_yam": ("left_arm", "right_arm"),
-}
-ROBOT_CAMERA_KEYS: dict[str, tuple[str, ...]] = {
-    "i2rt_yam": ("cam_high", "cam_wrist"),
-    "i2rt_dual_yam": ("cam_high", "cam_left_wrist", "cam_right_wrist"),
-}
+ROBOT_NAME = "i2rt_dual_yam"
+GROUP_NAMES = ("left_arm", "right_arm")
+CAMERA_KEYS = ("cam_high", "cam_left_wrist", "cam_right_wrist")
 LEADER_RECORD_BUTTON_INDEX = 1
 LEADER_BUTTON_DEBOUNCE_S = 0.08
+LEADER_CONNECT_RETRY_S = 5.0
+EEF_DOF = 8
+
+
+def split_group_eef(
+    eef: np.ndarray,
+    group_names: tuple[str, ...],
+) -> dict[str, np.ndarray]:
+    """Split flat EVA xyz + wxyz + gripper poses into actuator groups."""
+    vector = np.asarray(eef, dtype=np.float32).reshape(-1)
+    expected = len(group_names) * EEF_DOF
+    if vector.shape != (expected,):
+        raise ValueError(f"Expected a {expected}-D I2RT EEF vector, got {vector.shape}")
+    return {
+        name: vector[index * EEF_DOF : (index + 1) * EEF_DOF].copy()
+        for index, name in enumerate(group_names)
+    }
 
 
 class _RisingEdgeDebouncer:
@@ -86,7 +99,7 @@ class I2RTZmqConfig:
     group_names: tuple[str, ...]
     follower_can_channels: dict[str, str]
     leader_can_channels: dict[str, str]
-    disabled_groups: tuple[str, ...]
+    direct_leader_control: bool
     arm_type: str
     gripper_type: str
     sim: bool
@@ -132,20 +145,6 @@ def _parse_group_map(
     return result
 
 
-def _parse_name_list(values: list[str], allowed: tuple[str, ...]) -> tuple[str, ...]:
-    result: list[str] = []
-    for value in values:
-        for raw_name in value.split(","):
-            name = raw_name.strip()
-            if not name:
-                continue
-            if name not in allowed:
-                raise ValueError(f"Unknown I2RT group {name!r}; expected one of {allowed}")
-            if name not in result:
-                result.append(name)
-    return tuple(result)
-
-
 class I2RTZmqNode:
     """Bridge EVA wire messages to I2RT follower and leader YAM arms."""
 
@@ -162,10 +161,12 @@ class I2RTZmqNode:
 
         self._followers = I2RTYamFollowers(config)
         self._leaders = I2RTYamLeaders(config)
-        self._kinematics = I2RTYamKinematics(config)
+        robot = ROBOT_REGISTRY.build(config.robot_name)
+        self._fk_solver = robot.build_kinematics(initial_qpos_groups=robot.initial_qpos_by_group())
         self._cameras = RealSenseCameraCache(config.cameras)
         self._collection_active = False
         self._hil_active = False
+        self._direct_leader_control = config.direct_leader_control
         self._hil_mode = "relative"
         self._hil_error = ""
         self._leader_anchor: np.ndarray | None = None
@@ -178,6 +179,7 @@ class I2RTZmqNode:
         self._record_button = _RisingEdgeDebouncer(LEADER_BUTTON_DEBOUNCE_S)
         self._operator_event = ""
         self._operator_event_id = 0
+        self._next_leader_connect_time = 0.0
         now = time.monotonic()
         self._last_status_time = now
         self._next_status_time = now + max(config.status_log_interval_s, 0.0)
@@ -195,27 +197,45 @@ class I2RTZmqNode:
     def stop(self) -> None:
         self._stop.set()
 
+    def _capture_leader_anchors(self) -> None:
+        follower = flatten_state(self._followers.read_state(), self._config.group_names)
+        leader = self._leaders.read_action()
+        self._leader_anchor = leader
+        self._follower_anchor = follower
+
+    def _ensure_direct_leader_control(self) -> bool:
+        if not self._direct_leader_control:
+            return False
+        if self._leader_anchor is not None and self._follower_anchor is not None:
+            return True
+        now = time.monotonic()
+        if now < self._next_leader_connect_time:
+            return False
+        try:
+            self._capture_leader_anchors()
+        except Exception as exc:
+            self._hil_error = str(exc)
+            self._next_leader_connect_time = now + LEADER_CONNECT_RETRY_S
+            logger.warning(
+                "I2RT direct leader control is not ready; retrying in %.1f s: %s",
+                LEADER_CONNECT_RETRY_S,
+                exc,
+            )
+            return False
+        self._hil_error = ""
+        logger.info("I2RT direct dual-leader control started with relative anchors")
+        return True
+
     def _start_collection(self) -> None:
         if self._collection_active:
             return
-        follower = flatten_state(self._followers.read_state(), self._config.group_names)
-        leader = self._leaders.read_action(follower)
-        self._leader_anchor = leader
-        self._follower_anchor = follower
+        self._capture_leader_anchors()
         self._collection_active = True
-        logger.info(
-            "I2RT leader-follower collection started: leader_groups=%s unled_groups_hold_anchor=%s",
-            tuple(self._config.leader_can_channels),
-            tuple(
-                name
-                for name in self._config.group_names
-                if name not in self._config.leader_can_channels
-            ),
-        )
+        logger.info("I2RT dual-leader collection started")
 
     def _stop_collection(self) -> None:
         self._collection_active = False
-        if not self._hil_active:
+        if not self._hil_active and not self._direct_leader_control:
             self._leader_anchor = None
             self._follower_anchor = None
             self._latest_leader_action = None
@@ -228,15 +248,12 @@ class I2RTZmqNode:
             self._hil_error = f"Unsupported HIL mode: {mode}"
             return
         try:
-            follower = flatten_state(self._followers.read_state(), self._config.group_names)
-            leader = self._leaders.read_action(follower)
+            self._capture_leader_anchors()
         except Exception as exc:
             self._hil_error = str(exc)
             self._hil_active = False
             logger.exception("Could not start I2RT HIL")
             return
-        self._leader_anchor = leader
-        self._follower_anchor = follower
         self._hil_mode = mode
         self._hil_error = ""
         self._hil_active = True
@@ -244,11 +261,11 @@ class I2RTZmqNode:
 
     def _stop_hil(self) -> None:
         self._hil_active = False
-        self._leader_anchor = None
-        self._follower_anchor = None
-        self._latest_leader_action = None
         self._hil_error = ""
-        if not self._collection_active:
+        if not self._collection_active and not self._direct_leader_control:
+            self._leader_anchor = None
+            self._follower_anchor = None
+            self._latest_leader_action = None
             self._leaders.close()
             self._followers.enter_safe_idle()
         logger.info("I2RT HIL stopped")
@@ -280,7 +297,12 @@ class I2RTZmqNode:
             if action.target == HIL_STOP_TARGET:
                 self._stop_hil()
                 continue
-            if action.target == "sim" or self._hil_active or self._collection_active:
+            if (
+                action.target == "sim"
+                or self._direct_leader_control
+                or self._hil_active
+                or self._collection_active
+            ):
                 continue
             try:
                 self._followers.apply_action(action)
@@ -289,16 +311,19 @@ class I2RTZmqNode:
                 logger.warning("Dropped invalid I2RT action: %s", exc)
 
     def _leader_action(self) -> np.ndarray | None:
-        if not self._collection_active and not self._hil_active:
+        if not self._direct_leader_control and not self._collection_active and not self._hil_active:
+            return None
+        if not self._ensure_direct_leader_control() and (
+            self._leader_anchor is None or self._follower_anchor is None
+        ):
             return None
         try:
             assert self._follower_anchor is not None
             assert self._leader_anchor is not None
-            leader = self._leaders.read_action(self._follower_anchor)
+            leader = self._leaders.read_action()
             button_states = self._leaders.read_buttons()
             record_pressed = any(
-                len(buttons) > LEADER_RECORD_BUTTON_INDEX
-                and buttons[LEADER_RECORD_BUTTON_INDEX]
+                len(buttons) > LEADER_RECORD_BUTTON_INDEX and buttons[LEADER_RECORD_BUTTON_INDEX]
                 for buttons in button_states.values()
             )
             if self._record_button.update(record_pressed, time.monotonic()):
@@ -314,9 +339,7 @@ class I2RTZmqNode:
             # identical.  Absolute collection previously discarded the anchors
             # captured in _start_collection(), causing an immediate pose jump and
             # a constant tracking offset.
-            relative_control = (
-                self._hil_mode == "relative" if self._hil_active else self._collection_active
-            )
+            relative_control = self._hil_mode == "relative" if self._hil_active else True
             if relative_control:
                 action = self._follower_anchor + (leader - self._leader_anchor)
             action = flatten_state(
@@ -332,6 +355,11 @@ class I2RTZmqNode:
         except Exception as exc:
             self._hil_error = str(exc)
             logger.warning("I2RT leader read/control failed: %s", exc)
+            if self._direct_leader_control and not self._collection_active and not self._hil_active:
+                self._leader_anchor = None
+                self._follower_anchor = None
+                self._leaders.close()
+                self._next_leader_connect_time = time.monotonic() + LEADER_CONNECT_RETRY_S
             return None
 
     def _publish_observation(self) -> None:
@@ -343,8 +371,11 @@ class I2RTZmqNode:
             for group_name in self._config.group_names:
                 error = action_parts[group_name][:6] - state[group_name][:6]
                 self._tracking_error[group_name] = np.round(error, 5).tolist()
-        eef = self._kinematics.group_eef(state)
-        action_eef = None if action is None else self._kinematics.flat_eef(action)
+        eef = split_group_eef(
+            self._fk(flatten_state(state, self._config.group_names)),
+            self._config.group_names,
+        )
+        action_eef = None if action is None else self._fk(action)
         observation = WireObservation(
             t=time.monotonic(),
             images=self._cameras.snapshot(),
@@ -360,6 +391,10 @@ class I2RTZmqNode:
         )
         self._obs_pub.send(pack_observation(observation))
         self._published_observations += 1
+
+    def _fk(self, qpos: np.ndarray) -> np.ndarray:
+        """Run EVA's registered FK so hardware and client share one pose convention."""
+        return self._fk_solver.fk_chunk(np.asarray(qpos, dtype=np.float32)[np.newaxis, :])[0]
 
     def _log_status_if_due(self) -> None:
         if self._config.status_log_interval_s <= 0:
@@ -390,6 +425,9 @@ class I2RTZmqNode:
 
     def serve_forever(self) -> None:
         self._followers.move_to_startup_position()
+        if self._config.leader_can_channels:
+            self._leaders.move_to_startup_position()
+        self._ensure_direct_leader_control()
         control_period = 1.0 / self._config.control_rate_hz
         publish_period = 1.0 / self._config.publish_rate_hz
         next_control = time.monotonic()
@@ -423,38 +461,37 @@ class I2RTZmqNode:
         self._stop.set()
         self._collection_active = False
         self._hil_active = False
+        self._direct_leader_control = False
         self._leaders.close()
         self._followers.close()
+        self._fk_solver.close()
         self._cameras.close()
         self._action_sub.close(linger=0)
         self._obs_pub.close(linger=0)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--obs-endpoint", default="tcp://127.0.0.1:5555")
     parser.add_argument("--action-endpoint", default="tcp://127.0.0.1:5556")
-    parser.add_argument("--robot", choices=tuple(ROBOT_GROUPS), default="i2rt_dual_yam")
     parser.add_argument(
         "--follower-can",
         action="append",
         default=[],
         metavar="GROUP=INTERFACE",
-        help="Follower CAN mapping; repeat once per arm. Single-arm accepts INTERFACE.",
+        help="Follower CAN mapping; repeat once per arm.",
     )
     parser.add_argument(
-        "--leader-can",
-        action="append",
-        default=[],
-        metavar="GROUP=INTERFACE",
-        help="Optional teaching-handle CAN mapping for collection/HIL.",
+        "--leader-cans",
+        nargs=2,
+        default=None,
+        metavar=("LEFT_INTERFACE", "RIGHT_INTERFACE"),
+        help="Dual teaching-handle CAN interfaces for collection/HIL.",
     )
     parser.add_argument(
-        "--disabled-arm",
-        action="append",
-        default=[],
-        metavar="GROUP",
-        help="Intentionally disable one follower group; repeatable or comma-separated.",
+        "--direct-leader-control",
+        action="store_true",
+        help="Start relative dual-leader follower control immediately.",
     )
     parser.add_argument(
         "--arm-type",
@@ -597,14 +634,27 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def build_config(args: argparse.Namespace) -> I2RTZmqConfig:
-    group_names = ROBOT_GROUPS[args.robot]
-    if len(group_names) == 1:
-        follower_defaults = {"arm": "can0"}
-    else:
-        follower_defaults = {"left_arm": "can0", "right_arm": "can1"}
+    group_names = GROUP_NAMES
+    follower_defaults = {"left_arm": "can0", "right_arm": "can1"}
     follower_can = _parse_group_map(args.follower_can, group_names, follower_defaults)
-    leader_can = _parse_group_map(args.leader_can, group_names)
-    disabled_groups = _parse_name_list(args.disabled_arm, group_names)
+    leader_can: dict[str, str] = {}
+    if args.leader_cans is not None:
+        left_interface, right_interface = (value.strip() for value in args.leader_cans)
+        if not left_interface or not right_interface:
+            raise ValueError("--leader-cans requires two non-empty CAN interfaces")
+        if left_interface == right_interface:
+            raise ValueError("--leader-cans requires two distinct CAN interfaces")
+        leader_can = {
+            "left_arm": left_interface,
+            "right_arm": right_interface,
+        }
+        reused_interfaces = set(leader_can.values()) & set(follower_can.values())
+        if reused_interfaces:
+            raise ValueError(
+                f"leader and follower CAN interfaces must be distinct: {sorted(reused_interfaces)}"
+            )
+    if args.direct_leader_control and not leader_can:
+        raise ValueError("--direct-leader-control requires --leader-cans")
     cameras = parse_camera_specs(
         args.camera,
         width=args.camera_width,
@@ -613,15 +663,11 @@ def build_config(args: argparse.Namespace) -> I2RTZmqConfig:
         timeout_ms=args.camera_timeout_ms,
     )
     invalid_cameras = {
-        camera.image_key
-        for camera in cameras
-        if camera.image_key not in ROBOT_CAMERA_KEYS[args.robot]
+        camera.image_key for camera in cameras if camera.image_key not in CAMERA_KEYS
     }
     if invalid_cameras:
-        allowed = ", ".join(ROBOT_CAMERA_KEYS[args.robot])
-        raise ValueError(
-            f"Unknown camera keys for {args.robot}: {sorted(invalid_cameras)}; expected {allowed}"
-        )
+        allowed = ", ".join(CAMERA_KEYS)
+        raise ValueError(f"Unknown camera keys: {sorted(invalid_cameras)}; expected {allowed}")
     if args.joint4_kp is not None and not 0.0 < args.joint4_kp <= 500.0:
         raise ValueError("--joint4-kp must be in (0, 500]")
     if args.end_effector_mass is not None and not 0.0 <= args.end_effector_mass <= 5.0:
@@ -658,11 +704,11 @@ def build_config(args: argparse.Namespace) -> I2RTZmqConfig:
     return I2RTZmqConfig(
         observation_endpoint=args.obs_endpoint,
         action_endpoint=args.action_endpoint,
-        robot_name=args.robot,
+        robot_name=ROBOT_NAME,
         group_names=group_names,
         follower_can_channels=follower_can,
         leader_can_channels=leader_can,
-        disabled_groups=disabled_groups,
+        direct_leader_control=bool(args.direct_leader_control),
         arm_type=args.arm_type,
         gripper_type=args.gripper_type,
         sim=bool(args.sim),
