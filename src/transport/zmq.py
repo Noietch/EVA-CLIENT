@@ -493,26 +493,17 @@ class _ObservationReader:
         return self._wire_to_observation(wire_obs)
 
     def _drain_raw_collection(self) -> bytes | None:
-        """Drain a bounded socket batch and return only its newest raw payload.
-
-        The capture clock defines the stored frame rate, so retaining older full
-        observations would create latency and pin duplicate image payloads. Decoding
-        still happens later through the snapshot's raw-batch closure.
-        """
+        """Return the oldest raw payload without dropping collection frames."""
         with self._lock:
-            got_message = False
-            latest = self._raw_collection_queue[-1] if self._raw_collection_queue else None
-            self._raw_collection_queue.clear()
-            for _ in range(COLLECTION_SOCKET_DRAIN_MAX):
+            if self._raw_collection_queue:
+                payload = self._raw_collection_queue.popleft()
+            else:
                 try:
                     payload = self._sub.recv(self._zmq.NOBLOCK)
                 except self._zmq.Again:
-                    break
-                got_message = True
-                latest = payload
-            if got_message:
-                self._freshness.mark()
-            return latest
+                    return None
+            self._freshness.mark()
+            return payload
 
     def acquire_collection_raw(self) -> RawCollectionSnapshot | None:
         """Capture one raw collection payload and expose it as timestamped streams.
@@ -595,7 +586,12 @@ class ZmqTransport(TransportBridge):
         self._zmq = zmq
 
         self._reader = _ObservationReader(config, robot, zmq)
-        self._collection_reader = _ObservationReader(config, robot, zmq)
+        self._collection_reader = _ObservationReader(
+            config,
+            robot,
+            zmq,
+            preserve_collection_backlog=True,
+        )
         self._qpos_reader = _ObservationReader(config, robot, zmq)
         self._extra_readers: list[_ObservationReader] = []
 

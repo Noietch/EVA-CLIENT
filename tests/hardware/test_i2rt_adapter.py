@@ -3,6 +3,7 @@ from __future__ import annotations
 import dataclasses
 import os
 import subprocess
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -178,7 +179,7 @@ def test_i2rt_observation_uses_eva_fk_for_state_and_action() -> None:
     node = object.__new__(I2RTZmqNode)
     node._config = _Config()
     node._latest_leader_action = action
-    node._followers = type("_Followers", (), {"read_state": lambda self: state})()
+    node._followers = type("_Followers", (), {"snapshot_state": lambda self: state})()
     node._fk_solver = solver
     node._cameras = type("_Cameras", (), {"snapshot": lambda self: {}})()
     node._obs_pub = publisher
@@ -203,6 +204,55 @@ def test_i2rt_observation_uses_eva_fk_for_state_and_action() -> None:
     assert observation.eef["right_arm"] == pytest.approx(np.arange(8, 16) + 10.0)
     assert observation.action_eef == pytest.approx(np.arange(16) + 20.0)
     assert node._published_observations == 1
+
+
+def test_i2rt_observation_publisher_owns_socket_for_thread_lifetime() -> None:
+    class _Publisher:
+        endpoint: str | None = None
+        closed = False
+
+        def bind(self, endpoint: str) -> None:
+            self.endpoint = endpoint
+
+        def close(self, *, linger: int) -> None:
+            assert linger == 0
+            self.closed = True
+
+    class _Context:
+        publisher = _Publisher()
+
+        def socket(self, _socket_type: object) -> _Publisher:
+            return self.publisher
+
+    node = object.__new__(I2RTZmqNode)
+    node._config = SimpleNamespace(
+        publish_rate_hz=30.0,
+        observation_endpoint="tcp://127.0.0.1:5555",
+    )
+    node._ctx = _Context()
+    node._obs_pub = None
+    node._publisher_ready = threading.Event()
+    node._publisher_error = None
+    node._stop = threading.Event()
+    publish_count = 0
+
+    def publish_observation() -> None:
+        nonlocal publish_count
+        assert node._obs_pub is node._ctx.publisher
+        publish_count += 1
+        node._stop.set()
+
+    node._publish_observation = publish_observation
+    node._log_status_if_due = lambda: None
+
+    node._publish_loop()
+
+    assert publish_count == 1
+    assert node._publisher_ready.is_set()
+    assert node._publisher_error is None
+    assert node._ctx.publisher.endpoint == node._config.observation_endpoint
+    assert node._ctx.publisher.closed is True
+    assert node._obs_pub is None
 
 
 def test_split_group_eef_rejects_wrong_width() -> None:
@@ -372,6 +422,7 @@ def test_direct_leader_control_captures_anchors_and_commands_follower_delta() ->
     node._followers = _Followers()
     node._leader_control_updates = 0
     node._record_button = _RisingEdgeDebouncer(0.08)
+    node._cancel_button = _RisingEdgeDebouncer(0.08)
     node._operator_event = ""
     node._operator_event_id = 0
 
@@ -395,6 +446,29 @@ def test_leader_record_button_requires_stable_release_then_press() -> None:
     assert button.update(True, 1.27) is False
     assert button.update(True, 1.29) is True
     assert button.update(True, 1.40) is False
+
+
+def test_leader_record_and_cancel_buttons_emit_separate_events() -> None:
+    node = object.__new__(I2RTZmqNode)
+    node._record_button = _RisingEdgeDebouncer(0.08)
+    node._cancel_button = _RisingEdgeDebouncer(0.08)
+    node._operator_event = ""
+    node._operator_event_id = 0
+
+    node._update_operator_buttons({"left_arm": (False, False)}, 1.00)
+    node._update_operator_buttons({"left_arm": (False, True)}, 1.10)
+    node._update_operator_buttons({"left_arm": (False, True)}, 1.19)
+
+    assert node._operator_event == "collection_record_toggle"
+    assert node._operator_event_id == 1
+
+    node._update_operator_buttons({"left_arm": (False, False)}, 1.30)
+    node._update_operator_buttons({"left_arm": (False, False)}, 1.39)
+    node._update_operator_buttons({"right_arm": (True, False)}, 1.40)
+    node._update_operator_buttons({"right_arm": (True, False)}, 1.49)
+
+    assert node._operator_event == "collection_cancel"
+    assert node._operator_event_id == 2
 
 
 def test_hold_position_idle_starts_and_returns_to_measured_position() -> None:
@@ -643,6 +717,7 @@ def test_i2rt_dual_leader_collection_preset() -> None:
     assert collection.transport.disabled_cameras == []
     assert collection.inference_cfg.manual_max_qpos_step == pytest.approx(0.005)
     assert collection.inference_cfg.manual_settle_duration == pytest.approx(2.0)
+    assert collection.collection.schema.image_skew_tolerance_sec == pytest.approx(0.020)
     assert dict(collection.collection.schema.cameras) == {
         "cam_high": "observation.images.cam_high",
         "cam_left_wrist": "observation.images.cam_left_wrist",

@@ -238,6 +238,9 @@ class CollectionEpisodeWriter:
             self._merge_raw_batch(snapshot.decode_raw())
 
     def _image_skew_tolerance_sec(self) -> float:
+        configured = self._schema.get("image_skew_tolerance_sec")
+        if configured is not None:
+            return float(configured)
         return image_skew_tolerance_sec(float(self._logger._fps))
 
     def _align_raw_records(self) -> None:

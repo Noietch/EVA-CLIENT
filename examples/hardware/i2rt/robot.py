@@ -375,6 +375,15 @@ class I2RTYamFollowers:
             state[group_name] = current
         return state
 
+    def snapshot_state(self) -> dict[str, np.ndarray]:
+        """Return the latest control-loop state without touching the hardware SDK."""
+        with self._lock:
+            qpos = self._qpos.copy()
+        return {
+            group_name: qpos[self._offset(group_name) : self._offset(group_name) + GROUP_DOF]
+            for group_name in self._config.group_names
+        }
+
     def move_to_startup_position(self) -> None:
         """Connect all followers and optionally interpolate their arm joints to zero."""
         initial = self.read_state()
