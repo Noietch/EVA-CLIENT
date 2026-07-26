@@ -20,11 +20,12 @@ From the EVA Client root:
 bash examples/hardware/i2rt/setup_sdk.sh
 ```
 
-The SDK is an official Git submodule pinned to the latest stable release tested
-with this adapter (`v1.2.4`, commit `5d47b358`). Setup initializes that exact
-revision, applies the reviewed EVA compatibility/safety patches, and runs
-`uv sync --project examples/hardware/i2rt`. The subproject
-declares `i2rt`, `pyrealsense2`, `pyzmq`, and the SDK's NumPy/build constraints.
+The SDK is a Git submodule pinned to the tested `Noietch/i2rt` fork
+(`dev/yam`, commit `fd90afef`), based on the official v1.2.4 release. The fork
+contains the reviewed EVA compatibility and safety changes, so setup initializes
+that exact revision directly and runs `uv sync --project examples/hardware/i2rt`.
+The subproject declares `i2rt`, `pyrealsense2`, `pyzmq`, and the SDK's
+NumPy/build constraints.
 
 To install the official boot-time CAN udev rule:
 
@@ -224,8 +225,8 @@ and `joint10` are those two local fourth joints. Override with
   launches retain `gravity_comp`; override with `I2RT_IDLE_MODE` only after the
   gravity model and end-effector load have been calibrated.
 - Closing the node calls the SDK's safe `close()` path.
-- Setup applies a small SDK safety patch that closes partially initialized CAN
-  connections and waits for the motor-control loop before closing its socket.
+- The pinned SDK fork closes partially initialized CAN connections and waits
+  for the motor-control loop before closing its socket.
 - Linear grippers may calibrate at first connection. Follow I2RT's requirement
   to start them fully closed or complete gripper calibration first.
 
