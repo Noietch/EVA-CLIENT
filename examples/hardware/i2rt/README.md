@@ -141,7 +141,7 @@ The correction limit, deadband, settle delay, and startup learning duration have
 matching `I2RT_TRACKING_*` / `I2RT_STARTUP_TRIM_DURATION` variables.
 
 For the currently verified workstation mapping (can2 left follower, can1 right
-follower, can0 left leader, can3 right leader, and D405 serial `260422275306`),
+follower, can3 left leader, can0 right leader, and D405 serial `260422275306`),
 use the sole hardware launcher directly:
 
 ```bash

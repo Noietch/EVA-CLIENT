@@ -43,8 +43,8 @@ bring_up_can() {
 
 LEFT_FOLLOWER_CAN="${LEFT_FOLLOWER_CAN:-$(choose_can can_follower_l can2)}"
 RIGHT_FOLLOWER_CAN="${RIGHT_FOLLOWER_CAN:-$(choose_can can_follower_r can1)}"
-LEFT_LEADER_CAN="${LEFT_LEADER_CAN:-$(choose_can can_leader_l can0)}"
-RIGHT_LEADER_CAN="${RIGHT_LEADER_CAN:-$(choose_can can_leader_r can3)}"
+LEFT_LEADER_CAN="${LEFT_LEADER_CAN:-$(choose_can can_leader_l can3)}"
+RIGHT_LEADER_CAN="${RIGHT_LEADER_CAN:-$(choose_can can_leader_r can0)}"
 
 if [[ "$ENABLE_LEADERS" != "0" && "$ENABLE_LEADERS" != "1" ]]; then
   echo "ENABLE_I2RT_LEADERS must be 0 or 1." >&2

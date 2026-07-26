@@ -686,6 +686,12 @@ def test_run_hardware_defaults_to_dual_leaders_and_gripper_calibration(
     tmp_path: Path,
 ) -> None:
     root = Path(__file__).resolve().parents[2]
+    launcher = (root / "examples/hardware/i2rt/run_hardware.sh").read_text()
+    assert 'choose_can can_follower_l can2' in launcher
+    assert 'choose_can can_follower_r can1' in launcher
+    assert 'choose_can can_leader_l can3' in launcher
+    assert 'choose_can can_leader_r can0' in launcher
+
     fake_venv = tmp_path / "venv"
     fake_bin = fake_venv / "bin"
     fake_bin.mkdir(parents=True)
