@@ -76,9 +76,7 @@ _CAMERA_COLORS = {
     "cam_right_wrist": (40, 160, 90),
 }
 _DEFAULT_COLOR = (80, 80, 80)
-_HIL_SUPPORTED_ROBOTS = frozenset(
-    {"r1_lite", "ur5e", "arx_r5", "agilex_piper", "i2rt_yam", "i2rt_dual_yam"}
-)
+_HIL_SUPPORTED_ROBOTS = frozenset({"r1_lite", "ur5e", "arx_r5", "agilex_piper", "i2rt_dual_yam"})
 
 
 def _synth_image(

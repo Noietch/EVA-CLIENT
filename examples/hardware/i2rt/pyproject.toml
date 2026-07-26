@@ -4,11 +4,17 @@ version = "0.1.0"
 description = "Isolated I2RT YAM and RealSense D405 execution layer for EVA Client."
 requires-python = ">=3.11,<3.12"
 dependencies = [
+    "addict>=2.4.0",
     "i2rt",
+    "jax==0.6.2",
+    "jaxlib==0.6.2",
+    "jaxls @ git+https://github.com/brentyi/jaxls.git@50a58be88c5ef74532f09e3f55268b4f02c490e3",
     "msgpack==1.1.2",
     "numpy==2.2.6",
     "pyrealsense2==2.58.3.10794",
+    "pyroki @ git+https://github.com/chungmin99/pyroki.git@388e43e1fc0d0ee382968d3dd72970fd62a0450c",
     "pyzmq==27.1.0",
+    "yourdfpy==0.0.60",
 ]
 
 [tool.uv]

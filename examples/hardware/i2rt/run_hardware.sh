@@ -5,8 +5,9 @@ cd "$(dirname "$0")/../../.."
 
 VENV_DIR="${I2RT_VENV_DIR:-$PWD/examples/hardware/i2rt/.venv}"
 PYTHON_BIN="$VENV_DIR/bin/python"
-ROBOT="${I2RT_ROBOT:-i2rt_dual_yam}"
 SIM="${I2RT_SIM:-0}"
+ENABLE_LEADERS="${ENABLE_I2RT_LEADERS:-1}"
+ALLOW_GRIPPER_CALIBRATION="${I2RT_ALLOW_GRIPPER_CALIBRATION:-1}"
 
 if [[ ! -x "$PYTHON_BIN" ]]; then
   echo "I2RT environment not found: $VENV_DIR" >&2
@@ -40,11 +41,19 @@ bring_up_can() {
   sudo ip link set "$interface" up type can bitrate 1000000
 }
 
-LEFT_FOLLOWER_CAN="${LEFT_FOLLOWER_CAN:-$(choose_can can_follower_l can0)}"
+LEFT_FOLLOWER_CAN="${LEFT_FOLLOWER_CAN:-$(choose_can can_follower_l can2)}"
 RIGHT_FOLLOWER_CAN="${RIGHT_FOLLOWER_CAN:-$(choose_can can_follower_r can1)}"
-SINGLE_FOLLOWER_CAN="${FOLLOWER_CAN:-$LEFT_FOLLOWER_CAN}"
-LEFT_LEADER_CAN="${LEFT_LEADER_CAN:-$(choose_can can_leader_l can2)}"
+LEFT_LEADER_CAN="${LEFT_LEADER_CAN:-$(choose_can can_leader_l can0)}"
 RIGHT_LEADER_CAN="${RIGHT_LEADER_CAN:-$(choose_can can_leader_r can3)}"
+
+if [[ "$ENABLE_LEADERS" != "0" && "$ENABLE_LEADERS" != "1" ]]; then
+  echo "ENABLE_I2RT_LEADERS must be 0 or 1." >&2
+  exit 2
+fi
+if [[ "$ALLOW_GRIPPER_CALIBRATION" != "0" && "$ALLOW_GRIPPER_CALIBRATION" != "1" ]]; then
+  echo "I2RT_ALLOW_GRIPPER_CALIBRATION must be 0 or 1." >&2
+  exit 2
+fi
 
 show_help=0
 for arg in "$@"; do
@@ -54,7 +63,6 @@ for arg in "$@"; do
 done
 
 node_args=(
-  --robot "$ROBOT"
   --obs-endpoint "${OBS_ENDPOINT:-tcp://127.0.0.1:5555}"
   --action-endpoint "${ACTION_ENDPOINT:-tcp://127.0.0.1:5556}"
   --arm-type "${I2RT_ARM_TYPE:-yam}"
@@ -63,7 +71,7 @@ node_args=(
   --control-rate "${CONTROL_RATE:-200}"
   --command-timeout "${COMMAND_TIMEOUT:-0.5}"
   --idle-mode "${I2RT_IDLE_MODE:-gravity_comp}"
-  --startup-position "${I2RT_STARTUP_POSITION:-current}"
+  --startup-position "${I2RT_STARTUP_POSITION:-zero}"
   --startup-duration "${I2RT_STARTUP_DURATION:-5.0}"
   --tracking-ki "${I2RT_TRACKING_KI:-0.0}"
   --tracking-trim-limit "${I2RT_TRACKING_TRIM_LIMIT:-0.12}"
@@ -90,65 +98,41 @@ if [[ -n "${I2RT_GRIPPER_LIMITS:-}" ]]; then
   node_args+=(--gripper-limits-override "${gripper_limit_values[@]}")
 fi
 
-if [[ "${I2RT_ALLOW_GRIPPER_CALIBRATION:-0}" == "1" ]]; then
+if [[ "$ALLOW_GRIPPER_CALIBRATION" == "1" ]]; then
   node_args+=(--allow-gripper-calibration)
 fi
 
 if [[ "$SIM" == "1" ]]; then
   node_args+=(--sim)
 elif [[ "$show_help" == "0" ]]; then
-  if [[ "$ROBOT" == "i2rt_yam" ]]; then
-    bring_up_can "$SINGLE_FOLLOWER_CAN"
-  else
-    bring_up_can "$LEFT_FOLLOWER_CAN"
-    bring_up_can "$RIGHT_FOLLOWER_CAN"
-  fi
+  bring_up_can "$LEFT_FOLLOWER_CAN"
+  bring_up_can "$RIGHT_FOLLOWER_CAN"
 fi
 
-if [[ "$ROBOT" == "i2rt_yam" ]]; then
-  node_args+=(--follower-can "arm=$SINGLE_FOLLOWER_CAN")
-  if [[ -n "${LEADER_CAN:-}" ]]; then
-    if [[ "$SIM" != "1" && "$show_help" == "0" ]]; then
-      bring_up_can "$LEADER_CAN"
-    fi
-    node_args+=(--leader-can "arm=$LEADER_CAN")
+node_args+=(
+  --follower-can "left_arm=$LEFT_FOLLOWER_CAN"
+  --follower-can "right_arm=$RIGHT_FOLLOWER_CAN"
+)
+if [[ "$ENABLE_LEADERS" == "1" ]]; then
+  if [[ "$SIM" != "1" && "$show_help" == "0" ]]; then
+    bring_up_can "$LEFT_LEADER_CAN"
+    bring_up_can "$RIGHT_LEADER_CAN"
   fi
-else
   node_args+=(
-    --follower-can "left_arm=$LEFT_FOLLOWER_CAN"
-    --follower-can "right_arm=$RIGHT_FOLLOWER_CAN"
+    --leader-cans "$LEFT_LEADER_CAN" "$RIGHT_LEADER_CAN"
+    --direct-leader-control
   )
-  enable_left_leader="${ENABLE_I2RT_LEFT_LEADER:-${ENABLE_I2RT_LEADERS:-0}}"
-  enable_right_leader="${ENABLE_I2RT_RIGHT_LEADER:-${ENABLE_I2RT_LEADERS:-0}}"
-  if [[ "$enable_left_leader" == "1" ]]; then
-    if [[ "$SIM" != "1" && "$show_help" == "0" ]]; then
-      bring_up_can "$LEFT_LEADER_CAN"
-    fi
-    node_args+=(--leader-can "left_arm=$LEFT_LEADER_CAN")
-  fi
-  if [[ "$enable_right_leader" == "1" ]]; then
-    if [[ "$SIM" != "1" && "$show_help" == "0" ]]; then
-      bring_up_can "$RIGHT_LEADER_CAN"
-    fi
-    node_args+=(--leader-can "right_arm=$RIGHT_LEADER_CAN")
-  fi
 fi
 
 if [[ -n "${D405_CAM_HIGH_SERIAL:-}" ]]; then
   node_args+=(--camera "cam_high=$D405_CAM_HIGH_SERIAL")
 fi
-if [[ "$ROBOT" == "i2rt_yam" ]]; then
-  if [[ -n "${D405_CAM_WRIST_SERIAL:-}" ]]; then
-    node_args+=(--camera "cam_wrist=$D405_CAM_WRIST_SERIAL")
-  fi
-else
-  if [[ -n "${D405_CAM_LEFT_WRIST_SERIAL:-}" ]]; then
-    node_args+=(--camera "cam_left_wrist=$D405_CAM_LEFT_WRIST_SERIAL")
-  fi
-  if [[ -n "${D405_CAM_RIGHT_WRIST_SERIAL:-}" ]]; then
-    node_args+=(--camera "cam_right_wrist=$D405_CAM_RIGHT_WRIST_SERIAL")
-  fi
+if [[ -n "${D405_CAM_LEFT_WRIST_SERIAL:-}" ]]; then
+  node_args+=(--camera "cam_left_wrist=$D405_CAM_LEFT_WRIST_SERIAL")
+fi
+if [[ -n "${D405_CAM_RIGHT_WRIST_SERIAL:-}" ]]; then
+  node_args+=(--camera "cam_right_wrist=$D405_CAM_RIGHT_WRIST_SERIAL")
 fi
 
-export PYTHONPATH="$PWD:${PYTHONPATH:-}"
+export PYTHONPATH="$PWD/src:$PWD:${PYTHONPATH:-}"
 exec "$PYTHON_BIN" examples/hardware/i2rt/node.py "${node_args[@]}" "$@"

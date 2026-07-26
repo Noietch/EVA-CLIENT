@@ -30,7 +30,6 @@ def _free_port() -> int:
         "ur5e",
         "arx_r5",
         "agilex_piper",
-        "i2rt_yam",
         "i2rt_dual_yam",
     ],
 )
@@ -94,7 +93,6 @@ def test_generic_fake_reports_hil_unsupported_without_leader_adapter(robot_name:
         ("ur5e", "configs/01_deploy/ur5e/openpi_qpos.py"),
         ("arx_r5", "configs/01_deploy/arx_r5/openpi_qpos.py"),
         ("agilex_piper", "configs/01_deploy/dual_agilex_piper/openpi_qpos.py"),
-        ("i2rt_yam", "configs/01_deploy/i2rt_yam/openpi_qpos.py"),
         ("i2rt_dual_yam", "configs/01_deploy/i2rt_dual_yam/openpi_qpos.py"),
     ],
 )

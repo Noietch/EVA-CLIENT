@@ -49,9 +49,6 @@ class I2RTArmConfig(Protocol):
     def leader_can_channels(self) -> dict[str, str]: ...
 
     @property
-    def disabled_groups(self) -> tuple[str, ...]: ...
-
-    @property
     def arm_type(self) -> str: ...
 
     @property
@@ -166,7 +163,7 @@ def _sdk_factory(
 
 
 class I2RTYamFollowers:
-    """One or two YAM followers with retry, state caching, and a command watchdog."""
+    """Paired YAM followers with retry, state caching, and a command watchdog."""
 
     def __init__(self, config: I2RTArmConfig, factory: RobotFactory | None = None) -> None:
         self._config = config
@@ -174,7 +171,6 @@ class I2RTYamFollowers:
         self._lock = threading.RLock()
         self._robots: dict[str, Any] = {}
         self._offline_until: dict[str, float] = {}
-        self._disabled_groups = set(config.disabled_groups)
         self._qpos = np.concatenate([DEFAULT_ARM_QPOS.copy() for _ in config.group_names]).astype(
             np.float32
         )
@@ -275,8 +271,6 @@ class I2RTYamFollowers:
         )
 
     def _connect(self, group_name: str) -> Any | None:
-        if group_name in self._disabled_groups:
-            return None
         robot = self._robots.get(group_name)
         if robot is not None:
             return robot
@@ -396,11 +390,7 @@ class I2RTYamFollowers:
         duration_s = self._config.startup_duration_s
         if duration_s <= 0:
             raise ValueError("I2RT startup duration must be positive")
-        missing = [
-            name
-            for name in self._config.group_names
-            if name not in self._disabled_groups and name not in self._robots
-        ]
+        missing = [name for name in self._config.group_names if name not in self._robots]
         if missing:
             raise RuntimeError(f"Cannot move offline I2RT followers to zero: {missing}")
 
@@ -485,7 +475,6 @@ class I2RTYamFollowers:
         residuals = {
             name: np.round(qpos[:ARM_DOF].astype(np.float64), 5).tolist()
             for name, qpos in measured.items()
-            if name not in self._disabled_groups
         }
         max_error = max(
             (float(np.max(np.abs(qpos[:ARM_DOF]))) for qpos in measured.values()),
@@ -502,8 +491,6 @@ class I2RTYamFollowers:
     def _servo_active_targets(self, now: float) -> None:
         qpos = self._qpos.copy()
         for group_name, part in self._active_targets.items():
-            if group_name in self._disabled_groups:
-                continue
             offset = self._offset(group_name)
             robot = self._connect(group_name)
             if robot is None:
@@ -527,8 +514,6 @@ class I2RTYamFollowers:
         if wire_action.target != "real":
             qpos = self._qpos.copy()
             for group_name, part in parts.items():
-                if group_name in self._disabled_groups:
-                    continue
                 offset = self._offset(group_name)
                 qpos[offset : offset + GROUP_DOF] = part
             with self._lock:
@@ -537,8 +522,7 @@ class I2RTYamFollowers:
 
         now = time.monotonic()
         for group_name, part in parts.items():
-            if group_name not in self._disabled_groups:
-                self._active_targets[group_name] = part.astype(np.float64, copy=True)
+            self._active_targets[group_name] = part.astype(np.float64, copy=True)
         self._servo_active_targets(now)
         if wire_action.target == "real":
             self._last_command_time = now
@@ -595,9 +579,7 @@ class I2RTYamFollowers:
         now = time.monotonic()
         result: dict[str, str] = {}
         for name in self._config.group_names:
-            if name in self._disabled_groups:
-                result[name] = "disabled"
-            elif name in self._robots:
+            if name in self._robots:
                 result[name] = "online"
             elif self._offline_until.get(name, 0.0) > now:
                 result[name] = "retrying"
@@ -615,21 +597,35 @@ class I2RTYamFollowers:
 
 
 class I2RTYamLeaders:
-    """One or more teaching-handle YAMs used for collection and HIL."""
+    """A paired set of teaching-handle YAMs used for collection and HIL."""
 
     def __init__(self, config: I2RTArmConfig, factory: RobotFactory | None = None) -> None:
         self._config = config
         self._factory = factory or _sdk_factory
         self._robots: dict[str, Any] = {}
 
+    def _enter_gravity_compensation(self, robot: Any) -> None:
+        if self._config.sim:
+            robot.enable_gravity_comp()
+            return
+        robot.enter_gravity_comp_idle()
+
     def connect(self) -> None:
-        configured = [
-            name
-            for name in self._config.group_names
-            if name in self._config.leader_can_channels and name not in self._config.disabled_groups
-        ]
-        if not configured:
-            raise RuntimeError("No I2RT leader CAN channel is configured")
+        configured = ("left_arm", "right_arm")
+        if tuple(self._config.group_names) != configured or set(
+            self._config.leader_can_channels
+        ) != set(configured):
+            raise RuntimeError("I2RT leader control requires both dual-YAM leader CAN interfaces")
+        leader_interfaces = tuple(self._config.leader_can_channels[name] for name in configured)
+        if len(set(leader_interfaces)) != 2:
+            raise RuntimeError("I2RT leader control requires two distinct CAN interfaces")
+        reused_interfaces = set(leader_interfaces) & set(
+            self._config.follower_can_channels.values()
+        )
+        if reused_interfaces:
+            raise RuntimeError(
+                f"I2RT leader and follower CAN interfaces overlap: {sorted(reused_interfaces)}"
+            )
         try:
             for name in configured:
                 if name in self._robots:
@@ -640,20 +636,65 @@ class I2RTYamLeaders:
                     gripper_type="yam_teaching_handle",
                     sim=self._config.sim,
                     enable_auto_recovery=self._config.enable_auto_recovery,
+                    zero_gravity_mode=True,
                 )
-                if int(robot.num_dofs()) != ARM_DOF:
-                    raise ValueError(
-                        f"Leader {name} has {robot.num_dofs()} DoF; expected {ARM_DOF}"
-                    )
+                try:
+                    if int(robot.num_dofs()) != ARM_DOF:
+                        raise ValueError(
+                            f"Leader {name} has {robot.num_dofs()} DoF; expected {ARM_DOF}"
+                        )
+                    self._enter_gravity_compensation(robot)
+                except Exception:
+                    robot.close()
+                    raise
                 self._robots[name] = robot
                 logger.info(
-                    "Connected I2RT leader %s on %s",
+                    "Connected I2RT leader %s on %s with gravity compensation active",
                     name,
                     self._config.leader_can_channels[name],
                 )
         except Exception:
             self.close()
             raise
+
+    def move_to_startup_position(self) -> None:
+        """Connect both leaders and optionally move their arm joints to zero."""
+        self.connect()
+        if self._config.startup_position != "zero":
+            return
+        duration_s = self._config.startup_duration_s
+        if duration_s <= 0:
+            raise ValueError("I2RT startup duration must be positive")
+
+        initial = {
+            name: np.asarray(self._robots[name].get_joint_pos(), dtype=np.float64).reshape(-1)
+            for name in self._config.group_names
+        }
+        for name, qpos in initial.items():
+            if qpos.shape != (ARM_DOF,):
+                raise ValueError(f"Leader {name} returned shape {qpos.shape}")
+
+        control_hz = 50.0
+        steps = max(int(round(duration_s * control_hz)), 1)
+        logger.info(
+            "Moving I2RT leaders to all-zero arm position over %.1f s",
+            duration_s,
+        )
+        try:
+            for step in range(1, steps + 1):
+                unit = step / steps
+                alpha = unit * unit * (3.0 - 2.0 * unit)
+                for name, robot in self._robots.items():
+                    command = initial[name] * (1.0 - alpha)
+                    robot.command_joint_pos(command.copy())
+                if step < steps:
+                    time.sleep(duration_s / steps)
+            for robot in self._robots.values():
+                self._enter_gravity_compensation(robot)
+        except Exception:
+            self.close()
+            raise
+        logger.info("I2RT leaders reached zero and returned to gravity compensation")
 
     def _read_gripper(self, robot: Any) -> float:
         if self._config.sim:
@@ -681,15 +722,11 @@ class I2RTYamLeaders:
             buttons[name] = tuple(bool(value) for value in encoder_states[0].io_inputs)
         return buttons
 
-    def read_action(self, unled_follower_anchor: np.ndarray) -> np.ndarray:
-        """Read configured leaders and hold unled groups at their supplied anchor."""
-        anchor_parts = split_action(unled_follower_anchor, self._config.group_names)
+    def read_action(self) -> np.ndarray:
+        """Read the paired leaders in configured left/right group order."""
         self.connect()
         parts: list[np.ndarray] = []
         for name in self._config.group_names:
-            if name not in self._robots:
-                parts.append(anchor_parts[name])
-                continue
             robot = self._robots[name]
             arm = np.asarray(robot.get_joint_pos(), dtype=np.float32).reshape(-1)
             if arm.shape != (ARM_DOF,):
@@ -704,41 +741,3 @@ class I2RTYamLeaders:
             except Exception:
                 logger.exception("Failed to close I2RT leader %s", name)
         self._robots.clear()
-
-
-class I2RTYamKinematics:
-    """Official I2RT MuJoCo FK exposed in EVA's xyz + wxyz + gripper layout."""
-
-    def __init__(self, config: I2RTArmConfig) -> None:
-        try:
-            import mujoco
-            from i2rt.robots.kinematics import Kinematics
-            from i2rt.robots.utils import ArmType, GripperType, combine_arm_and_gripper_xml
-        except ImportError as exc:
-            raise RuntimeError(
-                "I2RT kinematics is unavailable; run examples/hardware/i2rt/setup_sdk.sh"
-            ) from exc
-        xml_path = combine_arm_and_gripper_xml(
-            ArmType.from_string_name(config.arm_type),
-            GripperType.NO_GRIPPER,
-        )
-        self._kinematics = Kinematics(xml_path, "grasp_site")
-        self._mujoco = mujoco
-        self._group_names = config.group_names
-
-    def group_eef(self, state: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
-        result: dict[str, np.ndarray] = {}
-        for group_name in self._group_names:
-            qpos = clip_group_action(state[group_name])
-            pose = self._kinematics.fk(qpos[:ARM_DOF].astype(np.float64))
-            quat_wxyz = np.empty(4, dtype=np.float64)
-            self._mujoco.mju_mat2Quat(quat_wxyz, pose[:3, :3].reshape(-1))
-            result[group_name] = np.concatenate(
-                [pose[:3, 3], quat_wxyz, [qpos[GRIPPER_INDEX]]]
-            ).astype(np.float32)
-        return result
-
-    def flat_eef(self, qpos: np.ndarray) -> np.ndarray:
-        state = split_action(qpos, self._group_names)
-        eef = self.group_eef(state)
-        return np.concatenate([eef[name] for name in self._group_names]).astype(np.float32)
