@@ -11,9 +11,7 @@ transport = dict(
     type="zmq",
     resize_pad=False,
     image_layout="hwc",
-    # The currently attached setup has one scene D405. Remove these entries in
-    # a local override when wrist cameras are installed and mapped by serial.
-    disabled_cameras=["cam_left_wrist", "cam_right_wrist"],
+    disabled_cameras=[],
 )
 
 policy = dict(type="openpi")

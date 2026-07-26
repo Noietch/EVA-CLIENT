@@ -5,9 +5,16 @@ cd "$(dirname "$0")/../../.."
 
 VENV_DIR="${I2RT_VENV_DIR:-$PWD/examples/hardware/i2rt/.venv}"
 PYTHON_BIN="$VENV_DIR/bin/python"
-SIM="${I2RT_SIM:-0}"
 ENABLE_LEADERS="${ENABLE_I2RT_LEADERS:-1}"
 ALLOW_GRIPPER_CALIBRATION="${I2RT_ALLOW_GRIPPER_CALIBRATION:-1}"
+
+D405_CAM_HIGH_SERIAL="${D405_CAM_HIGH_SERIAL:-260422275306}"
+D405_CAM_LEFT_WRIST_SERIAL="${D405_CAM_LEFT_WRIST_SERIAL:-260422273576}"
+D405_CAM_RIGHT_WRIST_SERIAL="${D405_CAM_RIGHT_WRIST_SERIAL:-260322279472}"
+D405_CAMERA_WIDTH="${D405_CAMERA_WIDTH:-640}"
+D405_CAMERA_HEIGHT="${D405_CAMERA_HEIGHT:-480}"
+D405_CAMERA_FPS="${D405_CAMERA_FPS:-30}"
+D405_CAMERA_TIMEOUT_MS="${D405_CAMERA_TIMEOUT_MS:-3000}"
 
 if [[ ! -x "$PYTHON_BIN" ]]; then
   echo "I2RT environment not found: $VENV_DIR" >&2
@@ -54,7 +61,6 @@ if [[ "$ALLOW_GRIPPER_CALIBRATION" != "0" && "$ALLOW_GRIPPER_CALIBRATION" != "1"
   echo "I2RT_ALLOW_GRIPPER_CALIBRATION must be 0 or 1." >&2
   exit 2
 fi
-
 show_help=0
 for arg in "$@"; do
   if [[ "$arg" == "-h" || "$arg" == "--help" || "$arg" == "--list-cameras" ]]; then
@@ -102,9 +108,7 @@ if [[ "$ALLOW_GRIPPER_CALIBRATION" == "1" ]]; then
   node_args+=(--allow-gripper-calibration)
 fi
 
-if [[ "$SIM" == "1" ]]; then
-  node_args+=(--sim)
-elif [[ "$show_help" == "0" ]]; then
+if [[ "$show_help" == "0" ]]; then
   bring_up_can "$LEFT_FOLLOWER_CAN"
   bring_up_can "$RIGHT_FOLLOWER_CAN"
 fi
@@ -114,7 +118,7 @@ node_args+=(
   --follower-can "right_arm=$RIGHT_FOLLOWER_CAN"
 )
 if [[ "$ENABLE_LEADERS" == "1" ]]; then
-  if [[ "$SIM" != "1" && "$show_help" == "0" ]]; then
+  if [[ "$show_help" == "0" ]]; then
     bring_up_can "$LEFT_LEADER_CAN"
     bring_up_can "$RIGHT_LEADER_CAN"
   fi
@@ -124,15 +128,15 @@ if [[ "$ENABLE_LEADERS" == "1" ]]; then
   )
 fi
 
-if [[ -n "${D405_CAM_HIGH_SERIAL:-}" ]]; then
-  node_args+=(--camera "cam_high=$D405_CAM_HIGH_SERIAL")
-fi
-if [[ -n "${D405_CAM_LEFT_WRIST_SERIAL:-}" ]]; then
-  node_args+=(--camera "cam_left_wrist=$D405_CAM_LEFT_WRIST_SERIAL")
-fi
-if [[ -n "${D405_CAM_RIGHT_WRIST_SERIAL:-}" ]]; then
-  node_args+=(--camera "cam_right_wrist=$D405_CAM_RIGHT_WRIST_SERIAL")
-fi
+node_args+=(
+  --camera "cam_high=$D405_CAM_HIGH_SERIAL"
+  --camera "cam_left_wrist=$D405_CAM_LEFT_WRIST_SERIAL"
+  --camera "cam_right_wrist=$D405_CAM_RIGHT_WRIST_SERIAL"
+  --camera-width "$D405_CAMERA_WIDTH"
+  --camera-height "$D405_CAMERA_HEIGHT"
+  --camera-fps "$D405_CAMERA_FPS"
+  --camera-timeout-ms "$D405_CAMERA_TIMEOUT_MS"
+)
 
 export PYTHONPATH="$PWD/src:$PWD:${PYTHONPATH:-}"
 exec "$PYTHON_BIN" examples/hardware/i2rt/node.py "${node_args[@]}" "$@"
