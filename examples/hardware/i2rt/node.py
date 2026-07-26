@@ -43,9 +43,12 @@ logger = logging.getLogger(__name__)
 ROBOT_NAME = "i2rt_dual_yam"
 GROUP_NAMES = ("left_arm", "right_arm")
 CAMERA_KEYS = ("cam_high", "cam_left_wrist", "cam_right_wrist")
+LEADER_CANCEL_BUTTON_INDEX = 0
 LEADER_RECORD_BUTTON_INDEX = 1
 LEADER_BUTTON_DEBOUNCE_S = 0.08
 LEADER_CONNECT_RETRY_S = 5.0
+COLLECTION_RECORD_TOGGLE_EVENT = "collection_record_toggle"
+COLLECTION_CANCEL_EVENT = "collection_cancel"
 EEF_DOF = 8
 
 
@@ -151,8 +154,10 @@ class I2RTZmqNode:
         self._config = config
         self._stop = threading.Event()
         self._ctx = zmq.Context.instance()
-        self._obs_pub = self._ctx.socket(zmq.PUB)
-        self._obs_pub.bind(config.observation_endpoint)
+        self._obs_pub: zmq.Socket | None = None
+        self._publisher_thread: threading.Thread | None = None
+        self._publisher_ready = threading.Event()
+        self._publisher_error: BaseException | None = None
         self._action_sub = self._ctx.socket(zmq.SUB)
         self._action_sub.bind(config.action_endpoint)
         self._action_sub.setsockopt(zmq.SUBSCRIBE, b"")
@@ -176,6 +181,7 @@ class I2RTZmqNode:
         self._leader_control_updates = 0
         self._published_observations = 0
         self._record_button = _RisingEdgeDebouncer(LEADER_BUTTON_DEBOUNCE_S)
+        self._cancel_button = _RisingEdgeDebouncer(LEADER_BUTTON_DEBOUNCE_S)
         self._operator_event = ""
         self._operator_event_id = 0
         self._next_leader_connect_time = 0.0
@@ -320,17 +326,7 @@ class I2RTZmqNode:
             assert self._leader_anchor is not None
             leader = self._leaders.read_action()
             button_states = self._leaders.read_buttons()
-            record_pressed = any(
-                len(buttons) > LEADER_RECORD_BUTTON_INDEX and buttons[LEADER_RECORD_BUTTON_INDEX]
-                for buttons in button_states.values()
-            )
-            if self._record_button.update(record_pressed, time.monotonic()):
-                self._operator_event_id += 1
-                self._operator_event = "collection_record_toggle"
-                logger.info(
-                    "I2RT leader RECORD button: collection toggle event=%d",
-                    self._operator_event_id,
-                )
+            self._update_operator_buttons(button_states, time.monotonic())
             action = leader
             # Collection is anchored at takeover time for the same reason as
             # relative HIL: leader and follower motor zeros are never perfectly
@@ -360,9 +356,42 @@ class I2RTZmqNode:
                 self._next_leader_connect_time = time.monotonic() + LEADER_CONNECT_RETRY_S
             return None
 
+    def _update_operator_buttons(
+        self,
+        button_states: dict[str, tuple[bool, ...]],
+        now: float,
+    ) -> None:
+        """Emit debounced RECORD/save or SYNC/cancel events from either leader."""
+        record_pressed = any(
+            len(buttons) > LEADER_RECORD_BUTTON_INDEX and buttons[LEADER_RECORD_BUTTON_INDEX]
+            for buttons in button_states.values()
+        )
+        cancel_pressed = any(
+            len(buttons) > LEADER_CANCEL_BUTTON_INDEX and buttons[LEADER_CANCEL_BUTTON_INDEX]
+            for buttons in button_states.values()
+        )
+        cancel_edge = self._cancel_button.update(cancel_pressed, now)
+        record_edge = self._record_button.update(record_pressed, now)
+        if cancel_edge:
+            event = COLLECTION_CANCEL_EVENT
+            button_name = "SYNC/CANCEL"
+        elif record_edge:
+            event = COLLECTION_RECORD_TOGGLE_EVENT
+            button_name = "RECORD"
+        else:
+            return
+        self._operator_event_id += 1
+        self._operator_event = event
+        logger.info(
+            "I2RT leader %s button: event=%s id=%d",
+            button_name,
+            event,
+            self._operator_event_id,
+        )
+
     def _publish_observation(self) -> None:
         action = self._latest_leader_action
-        state = self._followers.read_state()
+        state = self._followers.snapshot_state()
         self._tracking_error = {}
         if action is not None:
             action_parts = split_action(action, self._config.group_names)
@@ -387,7 +416,10 @@ class I2RTZmqNode:
             operator_event=self._operator_event,
             operator_event_id=self._operator_event_id,
         )
-        self._obs_pub.send(pack_observation(observation))
+        publisher = self._obs_pub
+        if publisher is None:
+            raise RuntimeError("I2RT observation publisher is not ready")
+        publisher.send(pack_observation(observation))
         self._published_observations += 1
 
     def _fk(self, qpos: np.ndarray) -> np.ndarray:
@@ -421,51 +453,91 @@ class I2RTZmqNode:
         self._last_status_control_count = self._leader_control_updates
         self._last_status_observation_count = self._published_observations
 
+    def _publish_loop(self) -> None:
+        publish_period = 1.0 / self._config.publish_rate_hz
+        publisher: zmq.Socket | None = None
+        try:
+            publisher = self._ctx.socket(zmq.PUB)
+            publisher.bind(self._config.observation_endpoint)
+            self._obs_pub = publisher
+            self._publisher_ready.set()
+            next_publish = time.monotonic()
+            while not self._stop.is_set():
+                now = time.monotonic()
+                if now < next_publish:
+                    self._stop.wait(next_publish - now)
+                    continue
+                self._publish_observation()
+                self._log_status_if_due()
+                next_publish += publish_period
+                finished = time.monotonic()
+                if next_publish <= finished:
+                    next_publish = finished + publish_period
+        except BaseException as exc:
+            self._publisher_error = exc
+            self._stop.set()
+            logger.exception("I2RT observation publisher failed")
+        finally:
+            self._publisher_ready.set()
+            self._obs_pub = None
+            if publisher is not None:
+                publisher.close(linger=0)
+
     def serve_forever(self) -> None:
         self._followers.move_to_startup_position()
         if self._config.leader_can_channels:
             self._leaders.move_to_startup_position()
         self._ensure_direct_leader_control()
+        self._publisher_thread = threading.Thread(
+            target=self._publish_loop,
+            name="i2rt-observation-publisher",
+            daemon=True,
+        )
+        self._publisher_thread.start()
+        if not self._publisher_ready.wait(timeout=2.0):
+            raise RuntimeError("I2RT observation publisher did not start")
+        if self._publisher_error is not None:
+            raise RuntimeError(
+                "I2RT observation publisher failed to start"
+            ) from self._publisher_error
+
         control_period = 1.0 / self._config.control_rate_hz
-        publish_period = 1.0 / self._config.publish_rate_hz
         next_control = time.monotonic()
-        next_publish = next_control
         while not self._stop.is_set():
+            self._drain_actions()
+            self._latest_leader_action = self._leader_action()
+            # A fresh policy/leader action already performs one follower
+            # servo update. With a one-shot MANUAL target, watchdog_tick()
+            # keeps closing the follower loop until the safety timeout.
+            self._followers.watchdog_tick()
+            next_control += control_period
             now = time.monotonic()
-            if now >= next_control:
-                self._drain_actions()
-                self._latest_leader_action = self._leader_action()
-                # A fresh policy/leader action already performs one follower
-                # servo update. With a one-shot MANUAL target, watchdog_tick()
-                # keeps closing the follower loop until the safety timeout.
-                self._followers.watchdog_tick()
-                next_control += control_period
-                if next_control <= now:
-                    next_control = now + control_period
-
-            now = time.monotonic()
-            if now >= next_publish:
-                self._publish_observation()
-                self._log_status_if_due()
-                next_publish += publish_period
-                if next_publish <= now:
-                    next_publish = now + publish_period
-
-            sleep_s = min(next_control, next_publish) - time.monotonic()
+            if next_control <= now:
+                next_control = now + control_period
+            sleep_s = next_control - time.monotonic()
             if sleep_s > 0:
-                time.sleep(sleep_s)
+                self._stop.wait(sleep_s)
+        if self._publisher_error is not None:
+            raise RuntimeError(
+                "I2RT observation publisher stopped unexpectedly"
+            ) from self._publisher_error
 
     def close(self) -> None:
         self._stop.set()
         self._collection_active = False
         self._hil_active = False
         self._direct_leader_control = False
+        if (
+            self._publisher_thread is not None
+            and self._publisher_thread.is_alive()
+            and self._publisher_thread is not threading.current_thread()
+        ):
+            self._publisher_thread.join(timeout=5.0)
         self._leaders.close()
         self._followers.close()
         self._fk_solver.close()
         self._cameras.close()
         self._action_sub.close(linger=0)
-        self._obs_pub.close(linger=0)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:

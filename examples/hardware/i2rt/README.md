@@ -121,17 +121,19 @@ the YAM model and the teaching handle's modeled 0.258 kg end-effector load.
 Set `ENABLE_I2RT_LEADERS=0` only for policy deployment without teaching
 handles.
 
-Leader/follower control runs at 200 Hz by default while camera/state publishing
-remains at 30 Hz. Override these independently with `CONTROL_RATE` and
+Leader/follower control runs at 200 Hz by default while an independent publisher
+thread sends cached camera/state observations at 30 Hz. The publisher never
+touches the CAN SDK. Override the rates independently with `CONTROL_RATE` and
 `PUBLISH_RATE`. The periodic hardware status log includes the achieved control
 rate and per-joint `target - current` tracking error in radians.
 
 After selecting a collection task and switching `ARM ON` in the Collection page,
-either leader's `RECORD` button toggles the recording episode: one debounced
-press starts recording and the next ends/saves it. The button cannot arm motion
-by itself. Leaving Collection or switching `ARM OFF` stops recording/HIL state,
-while direct leader control remains active until the hardware node exits or
-`ENABLE_I2RT_LEADERS=0` is used. The `SYNC` buttons are intentionally unused.
+either leader's `RECORD` button starts an episode when idle and ends/saves it
+while recording. `SYNC` is the cancel button: while recording it stops and
+discards the current episode. The buttons cannot arm motion by themselves.
+Leaving Collection or switching `ARM OFF` stops recording/HIL state, while
+direct leader control remains active until the hardware node exits or
+`ENABLE_I2RT_LEADERS=0` is used.
 
 An optional bounded outer-loop integral trim can remove gravity, friction, and
 small encoder-zero steady-state errors without increasing the SDK's inner-loop

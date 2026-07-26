@@ -1276,21 +1276,29 @@ def run(
                 loop_rate = transport.create_rate(target_hz)
                 loop_rate_hz = target_hz
             operator_event = transport.poll_operator_event()
-            if operator_event == "collection_record_toggle":
+            if operator_event in {"collection_record_toggle", "collection_cancel"}:
                 if (
                     runtime.collection_teleop_armed
                     and runtime.collection_teleop_active
                     and session.mode is SessionMode.COLLECT
                 ):
-                    intent = (
-                        "accept" if session.status is SessionStatus.RUNNING else "start"
-                    )
-                    command_queue.put(f"web:operator_action:{intent}:i2rt_leader")
-                    logger.info(
-                        "[OPERATOR] source=i2rt_leader event=%s intent=%s",
-                        operator_event,
-                        intent,
-                    )
+                    if operator_event == "collection_cancel":
+                        intent = "cancel" if session.status is SessionStatus.RUNNING else None
+                    else:
+                        intent = (
+                            "accept" if session.status is SessionStatus.RUNNING else "start"
+                        )
+                    if intent is not None:
+                        command_queue.put(f"web:operator_action:{intent}:i2rt_leader")
+                        logger.info(
+                            "[OPERATOR] source=i2rt_leader event=%s intent=%s",
+                            operator_event,
+                            intent,
+                        )
+                    else:
+                        logger.warning(
+                            "[OPERATOR] ignored I2RT cancel event with no active episode"
+                        )
                 else:
                     logger.warning(
                         "[OPERATOR] ignored I2RT leader event outside armed Collection mode"

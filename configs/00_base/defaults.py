@@ -75,6 +75,7 @@ collection = dict(
         robot_type="",
         min_episode_frames=1,
         max_frame_dt_factor=3.0,
+        image_skew_tolerance_sec=None,
         arms={},
         cameras={},
         columns={},

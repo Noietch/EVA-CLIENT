@@ -42,6 +42,7 @@ def _build_zmq_transport_with_fake_readers(monkeypatch):
             _zmq_mod,
             preserve_collection_backlog=False,
         ) -> None:
+            self.preserve_collection_backlog = preserve_collection_backlog
             self.frame = None
             self.collection_frame = None
             self.qpos = None
@@ -284,7 +285,7 @@ def test_zmq_collection_reader_defaults_to_latest_frame():
     np.testing.assert_allclose(frame.action_qpos, np.ones(robot.total_action_dim) * 2)
 
 
-def test_zmq_raw_collection_reader_keeps_latest_with_bounded_socket_drain():
+def test_zmq_raw_collection_reader_preserves_fifo_order():
     robot = ROBOT_REGISTRY.build("agilex_piper")
     budget = 64
     payloads = collections.deque(
@@ -319,11 +320,14 @@ def test_zmq_raw_collection_reader_keeps_latest_with_bounded_socket_drain():
     reader._lock = threading.Lock()
 
     snapshot = reader.acquire_collection_raw()
+    next_snapshot = reader.acquire_collection_raw()
 
     assert snapshot is not None
-    assert snapshot.timestamp == float(budget - 1)
+    assert next_snapshot is not None
+    assert snapshot.timestamp == 0.0
+    assert next_snapshot.timestamp == 1.0
     assert not reader._raw_collection_queue
-    assert len(payloads) == 5
+    assert len(payloads) == budget + 3
 
 
 def test_zmq_clear_collection_backlog_drops_raw_queue_and_returns_cutoff(monkeypatch):
@@ -542,6 +546,7 @@ def test_zmq_transport_uses_separate_internal_readers(monkeypatch):
     assert readers[0].calls == ["frame"]
     assert readers[1].calls == ["collection"]
     assert readers[2].calls == ["qpos", "operator_event"]
+    assert [reader.preserve_collection_backlog for reader in readers] == [False, True, False]
 
 
 def test_zmq_operator_event_is_edge_triggered_and_ignores_stale_baseline():

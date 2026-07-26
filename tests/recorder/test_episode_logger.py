@@ -99,6 +99,7 @@ def _collection_logger(
     save_image_height: int | None = None,
     save_image_width: int | None = None,
     async_save: bool = False,
+    image_skew_tolerance_sec: float | None = None,
 ) -> EpisodeLogger:
     return EpisodeLogger(
         log_dir,
@@ -115,6 +116,7 @@ def _collection_logger(
             schema=ConfigDict(
                 robot_type="fake_arm",
                 min_episode_frames=1,
+                image_skew_tolerance_sec=image_skew_tolerance_sec,
                 arms={"left_arm": "L"},
                 cameras={
                     "cam_high": "observation.images.cam_high",
@@ -129,6 +131,13 @@ def _collection_logger(
         save_image_height=save_image_height,
         save_image_width=save_image_width,
     )
+
+
+def test_collection_image_skew_tolerance_can_be_overridden(tmp_path):
+    logger = _collection_logger(tmp_path, image_skew_tolerance_sec=0.020)
+
+    assert logger._collection_writer is not None
+    assert logger._collection_writer._image_skew_tolerance_sec() == pytest.approx(0.020)
 
 
 def _collection_task_dir(root, task: str = "t"):

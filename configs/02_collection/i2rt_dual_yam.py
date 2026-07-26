@@ -10,6 +10,7 @@ collection = dict(
     ),
     schema=dict(
         robot_type="i2rt_dual_yam",
+        image_skew_tolerance_sec=0.020,
         arms=dict(
             left_arm="left",
             right_arm="right",
