@@ -21,7 +21,7 @@ bash examples/hardware/i2rt/setup_sdk.sh
 ```
 
 The SDK is a Git submodule pinned to the tested `Noietch/i2rt` fork
-(`dev/yam`, commit `fd90afef`), based on the official v1.2.4 release. The fork
+(`main`, commit `fd90afef`), based on the official v1.2.4 release. The fork
 contains the reviewed EVA compatibility and safety changes, so setup initializes
 that exact revision directly and runs `uv sync --project examples/hardware/i2rt`.
 The subproject declares `i2rt`, `pyrealsense2`, `pyzmq`, and the SDK's
