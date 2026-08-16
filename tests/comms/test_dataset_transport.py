@@ -8,6 +8,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from core.config import ConfigDict
+from core.datasets import open_dataset
 from robots.base import (
     ActuatorGroup,
     CameraSpec,
@@ -146,6 +147,7 @@ def test_dataset_transport_deterministic_replay_from_parquet(tmp_path):
     transport = DatasetTransport(_dataset_config(), robot, tmp_path)
 
     assert transport.n_steps == n
+    assert transport.fps == 30
     assert transport.current_task == "put the cup on the plate"
     for i in range(n):
         np.testing.assert_array_equal(transport.get_obs_state(i), states[i])
@@ -165,6 +167,19 @@ def test_dataset_transport_deterministic_replay_from_parquet(tmp_path):
 
     other = DatasetTransport(_dataset_config(), robot, tmp_path)
     np.testing.assert_array_equal(other.get_action_trajectory(), transport.get_action_trajectory())
+
+
+def test_dataset_transport_uses_configured_fallback_fps(tmp_path):
+    robot = _franka_like_robot()
+    states = np.zeros((2, 16), dtype=np.float32)
+    actions = np.ones((2, 16), dtype=np.float32)
+    _write_lerobot_episode(tmp_path, states, actions)
+    config = _dataset_config()
+    config.transport.fps = 24
+
+    transport = DatasetTransport(config, robot, tmp_path)
+
+    assert transport.fps == 24
 
 
 def test_dataset_transport_uses_recorded_timestamps_for_series_and_fps(tmp_path):
@@ -246,6 +261,117 @@ def test_dataset_transport_defers_video_decoder_until_frame_read(tmp_path, monke
     assert opened[0] == video_path
     assert frame is not None
     assert frame.shape == (4, 5, 3)
+
+
+def test_dataset_transport_reads_lerobot_v3_shared_shards_and_video_offset(tmp_path, monkeypatch):
+    robot = _franka_like_robot()
+    meta_dir = tmp_path / "meta"
+    episode_meta_dir = meta_dir / "episodes" / "chunk-000"
+    data_dir = tmp_path / "data" / "chunk-000"
+    video_dir = tmp_path / "videos" / "observation.images.cam_high" / "chunk-000"
+    episode_meta_dir.mkdir(parents=True)
+    data_dir.mkdir(parents=True)
+    video_dir.mkdir(parents=True)
+    (meta_dir / "info.json").write_text(
+        json.dumps(
+            {
+                "codebase_version": "v3.0",
+                "total_episodes": 2,
+                "fps": 10,
+                "data_path": "data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet",
+                "video_path": (
+                    "videos/{video_key}/chunk-{chunk_index:03d}/file-{file_index:03d}.mp4"
+                ),
+                "features": {
+                    "observations.state.qpos": {"dtype": "float32", "shape": [16]},
+                    "action": {"dtype": "float32", "shape": [16]},
+                    "observation.images.cam_high": {"dtype": "video"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    pq.write_table(
+        pa.table(
+            {
+                "episode_index": [0, 1],
+                "tasks": [["zero"], ["one"]],
+                "length": [2, 2],
+                "data/chunk_index": [0, 0],
+                "data/file_index": [0, 0],
+                "dataset_from_index": [0, 2],
+                "dataset_to_index": [2, 4],
+                "videos/observation.images.cam_high/chunk_index": [0, 0],
+                "videos/observation.images.cam_high/file_index": [0, 0],
+                "videos/observation.images.cam_high/from_timestamp": [0.0, 2.5],
+                "videos/observation.images.cam_high/to_timestamp": [0.2, 2.7],
+            }
+        ),
+        episode_meta_dir / "file-000.parquet",
+    )
+    states = np.arange(4 * 16, dtype=np.float32).reshape(4, 16)
+    actions = states + 100
+    pq.write_table(
+        pa.table(
+            {
+                "episode_index": [0, 0, 1, 1],
+                "observations.state.qpos": states.tolist(),
+                "action": actions.tolist(),
+                "timestamp": [0.0, 0.1, 0.0, 0.1],
+            }
+        ),
+        data_dir / "file-000.parquet",
+    )
+    video_path = video_dir / "file-000.mp4"
+    video_path.write_bytes(b"shared video")
+    reads = []
+
+    class FakeFrameSource:
+        def __init__(self, path):
+            assert path == video_path
+
+        def read_at(self, index):
+            reads.append(index)
+            return np.full((2, 3, 3), index, dtype=np.uint8)
+
+        def release(self):
+            pass
+
+    monkeypatch.setattr("transport.dataset._FrameSource", FakeFrameSource)
+    config = _dataset_config()
+    config.transport.dataset_keys.video_keys = {"cam_high": "observation.images.cam_high"}
+
+    transport = DatasetTransport(config, robot, tmp_path, episode_id=1)
+
+    assert transport.data_format == "lerobot_v3"
+    assert transport.current_task == "one"
+    np.testing.assert_array_equal(transport.get_action_trajectory(), actions[2:])
+    assert transport.video_offsets() == {"cam_high": 2.5}
+    assert transport.get_camera_frame_at("cam_high", 1) is not None
+    assert reads == [26]
+
+
+def test_dataset_transport_reads_hdf5_embedded_images(tmp_path):
+    robot = _franka_like_robot()
+    states = np.arange(2 * 16, dtype=np.float32).reshape(2, 16)
+    actions = states + 10
+    images = np.arange(2 * 4 * 5 * 3, dtype=np.uint8).reshape(2, 4, 5, 3)
+    open_dataset(tmp_path, "hdf5", fps=20).write(
+        {"observations.state.qpos": states, "action": actions},
+        {"episode_index": 0, "length": 2, "tasks": ["hdf replay"]},
+        {"observation.images.cam_high": images},
+    )
+    config = _dataset_config()
+    config.transport.dataset_keys.video_keys = {"cam_high": "observation.images.cam_high"}
+
+    transport = DatasetTransport(config, robot, tmp_path)
+
+    assert transport.data_format == "hdf5"
+    assert transport.current_task == "hdf replay"
+    assert transport.fps == 20
+    assert transport.video_mode == "frames"
+    np.testing.assert_array_equal(transport.get_action_trajectory(), actions)
+    np.testing.assert_array_equal(transport.get_camera_frame_at("cam_high", 1), images[1])
 
 
 def test_dataset_transport_close_waits_for_active_video_read(tmp_path, monkeypatch):

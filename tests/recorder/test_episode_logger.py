@@ -5,7 +5,6 @@ data integrity.
 
 from __future__ import annotations
 
-import io
 import json
 import threading
 
@@ -14,6 +13,8 @@ import pyarrow.parquet as pq
 import pytest
 
 from core.config import ConfigDict
+from core.datasets import lerobot as lerobot_module
+from core.datasets import open_dataset
 from core.recorder import collection as collection_module
 from core.recorder import episode as episode_module
 from core.recorder.episode import EpisodeLogger, sanitize_path_component
@@ -54,6 +55,7 @@ def _logger(
     fps: int = 30,
     async_save: bool = False,
     recording_space: str = "qpos",
+    dataset_format: str = "lerobot_v21",
 ) -> EpisodeLogger:
     return EpisodeLogger(
         log_dir,
@@ -67,6 +69,7 @@ def _logger(
         ),
         async_save=async_save,
         recording_space=recording_space,
+        dataset_format=dataset_format,
     )
 
 
@@ -95,15 +98,17 @@ def _rollout_logger(
 def _collection_logger(
     log_dir,
     *,
+    fps: int = 10,
     save_video: bool = False,
     save_image_height: int | None = None,
     save_image_width: int | None = None,
     async_save: bool = False,
+    dataset_format: str = "lerobot_v21",
 ) -> EpisodeLogger:
     return EpisodeLogger(
         log_dir,
         _robot(),
-        fps=10,
+        fps=fps,
         dataset_keys=ConfigDict(
             state_key="observations.state.qpos",
             eef_key="observations.state.eef",
@@ -128,6 +133,7 @@ def _collection_logger(
         async_save=async_save,
         save_image_height=save_image_height,
         save_image_width=save_image_width,
+        dataset_format=dataset_format,
     )
 
 
@@ -213,6 +219,43 @@ def test_collection_logger_has_no_decoded_frame_entrypoint(tmp_path):
     assert not hasattr(logger, "record_collection_frame")
 
 
+def test_collection_snapshot_bounds_preserve_the_full_episode(tmp_path):
+    logger = _collection_logger(tmp_path, fps=10)
+    logger.start_episode("bounded stream")
+    for frame_index in range(4):
+        timestamp = frame_index / 10.0
+        state = np.full(_DIM, frame_index, dtype=np.float32)
+        batch = CollectionRawBatch(
+            images={
+                "cam_high": [
+                    CollectionRawSample(
+                        timestamp,
+                        np.full((8, 8, 3), frame_index, dtype=np.uint8),
+                    )
+                ]
+            },
+            vectors={
+                "state_qpos": [CollectionRawSample(timestamp, state)],
+                "action_qpos": [CollectionRawSample(timestamp, state + 0.5)],
+            },
+            start_time=timestamp,
+            end_time=timestamp,
+        )
+        logger.ingest_collection_snapshot(
+            RawCollectionSnapshot(timestamp, decode_raw=lambda frozen=batch: frozen)
+        )
+
+    assert logger.end_episode()
+    logger.finalize()
+
+    dataset = open_dataset(_collection_task_dir(tmp_path, "bounded stream"))
+    assert dataset.episode_rows()[0]["length"] == 4
+    np.testing.assert_allclose(
+        dataset.load(0).columns["action"],
+        np.arange(4, dtype=np.float32)[:, None] + np.full((_DIM,), 0.5),
+    )
+
+
 def test_live_series_streams_in_flight_buffer(tmp_path):
     # live_series exposes the in-memory step buffer (state/action/timestamp) so the
     # console can chart a rollout before it is ever saved. Shape mirrors
@@ -281,7 +324,7 @@ def test_rollout_resizes_saved_frames_when_size_set(tmp_path, monkeypatch):
         def close(self) -> None:
             pass
 
-    monkeypatch.setattr(episode_module.imageio, "get_writer", lambda *a, **k: _Writer())
+    monkeypatch.setattr(lerobot_module.imageio, "get_writer", lambda *a, **k: _Writer())
     logger = _rollout_logger(tmp_path, save_image_height=120, save_image_width=160)
     state = np.zeros(_DIM, dtype=np.float32)
     logger.start_episode("t")
@@ -308,7 +351,7 @@ def test_episode_logger_writes_faststart_mp4s(tmp_path, monkeypatch):
         writer_kwargs.append(kwargs)
         return _Writer()
 
-    monkeypatch.setattr(episode_module.imageio, "get_writer", fake_get_writer)
+    monkeypatch.setattr(lerobot_module.imageio, "get_writer", fake_get_writer)
     logger = _rollout_logger(tmp_path)
     state = np.zeros(_DIM, dtype=np.float32)
     logger.start_episode("t")
@@ -401,6 +444,388 @@ def test_episode_logger_start_stop_start_lifecycle(tmp_path):
     resumed.end_episode()
     assert (data_dir / "episode_000002.parquet").exists()
     assert (data_dir / "episode_000000.parquet").exists()
+
+
+def test_lerobot_v3_writer_appends_episodes_to_one_shard_and_reopens(tmp_path, monkeypatch):
+    logger = _logger(tmp_path, dataset_format="lerobot_v3")
+    state = np.zeros(_DIM, dtype=np.float32)
+    for task, value in (("a", 1.0), ("b", 2.0)):
+        logger.start_episode(task)
+        logger.record_step(_obs(state + value), state + value, timestamp=0.0)
+        logger.record_step(_obs(state + value), state + value, timestamp=1.0 / 30.0)
+        assert logger.end_episode()
+
+    writer = logger._datasets[tmp_path]
+    assert writer._data_writer is not None
+    assert not hasattr(writer, "episodes")
+    read_table = episode_module.pq.read_table
+    monkeypatch.setattr(
+        episode_module.pq,
+        "read_table",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("v3 finalize must scan one row group at a time")
+        ),
+    )
+    logger.finalize()
+    monkeypatch.setattr(episode_module.pq, "read_table", read_table)
+
+    data_path = tmp_path / "data/chunk-000/file-000.parquet"
+    metadata_path = tmp_path / "meta/episodes/chunk-000/file-000.parquet"
+    data_file = pq.ParquetFile(data_path)
+    assert data_file.num_row_groups == 2
+    assert data_file.metadata.num_rows == 4
+    metadata = pq.read_table(metadata_path).to_pydict()
+    assert metadata["episode_index"] == [0, 1]
+    assert metadata["dataset_from_index"] == [0, 2]
+    assert metadata["dataset_to_index"] == [2, 4]
+    assert json.loads((tmp_path / "meta/info.json").read_text())["codebase_version"] == "v3.0"
+    assert (tmp_path / "meta/tasks.parquet").exists()
+
+    reader = open_dataset(tmp_path)
+    assert reader.format == "lerobot_v3"
+    assert reader.count_episodes() == 2
+    np.testing.assert_allclose(reader.load(0).columns["action.qpos"], [state + 1.0] * 2)
+    np.testing.assert_allclose(reader.load(1).columns["action.qpos"], [state + 2.0] * 2)
+
+    resumed = _logger(tmp_path, dataset_format="lerobot_v3")
+    assert resumed.current_episode_index == 2
+    resumed.start_episode("c")
+    resumed.record_step(_obs(state + 3.0), state + 3.0, timestamp=0.0)
+    assert resumed.end_episode()
+    resumed.finalize()
+
+    assert data_path.exists()
+    assert (tmp_path / "data/chunk-000/file-001.parquet").exists()
+    assert open_dataset(tmp_path).count_episodes() == 3
+
+
+def test_lerobot_v3_seals_shared_shard_only_when_reading(tmp_path):
+    logger = _logger(tmp_path, dataset_format="lerobot_v3")
+    state = np.zeros(_DIM, dtype=np.float32)
+    for value in (1.0, 2.0):
+        logger.start_episode(str(value))
+        logger.record_step(_obs(state + value), state + value, timestamp=0.0)
+        assert logger.end_episode()
+
+    writer = logger._datasets[tmp_path]
+    assert writer._data_writer is not None
+
+    series = logger.load_episode_series(0)
+
+    assert series is not None
+    assert series["action"] == [(state + 1.0).tolist()]
+    assert writer._data_writer is None
+    assert pq.ParquetFile(tmp_path / "data/chunk-000/file-000.parquet").num_row_groups == 2
+
+    logger.start_episode("third")
+    logger.record_step(_obs(state + 3.0), state + 3.0, timestamp=0.0)
+    assert logger.end_episode()
+    logger.finalize()
+
+    assert (tmp_path / "data/chunk-000/file-001.parquet").exists()
+
+
+def test_lerobot_v3_video_writer_stays_open_across_episodes(tmp_path, monkeypatch):
+    opened = []
+
+    class _Writer:
+        def __init__(self) -> None:
+            self.frames = []
+            self.closed = False
+
+        def append_data(self, frame) -> None:
+            self.frames.append(np.asarray(frame).copy())
+
+        def close(self) -> None:
+            self.closed = True
+
+    def get_writer(*_args, **_kwargs):
+        writer = _Writer()
+        opened.append(writer)
+        return writer
+
+    monkeypatch.setattr(lerobot_module.imageio, "get_writer", get_writer)
+    logger = _logger(tmp_path, dataset_format="lerobot_v3")
+    state = np.zeros(_DIM, dtype=np.float32)
+    for value in (1, 2):
+        logger.start_episode(f"task-{value}")
+        for frame_index in range(2):
+            image = np.full((4, 6, 3), value * 10 + frame_index, dtype=np.uint8)
+            logger.record_step(
+                _obs(state + value, image),
+                state + value,
+                timestamp=frame_index / 30.0,
+            )
+        assert logger.end_episode()
+
+    assert len(opened) == 1
+    assert len(opened[0].frames) == 4
+    assert not opened[0].closed
+    logger.finalize()
+    assert opened[0].closed
+
+    metadata = pq.read_table(tmp_path / "meta/episodes/chunk-000/file-000.parquet").to_pydict()
+    key = "observation.images.cam_high"
+    assert metadata[f"videos/{key}/from_timestamp"] == [0.0, pytest.approx(2.0 / 30.0)]
+    assert metadata[f"videos/{key}/to_timestamp"] == [
+        pytest.approx(2.0 / 30.0),
+        pytest.approx(4.0 / 30.0),
+    ]
+
+
+def test_lerobot_v3_collection_async_appends_to_shared_shard(tmp_path, monkeypatch):
+    class _Writer:
+        def append_data(self, _frame) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        lerobot_module.imageio,
+        "get_writer",
+        lambda *_args, **_kwargs: _Writer(),
+    )
+    logger = _collection_logger(
+        tmp_path,
+        async_save=True,
+        dataset_format="lerobot_v3",
+    )
+    for value in (1.0, 2.0, 3.0):
+        state = np.full(_DIM, value, dtype=np.float32)
+        logger.start_episode("task")
+        logger.ingest_collection_snapshot(
+            _collection_raw_snapshot(
+                value,
+                state=state,
+                action=state,
+                image=np.full((4, 6, 3), round(value), dtype=np.uint8),
+            )
+        )
+        assert logger.end_episode()
+    logger.finalize()
+
+    task_dir = _collection_task_dir(tmp_path, "task")
+    data_file = pq.ParquetFile(task_dir / "data/chunk-000/file-000.parquet")
+    assert data_file.num_row_groups == 3
+    reader = open_dataset(task_dir)
+    assert reader.count_episodes() == 3
+    for episode_index, value in enumerate((1.0, 2.0, 3.0)):
+        np.testing.assert_allclose(
+            reader.load(episode_index).columns["action"],
+            [[value] * _DIM],
+        )
+
+
+def test_lerobot_v3_real_collection_stream_is_bounded_and_replayable(tmp_path):
+    logger = _collection_logger(
+        tmp_path,
+        fps=30,
+        async_save=True,
+        dataset_format="lerobot_v3",
+    )
+    frames_per_episode = 30
+    for episode_index in range(2):
+        logger.start_episode("real-pick")
+        for frame_index in range(frames_per_episode):
+            phase = episode_index + frame_index / frames_per_episode
+            state = np.sin(np.linspace(phase, phase + 0.5, _DIM)).astype(np.float32)
+            action = (state + 0.05 * np.cos(phase)).astype(np.float32)
+            image = np.empty((120, 160, 3), dtype=np.uint8)
+            image[..., 0] = (episode_index * 70 + frame_index * 3) % 256
+            image[..., 1] = np.arange(160, dtype=np.uint8)
+            image[..., 2] = np.arange(120, dtype=np.uint8)[:, None]
+            timestamp = episode_index * 2.0 + frame_index / 30.0
+            timestamp += 0.0004 if frame_index % 2 else -0.0004
+            logger.ingest_collection_snapshot(
+                _collection_raw_snapshot(
+                    timestamp,
+                    image=image,
+                    state=state,
+                    action=action,
+                )
+            )
+        assert logger.end_episode()
+
+    assert logger.wait_for_saves(timeout=20.0)
+    task_dir = _collection_task_dir(tmp_path, "real-pick")
+    writer = logger._datasets[task_dir]
+    assert writer._data_writer is not None
+    assert not hasattr(writer, "episodes")
+    assert writer._video_frames == {"observation.images.cam_high": 2 * frames_per_episode}
+
+    replay = logger.load_collection_replay_qpos(1, "real-pick")
+
+    assert replay is not None
+    assert replay.shape == (frames_per_episode, _DIM)
+    assert writer._data_writer is None
+    data_file = pq.ParquetFile(task_dir / "data/chunk-000/file-000.parquet")
+    assert data_file.num_row_groups == 2
+    reader = open_dataset(task_dir)
+    assert reader.count_episodes() == 2
+    episode = reader.load(1)
+    assert episode.columns["observation.qpos"].shape == (frames_per_episode, _DIM)
+    video = episode.videos["observation.images.cam_high"]
+    assert video.path.stat().st_size > 0
+    assert video.start_time == pytest.approx(1.0)
+    assert video.end_time == pytest.approx(2.0)
+
+
+def test_lerobot_v3_recovers_metadata_commit_failure_without_reusing_indices(tmp_path, monkeypatch):
+    logger = _logger(tmp_path, dataset_format="lerobot_v3")
+    state = np.ones(_DIM, dtype=np.float32)
+    logger.start_episode("first")
+    logger.record_step(_obs(state), state, timestamp=0.0)
+    monkeypatch.setattr(
+        logger,
+        "_append_episode_dict_row_locked",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("metadata unavailable")),
+    )
+
+    with pytest.raises(OSError, match="metadata unavailable"):
+        logger.end_episode()
+
+    writer = logger._datasets[tmp_path]
+    assert writer._data_writer is None
+    assert (
+        pq.ParquetFile(tmp_path / "meta/episodes/chunk-000/file-000.parquet").metadata.num_rows == 1
+    )
+
+    resumed = _logger(tmp_path, dataset_format="lerobot_v3")
+    assert resumed.current_episode_index == 1
+    assert resumed._global_index == 1
+    assert resumed._task_to_index == {"first": 0}
+    assert _read_jsonl(tmp_path / "meta/episodes.jsonl")[0]["episode_index"] == 0
+
+    resumed.start_episode("second")
+    resumed.record_step(_obs(state * 2), state * 2, timestamp=0.0)
+    assert resumed.end_episode()
+    resumed.finalize()
+
+    reader = open_dataset(tmp_path)
+    assert reader.count_episodes() == 2
+    np.testing.assert_allclose(reader.load(0).columns["action.qpos"], [state])
+    np.testing.assert_allclose(reader.load(1).columns["action.qpos"], [state * 2])
+
+
+@pytest.mark.parametrize(
+    ("dataset_format", "suffix"),
+    [
+        ("lerobot_v21", ".parquet"),
+        ("hdf5", ".hdf5"),
+        ("mcap", ".mcap"),
+    ],
+)
+def test_non_v3_recovers_physical_episode_after_catalog_failure(
+    tmp_path,
+    monkeypatch,
+    dataset_format,
+    suffix,
+):
+    first = np.arange(_DIM, dtype=np.float32)
+    logger = _logger(tmp_path, dataset_format=dataset_format)
+    logger.start_episode("real first")
+    logger.record_step(_obs(first), first + 0.25, timestamp=0.0)
+    monkeypatch.setattr(
+        logger,
+        "_append_episode_dict_row_locked",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("catalog unavailable")),
+    )
+
+    with pytest.raises(OSError, match="catalog unavailable"):
+        logger.end_episode()
+
+    first_path = tmp_path / "data/chunk-000" / f"episode_000000{suffix}"
+    assert first_path.exists()
+    resumed = _logger(tmp_path, dataset_format=dataset_format)
+    assert resumed.current_episode_index == 1
+    assert resumed._global_index == 1
+    assert resumed._task_to_index == {"real first": 0}
+    recovered = _read_jsonl(tmp_path / "meta/episodes.jsonl")
+    assert len(recovered) == 1
+    assert recovered[0]["episode_index"] == 0
+    assert recovered[0]["tasks"] == ["real first"]
+    assert recovered[0]["length"] == 1
+    assert recovered[0]["fps"] == 30.0
+
+    second = first + 10.0
+    resumed.start_episode("real second")
+    resumed.record_step(_obs(second), second + 0.25, timestamp=1.0)
+    assert resumed.end_episode()
+    resumed.finalize()
+
+    second_path = tmp_path / "data/chunk-000" / f"episode_000001{suffix}"
+    assert first_path.exists()
+    assert second_path.exists()
+    reader = open_dataset(tmp_path)
+    assert [row["episode_index"] for row in reader.episode_rows()] == [0, 1]
+    np.testing.assert_allclose(reader.load(0).columns["action.qpos"], [first + 0.25])
+    np.testing.assert_allclose(reader.load(1).columns["action.qpos"], [second + 0.25])
+    info = json.loads((tmp_path / "meta/info.json").read_text())
+    stats = json.loads((tmp_path / "meta/stats.json").read_text())
+    assert info["total_episodes"] == 2
+    np.testing.assert_allclose(stats["action.qpos"]["mean"], first + 5.25)
+
+
+def test_lerobot_v3_collection_recovers_metadata_commit_failure(tmp_path, monkeypatch):
+    class _Writer:
+        def append_data(self, _frame) -> None:
+            pass
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(
+        lerobot_module.imageio,
+        "get_writer",
+        lambda *_args, **_kwargs: _Writer(),
+    )
+    logger = _collection_logger(tmp_path, dataset_format="lerobot_v3")
+    state = np.ones(_DIM, dtype=np.float32)
+    logger.start_episode("task")
+    logger.ingest_collection_snapshot(_collection_raw_snapshot(1.0, state=state, action=state))
+    monkeypatch.setattr(
+        logger,
+        "_append_episode_dict_row_locked",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("metadata unavailable")),
+    )
+    with pytest.raises(OSError, match="metadata unavailable"):
+        logger.end_episode()
+
+    task_dir = _collection_task_dir(tmp_path, "task")
+    assert (
+        pq.ParquetFile(task_dir / "meta/episodes/chunk-000/file-000.parquet").metadata.num_rows == 1
+    )
+
+    resumed = _collection_logger(tmp_path, dataset_format="lerobot_v3")
+    resumed.finalize()
+    status = resumed.status_snapshot("task")
+    assert status["completed_episodes"] == 1
+    assert status["episodes"][0]["episode_index"] == 0
+    assert (task_dir / "meta/info.json").exists()
+    assert (task_dir / "meta/tasks.parquet").exists()
+    assert open_dataset(task_dir).count_episodes() == 1
+
+    resumed.start_episode("task")
+    resumed.ingest_collection_snapshot(
+        _collection_raw_snapshot(2.0, state=state * 2, action=state * 2)
+    )
+    assert resumed.end_episode()
+    resumed.finalize()
+
+    reader = open_dataset(task_dir)
+    assert reader.count_episodes() == 2
+    np.testing.assert_allclose(reader.load(0).columns["action"], [state])
+    np.testing.assert_allclose(reader.load(1).columns["action"], [state * 2])
+
+
+def test_lerobot_v3_resume_rejects_unfinalized_metadata_shard(tmp_path):
+    metadata_path = tmp_path / "meta/episodes/chunk-000/file-000.parquet"
+    metadata_path.parent.mkdir(parents=True)
+    metadata_path.write_bytes(b"partial parquet without footer")
+
+    with pytest.raises(RuntimeError, match="unfinalized metadata shard"):
+        _logger(tmp_path, dataset_format="lerobot_v3")
 
 
 def test_episode_logger_copies_inputs_and_skips_empty_episode(tmp_path):
@@ -607,9 +1032,7 @@ def test_raw_episode_action_column_follows_recording_space(tmp_path):
 
     assert qpos_logger.end_episode()
 
-    qpos_table = pq.read_table(
-        tmp_path / "qpos" / "data" / "chunk-000" / "episode_000000.parquet"
-    )
+    qpos_table = pq.read_table(tmp_path / "qpos" / "data" / "chunk-000" / "episode_000000.parquet")
     assert "action.qpos" in qpos_table.column_names
     assert "action" not in qpos_table.column_names
 
@@ -630,9 +1053,7 @@ def test_raw_episode_action_column_follows_recording_space(tmp_path):
 
     assert eef_logger.end_episode()
 
-    eef_table = pq.read_table(
-        tmp_path / "eef" / "data" / "chunk-000" / "episode_000000.parquet"
-    )
+    eef_table = pq.read_table(tmp_path / "eef" / "data" / "chunk-000" / "episode_000000.parquet")
     assert "action.eef" in eef_table.column_names
     np.testing.assert_allclose(eef_table.column("action.eef").to_pylist(), [action_eef] * 2)
 
@@ -667,13 +1088,11 @@ def test_raw_episode_video_writer_holds_only_one_decoded_image(tmp_path, monkeyp
         def close(self) -> None:
             pass
 
-    monkeypatch.setattr(episode_module.imageio, "get_writer", lambda *args, **kwargs: _Writer())
+    monkeypatch.setattr(lerobot_module.imageio, "get_writer", lambda *args, **kwargs: _Writer())
     logger = _logger(tmp_path, fps=10, async_save=True)
 
     def snapshot(timestamp: float, value: int) -> RawCollectionSnapshot:
-        image = CollectionRawImage(
-            lambda value=value: np.full((2, 2, 3), value, dtype=np.uint8)
-        )
+        image = CollectionRawImage(lambda value=value: np.full((2, 2, 3), value, dtype=np.uint8))
         raw_images.append(image)
 
         def decode_raw() -> CollectionRawBatch:
@@ -893,49 +1312,6 @@ def test_raw_episode_trims_unsynchronized_leading_image_frame(tmp_path):
     assert episode["alignment_grid_start"] == pytest.approx(0.16)
 
 
-def test_encoded_video_writer_pipes_jpegs_directly_to_ffmpeg(tmp_path, monkeypatch):
-    commands = []
-    written = []
-
-    class _Input:
-        def write(self, payload: bytes) -> None:
-            written.append(payload)
-
-        def close(self) -> None:
-            pass
-
-    class _Process:
-        stdin = _Input()
-        stderr = io.BytesIO()
-
-        def wait(self) -> int:
-            return 0
-
-    def popen(command, **kwargs):
-        commands.append((command, kwargs))
-        return _Process()
-
-    monkeypatch.setattr(episode_module.subprocess, "Popen", popen)
-    logger = _logger(tmp_path, fps=15)
-
-    logger._write_encoded_sample_video(
-        tmp_path / "episode.mp4",
-        [b"jpeg-0", b"jpeg-1"],
-        15.0,
-        (360, 640),
-    )
-
-    command, kwargs = commands[0]
-    assert written == [b"jpeg-0", b"jpeg-1"]
-    assert kwargs == {
-        "stdin": episode_module.subprocess.PIPE,
-        "stderr": episode_module.subprocess.PIPE,
-    }
-    assert "image2pipe" in command
-    assert "scale=640:360:flags=fast_bilinear" in command
-    assert command[command.index("-g") + 1] == "15"
-
-
 def test_collection_raw_end_episode_defers_alignment_and_video_preprocess(tmp_path, monkeypatch):
     logger = _collection_logger(
         tmp_path,
@@ -989,7 +1365,7 @@ def test_collection_raw_save_worker_aligns_and_prepares_video(tmp_path, monkeypa
         def close(self) -> None:
             pass
 
-    monkeypatch.setattr(episode_module.imageio, "get_writer", lambda *a, **k: _Writer())
+    monkeypatch.setattr(lerobot_module.imageio, "get_writer", lambda *a, **k: _Writer())
     logger = _collection_logger(
         tmp_path,
         save_video=True,
@@ -1159,7 +1535,7 @@ def test_collection_skips_resize_when_saved_size_matches_frame(tmp_path, monkeyp
         raise AssertionError("resize should be skipped for matching collection frame size")
 
     monkeypatch.setattr(collection_module, "resize_direct", resize)
-    monkeypatch.setattr(episode_module.imageio, "get_writer", lambda *a, **k: _Writer())
+    monkeypatch.setattr(lerobot_module.imageio, "get_writer", lambda *a, **k: _Writer())
     logger = _collection_logger(tmp_path, save_video=True, save_image_height=8, save_image_width=8)
     qpos = np.zeros(_DIM, dtype=np.float32)
 
@@ -1469,7 +1845,7 @@ def test_collection_info_fps_uses_target_fps_not_measured(tmp_path, monkeypatch)
         writer_fps.append(kwargs["fps"])
         return _Writer()
 
-    monkeypatch.setattr(episode_module.imageio, "get_writer", fake_get_writer)
+    monkeypatch.setattr(lerobot_module.imageio, "get_writer", fake_get_writer)
     logger = _collection_logger(tmp_path, save_video=True)
     qpos = np.zeros(_DIM, dtype=np.float32)
     image = np.zeros((8, 8, 3), dtype=np.uint8)
@@ -1548,7 +1924,7 @@ def test_collection_resizes_saved_frames_when_size_set(tmp_path, monkeypatch):
         def close(self) -> None:
             pass
 
-    monkeypatch.setattr(episode_module.imageio, "get_writer", lambda *a, **k: _Writer())
+    monkeypatch.setattr(lerobot_module.imageio, "get_writer", lambda *a, **k: _Writer())
     logger = _collection_logger(
         tmp_path, save_video=True, save_image_height=120, save_image_width=160
     )
@@ -1570,7 +1946,7 @@ def test_collection_keeps_native_size_when_size_unset(tmp_path, monkeypatch):
         def close(self) -> None:
             pass
 
-    monkeypatch.setattr(episode_module.imageio, "get_writer", lambda *a, **k: _Writer())
+    monkeypatch.setattr(lerobot_module.imageio, "get_writer", lambda *a, **k: _Writer())
     logger = _collection_logger(tmp_path, save_video=True)
     _record_one_collection_episode(logger, np.zeros((480, 640, 3), dtype=np.uint8))
 
@@ -1658,7 +2034,7 @@ def test_episode_logger_info_and_video_fps_use_target_fps(tmp_path, monkeypatch)
         writer_fps.append(kwargs["fps"])
         return _Writer()
 
-    monkeypatch.setattr(episode_module.imageio, "get_writer", fake_get_writer)
+    monkeypatch.setattr(lerobot_module.imageio, "get_writer", fake_get_writer)
     logger = _logger(tmp_path, save_video=True)  # fps=30
     image = np.zeros((8, 8, 3), dtype=np.uint8)
 

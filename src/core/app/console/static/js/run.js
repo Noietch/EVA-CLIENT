@@ -819,6 +819,7 @@ function renderReplayConfig() {
     const input = $("replay-episode-input");
     if (n > 0) input.max = String(Math.max(0, n - 1));
     const datasetInput = $("replay-dataset-input");
+    const formatSelect = $("replay-data-format");
     if (document.activeElement !== datasetInput && !datasetInput.value && S.STATUS.replay_dataset_dir) {
       datasetInput.value = S.STATUS.replay_dataset_dir;
     }
@@ -848,9 +849,15 @@ function renderReplayConfig() {
       return replayDefaultKeys.action || "action";
     };
 
+    const replayInspectCacheKey = (dir, format) => `${dir}|${format || "auto"}`;
+
     const inspectDataset = async (dir) => {
       $("replay-episode-task").textContent = `inspecting ${dir}…`;
-      const r = await apiPost("/api/inspect_dataset", { dataset_dir: dir });
+      const requestedFormat = formatSelect.value || "auto";
+      const r = await apiPost("/api/inspect_dataset", {
+        dataset_dir: dir,
+        format: requestedFormat,
+      });
       if (!r.ok) {
         if (S.pendingQcLoad && S.pendingQcLoad.dir === dir) S.pendingQcLoad = null;
         $("replay-episode-task").textContent = `✗ ${r.error || "cannot read dataset"}`;
@@ -862,7 +869,11 @@ function renderReplayConfig() {
         state: r.keys.state.default || "observation.state",
       };
       S.replayVideoKeys = inferReplayVideoKeys(r.keys.image.candidates, r.keys.image.default);
-      replayInspectedDir = dir;
+      if (requestedFormat === "auto" && r.format) formatSelect.value = r.format;
+      replayInspectedDir = replayInspectCacheKey(
+        dir,
+        formatSelect.value || requestedFormat,
+      );
       S.STATUS.replay_n_episodes = r.n_episodes;
       $("replay-episode-n").textContent = r.n_episodes;
       return true;
@@ -885,7 +896,8 @@ function renderReplayConfig() {
         return;
       }
       if (!dir) { $("replay-episode-task").textContent = "✗ fill the dataset dir first"; return; }
-      const hasInspectedDir = replayInspectedDir === dir;
+      const dataFormat = formatSelect.value || "auto";
+      const hasInspectedDir = replayInspectedDir === replayInspectCacheKey(dir, dataFormat);
       const total = hasInspectedDir ? (S.STATUS.replay_n_episodes || 0) : 0;
       if (total > 0 && id >= total) {
         $("replay-episode-task").textContent = `✗ episode id must be in 0..${total - 1}`;
@@ -911,6 +923,7 @@ function renderReplayConfig() {
           keys: loadKeys,
           video_keys: loadVideoKeys,
           action_mode: actionMode,
+          format: dataFormat,
         });
         if (!load.ok) {
           $("replay-episode-task").textContent = `✗ ${load.error || "cannot load episode"}`;
@@ -942,6 +955,7 @@ function renderReplayConfig() {
 
     $("replay-b-episode-confirm").onclick = confirm;
     input.onkeydown = (e) => { if (e.key === "Enter") confirm(); };
+    formatSelect.onchange = () => { replayInspectedDir = ""; };
 
     // Load the next episode in the dataset; reuses confirm()'s inspect+load path.
     $("replay-b-episode-next").onclick = () => {

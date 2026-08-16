@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from core.recorder.lerobot_meta import history_row, summarize_quality_issues
+from core.datasets import history_row, summarize_quality_issues
 
 
 def test_quality_issue_status_summary_preserves_codes_and_exact_counts() -> None:
@@ -8,9 +8,7 @@ def test_quality_issue_status_summary_preserves_codes_and_exact_counts() -> None
         {"severity": "red", "code": "image_skew_exceeded", "detail": f"frame {i}"}
         for i in range(396)
     ]
-    issues.append(
-        {"severity": "red", "code": "frame_count_mismatch", "detail": "camera short"}
-    )
+    issues.append({"severity": "red", "code": "frame_count_mismatch", "detail": "camera short"})
 
     summaries, count = summarize_quality_issues(issues)
 

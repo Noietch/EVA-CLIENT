@@ -46,12 +46,18 @@ def test_recording_space_follows_action_space_not_observation_space():
     qpos = ConfigDict(is_eef=lambda: False)
     eef = ConfigDict(is_eef=lambda: True)
 
-    assert recording._recording_space(
-        ConfigDict(inference_cfg=ConfigDict(obs_space=eef, action_space=qpos))
-    ) == "qpos"
-    assert recording._recording_space(
-        ConfigDict(inference_cfg=ConfigDict(obs_space=qpos, action_space=eef))
-    ) == "eef"
+    assert (
+        recording._recording_space(
+            ConfigDict(inference_cfg=ConfigDict(obs_space=eef, action_space=qpos))
+        )
+        == "qpos"
+    )
+    assert (
+        recording._recording_space(
+            ConfigDict(inference_cfg=ConfigDict(obs_space=qpos, action_space=eef))
+        )
+        == "eef"
+    )
 
 
 def test_gripper_command_records_collection_action_target():
@@ -224,6 +230,9 @@ class _RolloutLifecycleLogger:
     def set_rollout_intervention_segments(self, segments) -> None:
         self.segments = list(segments)
 
+    def release_unused_memory(self) -> None:
+        pass
+
     def end_episode(self) -> bool:
         self.has_active_episode = False
         self.ended += 1
@@ -289,7 +298,6 @@ class _ResettableStrategy:
 
 class _BufferedBackgroundStrategy(_ResettableStrategy):
     runs_background_loop = True
-
 
 
 def _robot() -> Robot:

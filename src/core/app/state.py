@@ -15,7 +15,6 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from core.config import ConfigDict
-from core.recorder.episode import EpisodeLogger
 from core.types import RawCollectionSnapshot, RolloutInterventionSegment
 from policy_client.base import PolicyClient
 from robots.base import Robot
@@ -26,6 +25,7 @@ if TYPE_CHECKING:
     from tqdm import tqdm
 
     from core.app.collection_capture import CollectionCaptureRunner
+    from core.recorder.episode import EpisodeLogger
     from critic_client.runner import CriticRunner
     from transport.dataset import DatasetTransport
 
@@ -260,7 +260,7 @@ class RuntimeState:
     replay_task: str = ""
     replay_action_key: str = ""
     replay_action_mode: str = ""
-    replay_fps: int = 10
+    replay_fps: int = 30
     replay_exec_steps: int = 1
     replay_pbar: tqdm | None = None
     rollout_episode_logger: EpisodeLogger | None = None
@@ -286,8 +286,8 @@ class RuntimeState:
     rl_pending_critic_observation: dict | None = None
     rl_pending_critic_action: np.ndarray | None = None
     rl_pending_critic_timestamp: float | None = None
-    rl_live_samples: list[tuple[float, np.ndarray, np.ndarray, str, int]] = (
-        dataclasses.field(default_factory=list)
+    rl_live_samples: list[tuple[float, np.ndarray, np.ndarray, str, int]] = dataclasses.field(
+        default_factory=list
     )
     rl_replay_source: DatasetTransport | None = None
     rl_replay_sources: list[DatasetTransport] = dataclasses.field(default_factory=list)

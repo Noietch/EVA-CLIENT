@@ -28,6 +28,7 @@ import robots  # noqa: F401  (registers ROBOT_REGISTRY incl. ur5e for single-arm
 from core.app import handlers
 from core.app import run as app
 from core.app.console import server as console_server
+from core.app.console.episode_preview import EpisodePreview
 from core.app.console.server import ConsoleContext, _serialize_manual_scene, _serialize_scene
 from core.app.handlers import utils as handlers_utils
 from core.app.state import (
@@ -38,6 +39,33 @@ from core.app.state import (
     SessionStatus,
 )
 from core.config import ConfigDict
+from core.datasets import open_dataset
+
+
+def _write_review_episode(
+    dataset_dir: Path,
+    data_format: str,
+    dim: int,
+    episode_index: int,
+    base_value: int,
+) -> None:
+    state0 = np.full((dim,), base_value, dtype=np.float32)
+    state1 = np.full((dim,), base_value + 1, dtype=np.float32)
+    frame0 = np.full((4, 5, 3), base_value, dtype=np.uint8)
+    frame1 = np.full((4, 5, 3), base_value + 40, dtype=np.uint8)
+    open_dataset(dataset_dir, data_format, fps=10).write(
+        {
+            "observation.state": [state0.tolist(), state1.tolist()],
+            "action": [state0.tolist(), state1.tolist()],
+            "timestamp": [0.0, 0.1],
+            "frame_index": [0, 1],
+            "episode_index": [episode_index, episode_index],
+            "index": [0, 1],
+            "task_index": [0, 0],
+        },
+        {"episode_index": episode_index, "length": 2, "tasks": [f"episode-{episode_index}"]},
+        {"observation.images.cam_high": [frame0, frame1]},
+    )
 
 
 def test_run_before_setup_is_rejected(console):
@@ -447,6 +475,7 @@ def test_inspect_dataset_resolves_relative_dataset_dir(tmp_path, monkeypatch):
         resp = h.post("/api/inspect_dataset", {"dataset_dir": "work_dirs/collection/ur5e"})
 
     assert resp.json["ok"] is True
+    assert resp.json["format"] == "lerobot_v21"
     assert resp.json["n_episodes"] == 3
     assert resp.json["keys"]["state"]["default"] == "observation.qpos"
 
@@ -521,8 +550,38 @@ def test_load_replay_dataset_mounts_episode_before_response(tmp_path, monkeypatc
         assert resp.json["frames"] == 2
         assert resp.json["dataset_dir"] == str(dataset_dir)
         assert resp.json["video_keys"] == {"cam_high": "observation.images.cam_high"}
+        assert resp.json["format"] == "lerobot_v21"
+        assert resp.json["video_mode"] == "native"
+        assert resp.json["video_offsets"] == {}
         assert h.runtime.replay_source is not None
         assert h.runtime.command_queue.empty()
+
+
+def test_replay_image_returns_explicit_embedded_frame(monkeypatch):
+    expected = np.full((3, 4, 3), 17, dtype=np.uint8)
+
+    class EmbeddedSource:
+        def get_camera_frame_at(self, camera, frame):
+            assert camera == "cam_high"
+            assert frame == 3
+            return expected
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        console_server,
+        "_encode_jpeg",
+        lambda image, convert, quality=60: b"embedded-jpeg",
+    )
+    with serve_console(console_config()) as h:
+        h.runtime.replay_source = cast(Any, EmbeddedSource())
+        resp = h.get("/api/replay_image?cam=cam_high&frame=3")
+
+    assert resp.status == 200
+    assert resp.headers["content-type"] == "image/jpeg"
+    assert resp.headers["cache-control"] == "no-store"
+    assert resp.raw == b"embedded-jpeg"
 
 
 def test_replay_video_resolves_relative_dataset_episode_video(tmp_path, monkeypatch):
@@ -674,6 +733,9 @@ def test_review_episode_returns_series_without_mutating_runtime(tmp_path, monkey
         assert resp.status == 200
         assert resp.json["ok"] is True
         assert resp.json["frames"] == 2
+        assert resp.json["format"] == "lerobot_v21"
+        assert resp.json["video_mode"] == "native"
+        assert resp.json["video_offsets"] == {}
         assert resp.json["timestamp"] == pytest.approx([0.0, 0.1])
         assert len(resp.json["state"]) == 2
         assert len(resp.json["action"]) == 2
@@ -681,6 +743,138 @@ def test_review_episode_returns_series_without_mutating_runtime(tmp_path, monkey
         assert h.runtime.collection_replay_episode == 9
         assert h.runtime.collection_replay_started == 123.0
         assert h.runtime.replay_source is None
+
+
+def test_episode_preview_embedded_frame_clamps_to_last_image(monkeypatch):
+    preview = EpisodePreview(console_config(), Path("/tmp/results"))
+    frames = [
+        np.full((2, 3, 3), 11, dtype=np.uint8),
+        np.full((2, 3, 3), 17, dtype=np.uint8),
+    ]
+
+    class Dataset:
+        def load(self, episode_index):
+            assert episode_index == 7
+            return SimpleNamespace(
+                images={"observation.images.cam_high": frames},
+                videos={},
+            )
+
+        def load_image_frame(self, episode_index, image_key, frame_index):
+            assert (episode_index, image_key, frame_index) == (
+                7,
+                "observation.images.cam_high",
+                1,
+            )
+            return frames[frame_index]
+
+    monkeypatch.setattr(
+        preview,
+        "_dataset_reader",
+        lambda: Dataset(),
+    )
+
+    image = preview.image_frame(7, "cam_high", 99)
+
+    assert image is not None
+    assert np.array_equal(image, frames[-1])
+
+
+def test_episode_cams_and_image_support_embedded_preview_frames(monkeypatch):
+    monkeypatch.setattr(
+        console_server,
+        "_encode_jpeg",
+        lambda image, convert, quality=60: b"preview-jpeg",
+    )
+
+    class Preview:
+        def set_dataset_root(self, dataset_root):
+            self._dataset_root = Path(dataset_root)
+
+        def dataset_root(self):
+            return Path("/tmp/results/model/episodes")
+
+        def media(self, episode_index):
+            assert episode_index == 3
+            return {"cams": ["observation.images.cam_high"], "video_mode": "frames"}
+
+        def image_frame(self, episode_index, cam, frame):
+            assert (episode_index, cam, frame) == (3, "observation.images.cam_high", 8)
+            return np.full((2, 3, 3), 41, dtype=np.uint8)
+
+    with serve_console(console_config()) as h:
+        console_server.ConsoleRequestHandler.ctx.preview = Preview()
+        cams = h.get("/api/episode_cams?episode_index=3")
+        image = h.get("/api/episode_image?episode_index=3&cam=observation.images.cam_high&frame=8")
+
+    assert cams.status == 200
+    assert cams.json == {"cams": ["observation.images.cam_high"], "video_mode": "frames"}
+    assert image.status == 200
+    assert image.headers["content-type"] == "image/jpeg"
+    assert image.headers["cache-control"] == "no-store"
+    assert image.raw == b"preview-jpeg"
+
+
+@pytest.mark.parametrize("data_format", ["hdf5", "mcap"])
+def test_replay_image_reuses_real_review_source_until_key_changes(
+    tmp_path,
+    monkeypatch,
+    data_format,
+):
+    repo_root = tmp_path / "repo"
+    review_dir = repo_root / "work_dirs" / "review"
+    other_dir = repo_root / "work_dirs" / "review_other"
+    monkeypatch.setattr(handlers_utils, "_REPO_ROOT", repo_root)
+    console_server._invalidate_review_source_cache()
+
+    with serve_console(console_config(robot_type="ur5e")) as h:
+        dim = h.runtime.robot.total_action_dim
+        _write_review_episode(review_dir, data_format, dim, episode_index=0, base_value=10)
+        _write_review_episode(review_dir, data_format, dim, episode_index=1, base_value=20)
+        _write_review_episode(other_dir, data_format, dim, episode_index=0, base_value=30)
+
+        real_open = console_server._open_review_episode
+        open_calls = []
+
+        def counting_open(ctx, dataset_dir, episode, requested_format="auto"):
+            open_calls.append((Path(dataset_dir), episode, requested_format))
+            return real_open(ctx, dataset_dir, episode, requested_format)
+
+        monkeypatch.setattr(console_server, "_open_review_episode", counting_open)
+
+        first = h.get(
+            f"/api/replay_image?dataset_dir=work_dirs/review&episode=0"
+            f"&format={data_format}&cam=cam_high&frame=0"
+        )
+        second = h.get(
+            f"/api/replay_image?dataset_dir=work_dirs/review&episode=0"
+            f"&format={data_format}&cam=cam_high&frame=1"
+        )
+        third = h.get(
+            f"/api/replay_image?dataset_dir=work_dirs/review&episode=1"
+            f"&format={data_format}&cam=cam_high&frame=0"
+        )
+        fourth = h.get(
+            f"/api/replay_image?dataset_dir=work_dirs/review_other&episode=0"
+            f"&format={data_format}&cam=cam_high&frame=0"
+        )
+        fifth = h.get(
+            f"/api/replay_image?dataset_dir=work_dirs/review&episode=0"
+            f"&format={data_format}&cam=cam_high&frame=0"
+        )
+
+    console_server._invalidate_review_source_cache()
+
+    assert first.status == second.status == third.status == fourth.status == fifth.status == 200
+    assert first.headers["content-type"] == "image/jpeg"
+    assert second.headers["content-type"] == "image/jpeg"
+    assert first.raw != second.raw
+    assert open_calls == [
+        (review_dir, 0, data_format),
+        (review_dir, 1, data_format),
+        (other_dir, 0, data_format),
+        (review_dir, 0, data_format),
+    ]
 
 
 def test_client_trace_is_logged_without_enqueuing_command(console, caplog):

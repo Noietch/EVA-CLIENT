@@ -24,8 +24,8 @@ from core.app.state import (
     format_task_label,
 )
 from core.config import ConfigDict
+from core.datasets import history_row
 from core.recorder.episode import EpisodeLogger, sanitize_path_component
-from core.recorder.lerobot_meta import history_row
 from core.types import Observation, RolloutInterventionSegment
 
 logger = logging.getLogger(__name__)
@@ -212,6 +212,7 @@ def maybe_build_episode_logger(config: ConfigDict, runtime: RuntimeState) -> Non
         gripper_open=gripper_open,
         gripper_close=gripper_close,
         gripper_threshold=gripper_threshold,
+        dataset_format=storage.get("dataset_format", "lerobot_v21"),
     )
 
 
@@ -252,6 +253,7 @@ def maybe_build_rollout_episode_logger(config: ConfigDict, runtime: RuntimeState
         gripper_open=gripper_open,
         gripper_close=gripper_close,
         gripper_threshold=gripper_threshold,
+        dataset_format=storage.get("dataset_format", "lerobot_v21"),
     )
 
 
@@ -295,10 +297,7 @@ def mark_rollout_save_ready(runtime: RuntimeState, reason: str) -> None:
         logger_obj.active_frame_count
         + len(runtime.rollout_policy_actions)
         + runtime.rollout_raw_snapshots.qsize()
-        + sum(
-            len(segment.frames)
-            for segment in runtime.rollout_intervention_segments
-        )
+        + sum(len(segment.frames) for segment in runtime.rollout_intervention_segments)
     )
     if buffered_frames <= 0:
         logger_obj.cancel_episode("empty rollout")
@@ -616,6 +615,7 @@ def rebuild_eval_episode_logger(config: ConfigDict, runtime: RuntimeState) -> No
         gripper_open=gripper_open,
         gripper_close=gripper_close,
         gripper_threshold=gripper_threshold,
+        dataset_format=storage.get("dataset_format", "lerobot_v21"),
     )
 
 
@@ -657,11 +657,12 @@ def start_rollout_intervention(
         return False
     intervention_start_time = time.time()
     _close_rollout_exclusion(runtime, intervention_start_time)
-    runtime.rollout_intervention_pre_qpos = np.asarray(pre_qpos, dtype=np.float32).copy()
+    pre_intervention_qpos = np.asarray(pre_qpos, dtype=np.float32).copy()
+    runtime.rollout_intervention_pre_qpos = pre_intervention_qpos
     runtime.rollout_intervention_active_segment = RolloutInterventionSegment(
         segment_index=runtime.rollout_intervention_next_segment_index,
         start_policy_frame_index=session.step_index,
-        pre_intervention_qpos=runtime.rollout_intervention_pre_qpos.copy(),
+        pre_intervention_qpos=pre_intervention_qpos.copy(),
         start_time=intervention_start_time,
     )
     runtime.rollout_intervention_next_segment_index += 1

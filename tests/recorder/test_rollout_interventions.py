@@ -6,7 +6,7 @@ import numpy as np
 import pyarrow.parquet as pq
 
 from core.config import ConfigDict
-from core.recorder import episode as episode_module
+from core.datasets import lerobot as lerobot_module
 from core.recorder.episode import EpisodeLogger
 from core.types import Observation, RolloutInterventionSegment
 from robots.base import (
@@ -185,7 +185,7 @@ def test_rollout_intervention_video_uses_episode_writer_when_size_set(tmp_path, 
             pass
 
     monkeypatch.setattr(
-        episode_module.imageio, "get_writer", lambda path, *a, **k: _Writer(str(path))
+        lerobot_module.imageio, "get_writer", lambda path, *a, **k: _Writer(str(path))
     )
     logger = _logger(tmp_path, save_image_height=120, save_image_width=160)
     state = np.zeros(_DIM, dtype=np.float32)
@@ -232,7 +232,7 @@ def test_rollout_save_removes_explicit_policy_warmup_interval(tmp_path, monkeypa
         def close(self) -> None:
             pass
 
-    monkeypatch.setattr(episode_module.imageio, "get_writer", lambda *args, **kwargs: _Writer())
+    monkeypatch.setattr(lerobot_module.imageio, "get_writer", lambda *args, **kwargs: _Writer())
     logger = _logger(tmp_path)
     state = np.zeros(_DIM, dtype=np.float32)
     logger.start_episode("pick")

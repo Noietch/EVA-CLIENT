@@ -23,6 +23,9 @@ uv.lock
 
 # Runtime datasets, logs, and generated work directories.
 datasets/
+!src/core/datasets/
+!src/core/datasets/**
+src/core/datasets/**/__pycache__/
 work_dirs/
 logs/
 Log/
