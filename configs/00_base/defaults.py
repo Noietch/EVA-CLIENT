@@ -28,6 +28,8 @@ transport = dict(
     type="ros1",  # "ros1" | "ros2" | "zmq" | "dataset"
     node_name="eva_client",
     dataset_dir="",
+    dataset_format="auto",  # read auto-detect | lerobot_v21 | lerobot_v3 | mcap | hdf5
+    fps=30,  # dataset fallback; recorded metadata/timestamps override it
     episode_id=0,
     convert_bgr_to_rgb=True,
     image_height=224,
@@ -66,6 +68,7 @@ collection = dict(
         log_dir="",
         fps=30,
         save_queue_max=15,
+        dataset_format="lerobot_v21",
         # Saved video resolution; uncomment BOTH to resize each saved frame to exactly
         # (image_width, image_height). Omitted/commented -> keep the camera's native size.
         # image_height=224,
@@ -107,6 +110,7 @@ rollout = dict(
         fps=30,
         save_queue_max=15,
         async_save=True,
+        dataset_format="lerobot_v21",
     ),
     intervention=dict(
         control_mode="absolute",

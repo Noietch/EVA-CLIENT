@@ -36,6 +36,7 @@ import numpy as np
 from tqdm import tqdm
 
 from core.app.command_catalog import control_command_catalog
+from core.app.console.episode_preview import EpisodePreview, read_result_rows
 from core.app.console.transform_worker import build_transform_blob
 from core.app.handlers import (
     _resolve_runtime_path,
@@ -54,7 +55,10 @@ from core.app.state import (
     resolve_inference_strategy_label,
 )
 from core.config import ConfigDict
-from core.utils.lerobot import LeRobotDatasetIO
+from core.datasets import VideoRef, open_dataset
+from core.recorder.episode import sanitize_path_component
+from core.registry import STRATEGY_REGISTRY
+from robots.utils import UrdfScene
 from transport.base import HilStatus, ObservationSource
 from transport.dataset import DatasetTransport
 
@@ -79,6 +83,8 @@ _TRANSFORM_EXECUTOR_LOCK = threading.Lock()
 _TRACE_EVENT_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,96}$")
 _REVIEW_DATA_CACHE_MAX = 8
 _REVIEW_DATA_CACHE_LOCK = threading.RLock()
+_REVIEW_SOURCE_CACHE_MAX = 2
+_REVIEW_SOURCE_CACHE_LOCK = threading.RLock()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -88,9 +94,13 @@ class _CachedReviewEpisode:
     scene_qpos: np.ndarray
     fps: int
     task: str
+    data_format: str
+    video_mode: str
+    video_offsets: dict[str, float]
 
 
 _REVIEW_DATA_CACHE: OrderedDict[tuple[str, int], _CachedReviewEpisode] = OrderedDict()
+_REVIEW_SOURCE_CACHE: OrderedDict[tuple[str, int, str], DatasetTransport] = OrderedDict()
 
 
 def _trace_json(value: Any, limit: int = 1600) -> str:
@@ -254,9 +264,9 @@ def _mp4_needs_faststart(path: Path) -> bool:
 
 def _video_faststart_cache_path(path: Path) -> Path:
     stat = path.stat()
-    digest = hashlib.sha256(
-        f"{path.resolve()}\0{stat.st_size}\0{stat.st_mtime_ns}".encode()
-    ).hexdigest()[:24]
+    digest = hashlib.blake2b(
+        f"{path.resolve()}\0{stat.st_size}\0{stat.st_mtime_ns}".encode(), digest_size=12
+    ).hexdigest()
     cache_root_env = os.environ.get(_VIDEO_FASTSTART_CACHE_ENV)
     cache_root = (
         Path(cache_root_env)
@@ -266,11 +276,12 @@ def _video_faststart_cache_path(path: Path) -> Path:
     return cache_root / f"{path.stem}-{digest}.mp4"
 
 
-def _video_poster_cache_path(path: Path) -> Path:
+def _video_poster_cache_path(path: Path, at_seconds: float = 0.0) -> Path:
     stat = path.stat()
-    digest = hashlib.sha256(
-        f"{path.resolve()}\0{stat.st_size}\0{stat.st_mtime_ns}".encode()
-    ).hexdigest()[:24]
+    digest = hashlib.blake2b(
+        f"{path.resolve()}\0{stat.st_size}\0{stat.st_mtime_ns}\0{at_seconds:.6f}".encode(),
+        digest_size=12,
+    ).hexdigest()
     cache_root_env = os.environ.get(_VIDEO_FASTSTART_CACHE_ENV)
     cache_root = (
         Path(cache_root_env)
@@ -311,19 +322,21 @@ def _ensure_faststart_video(path: Path) -> Path:
         return out
 
 
-def _ensure_video_poster(path: Path) -> Path:
-    out = _video_poster_cache_path(path)
+def _ensure_video_poster(path: Path, at_seconds: float = 0.0) -> Path:
+    out = _video_poster_cache_path(path, at_seconds)
     with _VIDEO_POSTER_LOCK:
         if out.exists() and out.stat().st_size > 0:
             return out
         out.parent.mkdir(parents=True, exist_ok=True)
         cap = cv2.VideoCapture(str(path))
         try:
+            if at_seconds > 0:
+                cap.set(cv2.CAP_PROP_POS_MSEC, at_seconds * 1000.0)
             ok, frame = cap.read()
         finally:
             cap.release()
         if not ok or frame is None:
-            raise RuntimeError(f"could not read first video frame for {path}")
+            raise RuntimeError(f"could not read video frame at {at_seconds:.3f}s for {path}")
         ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 82])
         if not ok:
             raise RuntimeError(f"could not encode first video frame for {path}")
@@ -339,11 +352,36 @@ def _pick_video(videos: dict[str, Path], cam: str) -> Path | None:
     return videos.get(cam) if cam else next(iter(videos.values()), None)
 
 
+def _resolve_episode_video_ref(
+    dataset_dir: Path,
+    episode: int,
+    video_key: str,
+    cam: str,
+    data_format: str,
+) -> VideoRef | None:
+    reader = open_dataset(dataset_dir, format=data_format)
+    videos = reader.episode_videos(episode)
+    if video_key:
+        return videos.get(video_key)
+    image = reader.infer_keys().get("image") or {}
+    candidates = image.get("candidates") or []
+    inferred = next(
+        (
+            candidate
+            for candidate in candidates
+            if candidate == cam or _match_video_key([candidate], cam)
+        ),
+        None,
+    )
+    inferred = inferred or image.get("default") or ""
+    return videos.get(inferred) if inferred else next(iter(videos.values()), None)
+
+
 def _match_video_key(candidates: list[str], cam: str) -> str | None:
     """First inferred candidate key naming this camera, or None.
 
     Args:
-        candidates: image candidate keys from ``LeRobotDatasetIO.infer_keys``.
+        candidates: image candidate keys inferred by the dataset reader.
         cam: camera observation key (e.g. ``cam_high``).
 
     Returns:
@@ -359,21 +397,11 @@ def _match_video_key(candidates: list[str], cam: str) -> str | None:
     )
 
 
-def _infer_replay_video_key(dataset_dir: Path, cam: str) -> str:
-    try:
-        inferred = LeRobotDatasetIO(dataset_dir).infer_keys()
-    except Exception:
-        return ""
-    image = inferred.get("image") or {}
-    candidates = image.get("candidates") or []
-    match = next((c for c in candidates if c == cam or _match_video_key([c], cam)), None)
-    return match or image.get("default") or ""
-
-
 def _open_review_episode(
     ctx: ConsoleContext,
     dataset_dir: str | Path,
     episode_index: int,
+    data_format: str = "auto",
 ) -> tuple[DatasetTransport, dict[str, str]]:
     """Open one saved episode without attaching it to shared console runtime state.
 
@@ -388,7 +416,8 @@ def _open_review_episode(
     """
     runtime = ctx.runtime
     config = runtime.active_config or ctx.config
-    inferred = LeRobotDatasetIO(dataset_dir).infer_keys()
+    reader = open_dataset(dataset_dir, format=data_format)
+    inferred = reader.infer_keys()
     state_key = (inferred.get("state") or {}).get("default") or "observations.state.qpos"
     action_key = (inferred.get("action") or {}).get("default") or "action"
     image = inferred.get("image") or {}
@@ -404,6 +433,7 @@ def _open_review_episode(
 
     review_config = copy.deepcopy(config)
     review_config.transport.dataset_dir = dataset_dir
+    review_config.transport.dataset_format = reader.format
     review_config.transport.episode_id = episode_index
     review_config.transport.dataset_keys = ConfigDict(
         state_key=state_key,
@@ -445,10 +475,22 @@ def _cached_review_episode(
             [source.get_scene_qpos(index) for index in range(source.n_steps)],
             dtype=np.float32,
         )
+        fps = source.fps
+        task = source.current_task
+        data_format = source.data_format
+        video_mode = source.video_mode
+        video_offsets = source.video_offsets()
     finally:
         source.close()
     cached = _CachedReviewEpisode(
-        series, dict(video_keys), scene_qpos, source.fps, source.current_task
+        series=series,
+        video_keys=dict(video_keys),
+        scene_qpos=scene_qpos,
+        fps=fps,
+        task=task,
+        data_format=data_format,
+        video_mode=video_mode,
+        video_offsets=video_offsets,
     )
     with _REVIEW_DATA_CACHE_LOCK:
         existing = _REVIEW_DATA_CACHE.get(key)
@@ -459,6 +501,80 @@ def _cached_review_episode(
         while len(_REVIEW_DATA_CACHE) > _REVIEW_DATA_CACHE_MAX:
             _REVIEW_DATA_CACHE.popitem(last=False)
     return cached
+
+
+def _review_source_key(
+    dataset_dir: str | Path,
+    episode_index: int,
+    data_format: str = "auto",
+) -> tuple[str, int, str]:
+    return (
+        str(Path(dataset_dir).resolve()),
+        int(episode_index),
+        str(data_format or "auto"),
+    )
+
+
+def _close_review_source(source: DatasetTransport) -> None:
+    try:
+        source.close()
+    except Exception:
+        logger.exception("Failed closing cached review source")
+
+
+def _invalidate_review_source_cache(
+    keep: tuple[str, int, str] | None = None,
+) -> None:
+    stale: list[DatasetTransport] = []
+    with _REVIEW_SOURCE_CACHE_LOCK:
+        for key in list(_REVIEW_SOURCE_CACHE):
+            if keep is not None and key == keep:
+                continue
+            stale.append(_REVIEW_SOURCE_CACHE.pop(key))
+    for source in stale:
+        _close_review_source(source)
+
+
+def _seal_runtime_dataset_for_read(ctx: ConsoleContext, dataset_dir: str | Path) -> None:
+    dataset_path = Path(dataset_dir)
+    for logger_obj in (ctx.runtime.episode_logger, ctx.runtime.rollout_episode_logger):
+        if logger_obj is None:
+            continue
+        try:
+            logger_obj.seal_for_read(dataset_path)
+        except Exception:
+            logger.exception("Failed sealing dataset for read: %s", dataset_path)
+
+
+def _get_review_source(
+    ctx: ConsoleContext,
+    dataset_dir: str | Path,
+    episode_index: int,
+    data_format: str = "auto",
+) -> DatasetTransport:
+    key = _review_source_key(dataset_dir, episode_index, data_format)
+    with _REVIEW_SOURCE_CACHE_LOCK:
+        cached = _REVIEW_SOURCE_CACHE.get(key)
+        if cached is not None:
+            _REVIEW_SOURCE_CACHE.move_to_end(key)
+            return cached
+
+    _seal_runtime_dataset_for_read(ctx, dataset_dir)
+    source, _ = _open_review_episode(ctx, dataset_dir, episode_index, data_format)
+    stale: list[DatasetTransport] = []
+    with _REVIEW_SOURCE_CACHE_LOCK:
+        cached = _REVIEW_SOURCE_CACHE.get(key)
+        if cached is not None:
+            _REVIEW_SOURCE_CACHE.move_to_end(key)
+            _close_review_source(source)
+            return cached
+        _REVIEW_SOURCE_CACHE[key] = source
+        while len(_REVIEW_SOURCE_CACHE) > _REVIEW_SOURCE_CACHE_MAX:
+            _, evicted = _REVIEW_SOURCE_CACHE.popitem(last=False)
+            stale.append(evicted)
+    for evicted in stale:
+        _close_review_source(evicted)
+    return source
 
 
 def _ensure_ckpt_order(config: ConfigDict, runtime: RuntimeState) -> None:
@@ -560,8 +676,7 @@ def _serialize_rl(ctx: ConsoleContext) -> dict:
         "inference_strategy": str(rl_cfg.inference_strategy),
         "tasks": [str(task) for task in rl_cfg.tasks],
         "policies": [
-            {"slot": slot, "name": str(model.name)}
-            for slot, model in enumerate(rl_cfg.policies)
+            {"slot": slot, "name": str(model.name)} for slot, model in enumerate(rl_cfg.policies)
         ],
         "critics": [
             {"slot": slot, "name": str(model.name), "type": str(model.type)}
@@ -612,8 +727,6 @@ def _resolve_dataset_dir(dataset_dir: str) -> str:
 def _serialize_config(ctx: ConsoleContext) -> dict:
     # Static config the frontend renders once: prompts, modes, strategies, robot.
     # Read the active (online-tuned) config so a reload reflects live param edits.
-    from core.registry import STRATEGY_REGISTRY
-
     config = ctx.runtime.active_config or ctx.config
     strategies = [
         {
@@ -699,14 +812,18 @@ def _serialize_status(ctx: ConsoleContext) -> dict:
     replay_source = r.replay_source
     replay_source_frame = None
     replay_source_total = None
+    replay_data_format = "auto"
+    replay_video_mode = "native"
+    replay_video_offsets: dict[str, float] = {}
     if replay_source is not None:
-        raw_frame = getattr(replay_source, "frame_index", None)
-        raw_total = getattr(replay_source, "n_steps", None)
-        replay_source_frame = None if raw_frame is None else int(raw_frame)
-        replay_source_total = None if raw_total is None else int(raw_total)
-        if replay_source_total is not None and replay_source_total > 0:
+        replay_source_frame = replay_source.frame_index
+        replay_source_total = replay_source.n_steps
+        replay_data_format = replay_source.data_format
+        replay_video_mode = replay_source.video_mode
+        replay_video_offsets = replay_source.video_offsets()
+        if replay_source_total > 0:
             replay_source_frame = min(
-                max(replay_source_frame or 0, int(s.step_index or 0)),
+                max(replay_source_frame, int(s.step_index or 0)),
                 replay_source_total - 1,
             )
     # "Online" means a message arrived recently, not just that the socket opened
@@ -778,6 +895,9 @@ def _serialize_status(ctx: ConsoleContext) -> dict:
         "replay_action_key": r.replay_action_key,
         "replay_action_mode": r.replay_action_mode,
         "replay_fps": r.replay_fps,
+        "replay_data_format": replay_data_format,
+        "replay_video_mode": replay_video_mode,
+        "replay_video_offsets": replay_video_offsets,
         "replay_exec_steps": r.replay_exec_steps,
         "setup_stage": r.setup_stage,
         "collection_replay": {
@@ -1259,13 +1379,20 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         dataset_dir = _resolve_dataset_dir(str(body.get("dataset_dir", "")).strip())
         episode_index = int(body.get("episode", 0))
         try:
+            _seal_runtime_dataset_for_read(self.ctx, dataset_dir)
             cached = _cached_review_episode(self.ctx, dataset_dir, episode_index)
+            keep_key = _review_source_key(dataset_dir, episode_index, cached.data_format)
+            _get_review_source(self.ctx, dataset_dir, episode_index, cached.data_format)
+            _invalidate_review_source_cache(keep=keep_key)
             payload = {
                 "ok": True,
                 "episode": episode_index,
                 "frames": len(cached.scene_qpos),
                 "fps": cached.fps,
                 "task": cached.task,
+                "format": cached.data_format,
+                "video_mode": cached.video_mode,
+                "video_offsets": cached.video_offsets,
                 "video_keys": cached.video_keys,
                 **cached.series,
             }
@@ -1502,17 +1629,16 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         model = self._query_str("model")
         if self.ctx.preview is not None and model:
             self.ctx.preview.set_dataset_root(eval_episode_dir(self.ctx.output_dir, model))
-            return
-        self._sync_preview_to_active_model()
+        else:
+            self._sync_preview_to_active_model()
+        if self.ctx.preview is not None:
+            _seal_runtime_dataset_for_read(self.ctx, self.ctx.preview.dataset_root())
 
     def _get_results_all(self) -> None:
         # Cross-model aggregation for the RESULT browser: one record list per model
         # discovered under the eval run root, plus the eval prompt/milestone config.
         # Each model's dataset lives at <output_dir>/<model>/episodes; scan every subdir
         # whose meta/episodes.jsonl exists so prior evals auto-load.
-        from core.app.console.episode_preview import read_result_rows
-        from core.recorder.episode import sanitize_path_component
-
         eval_cfg = self.ctx.config.eval
         root = Path(self.ctx.output_dir)
         configured: list[str] = []
@@ -1736,22 +1862,21 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         dataset_dir = self._query_str("dataset_dir")
         episode = self._query_int("episode", -1)
         video_key = self._query_str("video_key")
+        data_format = self._query_str("format") or "auto"
         if dataset_dir and episode >= 0:
             root = _resolve_runtime_path(dataset_dir)
-            if not video_key:
-                video_key = _infer_replay_video_key(root, cam)
-            videos = LeRobotDatasetIO(root).episode_video_paths(
-                episode, {cam or video_key: video_key}
-            )
-            video = _pick_video(videos, cam)
+            try:
+                video = _resolve_episode_video_ref(root, episode, video_key, cam, data_format)
+            except Exception:
+                video = None
             if video is None:
                 self._send_empty(404)
                 return
-            self._send_video(video)
+            self._send_video(video.path)
             return
 
         replay = self.ctx.runtime.replay_source
-        videos = replay.video_paths() if (replay and hasattr(replay, "video_paths")) else {}  # type: ignore[attr-defined]
+        videos = replay.video_paths() if replay is not None else {}
         video = _pick_video(videos, cam)
         if video is None:
             self._send_empty(404)
@@ -1763,27 +1888,81 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         dataset_dir = self._query_str("dataset_dir")
         episode = self._query_int("episode", -1)
         video_key = self._query_str("video_key")
+        data_format = self._query_str("format") or "auto"
         if dataset_dir and episode >= 0:
             root = _resolve_runtime_path(dataset_dir)
-            if not video_key:
-                video_key = _infer_replay_video_key(root, cam)
-            videos = LeRobotDatasetIO(root).episode_video_paths(
-                episode, {cam or video_key: video_key}
-            )
-            video = _pick_video(videos, cam)
+            try:
+                video = _resolve_episode_video_ref(root, episode, video_key, cam, data_format)
+            except Exception:
+                video = None
             if video is None:
                 self._send_empty(404)
                 return
-            self._send_video_poster(video)
+            self._send_video_poster(video.path, video.start_time)
             return
 
         replay = self.ctx.runtime.replay_source
-        videos = replay.video_paths() if (replay and hasattr(replay, "video_paths")) else {}  # type: ignore[attr-defined]
+        videos = replay.video_paths() if replay is not None else {}
+        offsets = replay.video_offsets() if replay is not None else {}
         video = _pick_video(videos, cam)
         if video is None:
             self._send_empty(404)
             return
-        self._send_video_poster(video)
+        self._send_video_poster(video, float(offsets.get(cam, 0.0)))
+
+    def _get_replay_image(self) -> None:
+        runtime = self.ctx.runtime
+        source = None
+        requested_dir = self._query_str("dataset_dir")
+        episode_index = self._query_int("episode", -1)
+        if requested_dir and episode_index >= 0:
+            dataset_dir = _resolve_dataset_dir(requested_dir)
+            resolved = Path(dataset_dir).resolve()
+            if (
+                runtime.replay_source is not None
+                and Path(runtime.replay_dataset_dir).resolve() == resolved
+                and runtime.replay_episode_id == episode_index
+            ):
+                source = runtime.replay_source
+            elif (
+                runtime.rl_replay_source is not None
+                and Path(runtime.rl_replay_dataset_dir).resolve() == resolved
+                and runtime.rl_replay_episode_id == episode_index
+            ):
+                source = runtime.rl_replay_source
+            else:
+                try:
+                    source = _get_review_source(
+                        self.ctx,
+                        dataset_dir,
+                        episode_index,
+                        self._query_str("format", "auto"),
+                    )
+                except Exception:
+                    self._send_empty(404)
+                    return
+        else:
+            source = runtime.replay_source or runtime.rl_replay_source
+        camera = self._query_str("cam")
+        frame_index = self._query_int("frame", -1)
+        frame = source.get_camera_frame_at(camera, frame_index) if source is not None else None
+        if frame is None:
+            self._send_empty(404)
+            return
+        body = _encode_jpeg(
+            frame,
+            bool(self.ctx.config.transport.convert_bgr_to_rgb),
+            quality=82,
+        )
+        if body is None:
+            self._send_empty(500)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "image/jpeg")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
 
     def _get_replay_frame(self) -> None:
         self._point_preview_for_request()
@@ -1804,9 +1983,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         if transform_range is not None:
             start, count = transform_range
         raw = (
-            preview.transforms_blob(ep, start=start, count=count)
-            if (preview and ep >= 0)
-            else None
+            preview.transforms_blob(ep, start=start, count=count) if (preview and ep >= 0) else None
         )
         if raw is None:
             self._send_json(404, {"available": False})
@@ -1833,8 +2010,40 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         # operator may want to inspect a specific view).
         self._point_preview_for_request()
         ep = self._query_int("episode_index", -1)
-        videos = self.ctx.preview.videos(ep) if (self.ctx.preview and ep >= 0) else {}
-        self._send_json(200, {"cams": list(videos.keys())})
+        media = (
+            self.ctx.preview.media(ep)
+            if (self.ctx.preview and ep >= 0)
+            else {"cams": [], "video_mode": "native"}
+        )
+        self._send_json(200, media)
+
+    def _get_episode_image(self) -> None:
+        self._point_preview_for_request()
+        ep = self._query_int("episode_index", -1)
+        cam = self._query_str("cam")
+        frame = self._query_int("frame", 0)
+        image = (
+            self.ctx.preview.image_frame(ep, cam, frame)
+            if (self.ctx.preview and ep >= 0 and cam)
+            else None
+        )
+        if image is None:
+            self._send_empty(404)
+            return
+        body = _encode_jpeg(
+            image,
+            bool(self.ctx.config.transport.convert_bgr_to_rgb),
+            quality=82,
+        )
+        if body is None:
+            self._send_empty(500)
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "image/jpeg")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
 
     def _send_video(self, path: Path) -> None:
         # Stream an mp4 honoring HTTP Range so <video> can seek; whole-file otherwise.
@@ -1888,10 +2097,10 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             return
 
-    def _send_video_poster(self, path: Path) -> None:
+    def _send_video_poster(self, path: Path, at_seconds: float = 0.0) -> None:
         try:
             try:
-                poster = _ensure_video_poster(path)
+                poster = _ensure_video_poster(path, at_seconds)
             except RuntimeError as exc:
                 logger.error("%s", exc)
                 self._send_json(500, {"error": str(exc)})
@@ -2015,6 +2224,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         dataset_dir = _resolve_dataset_dir(str(body.get("dataset_dir", "")).strip())
         episode_index = int(body.get("episode", 0))
         try:
+            _seal_runtime_dataset_for_read(self.ctx, dataset_dir)
             source, video_keys = _open_review_episode(self.ctx, dataset_dir, episode_index)
             series = source.series()
         except Exception as error:
@@ -2047,6 +2257,9 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                 "frames": source.n_steps,
                 "fps": source.fps,
                 "task": source.current_task,
+                "format": getattr(source, "data_format", "lerobot_v21"),
+                "video_mode": getattr(source, "video_mode", "native"),
+                "video_offsets": getattr(source, "video_offsets", dict)(),
                 "video_keys": video_keys,
                 **series,
             },
@@ -2157,6 +2370,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             action_key=str(keys.get("action", "")),
             video_keys=body.get("video_keys") or {},
             action_mode=str(body.get("action_mode", "")),
+            data_format=str(body.get("format", "auto")),
         )
         if session.last_error or runtime.replay_source is None:
             error = session.last_error or "replay dataset was not mounted"
@@ -2177,11 +2391,14 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                 "action_key": runtime.replay_action_key,
                 "action_mode": runtime.replay_action_mode,
                 "video_keys": dict(replay_keys.video_keys),
+                "format": runtime.replay_source.data_format,
+                "video_mode": runtime.replay_source.video_mode,
+                "video_offsets": runtime.replay_source.video_offsets(),
             },
         )
 
     def _post_set_replay_fps(self, body: dict) -> None:
-        self._enqueue_ok(f"web:set_replay_fps:{int(body.get('fps', 10))}")
+        self._enqueue_ok(f"web:set_replay_fps:{int(body.get('fps', self.ctx.runtime.replay_fps))}")
 
     def _post_replay_seek(self, body: dict) -> None:
         self._enqueue_ok(f"web:replay_seek:{int(body.get('frame', 0))}")
@@ -2244,10 +2461,13 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
     def _post_inspect_dataset(self, body: dict) -> None:
         dataset_dir = _resolve_dataset_dir(str(body.get("dataset_dir", "")).strip())
         try:
-            io = LeRobotDatasetIO(dataset_dir)
+            io = open_dataset(dataset_dir, format=str(body.get("format", "auto")))
             keys = io.infer_keys()
             n_episodes = io.count_episodes()
-            self._send_json(200, {"ok": True, "keys": keys, "n_episodes": n_episodes})
+            self._send_json(
+                200,
+                {"ok": True, "format": io.format, "keys": keys, "n_episodes": n_episodes},
+            )
         except Exception as error:
             self._send_json(200, {"ok": False, "error": str(error)})
 
@@ -2255,7 +2475,11 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         dataset_dir = _resolve_dataset_dir(str(body.get("dataset_dir", "")).strip())
         episode = int(body.get("episode", -1))
         verdict = str(body.get("verdict", ""))
-        ok = LeRobotDatasetIO(dataset_dir).mark_qc(episode, verdict, str(body.get("note", "")))
+        ok = open_dataset(dataset_dir, format=str(body.get("format", "auto"))).mark_qc(
+            episode,
+            verdict,
+            str(body.get("note", "")),
+        )
         if ok:
             self._send_json(200, {"ok": True, "episode": episode, "verdict": verdict})
         else:
@@ -2322,7 +2546,10 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         dataset_dir = _resolve_dataset_dir(str(body.get("dataset_dir", "")).strip())
         episode = int(body.get("episode", -1))
         annotation = str(body.get("annotation", ""))
-        ok = LeRobotDatasetIO(dataset_dir).annotate_language(episode, annotation)
+        ok = open_dataset(dataset_dir, format=str(body.get("format", "auto"))).annotate_language(
+            episode,
+            annotation,
+        )
         if ok:
             self._send_json(200, {"ok": True, "episode": episode})
         else:
@@ -2332,7 +2559,8 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         # Read back an episode's stored annotation so the editor prefills it (enabling edits).
         dataset_dir = _resolve_dataset_dir(str(body.get("dataset_dir", "")).strip())
         episode = int(body.get("episode", -1))
-        annotation = LeRobotDatasetIO(dataset_dir).read_annotation(episode)
+        dataset = open_dataset(dataset_dir, format=str(body.get("format", "auto")))
+        annotation = dataset.read_annotation(episode)
         self._send_json(200, {"ok": True, "episode": episode, "annotation": annotation})
 
     def _post_select_ckpt(self, body: dict) -> None:
@@ -2350,6 +2578,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         side = str(body.get("side", "") or "")
         arg = f"{action}:{side}" if side in ("l", "r") else action
         self._enqueue_ok(f"web:init_gripper:{arg}")
+
 
 # Exact-path GET routes (prefix routes — camera/assets/meshes — are handled inline in
 # do_GET because they own a path subtree). Values are unbound handler methods.
@@ -2369,12 +2598,14 @@ _GET_ROUTES = {
     "/api/review_transforms": ConsoleRequestHandler._get_review_transforms,
     "/api/replay_video": ConsoleRequestHandler._get_replay_video,
     "/api/replay_poster": ConsoleRequestHandler._get_replay_poster,
+    "/api/replay_image": ConsoleRequestHandler._get_replay_image,
     "/api/live_series": ConsoleRequestHandler._get_live_series,
     "/api/rl/series": ConsoleRequestHandler._get_rl_series,
     "/api/replay_frame": ConsoleRequestHandler._get_replay_frame,
     "/api/episode_transforms": ConsoleRequestHandler._get_episode_transforms,
     "/api/episode_video": ConsoleRequestHandler._get_episode_video,
     "/api/episode_cams": ConsoleRequestHandler._get_episode_cams,
+    "/api/episode_image": ConsoleRequestHandler._get_episode_image,
 }
 
 # POST endpoints that just enqueue one constant command and ack {"ok": true}.
@@ -2471,8 +2702,6 @@ def build_console_context(
     scene: object | None = None
     if with_scene:
         try:
-            from robots.utils import UrdfScene
-
             scene = UrdfScene(
                 runtime.robot,
                 gripper_open=config.robot.gripper_open,
@@ -2491,8 +2720,6 @@ def build_console_context(
     )
     # RESULT-tab playback reads recorded episodes under <output_dir>/episodes.
     if with_preview and output_dir:
-        from core.app.console.episode_preview import EpisodePreview
-
         ctx.preview = EpisodePreview(config, Path(output_dir))
     runtime.console_ctx = ctx
     return ctx

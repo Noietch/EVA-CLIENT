@@ -195,6 +195,10 @@ def test_r1lite_collection_configures_common_recording():
 def test_operator_control_defaults_disabled():
     cfg = load_config(_CONFIGS_DIR / "00_base" / "defaults.py")
 
+    assert cfg.transport.dataset_format == "auto"
+    assert cfg.transport.fps == 30
+    assert cfg.collection.storage.dataset_format == "lerobot_v21"
+    assert cfg.rollout.storage.dataset_format == "lerobot_v21"
     assert cfg.operator_control.enabled is False
     assert cfg.operator_control.action_topic == "/eva/operator_action"
 

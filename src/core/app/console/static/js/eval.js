@@ -711,6 +711,8 @@ let TP_MODEL = "";
 
 let TP_LOAD_SEQ = 0;
 
+function tpMediaMode() { return (TP && TP.videoMode) || "native"; }
+
 function tpBuildPlayTimeline(timestamps, nFrames) {
     const n = Math.max(0, Number(nFrames) || timestamps.length);
     if (!n) return [];
@@ -806,20 +808,27 @@ function tpSetup(epi, prompt, model) {
       .then((d) => {
         if (loadSeq !== TP_LOAD_SEQ) return false;
         const cams = d.cams || [];
+        const videoMode = d.video_mode || "native";
         const strip = $("tp-cam-strip");
         if (!cams.length) {
-          strip.innerHTML = '<div class="miss">no camera video</div>';
+          strip.innerHTML = '<div class="miss">no camera media</div>';
           return false;
         }
         strip.innerHTML = cams.map((c) => {
+          const label = c.split(".").pop();
+          if (videoMode === "frames") {
+            const src = "/api/episode_image?episode_index=" + epi + "&cam=" + encodeURIComponent(c) + mq;
+            return '<div class="tp-cam-cell"><div class="tp-cam-lbl">' + label + '</div>'
+              + '<img class="tp-cam tp-cam-frame" alt="' + label + '" data-src="' + src + '"></div>';
+          }
           const src = "/api/episode_video?episode_index=" + epi + "&cam=" + encodeURIComponent(c) + mq;
-          return '<div class="tp-cam-cell"><div class="tp-cam-lbl">' + c.split(".").pop() + '</div>'
+          return '<div class="tp-cam-cell"><div class="tp-cam-lbl">' + label + '</div>'
             + '<video class="tp-cam" muted playsinline preload="auto" src="' + src
             + '" onerror="this.closest(\'.tp-cam-cell\').style.display=\'none\'"></video></div>';
         }).join("");
-        return true;
+        return videoMode;
       })
-      .catch(() => false);
+      .catch(() => "native");
     fetch("/api/episode_series?episode_index=" + epi + mq).then((r) => r.ok ? r.json() : null).then((series) => {
       if (loadSeq !== TP_LOAD_SEQ) return;
       if (!series || !series.state || !series.state.length) return;
@@ -828,14 +837,19 @@ function tpSetup(epi, prompt, model) {
       const dimsOn = {}; for (let d = 0; d < sd; d++) dimsOn[d] = true;
       const dimsOnA = {}; for (let d = 0; d < ad; d++) dimsOnA[d] = true;
       const playTime = tpBuildPlayTimeline(series.timestamp || [], series.state.length);
-      TP = { epi, model, series, n: series.state.length, fps: Number(series.fps) || 10, i: 0, playing: false, raf: null, dimsOn, sd, dimsOnA, ad, playTime, lastChartDraw: 0, lastVideoSync: 0, camerasReady };
+      TP = { epi, model, series, n: series.state.length, fps: Number(series.fps) || 30, i: 0, playing: false, raf: null, dimsOn, sd, dimsOnA, ad, playTime, lastChartDraw: 0, lastVideoSync: 0, camerasReady, videoMode: "native" };
       $("tp-seek").max = String(TP.n - 1); $("tp-seek").step = "0.001"; $("tp-seek").value = "0";
+      camerasReady.then((videoMode) => {
+        if (TP && loadSeq === TP_LOAD_SEQ) TP.videoMode = videoMode || "native";
+      }).catch(() => {});
       const loaded = window.ReplayScene ? ReplayScene.loadEpisode(epi, model) : Promise.resolve(false);
       loaded.finally(() => { tpRenderDims(); tpApplyFrame(0, true); });
     }).catch(() => {});
   }
 
 function tpVideos() { return Array.from($("tp-cam-strip").querySelectorAll("video.tp-cam")); }
+
+function tpFrameImages() { return Array.from($("tp-cam-strip").querySelectorAll("img.tp-cam-frame")); }
 
 function tpMasterVideo() {
     return tpVideos().find((v) => {
@@ -848,10 +862,20 @@ function tpSeekVideos(frame = null, force = false) {
     if (!TP) return;
     const t = tpTimeAtFrame(frame == null ? TP.i : frame);
     tpVideos().forEach((v) => {
-      const tolerance = Math.min(0.5 / Math.max(1, Number(TP.fps) || 10), 0.03);
+      const tolerance = Math.min(0.5 / Math.max(1, Number(TP.fps) || 30), 0.03);
       if (v && isFinite(t) && (force || Math.abs((v.currentTime || 0) - t) > tolerance)) {
         try { v.currentTime = t; } catch (e) {}
       }
+    });
+  }
+
+function tpRefreshImages(frame = null) {
+    if (!TP) return;
+    const clamped = Math.max(0, Math.min(Math.round(frame == null ? TP.i : frame), TP.n - 1));
+    tpFrameImages().forEach((img) => {
+      const base = img.dataset.src;
+      if (!base) return;
+      img.src = base + "&frame=" + clamped;
     });
   }
 
@@ -862,7 +886,8 @@ function tpApplyFrame(frame, syncVideos = false) {
     $("tp-time").textContent = tpTimeAtFrame(clamped).toFixed(1) + "s";
     if (window.ReplayScene) ReplayScene.setFrame(TP.epi, clamped, TP_MODEL);
     tpDrawChart();
-    if (syncVideos) tpSeekVideos(clamped);
+    if (tpMediaMode() === "frames") tpRefreshImages(clamped);
+    else if (syncVideos) tpSeekVideos(clamped);
   }
 
 function tpSeek(v) { tpStop(); tpApplyFrame(parseFloat(v) || 0, true); }
@@ -920,6 +945,17 @@ function alignTpVideos(frame) {
     }));
   }
 
+function tpWaitFrameImagesReady() {
+    return Promise.all(tpFrameImages().map((img) => {
+      if (img.complete && img.naturalWidth > 0) return Promise.resolve(true);
+      return new Promise((resolve) => {
+        const done = () => resolve(img.naturalWidth > 0);
+        img.addEventListener("load", done, { once: true });
+        img.addEventListener("error", () => resolve(false), { once: true });
+      });
+    })).then((states) => states.length > 0 && states.every(Boolean));
+  }
+
 async function tpPlay() {
     if (!TP) return;
     if (TP.i >= TP.n - 1) tpApplyFrame(0, true);
@@ -927,8 +963,19 @@ async function tpPlay() {
     TP.playing = true; $("tp-play").textContent = "⏸";
     TP.playFrame0 = TP.i;
     const camerasReady = TP.camerasReady;
-    if (camerasReady) await camerasReady;
+    if (camerasReady) {
+      try { TP.videoMode = await camerasReady; } catch (e) {}
+    }
     if (!TP || seq !== TP_LOAD_SEQ || !TP.playing) return;
+    if (tpMediaMode() === "frames") {
+      tpRefreshImages(TP.i);
+      await tpWaitFrameImagesReady();
+      if (!TP || seq !== TP_LOAD_SEQ || !TP.playing) return;
+      TP.playWall0 = performance.now();
+      TP.lastVideoSync = TP.playWall0;
+      TP.raf = requestAnimationFrame(tpPlayFrame);
+      return;
+    }
     const videos = tpVideos();
     await Promise.all(videos.map(waitTpVideoReady));
     if (!TP || seq !== TP_LOAD_SEQ || !TP.playing) return;
@@ -951,7 +998,7 @@ function tpPlayFrame() {
     const frame = tpFrameAtTime(targetTime);
     tpApplyFrame(frame, false);
     const now = performance.now();
-    if (now - TP.lastVideoSync >= 200) {
+    if (tpMediaMode() !== "frames" && now - TP.lastVideoSync >= 200) {
       tpSeekVideos(frame);
       TP.lastVideoSync = now;
     }

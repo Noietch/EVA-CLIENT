@@ -14,6 +14,24 @@ let replayLoadedEpisodeId = 0;
 
 let replayLoadedVideoKeys = {};
 
+let replayLoadedVideoOffsets = {};
+
+let replayLoadedVideoMode = "native";
+
+let replayStreamFrame = -1;
+
+let replayLoadedDataFormat = "auto";
+
+function setReplayLoadedMedia(info = {}) {
+  replayLoadedDatasetDir = info.dataset_dir || "";
+  replayLoadedEpisodeId = Number(info.episode || 0);
+  replayLoadedVideoKeys = { ...(info.video_keys || {}) };
+  replayLoadedVideoOffsets = { ...(info.video_offsets || {}) };
+  replayLoadedVideoMode = info.video_mode || "native";
+  replayLoadedDataFormat = info.format || "auto";
+  replayStreamFrame = -1;
+}
+
 let REPLAY_XF_LOADING = false;
 
 const REPLAY_INITIAL_TRANSFORM_FRAMES = 30;
@@ -23,7 +41,7 @@ let replayTransformLoads = new Map();
 
 let _lastReplayChartDraw = 0;
 
-const REPLAY_DEFAULT_FPS = 10;
+const REPLAY_DEFAULT_FPS = 30;
 
 let replayVideoFps = REPLAY_DEFAULT_FPS;
 
@@ -76,7 +94,7 @@ function recordReplaySync(frame) {
     let videoSamples = 0;
     videos.forEach((video) => {
       if (video.error || video.readyState < 2 || !Number.isFinite(video.currentTime)) return;
-      maxVideoSkew = Math.max(maxVideoSkew, Math.abs(video.currentTime - targetTime));
+      maxVideoSkew = Math.max(maxVideoSkew, Math.abs(videoLocalTime(video) - targetTime));
       videoSamples += 1;
     });
     if (replayUrdfAppliedFrame == null && LIVE.playing) {
@@ -87,7 +105,7 @@ function recordReplaySync(frame) {
       : Math.abs(Number(replayUrdfAppliedFrame) - Number(frame));
     const readyTimes = videos
       .filter((video) => !video.error && Number.isFinite(video.currentTime))
-      .map((video) => video.currentTime);
+      .map((video) => videoLocalTime(video));
     const cameraSkew = readyTimes.length > 1
       ? Math.max(...readyTimes) - Math.min(...readyTimes)
       : 0;
@@ -102,7 +120,7 @@ function recordReplaySync(frame) {
     metrics.maxUrdfFrameSkew = Math.max(metrics.maxUrdfFrameSkew, urdfSkew);
     metrics.videoSkewSamples.push({
       frame: Number(frame), target: targetTime,
-      times: videos.map((video) => Number(video.currentTime)),
+      times: videos.map((video) => videoLocalTime(video)),
     });
     if (metrics.videoSkewSamples.length > 32) metrics.videoSkewSamples.shift();
   }
@@ -178,9 +196,14 @@ function maybeSyncReplayPlayer(s) {
     ].join("|");
     if (key !== S.replaySeriesKey) {
       S.replaySeriesKey = key;
-      replayLoadedDatasetDir = s.replay_dataset_dir || "";
-      replayLoadedEpisodeId = s.replay_episode_id || 0;
-      replayLoadedVideoKeys = { ...S.replayVideoKeys };
+      setReplayLoadedMedia({
+        dataset_dir: s.replay_dataset_dir,
+        episode: s.replay_episode_id,
+        video_keys: S.replayVideoKeys,
+        video_offsets: s.replay_video_offsets,
+        video_mode: s.replay_video_mode,
+        format: s.replay_data_format,
+      });
       replayVideoFps = Math.max(1, Number(s.replay_fps) || REPLAY_DEFAULT_FPS);
       loadReplaySeries();
       return;
@@ -203,9 +226,7 @@ function loadMountedReplaySeries(info) {
       info.action_mode || "",
       info.action_key || "",
     ].join("|");
-    replayLoadedDatasetDir = info.dataset_dir || "";
-    replayLoadedEpisodeId = Number(info.episode || 0);
-    replayLoadedVideoKeys = { ...(info.video_keys || {}) };
+    setReplayLoadedMedia(info);
     replayVideoFps = Math.max(1, Number(info.fps) || REPLAY_DEFAULT_FPS);
     return loadReplaySeries();
   }
@@ -391,9 +412,7 @@ async function loadReviewPlayback(info, owner) {
     LIVE.replayLoading = true;
     LIVE.playing = false;
     resetReplaySyncMetrics();
-    replayLoadedDatasetDir = info.dataset_dir || "";
-    replayLoadedEpisodeId = Number(info.episode || 0);
-    replayLoadedVideoKeys = { ...(info.video_keys || {}) };
+    setReplayLoadedMedia(info);
     installReplaySeries(info);
     resetReplayTransformChunks();
     resetReplayUrdfRequests();
@@ -401,6 +420,9 @@ async function loadReviewPlayback(info, owner) {
       datasetDir: replayLoadedDatasetDir,
       episodeId: replayLoadedEpisodeId,
       videoKeys: replayLoadedVideoKeys,
+      videoOffsets: replayLoadedVideoOffsets,
+      videoMode: replayLoadedVideoMode,
+      dataFormat: replayLoadedDataFormat,
     });
     const params = new URLSearchParams({
       dataset_dir: replayLoadedDatasetDir,
@@ -521,22 +543,36 @@ function stopRealReplayVisual(frame) {
     }
   }
 
-function mountEpisodeVideos({ datasetDir, episodeId, videoKeys }) {
+function mountEpisodeVideos({
+    datasetDir, episodeId, videoKeys, videoOffsets = {}, videoMode = "native",
+    dataFormat = "auto",
+  }) {
     const cams = (S.CFG && S.CFG.camera_keys) || [];
     replaceCamStripContent(cams.map((k) => {
       const params = new URLSearchParams({
         cam: k,
         dataset_dir: datasetDir,
         episode: String(episodeId),
+        format: dataFormat,
       });
       const videoKey = videoKeys[k];
       if (videoKey) params.set("video_key", videoKey);
+      if (videoMode === "frames") {
+        const frameParams = new URLSearchParams(params);
+        frameParams.set("frame", "0");
+        return `<div class="cam-cell"><div class="cam-lbl">${k}</div>` +
+          `<img class="cam cam-replay-frame" data-key="${k}" ` +
+          `data-src="/api/replay_image?${params.toString()}" ` +
+          `src="/api/replay_image?${frameParams.toString()}" ` +
+          `onload="this.closest('.cam-cell').classList.add('video-ready')" ` +
+          `onerror="this.closest('.cam-cell').classList.add('failed')"></div>`;
+      }
       return `<div class="cam-cell loading"><div class="cam-lbl">${k}</div>` +
         `<img class="cam cam-poster" data-key="${k}" ` +
         `src="/api/replay_poster?${params.toString()}" ` +
         `onload="this.closest('.cam-cell').classList.remove('loading')" ` +
         `onerror="this.closest('.cam-cell').classList.add('failed')">` +
-        `<video class="cam cam-video" data-key="${k}" muted playsinline preload="none" ` +
+        `<video class="cam cam-video" data-key="${k}" data-start="${Number(videoOffsets[k]) || 0}" muted playsinline preload="none" ` +
         `data-poster="/api/replay_poster?${params.toString()}" ` +
         `data-src="/api/replay_video?${params.toString()}" ` +
         `oncanplay="this.closest('.cam-cell').classList.add('video-ready')" ` +
@@ -549,6 +585,7 @@ function mountEpisodeVideos({ datasetDir, episodeId, videoKeys }) {
       episode: episodeId,
       cameras: cams,
       video_keys: videoKeys,
+      video_mode: videoMode,
     });
     const strip = $("cam-strip");
     if (strip) {
@@ -575,12 +612,59 @@ function mountReplayVideos() {
       datasetDir: replayLoadedDatasetDir,
       episodeId: replayLoadedEpisodeId,
       videoKeys: replayLoadedVideoKeys,
+      videoOffsets: replayLoadedVideoOffsets,
+      videoMode: replayLoadedVideoMode,
+      dataFormat: replayLoadedDataFormat,
+    });
+  }
+
+function videoStartTime(video) {
+    return Number(video.dataset.start) || 0;
+  }
+
+function videoLocalTime(video) {
+    return Number(video.currentTime || 0) - videoStartTime(video);
+  }
+
+function refreshReplayImages(frame) {
+    if (replayLoadedVideoMode !== "frames") return;
+    const index = Math.max(0, Math.floor(Number(frame) || 0));
+    if (index === replayStreamFrame) return;
+    replayStreamFrame = index;
+    const strip = $("cam-strip");
+    if (!strip) return;
+    strip.querySelectorAll("img.cam-replay-frame").forEach((img) => {
+      img.src = `${img.dataset.src}&frame=${index}`;
     });
   }
 
 function replayVideos() {
     const strip = $("cam-strip");
     return strip ? Array.from(strip.querySelectorAll("video.cam")) : [];
+  }
+
+function replayFrameImages() {
+    const strip = $("cam-strip");
+    return strip ? Array.from(strip.querySelectorAll("img.cam-replay-frame")) : [];
+  }
+
+function waitForReplayImageReady(img) {
+    const signal = replayVideoAbortController ? replayVideoAbortController.signal : null;
+    if (img.complete) return Promise.resolve(img.naturalWidth > 0);
+    return new Promise((resolve) => {
+      const finish = () => {
+        img.removeEventListener("load", finish);
+        img.removeEventListener("error", finish);
+        if (signal) signal.removeEventListener("abort", finish);
+        resolve(img.naturalWidth > 0);
+      };
+      img.addEventListener("load", finish, { once: true });
+      img.addEventListener("error", finish, { once: true });
+      if (signal) {
+        signal.addEventListener("abort", finish, { once: true });
+        if (signal.aborted) finish();
+      }
+    });
   }
 
 function setVideosLoading(videos, on, text) {
@@ -643,7 +727,8 @@ function alignStageVideos(frame) {
     const target = replayTimeAtFrame(frame);
     return Promise.all(replayVideos().map((video) => {
       if (video.error || !Number.isFinite(target)) return Promise.resolve();
-      if (Math.abs((video.currentTime || 0) - target) < 0.001) return Promise.resolve();
+      const absoluteTarget = target + videoStartTime(video);
+      if (Math.abs((video.currentTime || 0) - absoluteTarget) < 0.001) return Promise.resolve();
       return new Promise((resolve) => {
         const finish = () => {
           video.removeEventListener("seeked", finish);
@@ -652,7 +737,7 @@ function alignStageVideos(frame) {
         };
         video.addEventListener("seeked", finish, { once: true });
         video.addEventListener("error", finish, { once: true });
-        video.currentTime = target;
+        video.currentTime = absoluteTarget;
       });
     }));
   }
@@ -692,8 +777,14 @@ async function waitForStageVideosReady() {
     const videos = replayVideos();
     const signal = replayVideoAbortController ? replayVideoAbortController.signal : null;
     if (!videos.length) {
-      clientTrace("review.videos.ready", { count: 0, errors: 0 });
-      return false;
+      const images = replayFrameImages();
+      const ready = await Promise.all(images.map((img) => waitForReplayImageReady(img)));
+      clientTrace("review.videos.ready", {
+        count: images.length,
+        errors: ready.filter((ok) => !ok).length,
+        mode: "frames",
+      });
+      return images.length > 0 && ready.every(Boolean);
     }
     setVideosLoading(videos, true, "loading video");
     await Promise.all(videos.map((v) => waitForVideoReady(v)));
@@ -703,19 +794,26 @@ async function waitForStageVideosReady() {
       errors: videos.filter((v) => !!v.error).length,
       states: videos.map((v) => ({ camera: v.dataset.key || "", ready_state: v.readyState })),
     });
-    return videos.length >= 3 && videos.every((v) => !v.error && v.readyState >= 3);
+    return videos.length > 0 && videos.every((v) => !v.error && v.readyState >= 3);
   }
 
 async function waitForStageVideosPainted() {
     const videos = replayVideos();
-    if (!videos.length) return false;
+    if (!videos.length) {
+      const images = replayFrameImages();
+      if (!images.length || images.some((img) => !img.complete || img.naturalWidth <= 0)) {
+        return false;
+      }
+      await waitForBrowserPaint();
+      return true;
+    }
     const signal = replayVideoAbortController ? replayVideoAbortController.signal : null;
     setVideosLoading(videos, true, "rendering video");
     await Promise.all(videos.map((v) => waitForVideoPainted(v)));
     if (signal && signal.aborted) return;
     await waitForBrowserPaint();
     setVideosLoading(videos, false, "");
-    return videos.length >= 3 && videos.every((v) => !v.error);
+    return videos.length > 0 && videos.every((v) => !v.error);
   }
 
 function playStageVideos() {
@@ -741,7 +839,7 @@ function replayMasterVideo() {
 
 function syncReplayVideos(frame, master = null, force = false) {
     const t = master && Number.isFinite(master.currentTime)
-      ? master.currentTime
+      ? videoLocalTime(master)
       : replayTimeAtFrame(frame);
     if (!Number.isFinite(t)) return;
     const softTolerance = 0.2 / replayVideoFps;
@@ -749,9 +847,10 @@ function syncReplayVideos(frame, master = null, force = false) {
     replayVideos().forEach((v) => {
       if (v === master) return;
       if (v.error) return;
-      const drift = (v.currentTime || 0) - t;
+      const target = t + videoStartTime(v);
+      const drift = (v.currentTime || 0) - target;
       if (force || Math.abs(drift) > hardTolerance) {
-        v.currentTime = t;
+        v.currentTime = target;
         v.playbackRate = 1;
         if (!force) LIVE.replaySync.hardVideoSeeks += 1;
       } else if (Math.abs(drift) > softTolerance) {
@@ -821,9 +920,7 @@ function exitReplayMode() {
     LIVE.replayError = "";
     LIVE.cursorFrac = null;
     replayTransformsUrl = "/api/replay_transforms";
-    replayLoadedDatasetDir = "";
-    replayLoadedEpisodeId = 0;
-    replayLoadedVideoKeys = {};
+    setReplayLoadedMedia();
     resetReplayTransformChunks();
     _lastReplayChartDraw = 0;
     resetReplayUrdfRequests();
@@ -838,6 +935,7 @@ function seekReplay(i, syncVideos = true) {
     LIVE.cursor = Math.max(0, Math.min(i, LIVE.n - 1));
     LIVE.cursorFrac = null;
     replaySetUrdfFrame(LIVE.cursor);
+    refreshReplayImages(LIVE.cursor);
     if (syncVideos) syncReplayVideos(LIVE.cursor, null, true);
     recordReplaySync(LIVE.cursor);
     updateScrub();
@@ -853,6 +951,7 @@ function setReplayCursorFrame(frame, syncVideos = false) {
     LIVE.cursorFrac = frac;
     LIVE.cursor = Math.max(0, Math.min(Math.floor(frac), LIVE.n - 1));
     replaySetUrdfFrame(frac);
+    refreshReplayImages(frac);
     if (syncVideos) syncReplayVideos(frac, null, true);
     recordReplaySync(frac);
     updateScrub();
@@ -898,15 +997,20 @@ async function replayPlay() {
     syncReplayRunButtons();
     const videos = replayVideos();
     const master = replayMasterVideo();
-    if (!master) {
+    const framePlayback = replayLoadedVideoMode === "frames";
+    if (!master && !framePlayback) {
       LIVE.playing = false;
       LIVE.replayError = "replay master camera unavailable";
       updateScrub();
       return;
     }
+    const anchorTime = replayTimeAtFrame(LIVE.cursor);
+    const anchorWall = performance.now();
     pauseStageVideos();
-    await alignStageVideos(LIVE.cursor);
-    await Promise.all(videos.map((video) => video.play().catch(() => null)));
+    if (master) {
+      await alignStageVideos(LIVE.cursor);
+      await Promise.all(videos.map((video) => video.play().catch(() => null)));
+    }
     await waitForBrowserPaint();
     const frame = () => {
       if (!LIVE.playing) return;
@@ -919,7 +1023,10 @@ async function replayPlay() {
       replayLastRafAt = now;
       setStageVideoLoading(false, "");
       const cursor = LIVE.cursorFrac != null ? LIVE.cursorFrac : LIVE.cursor;
-      const framePos = Math.max(cursor, replayFrameAtTime(master.currentTime));
+      const playbackTime = master
+        ? videoLocalTime(master)
+        : anchorTime + (now - anchorWall) / 1000;
+      const framePos = Math.max(cursor, replayFrameAtTime(playbackTime));
       setReplayCursorFrame(framePos, false);
       syncReplayVideos(framePos, master);
       recordReplaySync(framePos);

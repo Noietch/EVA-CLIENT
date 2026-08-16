@@ -1,12 +1,13 @@
-"""Dataset transport — reads LeRobot v2 dataset (parquet + MP4) for offline inference and replay."""
+"""Dataset transport for offline inference and replay."""
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import threading
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 # Silence ffmpeg's stderr spam (e.g. "av1 ... Missing Sequence Header") emitted
 # while OpenCV probes a codec it cannot decode before falling back to PyAV. Must be
@@ -18,18 +19,18 @@ import av.container
 import av.logging
 import cv2
 import numpy as np
-import pyarrow.parquet as pq
 
 from core.config import ConfigDict, resolve_video_key
+from core.datasets import EpisodeData, open_dataset
 from core.registry import TRANSPORT_REGISTRY
 from core.types import Observation
-from core.utils.lerobot import LeRobotDatasetIO
 from robots.base import ActuatorGroup, Robot
 from transport.base import TransportBridge
 
 av.logging.set_level(av.logging.PANIC)
 
 logger = logging.getLogger(__name__)
+_DEFAULT_FPS = 30
 _TWO_FINGER_STROKE_M = 0.04
 _EEF_DIMS = ("x", "y", "z", "qw", "qx", "qy", "qz", "gripper")
 
@@ -129,17 +130,7 @@ class _FrameSource:
 
 
 class DatasetTransport(TransportBridge):
-    """Reads observations from a LeRobot v2 dataset directory.
-
-    Expected layout (LeRobot v2.1)::
-
-        dataset_dir/
-            meta/info.json
-            data/chunk-000/episode_000000.parquet
-            videos/chunk-000/observation.images.cam_high/episode_000000.mp4
-
-    Provides step-by-step frame access for offline inference and replay.
-    """
+    """Reads supported robotics datasets for offline inference and replay."""
 
     def __init__(
         self,
@@ -151,7 +142,8 @@ class DatasetTransport(TransportBridge):
         self._config = config
         self._robot = robot
         self._dataset_dir = Path(dataset_dir)
-        self._io = LeRobotDatasetIO(self._dataset_dir)
+        requested_format = str(config.transport.get("dataset_format", "auto"))
+        self._io = open_dataset(self._dataset_dir, format=requested_format)
         self._shutdown = threading.Event()
         self._lock = threading.Lock()
 
@@ -174,41 +166,33 @@ class DatasetTransport(TransportBridge):
                 self._enabled_groups.append(group)
             offset += group.dof
         self._robot_qpos_dim = offset
-        self._tasks_by_index = self._io.tasks_by_index()
         self._total_episodes = self._io.count_episodes()
-        self._fps = self._load_fps()
+        self._fallback_fps = max(
+            1, int(round(float(config.transport.get("fps", _DEFAULT_FPS))))
+        )
+        self._fps = self._fallback_fps
         self._timestamps: np.ndarray | None = None
         self._caps: dict[str, _FrameSource] = {}
         self._video_paths: dict[str, Path] = {}
+        self._video_offsets: dict[str, float] = {}
+        self._embedded_images: dict[str, np.ndarray] = {}
         self._episode_id = episode_id
         self._load_episode(episode_id)
-
-    def _load_fps(self) -> int:
-        # Recorded capture rate from info.json; replay plays back at this rate so the
-        # motion matches the original data collection instead of the publish rate.
-        info_path = self._dataset_dir / "meta" / "info.json"
-        if info_path.exists():
-            with open(info_path) as f:
-                fps = json.load(f).get("fps")
-            if fps:
-                return int(fps)
-        return 10
 
     @property
     def fps(self) -> int:
         """Recorded capture rate; replay plays back at this rate."""
         return self._fps
 
-    def _resolve_task(self, table: object) -> str:
-        return self._io.resolve_task(table, self._tasks_by_index)
+    @property
+    def data_format(self) -> str:
+        """Canonical format identifier selected by the dataset reader."""
+        return self._io.format
 
-    def _load_timestamps(self, table: object) -> np.ndarray | None:
-        if "timestamp" not in table.column_names:  # type: ignore[attr-defined]
+    def _load_timestamps(self, columns: Mapping[str, Any]) -> np.ndarray | None:
+        if "timestamp" not in columns:
             return None
-        timestamps = np.asarray(
-            table.column("timestamp").to_pylist(),  # type: ignore[attr-defined]
-            dtype=np.float32,
-        ).reshape(-1)
+        timestamps = np.asarray(columns["timestamp"], dtype=np.float32).reshape(-1)
         return timestamps if timestamps.shape[0] == self._n_steps else None
 
     def _fps_from_timestamps(self, timestamps: np.ndarray | None) -> int | None:
@@ -221,75 +205,77 @@ class DatasetTransport(TransportBridge):
         return max(1, int(round(1.0 / float(np.median(deltas)))))
 
     def _load_episode(self, episode_id: int) -> None:
-        # (Re)open parquet + per-camera video captures for one episode in place.
-        parquet_path = self._io.episode_parquet(episode_id)
-        if not parquet_path.exists():
-            raise FileNotFoundError(f"Parquet not found: {parquet_path}")
-
+        episode: EpisodeData = self._io.load(episode_id)
+        columns = episode.columns
         keys = self._config.transport.dataset_keys
-        table = pq.read_table(str(parquet_path))
-        self._obs_state = np.array(table.column(keys.state_key).to_pylist(), dtype=np.float32)
-        self._actions = np.array(table.column(keys.action_key).to_pylist(), dtype=np.float32)
-        if "control_source" in table.column_names:
+        missing = [key for key in (keys.state_key, keys.action_key) if key not in columns]
+        if missing:
+            available = ", ".join(sorted(columns))
+            raise KeyError(f"Dataset columns missing {missing}; available columns: {available}")
+        self._obs_state = np.asarray(columns[keys.state_key], dtype=np.float32)
+        self._actions = np.asarray(columns[keys.action_key], dtype=np.float32)
+        if "control_source" in columns:
+            self._control_source = [str(value) for value in columns["control_source"]]
+        elif "intervention" in columns:
             self._control_source = [
-                str(value) for value in table.column("control_source").to_pylist()
-            ]
-        elif "intervention" in table.column_names:
-            self._control_source = [
-                "intervention" if value else "policy"
-                for value in table.column("intervention").to_pylist()
+                "intervention" if value else "policy" for value in columns["intervention"]
             ]
         else:
             self._control_source = ["policy"] * len(self._actions)
         self._intervention = [value == "intervention" for value in self._control_source]
         self._intervention_segment_index = (
-            [int(value) for value in table.column("intervention_segment_index").to_pylist()]
-            if "intervention_segment_index" in table.column_names
+            np.asarray(columns["intervention_segment_index"], dtype=np.int64).reshape(-1).tolist()
+            if "intervention_segment_index" in columns
             else [-1] * len(self._actions)
         )
         series_state_key = keys.get("series_state_key", "")
         self._series_state = (
-            np.array(table.column(series_state_key).to_pylist(), dtype=np.float32)
-            if series_state_key
+            np.asarray(columns[series_state_key], dtype=np.float32)
+            if series_state_key and series_state_key in columns
             else self._obs_state
         )
         self._state_names = (
             _eef_dimension_names(self._robot, self._series_state.shape[1])
-            if _is_eef_key(series_state_key)
+            if _is_eef_key(series_state_key) and self._series_state.ndim > 1
             else []
         )
         self._action_names = (
             _eef_dimension_names(self._robot, self._actions.shape[1])
-            if _is_eef_key(keys.action_key)
+            if _is_eef_key(keys.action_key) and self._actions.ndim > 1
             else []
         )
         self._n_steps = self._obs_state.shape[0]
-        self._timestamps = self._load_timestamps(table)
+        self._timestamps = self._load_timestamps(columns)
+        self._fps = self._fallback_fps
+        if episode.fps:
+            self._fps = max(1, int(round(episode.fps)))
         timestamp_fps = self._fps_from_timestamps(self._timestamps)
         if timestamp_fps is not None:
             self._fps = timestamp_fps
-        self._current_task = self._resolve_task(table)
+        self._current_task = episode.task
 
         for cap in self._caps.values():
             cap.release()
         self._caps = {}
         self._video_paths = {}
+        self._video_offsets = {}
+        self._embedded_images = {}
         video_keys = {
             cam_key: video_key
             for cam_key in self._camera_keys
             if (video_key := resolve_video_key(keys, cam_key)) is not None
         }
-        resolved = self._io.episode_video_paths(episode_id, video_keys)
-        for cam_key in self._camera_keys:
-            if cam_key not in video_keys:
-                # Dataset does not provide this camera (robot declares more views than
-                # the dataset recorded); get_frame fills it with a black frame.
+        for cam_key, data_key in video_keys.items():
+            video = episode.videos.get(data_key)
+            if video is not None:
+                self._video_paths[cam_key] = video.path
+                self._video_offsets[cam_key] = video.start_time
                 continue
-            video_path = resolved.get(cam_key)
-            if video_path is None:
-                logger.warning("Video not found for camera %s", cam_key)
+            images = episode.images.get(data_key)
+            if images is not None:
+                self._embedded_images[cam_key] = np.asarray(images)
                 continue
-            self._video_paths[cam_key] = video_path
+            logger.warning("Image stream not found for camera %s (%s)", cam_key, data_key)
 
         self._episode_id = episode_id
         self._frame_index = 0
@@ -306,11 +292,11 @@ class DatasetTransport(TransportBridge):
             self._dataset_dir,
             episode_id,
             self._n_steps,
-            list(self._video_paths.keys()),
+            sorted(set(self._video_paths) | set(self._embedded_images)),
         )
 
     def reload_episode(self, episode_id: int) -> None:
-        """Swap the active episode in place (thread-safe), reopening parquet+videos."""
+        """Swap the active episode in place and reopen its media."""
         # Swap the active episode in place without recreating the transport object.
         with self._lock:
             self._load_episode(episode_id)
@@ -340,8 +326,9 @@ class DatasetTransport(TransportBridge):
         return self._n_steps
 
     def available_camera_keys(self) -> tuple[str, ...]:
-        """Camera observation keys that actually have a video stream this episode."""
-        return tuple(cam_key for cam_key in self._camera_keys if cam_key in self._video_paths)
+        """Camera observation keys that have video or embedded image frames."""
+        available = set(self._video_paths) | set(self._embedded_images)
+        return tuple(cam_key for cam_key in self._camera_keys if cam_key in available)
 
     def _frame_source(self, cam_key: str) -> _FrameSource | None:
         cap = self._caps.get(cam_key)
@@ -353,6 +340,19 @@ class DatasetTransport(TransportBridge):
         cap = _FrameSource(video_path)
         self._caps[cam_key] = cap
         return cap
+
+    def _read_camera_frame(self, cam_key: str, index: int) -> np.ndarray | None:
+        images = self._embedded_images.get(cam_key)
+        if images is not None:
+            if 0 <= index < len(images):
+                frame = np.asarray(images[index])
+                return frame.copy() if frame.ndim == 3 else None
+            return None
+        cap = self._frame_source(cam_key)
+        if cap is None:
+            return None
+        offset = int(round(self._video_offsets.get(cam_key, 0.0) * self._fps))
+        return cap.read_at(index + offset)
 
     def get_action_trajectory(self) -> np.ndarray:
         """Full recorded action sequence [n_steps, action_dim] float32 for replay."""
@@ -394,6 +394,16 @@ class DatasetTransport(TransportBridge):
         """
         with self._lock:
             return dict(self._video_paths)
+
+    def video_offsets(self) -> dict[str, float]:
+        """Map camera keys to their episode start offsets within shared video files."""
+        with self._lock:
+            return dict(self._video_offsets)
+
+    @property
+    def video_mode(self) -> str:
+        """Use frame endpoints when an episode stores any camera images inline."""
+        return "frames" if self._embedded_images else "native"
 
     @property
     def frame_index(self) -> int:
@@ -508,8 +518,7 @@ class DatasetTransport(TransportBridge):
             w = self._config.transport.image_width
             images: dict[str, np.ndarray] = {}
             for cam_key in self._camera_keys:
-                cap = self._frame_source(cam_key)
-                frame = cap.read_at(idx) if cap is not None else None
+                frame = self._read_camera_frame(cam_key, idx)
                 if frame is not None:
                     images[cam_key] = frame
                 else:
@@ -546,14 +555,20 @@ class DatasetTransport(TransportBridge):
             cached = self._frame_cache.get(key)
             if cached is not None:
                 return cached
-            cap = self._frame_source(key)
-            frame = cap.read_at(idx) if cap is not None else None
+            frame = self._read_camera_frame(key, idx)
             if frame is None:
                 h = self._config.transport.image_height
                 w = self._config.transport.image_width
                 frame = np.zeros((h, w, 3), dtype=np.uint8)
             self._frame_cache[key] = frame
             return frame
+
+    def get_camera_frame_at(self, key: str, index: int) -> np.ndarray | None:
+        """Decode one camera at an explicit episode frame without moving playback."""
+        with self._lock:
+            if self._shutdown.is_set() or not 0 <= index < self._n_steps:
+                return None
+            return self._read_camera_frame(key, index)
 
     def publish_action(self, action: np.ndarray, target: str = "real") -> None:
         """Record the action as the latest qpos and advance the playback cursor.

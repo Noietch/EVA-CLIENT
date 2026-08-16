@@ -12,17 +12,17 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import numpy as np
 
 import robots  # noqa: F401  (import side effect registers robots in ROBOT_REGISTRY)
+from core.app.handlers.recording import resolve_storage
 from core.config import ConfigDict
+from core.datasets import BaseDataset, open_dataset
 from core.recorder.episode import EpisodeLogger
 from core.registry import ROBOT_REGISTRY
-
-if TYPE_CHECKING:
-    from robots.utils import UrdfScene
+from robots.utils import UrdfScene
 
 logger = logging.getLogger(__name__)
 
@@ -82,9 +82,12 @@ class EpisodePreview:
         self._dataset_root = results_dir / "episodes"
         self._robot = ROBOT_REGISTRY.build(config.robot.type)
         self._reader: EpisodeLogger | None = None
+        self._dataset: BaseDataset | None = None
         self._scene: UrdfScene | None = None
         self._scene_tried = False
         self._series_cache: dict[int, dict[str, Any]] = {}
+        self._media_cache: dict[int, dict[str, Any]] = {}
+        self._image_lengths: dict[tuple[int, str], int] = {}
         self._xf_cache: dict[tuple[Path, int, int, int, int], bytes] = {}
 
     def set_dataset_root(self, dataset_root: Path) -> None:
@@ -95,8 +98,14 @@ class EpisodePreview:
             return
         self._dataset_root = Path(dataset_root)
         self._reader = None
+        self._dataset = None
         self._series_cache.clear()
+        self._media_cache.clear()
+        self._image_lengths.clear()
         self._xf_cache.clear()
+
+    def dataset_root(self) -> Path:
+        return self._dataset_root
 
     def result_rows(self) -> list[dict[str, Any]]:
         """All scored/owned trials for the active model, read straight from the dataset's
@@ -115,23 +124,25 @@ class EpisodePreview:
         if self._reader is None:
             if not self._dataset_root.exists():
                 return None
-            from core.app.handlers import resolve_storage
-
             storage = resolve_storage(self._config)
             self._reader = EpisodeLogger(
                 log_dir=self._dataset_root,
                 robot=self._robot,
                 fps=storage.fps if storage else 30,
                 dataset_keys=self._config.transport.dataset_keys,
+                dataset_format=(storage or {}).get("dataset_format", "lerobot_v21"),
             )
         return self._reader
+
+    def _dataset_reader(self) -> BaseDataset | None:
+        if self._dataset is None and self._dataset_root.exists():
+            self._dataset = open_dataset(self._dataset_root, format="auto")
+        return self._dataset
 
     def _urdf_scene(self) -> UrdfScene | None:
         if not self._scene_tried:
             self._scene_tried = True
             try:
-                from robots.utils import UrdfScene
-
                 self._scene = UrdfScene(
                     self._robot,
                     gripper_open=self._config.robot.gripper_open,
@@ -174,6 +185,51 @@ class EpisodePreview:
         if reader is None:
             return {}
         return reader.list_episode_videos(episode_index)
+
+    def _load_episode(self, episode_index: int) -> Any | None:
+        reader = self._episode_reader()
+        if reader is None:
+            return None
+        return reader._load_episode(self._dataset_root, episode_index)
+
+    def media(self, episode_index: int) -> dict[str, Any]:
+        cached = self._media_cache.get(int(episode_index))
+        if cached is not None:
+            return cached
+        dataset = self._dataset_reader()
+        episode = dataset.load(episode_index) if dataset is not None else None
+        if episode is None:
+            return {"cams": [], "video_mode": "native"}
+        image_keys = list(episode.images.keys())
+        if image_keys:
+            for key, frames in episode.images.items():
+                self._image_lengths[(int(episode_index), key)] = len(frames)
+            media = {"cams": image_keys, "video_mode": "frames"}
+        else:
+            media = {"cams": list(episode.videos.keys()), "video_mode": "native"}
+        self._media_cache[int(episode_index)] = media
+        return media
+
+    def image_frame(self, episode_index: int, cam: str, frame: int) -> np.ndarray | None:
+        dataset = self._dataset_reader()
+        if dataset is None:
+            return None
+        media = self.media(episode_index)
+        image_key = next(
+            (
+                key
+                for key in media["cams"]
+                if key == cam or key.split(".")[-1] == cam or key.endswith("." + cam)
+            ),
+            None,
+        )
+        if image_key is None:
+            return None
+        length = self._image_lengths.get((int(episode_index), image_key), 0)
+        if length <= 0:
+            return None
+        index = max(0, min(int(frame), length - 1))
+        return dataset.load_image_frame(episode_index, image_key, index)
 
     def frame_transforms(self, episode_index: int, frame: int) -> dict | None:
         """World 4x4 transforms for one replay frame: feed state[frame] to FK.

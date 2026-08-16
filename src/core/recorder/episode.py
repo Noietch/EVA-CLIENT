@@ -1,21 +1,4 @@
-"""Episode logger — records each inference run as one LeRobot v2.1 episode.
-
-One config -> one log dir -> one dataset. Each execution run appends one episode.
-
-Two tables, deliberately different shapes, joined by ``absolute_step``:
-
-1. Main table (``data/chunk-000/episode_xxxxxx.parquet``): LeRobot v2.1 standard,
-   strictly 1 row per executed step. ``observation.<state>`` paired with the
-   ``action`` actually sent to the robot, plus ``timestamp`` / ``frame_index`` /
-   ``episode_index`` / ``task_index`` / ``index``. SFT training reads only this.
-   Camera frames stream into per-camera mp4 via ``observation.images.<cam>``.
-
-2. Debug sidecar (``meta/debug/episode_xxxxxx.parquet``): a LONG table, N rows
-   per step allowed. Async/RTC overlapping chunks make one ``absolute_step`` carry
-   several raw predictions (different ``chunk_index`` / ``inference_timestamp``),
-   which is exactly what temporal-ensembling blends. Lives outside ``data/`` so
-   training ignores it; joined back to the main table by ``absolute_step``.
-"""
+"""Capture, align, persist, recover, and replay robot episodes."""
 
 from __future__ import annotations
 
@@ -25,24 +8,46 @@ import dataclasses
 import datetime as _dt
 import json
 import logging
-import subprocess
 import threading
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-import imageio.v2 as imageio
-import imageio_ffmpeg
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 from core.config import resolve_video_key
+from core.datasets import (
+    BaseDataset,
+    build_info,
+    history_row,
+    normalize_data_format,
+    open_dataset,
+    summarize_quality_issues,
+)
+from core.recorder.collection import CollectionEpisodeWriter
 from core.recorder.collection_alignment import (
     align_collection_samples,
     image_skew_tolerance_sec,
 )
-from core.recorder.lerobot_meta import build_info, history_row, summarize_quality_issues
+from core.recorder.common import (
+    COLLECTION_VECTOR_FIELDS as _COLLECTION_VECTOR_FIELDS,
+)
+from core.recorder.common import (
+    QualityIssue,
+    SaveJob,
+)
+from core.recorder.common import (
+    StatAccumulator as _StatAccumulator,
+)
+from core.recorder.common import (
+    read_jsonl as _read_jsonl,
+)
+from core.recorder.common import (
+    to_rgb_uint8 as _to_rgb_uint8,
+)
 from core.types import (
     CollectionRawBatch,
     CollectionRawImage,
@@ -87,13 +92,7 @@ def _release_failed_save_payload(job: SaveJob) -> None:
     job.raw_video_samples = None
     job.intervention_segments = []
 
-# Observation vector fields (everything except timestamp/images) recorded per collection frame.
-_COLLECTION_VECTOR_FIELDS = (
-    "state_qpos",
-    "state_eef",
-    "action_qpos",
-    "action_eef",
-)
+
 _INTERVENTION_VECTOR_FIELDS = (
     "state_qpos",
     "state_eef",
@@ -111,60 +110,6 @@ def sanitize_path_component(text: str) -> str:
     if sanitized == "":
         return "unset"
     return sanitized[:96]
-
-
-@dataclasses.dataclass
-class QualityIssue:
-    """One quality-control flag raised while validating a collection episode.
-
-    Fields:
-        severity: Issue severity tag (e.g. "red").
-        code: Machine-readable issue category (e.g. "missing_camera").
-        detail: Human-readable description of the offending frame/field.
-    """
-
-    severity: str
-    code: str
-    detail: str
-
-
-@dataclasses.dataclass
-class SaveJob:
-    """A self-contained snapshot of one finished episode, queued for background save.
-
-    Carries everything the disk writers need (steps/debug rows or collection
-    columns/videos, resolved indices, a frozen copy of the task table) so the
-    worker thread never touches the live EpisodeLogger buffers. Non-collection
-    mp4 writers are closed before SaveJob creation.
-    """
-
-    episode_index: int
-    task: str
-    task_index: int
-    global_index: int
-    steps: list[Observation]
-    episode_meta: dict[str, Any]
-    task_to_index: dict[str, int]
-    collection_columns: dict[str, Any] | None = None
-    collection_episode_row: dict[str, Any] | None = None
-    collection_payload: Any | None = None
-    raw_episode_payload: Any | None = None
-    videos: dict[str, list[np.ndarray]] | None = None
-    raw_video_samples: dict[str, list[CollectionRawSample]] | None = None
-    video_fps: float | None = None
-    dataset_dir: Path | None = None
-    intervention_segments: list[RolloutInterventionSegment] = dataclasses.field(
-        default_factory=list
-    )
-    reason: str = ""
-    # When True the episodes.jsonl row + tasks.jsonl were already written before this
-    # job's parquet/video flush; the worker must not append the row again.
-    meta_written: bool = False
-    status: str = "queued"  # queued -> saving -> saved | failed
-    error: BaseException | None = None
-    queued_wall_time: float = 0.0
-    started_wall_time: float = 0.0
-    finished_wall_time: float = 0.0
 
 
 @dataclasses.dataclass(frozen=True)
@@ -196,8 +141,7 @@ class RawEpisodeSnapshot:
 
 
 class EpisodeLogger:
-    """Records one inference run as a LeRobot v2.1 episode and appends it to the
-    config-scoped dataset under ``log_dir``.
+    """Append inference and collection episodes to the configured dataset.
 
     Lifecycle::
 
@@ -228,6 +172,7 @@ class EpisodeLogger:
         gripper_open: float | None = None,
         gripper_close: float | None = None,
         gripper_threshold: float | None = None,
+        dataset_format: str = "lerobot_v21",
     ) -> None:
         self._log_dir = Path(log_dir)
         self._robot = robot
@@ -236,6 +181,9 @@ class EpisodeLogger:
         self._keys = dataset_keys
         self._convert_bgr_to_rgb = convert_bgr_to_rgb
         self._collection = collection
+        self._dataset_format = normalize_data_format(dataset_format)
+        if self._dataset_format not in {"lerobot_v21", "lerobot_v3", "hdf5", "mcap"}:
+            raise ValueError(f"unsupported recording dataset format: {self._dataset_format}")
         if recording_space not in {"qpos", "eef"}:
             raise ValueError(f"unsupported recording space: {recording_space}")
         self._recording_space = recording_space
@@ -250,8 +198,6 @@ class EpisodeLogger:
         # the operator. Those fields live in episodes.jsonl only; scoring waits for any
         # queued save to finish before patching the row.
         self._eval_mode = eval_mode
-        from core.recorder.collection import CollectionEpisodeWriter  # local: break import cycle
-
         self._collection_writer = (
             CollectionEpisodeWriter(self, collection)
             if collection is not None and collection.schema.columns
@@ -263,7 +209,16 @@ class EpisodeLogger:
         (self._log_dir / "meta").mkdir(parents=True, exist_ok=True)
 
         # dataset-wide running state (survives across episodes within one dataset)
+        recovered_rows = self._reconcile_episode_catalog(self._log_dir)
         self._task_to_index: dict[str, int] = self._load_existing_tasks()
+        task_count = len(self._task_to_index)
+        for row in recovered_rows:
+            for task in row.get("tasks") or []:
+                task = str(task)
+                if task not in self._task_to_index:
+                    self._task_to_index[task] = len(self._task_to_index)
+        if len(self._task_to_index) != task_count:
+            self._write_tasks_jsonl_from(self._task_to_index)
         self._episode_index = self._discover_next_episode_index()
         self._global_index = self._load_global_index()
 
@@ -274,6 +229,7 @@ class EpisodeLogger:
         self._live_steps: list[Observation] = []
         self._episode_meta: dict[str, Any] = {}
         self._image_shape: tuple[int, int] | None = None  # (h, w) from first frame
+        self._eef_dim: int | None = None
         self._intervention_segments: list[RolloutInterventionSegment] = []
         self._raw_episode_batch = CollectionRawBatch()
         self._raw_episode_frame_labels: list[RawEpisodeFrameLabel] = []
@@ -299,6 +255,7 @@ class EpisodeLogger:
         self._completed_episodes = len(self._collection_history)
         self._save_durations: list[float] = []
         self._pending_episode_meta_by_clip: dict[str, dict[str, Any]] = {}
+        self._datasets: dict[Path, BaseDataset] = {}
 
     # -- episode lifecycle ------------------------------------------------------
 
@@ -415,9 +372,7 @@ class EpisodeLogger:
                 self._raw_episode_batch.vectors.setdefault("state_eef", []).append(
                     CollectionRawSample(timestamp, np.asarray(state_eef, dtype=np.float32).copy())
                 )
-            self._raw_episode_frame_labels.append(
-                RawEpisodeFrameLabel(timestamp, False, -1)
-            )
+            self._raw_episode_frame_labels.append(RawEpisodeFrameLabel(timestamp, False, -1))
             self._extend_raw_episode_time_bounds(
                 self._raw_episode_batch,
                 self._raw_episode_batch.vectors["action_qpos"][-1:],
@@ -642,7 +597,11 @@ class EpisodeLogger:
         # its index and overwrite that episode's data IN PLACE (parquet + video + meta row)
         # instead of appending a new episode. Otherwise advance the dataset-wide counters so
         # the next episode can start while this one is still being written in the background.
-        reuse_index = self._eval_existing_episode_index(episode_meta) if self._eval_mode else None
+        reuse_index = (
+            self._eval_existing_episode_index(episode_meta)
+            if self._eval_mode and self._dataset_format != "lerobot_v3"
+            else None
+        )
         if reuse_index is not None:
             episode_index = reuse_index
             global_index = self._existing_episode_global_start(episode_index)
@@ -657,9 +616,7 @@ class EpisodeLogger:
         raw_snapshots = [
             RawEpisodeSnapshot(
                 snapshot=sample.snapshot,
-                action_qpos=None
-                if sample.action_qpos is None
-                else sample.action_qpos.copy(),
+                action_qpos=None if sample.action_qpos is None else sample.action_qpos.copy(),
                 intervention=sample.intervention,
                 segment_index=sample.segment_index,
             )
@@ -847,7 +804,7 @@ class EpisodeLogger:
             target.start_time = (
                 batch.start_time
                 if target.start_time is None
-                else max(target.start_time, batch.start_time)
+                else min(target.start_time, batch.start_time)
             )
         if batch.end_time is not None:
             target.end_time = (
@@ -986,25 +943,38 @@ class EpisodeLogger:
         row = job.collection_episode_row
         if columns is None or row is None:
             raise ValueError("raw episode save job missing columns or episode row")
-        path = self._parquet_path(job.episode_index)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        pq.write_table(pa.table(columns), str(path))
+        if self._keys.eef_key in columns:
+            eef = np.asarray(columns[self._keys.eef_key])
+            if eef.ndim > 1:
+                self._eef_dim = int(eef.shape[1])
+        videos = {
+            key: self._iter_raw_sample_frames(samples)
+            for key, samples in (job.raw_video_samples or {}).items()
+        }
+        dataset = self._dataset(self._log_dir)
         try:
-            self._write_raw_sample_videos(
-                job.episode_index,
-                job.raw_video_samples,
-                job.video_fps,
-            )
+            row.update(dataset.write(columns, row, videos))
         finally:
             job.raw_video_samples = None
-        with self._lock:
-            if self._eval_mode:
-                self._upsert_episode_dict_row_locked(row)
-            else:
-                self._append_episode_dict_row_locked(row)
-            self._write_tasks_jsonl_from(job.task_to_index)
-        self._write_info_json()
-        self._write_stats_json()
+        stats_keys = {self._keys.state_key, self._action_key, self._keys.eef_key}
+        episode_stats = {
+            key: _vector_episode_stats(values)
+            for key, values in columns.items()
+            if key in stats_keys
+        }
+        try:
+            with self._lock:
+                if self._eval_mode:
+                    self._upsert_episode_dict_row_locked(row)
+                else:
+                    self._append_episode_dict_row_locked(row)
+                self._append_episode_stats_locked(job.episode_index, episode_stats)
+                self._write_tasks_jsonl_from(job.task_to_index)
+            self._write_info_json()
+            self._write_stats_json()
+        except BaseException:
+            dataset.seal_current_shard()
+            raise
         self._clear_pending_episode_meta_for_job(job)
 
     def _exclude_raw_episode_ranges(
@@ -1030,8 +1000,7 @@ class EpisodeLogger:
                 (
                     index
                     for index, interval in enumerate(ranges)
-                    if float(interval["start_time"]) < timestamp
-                    < float(interval["end_time"])
+                    if float(interval["start_time"]) < timestamp < float(interval["end_time"])
                 ),
                 None,
             )
@@ -1434,143 +1403,29 @@ class EpisodeLogger:
                 videos[video_key] = samples
         return videos or None
 
-    def _write_raw_sample_videos(
-        self,
-        episode_index: int,
-        videos: dict[str, list[CollectionRawSample]] | None,
-        fps: float | None,
-    ) -> None:
-        if not videos:
-            return
-        video_fps = float(fps or self._fps)
+    def _iter_raw_sample_frames(self, samples: list[CollectionRawSample]) -> Iterator[np.ndarray]:
         size = self._save_size()
-        for video_key, samples in videos.items():
-            path = (
-                self._log_dir
-                / "videos"
-                / "chunk-000"
-                / video_key
-                / f"episode_{episode_index:06d}.mp4"
-            )
-            path.parent.mkdir(parents=True, exist_ok=True)
-            encoded = [
-                sample.value.encoded
-                if isinstance(sample.value, CollectionRawImage)
-                else None
-                for sample in samples
-            ]
-            if self._convert_bgr_to_rgb and all(payload is not None for payload in encoded):
-                self._write_encoded_sample_video(
-                    path,
-                    cast(list[bytes], encoded),
-                    video_fps,
-                    size,
-                )
-                continue
-            writer = imageio.get_writer(
-                str(path),
-                fps=video_fps,
-                codec="libx264",
-                macro_block_size=1,
-                ffmpeg_params=[
-                    "-preset",
-                    "ultrafast",
-                    "-g",
-                    str(max(1, round(video_fps))),
-                    "-movflags",
-                    "+faststart",
-                ],
-            )
-            active_value: Any | None = None
-            active_frame: np.ndarray | None = None
-            try:
-                for sample in samples:
-                    value = sample.value
-                    if value is not active_value or active_frame is None:
-                        if isinstance(active_value, CollectionRawImage):
-                            active_value.release_decoded()
-                        image = value.decode() if isinstance(value, CollectionRawImage) else value
-                        rgb = _to_rgb_uint8(np.asarray(image), self._convert_bgr_to_rgb)
-                        if size is not None and rgb.shape[:2] != size:
-                            rgb = resize_direct(rgb, size[0], size[1])
-                        active_value = value
-                        active_frame = np.ascontiguousarray(rgb)
-                        if self._image_shape is None:
-                            self._image_shape = (active_frame.shape[0], active_frame.shape[1])
-                    writer.append_data(active_frame)
-            finally:
-                if isinstance(active_value, CollectionRawImage):
-                    active_value.release_decoded()
-                writer.close()
-
-    def _write_encoded_sample_video(
-        self,
-        path: Path,
-        frames: list[bytes],
-        fps: float,
-        size: tuple[int, int] | None,
-    ) -> None:
-        """Encode compressed camera frames without a Python decode/resize pass.
-
-        Args:
-            path: Destination MP4 path.
-            frames: Ordered JPEG payloads, one per aligned output frame.
-            fps: Constant output video frame rate.
-            size: Optional output (height, width).
-        """
-        command = [
-            imageio_ffmpeg.get_ffmpeg_exe(),
-            "-y",
-            "-loglevel",
-            "error",
-            "-f",
-            "image2pipe",
-            "-framerate",
-            str(fps),
-            "-vcodec",
-            "mjpeg",
-            "-i",
-            "pipe:0",
-            "-an",
-        ]
-        if size is not None:
-            command.extend(["-vf", f"scale={size[1]}:{size[0]}:flags=fast_bilinear"])
-        keyframe_interval = max(1, round(fps))
-        command.extend(
-            [
-                "-c:v",
-                "libx264",
-                "-preset",
-                "ultrafast",
-                "-threads",
-                "1",
-                "-pix_fmt",
-                "yuv420p",
-                "-g",
-                str(keyframe_interval),
-                "-keyint_min",
-                str(keyframe_interval),
-                "-sc_threshold",
-                "0",
-                "-movflags",
-                "+faststart",
-                str(path),
-            ]
-        )
-        process = subprocess.Popen(
-            command,
-            stdin=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        assert process.stdin is not None
-        assert process.stderr is not None
-        for frame in frames:
-            process.stdin.write(frame)
-        process.stdin.close()
-        stderr = process.stderr.read().decode("utf-8", errors="replace")
-        returncode = process.wait()
-        if returncode != 0:
-            raise RuntimeError(f"ffmpeg encoded-frame writer failed for {path}: {stderr}")
+        active_value: Any | None = None
+        active_frame: np.ndarray | None = None
+        try:
+            for sample in samples:
+                value = sample.value
+                if value is not active_value or active_frame is None:
+                    if isinstance(active_value, CollectionRawImage):
+                        active_value.release_decoded()
+                    image = value.decode() if isinstance(value, CollectionRawImage) else value
+                    rgb = _to_rgb_uint8(np.asarray(image), self._convert_bgr_to_rgb)
+                    if size is not None and rgb.shape[:2] != size:
+                        rgb = resize_direct(rgb, size[0], size[1])
+                    active_value = value
+                    frame = np.ascontiguousarray(rgb)
+                    active_frame = frame
+                    if self._image_shape is None:
+                        self._image_shape = (int(frame.shape[0]), int(frame.shape[1]))
+                yield active_frame
+        finally:
+            if isinstance(active_value, CollectionRawImage):
+                active_value.release_decoded()
 
     def _next_episode_global_index(self, n_frames: int) -> int:
         with self._lock:
@@ -1588,47 +1443,22 @@ class EpisodeLogger:
         if columns is None or row is None:
             raise ValueError("collection save job missing columns or episode row")
         dataset_dir = job.dataset_dir or self._log_dir
-        path = self._parquet_path(job.episode_index, dataset_dir)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        pq.write_table(pa.table(columns), str(path))
-        self._write_videos(job.episode_index, job.videos, job.video_fps, dataset_dir)
         episode_stats = {key: _vector_episode_stats(vals) for key, vals in columns.items()}
         if job.videos:
             for video_key, frames in job.videos.items():
                 episode_stats[video_key] = _image_episode_stats(frames)
-        with self._lock:
-            self._append_episode_dict_row_locked(row, dataset_dir)
-            self._append_episode_stats_locked(job.episode_index, episode_stats, dataset_dir)
-            self._write_tasks_jsonl_from(job.task_to_index, dataset_dir)
-        if self._collection_writer is not None:
-            self._collection_writer.finalize(dataset_dir)
-
-    def _write_videos(
-        self,
-        episode_index: int,
-        videos: dict[str, list[np.ndarray]] | None,
-        fps: float | None,
-        dataset_dir: Path | None = None,
-    ) -> None:
-        if not videos:
-            return
-        root = dataset_dir or self._log_dir
-        video_fps = float(fps or self._fps)
-        for video_key, frames in videos.items():
-            path = root / "videos" / "chunk-000" / video_key / f"episode_{episode_index:06d}.mp4"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            writer = imageio.get_writer(
-                str(path),
-                fps=video_fps,
-                codec="libx264",
-                macro_block_size=1,
-                ffmpeg_params=["-preset", "ultrafast", "-movflags", "+faststart"],
-            )
-            try:
-                for frame in frames:
-                    writer.append_data(np.ascontiguousarray(frame))
-            finally:
-                writer.close()
+        dataset = self._dataset(dataset_dir)
+        row.update(dataset.write(columns, row, job.videos or {}))
+        try:
+            with self._lock:
+                self._append_episode_dict_row_locked(row, dataset_dir)
+                self._append_episode_stats_locked(job.episode_index, episode_stats, dataset_dir)
+                self._write_tasks_jsonl_from(job.task_to_index, dataset_dir)
+            if self._collection_writer is not None and self._dataset_format != "lerobot_v3":
+                self._collection_writer.finalize(dataset_dir)
+        except BaseException:
+            dataset.seal_current_shard()
+            raise
 
     def wait_for_saves(self, timeout: float | None = None) -> bool:
         """Block until the save queue drains. Returns True if it emptied in time."""
@@ -1638,11 +1468,31 @@ class EpisodeLogger:
         with self._lock:
             return not self._save_jobs
 
+    def seal_for_read(self, dataset_dir: str | Path | None = None) -> bool:
+        """Finish the active shard so completed episodes can be opened safely."""
+        if not self.wait_for_saves():
+            return False
+        root = Path(dataset_dir) if dataset_dir is not None else self._log_dir
+        dataset = self._datasets.get(root)
+        if dataset is None or self._dataset_format != "lerobot_v3":
+            return True
+        dataset.seal_current_shard()
+        if self._collection_writer is not None:
+            self._collection_writer.finalize(root)
+        else:
+            self._write_info_json()
+            self._write_stats_json()
+        return True
+
     def status_snapshot(self, task: str | None = None) -> dict[str, Any]:
         """Recording status for the web UI: pipeline state, history, and queue depth."""
         dataset_dir = (
             self._collection_dataset_dir(task) if self._collection_writer else self._log_dir
         )
+        if self._collection_writer is not None:
+            repaired = self._recover_collection_dataset(dataset_dir)
+            if repaired:
+                self._collection_writer.finalize(dataset_dir)
         with self._lock:
             jobs = [
                 job
@@ -1728,15 +1578,17 @@ class EpisodeLogger:
         """
         if self._collection is None or not self._collection.schema.columns:
             return None
-        qpos_key = self._collection.schema.columns.get("state_qpos")
+        qpos_key = self._collection.schema.columns.get(
+            "qpos",
+            self._collection.schema.columns.get("state_qpos"),
+        )
         if not qpos_key:
             return None
         dataset_dir = self._collection_dataset_dir(task)
-        path = self._parquet_path(episode_index, dataset_dir=dataset_dir)
-        if not path.exists():
+        episode = self._load_episode(dataset_dir, episode_index)
+        if episode is None or qpos_key not in episode.columns:
             return None
-        table = pq.read_table(str(path), columns=[qpos_key])
-        return np.asarray(table.column(qpos_key).to_pylist(), dtype=np.float32)
+        return np.asarray(episode.columns[qpos_key], dtype=np.float32)
 
     def load_collection_episode_fps(
         self, episode_index: int, task: str | None = None
@@ -1764,16 +1616,18 @@ class EpisodeLogger:
             replay (fed frame-by-frame to UrdfScene.transforms) and the per-dim
             time-series chart; ``action`` is an optional overlay on the chart.
         """
-        path = self._parquet_path(episode_index)
-        if not path.exists():
-            return None
         state_key = self._keys.state_key
         action_key = self._action_key
-        table = pq.read_table(str(path), columns=[state_key, action_key, "timestamp"])
+        episode = self._load_episode(self._log_dir, episode_index)
+        if episode is None:
+            return None
+        columns = episode.columns
+        if any(key not in columns for key in (state_key, action_key, "timestamp")):
+            return None
         return {
-            "timestamp": [float(t) for t in table.column("timestamp").to_pylist()],
-            "state": table.column(state_key).to_pylist(),
-            "action": table.column(action_key).to_pylist(),
+            "timestamp": np.asarray(columns["timestamp"], dtype=float).tolist(),
+            "state": np.asarray(columns[state_key]).tolist(),
+            "action": np.asarray(columns[action_key]).tolist(),
         }
 
     def live_series(self, since: int = 0) -> dict[str, Any]:
@@ -1806,15 +1660,10 @@ class EpisodeLogger:
         Returns only cameras whose mp4 exists, so the viewer can offer camera
         switching without 404s. Empty when save_video was off or files are absent.
         """
-        out: dict[str, Path] = {}
-        for cam_key in self._camera_keys:
-            video_key = resolve_video_key(self._keys, cam_key)
-            if not video_key:
-                continue
-            path = self._video_path(episode_index, cam_key)
-            if path.exists():
-                out[video_key] = path
-        return out
+        episode = self._load_episode(self._log_dir, episode_index)
+        if episode is None:
+            return {}
+        return {key: video.path for key, video in episode.videos.items()}
 
     def _remember_finished_job(self, job: SaveJob) -> None:
         self._collection_history.append(self._save_job_summary(job))
@@ -1825,9 +1674,7 @@ class EpisodeLogger:
 
     def _save_job_summary(self, job: SaveJob) -> dict[str, Any]:
         row = job.collection_episode_row or {}
-        quality_issues, quality_issue_count = summarize_quality_issues(
-            row.get("quality_issues")
-        )
+        quality_issues, quality_issue_count = summarize_quality_issues(row.get("quality_issues"))
         payload = job.raw_episode_payload
         pending_length = 0
         if payload is not None:
@@ -1846,11 +1693,24 @@ class EpisodeLogger:
 
     def finalize(self) -> None:
         """Write meta/stats.json (per-feature min/max/mean/std) and meta/info.json."""
-        if self._collection_writer is not None:
-            self.wait_for_saves()
-            self._collection_writer.finalize()
-            return
         self.wait_for_saves()
+        writer_roots = set(self._datasets)
+        for dataset in self._datasets.values():
+            dataset.finalize()
+        self._datasets = {}
+        if self._collection_writer is not None:
+            if self._dataset_format == "lerobot_v3" and self._log_dir.is_dir():
+                writer_roots.update(
+                    child
+                    for child in self._log_dir.iterdir()
+                    if child.is_dir() and (child / "meta" / "episodes").is_dir()
+                )
+            for root in sorted(writer_roots):
+                self._recover_collection_dataset(root)
+                self._collection_writer.finalize(root)
+            return
+        if self._dataset_format != "lerobot_v3":
+            self._reconcile_episode_catalog(self._log_dir)
         self._write_info_json()
         self._write_stats_json()
 
@@ -1982,6 +1842,16 @@ class EpisodeLogger:
         with path.open("w") as f:
             for task, idx in items:
                 f.write(json.dumps({"task_index": idx, "task": task}, ensure_ascii=False) + "\n")
+        if self._dataset_format == "lerobot_v3":
+            pq.write_table(
+                pa.table(
+                    {
+                        "task_index": [index for _, index in items],
+                        "task": [task for task, _ in items],
+                    }
+                ),
+                self._meta_path("tasks.parquet", dataset_dir),
+            )
 
     def _write_info_json(self) -> None:
         episodes = _read_jsonl(self._meta_path("episodes.jsonl"))
@@ -1999,6 +1869,7 @@ class EpisodeLogger:
             total_videos=total_videos,
             fps=fps,
             features=self._build_features(fps),
+            data_format=self._dataset_format,
         )
         if self._eval_mode:
             info["eval"] = self._eval_info(episodes)
@@ -2028,10 +1899,16 @@ class EpisodeLogger:
                 if video_key is None:
                     continue
                 features[video_key] = {
-                    "dtype": "video",
+                    "dtype": (
+                        "video"
+                        if self._dataset_format in {"lerobot_v21", "lerobot_v3"}
+                        else "image"
+                    ),
                     "shape": [h, w, 3],
                     "names": ["height", "width", "channels"],
-                    "info": {
+                }
+                if self._dataset_format in {"lerobot_v21", "lerobot_v3"}:
+                    features[video_key]["info"] = {
                         "video.height": h,
                         "video.width": w,
                         "video.codec": "h264",
@@ -2040,8 +1917,7 @@ class EpisodeLogger:
                         "video.fps": fps,
                         "video.channels": 3,
                         "has_audio": False,
-                    },
-                }
+                    }
         state_dim, action_dim = self._infer_vector_dims()
         features[self._keys.state_key] = {"dtype": "float32", "shape": [state_dim], "names": None}
         features[self._action_key] = {"dtype": "float32", "shape": [action_dim], "names": None}
@@ -2066,22 +1942,56 @@ class EpisodeLogger:
         return features
 
     def _write_stats_json(self) -> None:
-        """Per-feature min/max/mean/std over the whole dataset (scans data parquet)."""
+        """Write per-feature min/max/mean/std over every committed episode."""
+        episode_stats = self._stats_from_episode_stats()
+        if episode_stats is not None:
+            with self._meta_path("stats.json").open("w") as stream:
+                json.dump(episode_stats, stream, indent=2)
+            return
+        if self._dataset_format == "lerobot_v3" and self._datasets:
+            return
         state_acc = _StatAccumulator()
         action_acc = _StatAccumulator()
         eef_acc = _StatAccumulator()
-        for ep_path in sorted((self._log_dir / "data" / "chunk-000").glob("episode_*.parquet")):
-            table = pq.read_table(str(ep_path))
-            state_acc.update(
-                np.array(table.column(self._keys.state_key).to_pylist(), dtype=np.float64)
-            )
-            action_acc.update(
-                np.array(table.column(self._action_key).to_pylist(), dtype=np.float64)
-            )
-            if self._keys.eef_key in table.column_names:
-                eef_acc.update(
-                    np.array(table.column(self._keys.eef_key).to_pylist(), dtype=np.float64)
-                )
+        if self._dataset_format in {"hdf5", "mcap"}:
+            dataset = open_dataset(self._log_dir, format=self._dataset_format)
+            for row in dataset.episode_rows():
+                columns = dataset.load_columns(int(row["episode_index"]))
+                for key, accumulator in (
+                    (self._keys.state_key, state_acc),
+                    (self._action_key, action_acc),
+                    (self._keys.eef_key, eef_acc),
+                ):
+                    if key in columns:
+                        accumulator.update(np.asarray(columns[key], dtype=np.float64))
+        else:
+            for ep_path in sorted((self._log_dir / "data").glob("chunk-*/*.parquet")):
+                parquet_file = pq.ParquetFile(ep_path)
+                available = set(parquet_file.schema_arrow.names)
+                columns = [self._keys.state_key, self._action_key]
+                if self._keys.eef_key in available:
+                    columns.append(self._keys.eef_key)
+                for row_group in range(parquet_file.num_row_groups):
+                    table = parquet_file.read_row_group(row_group, columns=columns)
+                    state_acc.update(
+                        np.asarray(
+                            table.column(self._keys.state_key).to_pylist(),
+                            dtype=np.float64,
+                        )
+                    )
+                    action_acc.update(
+                        np.asarray(
+                            table.column(self._action_key).to_pylist(),
+                            dtype=np.float64,
+                        )
+                    )
+                    if self._keys.eef_key in table.column_names:
+                        eef_acc.update(
+                            np.asarray(
+                                table.column(self._keys.eef_key).to_pylist(),
+                                dtype=np.float64,
+                            )
+                        )
         stats: dict[str, Any] = {}
         if state_acc.count:
             stats[self._keys.state_key] = state_acc.result()
@@ -2091,6 +2001,23 @@ class EpisodeLogger:
             stats[self._keys.eef_key] = eef_acc.result()
         with self._meta_path("stats.json").open("w") as f:
             json.dump(stats, f, indent=2)
+
+    def _stats_from_episode_stats(self) -> dict[str, Any] | None:
+        episodes = _read_jsonl(self._meta_path("episodes.jsonl"))
+        rows = _read_jsonl(self._meta_path("episodes_stats.jsonl"))
+        if not episodes or not rows:
+            return None
+        by_episode = {int(row["episode_index"]): row.get("stats", {}) for row in rows}
+        if set(by_episode) != {int(row["episode_index"]) for row in episodes}:
+            return None
+        stats: dict[str, Any] = {}
+        for key in (self._keys.state_key, self._action_key, self._keys.eef_key):
+            combined = _combine_episode_stats(
+                by_episode[int(row["episode_index"])].get(key) for row in episodes
+            )
+            if combined is not None:
+                stats[key] = combined
+        return stats or None
 
     # -- dimension / shape inference --------------------------------------------
 
@@ -2122,13 +2049,23 @@ class EpisodeLogger:
             on-disk episode parquet that carries the eef column; None for joint-only
             datasets where state_eef was never present.
         """
+        if self._eef_dim is not None:
+            return self._eef_dim
         for step in self._steps:
             if step.state_eef is not None:
                 return int(step.state_eef.shape[0])
-        for ep_path in sorted((self._log_dir / "data" / "chunk-000").glob("episode_*.parquet")):
-            table = pq.read_table(str(ep_path))
-            if self._keys.eef_key in table.column_names:
-                col = table.column(self._keys.eef_key).to_pylist()
+        if self._dataset_format == "lerobot_v3" and self._datasets:
+            return None
+        for ep_path in sorted((self._log_dir / "data").glob("chunk-*/*.parquet")):
+            parquet_file = pq.ParquetFile(ep_path)
+            if self._keys.eef_key not in parquet_file.schema_arrow.names:
+                continue
+            for row_group in range(parquet_file.num_row_groups):
+                col = (
+                    parquet_file.read_row_group(row_group, columns=[self._keys.eef_key])
+                    .column(self._keys.eef_key)
+                    .to_pylist()
+                )
                 for row in col:
                     if row is not None:
                         return len(row)
@@ -2145,7 +2082,9 @@ class EpisodeLogger:
     # -- dataset-resume discovery (so reruns append, not overwrite) -------------
 
     def _discover_next_episode_index(self, dataset_dir: Path | None = None) -> int:
-        return len(_read_jsonl(self._meta_path("episodes.jsonl", dataset_dir)))
+        root = dataset_dir or self._log_dir
+        rows = self._reconcile_episode_catalog(root)
+        return max((int(row.get("episode_index", -1)) for row in rows), default=-1) + 1
 
     def _load_existing_tasks(self, dataset_dir: Path | None = None) -> dict[str, int]:
         mapping: dict[str, int] = {}
@@ -2154,16 +2093,85 @@ class EpisodeLogger:
         return mapping
 
     def _load_global_index(self, dataset_dir: Path | None = None) -> int:
-        return sum(
-            int(e.get("length", 0))
-            for e in _read_jsonl(self._meta_path("episodes.jsonl", dataset_dir))
-        )
+        root = dataset_dir or self._log_dir
+        rows = self._reconcile_episode_catalog(root)
+        if self._dataset_format == "lerobot_v3":
+            return max(
+                (int(row.get("dataset_to_index", 0)) for row in rows),
+                default=0,
+            )
+        return sum(int(row.get("length", 0)) for row in rows)
 
     def _load_collection_history(self, dataset_dir: Path | None = None) -> list[dict[str, Any]]:
         history = []
         for row in _read_jsonl(self._meta_path("episodes.jsonl", dataset_dir)):
             history.append(history_row(row, len(history)))
         return history[-200:]
+
+    def _recover_collection_dataset(self, dataset_dir: Path) -> bool:
+        if self._dataset_format == "lerobot_v3" and dataset_dir in self._datasets:
+            return False
+        existing_rows = _read_jsonl(self._meta_path("episodes.jsonl", dataset_dir))
+        rows = self._reconcile_episode_catalog(dataset_dir)
+        needs_repair = (
+            rows != existing_rows
+            or not self._meta_path("info.json", dataset_dir).exists()
+            or (
+                self._dataset_format == "lerobot_v3"
+                and not self._meta_path("tasks.parquet", dataset_dir).exists()
+            )
+        )
+        if not needs_repair:
+            return False
+        tasks = self._load_existing_tasks(dataset_dir)
+        for row in rows:
+            for task in row.get("tasks") or []:
+                task = str(task)
+                if task not in tasks:
+                    tasks[task] = len(tasks)
+        self._write_tasks_jsonl_from(tasks, dataset_dir)
+        return True
+
+    def _reconcile_episode_catalog(self, dataset_dir: Path) -> list[dict[str, Any]]:
+        path = self._meta_path("episodes.jsonl", dataset_dir)
+        existing_rows = _read_jsonl(path)
+        existing = {
+            int(row["episode_index"]): dict(row)
+            for row in existing_rows
+            if row.get("episode_index") is not None
+        }
+        try:
+            committed_rows = open_dataset(
+                dataset_dir,
+                format=self._dataset_format,
+            ).episode_rows()
+        except Exception as exc:
+            metadata_files = (dataset_dir / "meta" / "episodes").glob(
+                "chunk-*/file-*.parquet"
+            )
+            if self._dataset_format == "lerobot_v3" and next(metadata_files, None):
+                raise RuntimeError(
+                    "Cannot resume LeRobot v3 dataset with an unfinalized metadata shard"
+                ) from exc
+            raise
+        committed = {
+            int(row["episode_index"]): dict(row)
+            for row in committed_rows
+            if row.get("episode_index") is not None
+        }
+        merged = [
+            {**committed.get(index, {}), **existing.get(index, {})}
+            for index in sorted(committed.keys() | existing.keys())
+        ]
+        if merged == existing_rows:
+            return merged
+        path.parent.mkdir(parents=True, exist_ok=True)
+        pending = path.with_name(f"{path.name}.reconcile.tmp")
+        with pending.open("w") as stream:
+            for row in merged:
+                stream.write(json.dumps(row, ensure_ascii=False) + "\n")
+        pending.replace(path)
+        return merged
 
     def _collection_dataset_dir(self, task: str | None) -> Path:
         return self._log_dir / sanitize_path_component(task or "unset")
@@ -2193,13 +2201,40 @@ class EpisodeLogger:
 
     # -- path helpers (mirror transport.dataset layout so output is replayable) -
 
-    def _parquet_path(
-        self,
-        episode_index: int,
-        dataset_dir: Path | None = None,
-    ) -> Path:
-        root = dataset_dir or self._log_dir
-        return root / "data" / "chunk-000" / f"episode_{episode_index:06d}.parquet"
+    def _dataset(self, dataset_dir: Path) -> BaseDataset:
+        dataset = self._datasets.get(dataset_dir)
+        if dataset is None:
+            if self._collection_writer is not None:
+                video_keys = tuple(self._collection_writer._schema.cameras.values())
+            else:
+                video_keys = tuple(
+                    key
+                    for camera in self._camera_keys
+                    if (key := resolve_video_key(self._keys, camera)) is not None
+                )
+            dataset = open_dataset(
+                dataset_dir,
+                self._dataset_format,
+                fps=self._fps,
+                video_keys=video_keys,
+            )
+            self._datasets[dataset_dir] = dataset
+        return dataset
+
+    def _load_episode(self, dataset_dir: Path, episode_index: int) -> Any | None:
+        try:
+            self.seal_for_read(dataset_dir)
+            dataset = open_dataset(dataset_dir, format=self._dataset_format)
+            return dataset.load(episode_index)
+        except (FileNotFoundError, IndexError, OSError, ValueError) as exc:
+            logger.warning(
+                "Failed loading %s episode %d from %s: %s",
+                self._dataset_format,
+                episode_index,
+                dataset_dir,
+                exc,
+            )
+            return None
 
     def _video_path(
         self,
@@ -2215,57 +2250,6 @@ class EpisodeLogger:
 
     def _meta_path(self, name: str, dataset_dir: Path | None = None) -> Path:
         return (dataset_dir or self._log_dir) / "meta" / name
-
-
-class _StatAccumulator:
-    """Running min/max/sum/sumsq over float vectors -> LeRobot stats dict."""
-
-    def __init__(self) -> None:
-        self.count = 0
-        self._min: np.ndarray | None = None
-        self._max: np.ndarray | None = None
-        self._sum: np.ndarray | None = None
-        self._sumsq: np.ndarray | None = None
-
-    def update(self, arr: np.ndarray) -> None:
-        """Fold one batch of rows into the running min/max/sum/sumsq.
-
-        Args:
-            arr: [N, D] float64 batch of feature vectors; empty batches are ignored.
-        """
-        if arr.size == 0:
-            return
-        batch_min = arr.min(axis=0)
-        batch_max = arr.max(axis=0)
-        batch_sum = arr.sum(axis=0)
-        batch_sumsq = (arr * arr).sum(axis=0)
-        if self._min is None or self._max is None or self._sum is None or self._sumsq is None:
-            self._min, self._max = batch_min, batch_max
-            self._sum, self._sumsq = batch_sum, batch_sumsq
-        else:
-            self._min = np.minimum(self._min, batch_min)
-            self._max = np.maximum(self._max, batch_max)
-            self._sum = self._sum + batch_sum
-            self._sumsq = self._sumsq + batch_sumsq
-        self.count += arr.shape[0]
-
-    def result(self) -> dict[str, list[float]]:
-        """Finalize the accumulated stats into a LeRobot dict.
-
-        Returns:
-            {"min", "max", "mean", "std"} each a length-D list of per-feature floats.
-        """
-        assert self._min is not None and self._max is not None
-        assert self._sum is not None and self._sumsq is not None
-        mean = self._sum / self.count
-        var = np.maximum(self._sumsq / self.count - mean * mean, 0.0)
-        std = np.sqrt(var)
-        return {
-            "min": self._min.tolist(),
-            "max": self._max.tolist(),
-            "mean": mean.tolist(),
-            "std": std.tolist(),
-        }
 
 
 def _copy_observation(frame: Observation) -> Observation:
@@ -2303,7 +2287,7 @@ def _copy_intervention_segment(segment: RolloutInterventionSegment) -> RolloutIn
 
 
 def _vector_episode_stats(values: list[list[float]]) -> dict[str, Any]:
-    """Per-feature min/max/mean/std/count for one episode's column (LeRobot v2.1).
+    """Per-feature min/max/mean/std/count for one episode column.
 
     Args:
         values: [N, D] list of per-frame feature vectors (or [N, 1] for scalars).
@@ -2326,8 +2310,48 @@ def _vector_episode_stats(values: list[list[float]]) -> dict[str, Any]:
     }
 
 
+def _combine_episode_stats(rows: Iterator[dict[str, Any] | None]) -> dict[str, Any] | None:
+    count = 0
+    minimum: np.ndarray | None = None
+    maximum: np.ndarray | None = None
+    total: np.ndarray | None = None
+    total_squares: np.ndarray | None = None
+    for row in rows:
+        if row is None:
+            return None
+        row_count = int(row["count"][0])
+        mean = np.asarray(row["mean"], dtype=np.float64)
+        std = np.asarray(row["std"], dtype=np.float64)
+        row_minimum = np.asarray(row["min"], dtype=np.float64)
+        row_maximum = np.asarray(row["max"], dtype=np.float64)
+        if minimum is None:
+            minimum = row_minimum
+            maximum = row_maximum
+            total = mean * row_count
+            total_squares = (std * std + mean * mean) * row_count
+        else:
+            assert maximum is not None and total is not None and total_squares is not None
+            minimum = np.minimum(minimum, row_minimum)
+            maximum = np.maximum(maximum, row_maximum)
+            total += mean * row_count
+            total_squares += (std * std + mean * mean) * row_count
+        count += row_count
+    if count == 0 or minimum is None:
+        return None
+    assert maximum is not None and total is not None and total_squares is not None
+    mean = total / count
+    std = np.sqrt(np.maximum(total_squares / count - mean * mean, 0.0))
+    return {
+        "min": minimum.tolist(),
+        "max": maximum.tolist(),
+        "mean": mean.tolist(),
+        "std": std.tolist(),
+        "count": [count],
+    }
+
+
 def _image_episode_stats(frames: list[np.ndarray]) -> dict[str, Any]:
-    """Per-channel min/max/mean/std/count over one episode's RGB frames (LeRobot v2.1).
+    """Per-channel min/max/mean/std/count over one episode's RGB frames.
 
     Args:
         frames: list of [H, W, 3] uint8 RGB frames.
@@ -2365,25 +2389,3 @@ def _image_episode_stats(frames: list[np.ndarray]) -> dict[str, Any]:
         "std": _ch(std),
         "count": [len(frames)],
     }
-
-
-def _to_rgb_uint8(frame: np.ndarray, convert_bgr_to_rgb: bool) -> np.ndarray:
-    """Ensure HWC uint8 RGB for imageio."""
-    arr = np.asarray(frame)
-    if arr.dtype != np.uint8:
-        arr = np.clip(arr, 0, 255).astype(np.uint8)
-    if convert_bgr_to_rgb and arr.ndim == 3 and arr.shape[2] == 3:
-        arr = arr[:, :, ::-1]
-    return arr
-
-
-def _read_jsonl(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
-    rows: list[dict[str, Any]] = []
-    with path.open() as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                rows.append(json.loads(line))
-    return rows

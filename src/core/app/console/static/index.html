@@ -397,6 +397,7 @@
           <div class="card">
             <input type="text" id="replay-dataset-input" class="replay-ds-input" placeholder="dataset dir (e.g. datasets/sft/.../push_black_block)" />
             <div class="replay-id-row">
+              <select id="replay-data-format" aria-label="dataset format"><option value="auto">auto</option><option value="lerobot_v21">LeRobot 2.1</option><option value="lerobot_v3">LeRobot 3.0</option><option value="mcap">MCAP</option><option value="hdf5">HDF5</option></select>
               <select id="replay-key-action-mode"><option value="joint">joint</option><option value="eef">eef</option></select>
               <input type="number" id="replay-episode-input" min="0" step="1" value="0" placeholder="episode id" />
             </div>

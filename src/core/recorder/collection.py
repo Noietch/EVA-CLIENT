@@ -1,5 +1,4 @@
-"""Teleop collection episode writer — the EpisodeLogger sub-component that turns a
-stream of raw teleop snapshots into one LeRobot v2.1 collection episode.
+"""Teleop collection writer that turns raw snapshots into aligned episodes.
 
 Recording only stores raw snapshots; the save worker later extracts raw samples,
 aligns the full episode, validates each frame, and packs the per-frame columns
@@ -20,20 +19,28 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import pyarrow.parquet as pq
 
+from core.datasets import build_info, open_dataset
 from core.recorder.collection_alignment import (
     CollectionAlignmentReport,
     align_collection_samples,
     image_skew_tolerance_sec,
 )
-from core.recorder.episode import (
-    _COLLECTION_VECTOR_FIELDS,
+from core.recorder.common import (
+    COLLECTION_VECTOR_FIELDS as _COLLECTION_VECTOR_FIELDS,
+)
+from core.recorder.common import (
     QualityIssue,
     SaveJob,
-    _read_jsonl,
-    _StatAccumulator,
-    _to_rgb_uint8,
 )
-from core.recorder.lerobot_meta import build_info
+from core.recorder.common import (
+    StatAccumulator as _StatAccumulator,
+)
+from core.recorder.common import (
+    read_jsonl as _read_jsonl,
+)
+from core.recorder.common import (
+    to_rgb_uint8 as _to_rgb_uint8,
+)
 from core.types import CollectionRawBatch, Observation
 from core.utils.images import resize_direct
 
@@ -146,9 +153,7 @@ class CollectionEpisodeWriter:
             raise ValueError("collection frame missing timestamp or state_qpos")
         with self._state_lock:
             frame_index = len(self._records)
-            images = {
-                key: np.asarray(value) for key, value in frame.images.items()
-            }
+            images = {key: np.asarray(value) for key, value in frame.images.items()}
             vectors = {
                 field: (
                     None
@@ -158,19 +163,20 @@ class CollectionEpisodeWriter:
                 for field in _COLLECTION_VECTOR_FIELDS
                 if field != "state_qpos"
             }
+            timestamp = float(frame.timestamp)
             record = Observation(
-                timestamp=float(frame.timestamp),
+                timestamp=timestamp,
                 images=images,
                 state_qpos=np.asarray(frame.state_qpos, dtype=np.float32).copy(),
                 **vectors,
             )
             self._records.append(record)
-            self._check_timestamp(float(frame.timestamp), frame_index)
+            self._check_timestamp(timestamp, frame_index)
             self._check_images(record, frame_index)
             self._max_capture_time = (
-                record.timestamp
+                timestamp
                 if self._max_capture_time is None
-                else max(self._max_capture_time, record.timestamp)
+                else max(self._max_capture_time, timestamp)
             )
 
     def frame_counts(self) -> dict[str, int]:
@@ -199,10 +205,13 @@ class CollectionEpisodeWriter:
     def _merge_raw_batch(self, batch: CollectionRawBatch) -> None:
         with self._state_lock:
             if batch.start_time is not None:
+                start_time = batch.start_time
+                if self._min_capture_time is not None:
+                    start_time = max(start_time, self._min_capture_time)
                 self._raw_batch.start_time = (
-                    batch.start_time
+                    start_time
                     if self._raw_batch.start_time is None
-                    else max(self._raw_batch.start_time, batch.start_time)
+                    else min(self._raw_batch.start_time, start_time)
                 )
             if batch.end_time is not None:
                 self._raw_batch.end_time = (
@@ -317,8 +326,7 @@ class CollectionEpisodeWriter:
         self._alignment_report = None
         self._max_capture_time = None
         logger.info(
-            "collection end_episode queued raw=%s raw_snapshots=%d: package=%.1fms "
-            "total=%.1fms",
+            "collection end_episode queued raw=%s raw_snapshots=%d: package=%.1fms total=%.1fms",
             has_raw,
             len(raw_snapshots),
             (package_done - started) * 1000.0,
@@ -413,9 +421,7 @@ class CollectionEpisodeWriter:
                     "alignment_grid_end": self._alignment_report.grid_end,
                     "alignment_image_skew_tolerance_sec": self._image_skew_tolerance_sec(),
                     "alignment_image_max_skew_sec": self._alignment_report.image_max_skew,
-                    "alignment_image_stream_stats": (
-                        self._alignment_report.image_stream_stats
-                    ),
+                    "alignment_image_stream_stats": (self._alignment_report.image_stream_stats),
                 }
             )
         if job.episode_meta:
@@ -442,9 +448,7 @@ class CollectionEpisodeWriter:
     def _alignment_failure_detail(self) -> str:
         issues = []
         if self._alignment_report is not None:
-            issues = [
-                f"{issue.code}: {issue.detail}" for issue in self._alignment_report.issues
-            ]
+            issues = [f"{issue.code}: {issue.detail}" for issue in self._alignment_report.issues]
         issue_text = "; ".join(issues) if issues else "none"
         return (
             "collection episode produced 0 frames; "
@@ -604,6 +608,7 @@ class CollectionEpisodeWriter:
             total_videos=total_videos,
             fps=fps,
             features=self._build_features(fps),
+            data_format=self._logger._dataset_format,
         )
         with self._logger._meta_path("info.json", dataset_dir).open("w") as f:
             json.dump(info, f, indent=2, ensure_ascii=False)
@@ -614,10 +619,16 @@ class CollectionEpisodeWriter:
             for video_key in self._schema.cameras.values():
                 h, w = self._image_shapes.get(video_key, (480, 640))
                 features[video_key] = {
-                    "dtype": "video",
+                    "dtype": (
+                        "video"
+                        if self._logger._dataset_format in {"lerobot_v21", "lerobot_v3"}
+                        else "image"
+                    ),
                     "shape": [h, w, 3],
                     "names": ["height", "width", "channels"],
-                    "info": {
+                }
+                if self._logger._dataset_format in {"lerobot_v21", "lerobot_v3"}:
+                    features[video_key]["info"] = {
                         "video.height": h,
                         "video.width": w,
                         "video.codec": "h264",
@@ -626,8 +637,7 @@ class CollectionEpisodeWriter:
                         "video.fps": fps,
                         "video.channels": 3,
                         "has_audio": False,
-                    },
-                }
+                    }
         for column, output_key in self._schema.columns.items():
             field = _COLUMN_TO_FIELD[column]
             features[output_key] = {
@@ -642,23 +652,36 @@ class CollectionEpisodeWriter:
         return features
 
     def _write_stats_json(self, dataset_dir: Path) -> None:
-        stats = self._stats_from_episode_stats(dataset_dir)
-        if stats is not None:
+        cached_stats = self._stats_from_episode_stats(dataset_dir)
+        if cached_stats is not None:
             with self._logger._meta_path("stats.json", dataset_dir).open("w") as f:
-                json.dump(stats, f, indent=2)
+                json.dump(cached_stats, f, indent=2)
             return
 
         accumulators = {
             output_key: _StatAccumulator() for output_key in self._schema.columns.values()
         }
-        data_dir = dataset_dir / "data" / "chunk-000"
-        for ep_path in sorted(data_dir.glob("*.parquet")):
-            table = pq.read_table(str(ep_path))
-            for output_key, accumulator in accumulators.items():
-                if output_key in table.column_names:
-                    accumulator.update(
-                        np.array(table.column(output_key).to_pylist(), dtype=np.float64)
-                    )
+        if self._logger._dataset_format in {"hdf5", "mcap"}:
+            dataset = open_dataset(dataset_dir, format=self._logger._dataset_format)
+            for row in dataset.episode_rows():
+                columns = dataset.load_columns(int(row["episode_index"]))
+                for output_key, accumulator in accumulators.items():
+                    if output_key in columns:
+                        accumulator.update(np.asarray(columns[output_key], dtype=np.float64))
+        else:
+            for ep_path in sorted((dataset_dir / "data").glob("chunk-*/*.parquet")):
+                parquet_file = pq.ParquetFile(ep_path)
+                columns = [
+                    output_key
+                    for output_key in accumulators
+                    if output_key in parquet_file.schema_arrow.names
+                ]
+                for row_group in range(parquet_file.num_row_groups):
+                    table = parquet_file.read_row_group(row_group, columns=columns)
+                    for output_key in columns:
+                        accumulators[output_key].update(
+                            np.asarray(table.column(output_key).to_pylist(), dtype=np.float64)
+                        )
 
         stats: dict[str, Any] = {}
         for output_key, accumulator in accumulators.items():
@@ -673,9 +696,7 @@ class CollectionEpisodeWriter:
         if not episodes or not stats_rows:
             return None
 
-        stats_by_episode = {
-            int(row["episode_index"]): row.get("stats", {}) for row in stats_rows
-        }
+        stats_by_episode = {int(row["episode_index"]): row.get("stats", {}) for row in stats_rows}
         episode_indices = {int(row["episode_index"]) for row in episodes}
         if set(stats_by_episode) != episode_indices:
             return None
@@ -683,8 +704,7 @@ class CollectionEpisodeWriter:
         stats: dict[str, Any] = {}
         for output_key in self._schema.columns.values():
             combined = self._combine_episode_stats(
-                stats_by_episode[int(row["episode_index"])].get(output_key)
-                for row in episodes
+                stats_by_episode[int(row["episode_index"])].get(output_key) for row in episodes
             )
             if combined is None:
                 return None

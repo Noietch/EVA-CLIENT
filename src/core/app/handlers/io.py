@@ -36,8 +36,8 @@ from core.app.state import (
     set_status,
 )
 from core.config import ConfigDict
+from core.datasets import open_dataset
 from core.registry import POLICY_REGISTRY
-from core.utils.lerobot import LeRobotDatasetIO
 from policy_client.base import PolicyBuildContext, PolicyConnectionError, PolicyRequestError
 from transport.base import TransportBridge
 from transport.dataset import DatasetTransport
@@ -218,8 +218,8 @@ def normalize_policy_action_chunk(
     """
     if not resolve_policy_action_mode(config, runtime, response=response).is_eef():
         return action_chunk
-    canonical_eef_chunk = (
-        config.inference_cfg.action_space.normalize_chunk_to_canonical(action_chunk)
+    canonical_eef_chunk = config.inference_cfg.action_space.normalize_chunk_to_canonical(
+        action_chunk
     )
     ik_solver = ensure_ik_solver(config, runtime)
     seed_qpos = runtime.transport.get_latest_qpos()
@@ -295,9 +295,7 @@ def _replay_action_at(config: ConfigDict, runtime: RuntimeState, index: int) -> 
     action_chunk = normalize_action_chunk(raw_action)
     replay_mode = _resolve_replay_action_mode(config, runtime)
     if isinstance(replay_mode, EEFPose):
-        action_chunk = _fill_missing_replay_eef_gripper(
-            runtime, replay_mode, action_chunk, index
-        )
+        action_chunk = _fill_missing_replay_eef_gripper(runtime, replay_mode, action_chunk, index)
         canonical_eef_chunk = replay_mode.normalize_chunk_to_canonical(action_chunk)
         ik_solver = ensure_ik_solver(config, runtime)
         seed_qpos = _replay_qpos_at(runtime, index) if index == 0 else None
@@ -400,9 +398,7 @@ def fetch_action_chunk(
     raise SystemExit(0)
 
 
-def _loop_observation(
-    config: ConfigDict, runtime: RuntimeState, prompt: str
-) -> dict | None:
+def _loop_observation(config: ConfigDict, runtime: RuntimeState, prompt: str) -> dict | None:
     """Build a policy observation from the latest frame; None if none is available."""
     frame = runtime.transport.get_frame()
     if frame is None:
@@ -465,11 +461,7 @@ def run_warmup_and_start(config: ConfigDict, runtime: RuntimeState, session: Ses
 
     warmup_n = max(1, config.inference_cfg.setup_warmup_chunks)
 
-    skip_warmup = (
-        config.eval
-        and config.eval.skip_warmup_after_first
-        and runtime._eval_warmup_done
-    )
+    skip_warmup = config.eval and config.eval.skip_warmup_after_first and runtime._eval_warmup_done
 
     if runtime.infer_strategy is not None:
         runtime.infer_strategy.reset()
@@ -766,6 +758,7 @@ def _build_replay_dataset_config(
     action_key: str,
     series_state_key: str,
     video_keys: dict[str, str],
+    data_format: str,
 ) -> ConfigDict:
     """Clone the live config but point its transport at the chosen dataset + keys.
 
@@ -774,8 +767,10 @@ def _build_replay_dataset_config(
     only the dataset-relevant fields so the source decodes the right columns/videos.
     """
     import copy
+
     new_config = copy.deepcopy(config)
     new_config.transport.dataset_dir = dataset_dir
+    new_config.transport.dataset_format = data_format
     new_config.transport.episode_id = episode_id
     new_config.transport.dataset_keys = ConfigDict(
         state_key=state_key,
@@ -843,6 +838,7 @@ def load_replay_dataset(
     action_key: str = "",
     video_keys: dict[str, str] | None = None,
     action_mode: str = "",
+    data_format: str = "auto",
 ) -> None:
     """Mount a recorded dataset episode as the runtime replay/QC source.
 
@@ -858,11 +854,17 @@ def load_replay_dataset(
     runtime.collection_replay_qpos = None
     runtime.collection_replay_episode = None
     replay_mode = parse_policy_action_mode(action_mode) or config.inference_cfg.action_space
+    try:
+        reader = open_dataset(dataset_dir, format=data_format)
+    except Exception as error:
+        session.last_error = f"Cannot read dataset {dataset_dir}: {error}"
+        logger.warning("load_replay_dataset: %s", session.last_error)
+        return
     should_infer_keys = not state_key or not action_key or not video_keys or replay_mode.is_eef()
     series_state_key = ""
     if should_infer_keys:
         try:
-            inferred = LeRobotDatasetIO(dataset_dir).infer_keys()
+            inferred = reader.infer_keys()
         except Exception:
             inferred = {}
         if not state_key:
@@ -891,7 +893,7 @@ def load_replay_dataset(
                     default_image
                 )
     try:
-        n_episodes = LeRobotDatasetIO(dataset_dir).count_episodes()
+        n_episodes = reader.count_episodes()
     except Exception as error:
         session.last_error = f"Cannot read dataset {dataset_dir}: {error}"
         logger.warning("load_replay_dataset: %s", session.last_error)
@@ -902,7 +904,14 @@ def load_replay_dataset(
         return
     try:
         replay_config = _build_replay_dataset_config(
-            config, dataset_dir, episode_id, state_key, action_key, series_state_key, video_keys
+            config,
+            dataset_dir,
+            episode_id,
+            state_key,
+            action_key,
+            series_state_key,
+            video_keys,
+            reader.format,
         )
         source = DatasetTransport(replay_config, runtime.robot, dataset_dir, episode_id)
         actions = source.get_action_trajectory()
