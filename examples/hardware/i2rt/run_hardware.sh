@@ -25,11 +25,27 @@ fi
 choose_can() {
   local persistent_name="$1"
   local fallback_name="$2"
+  local serial_number="${3:-}"
+  local path interface
   if [[ -e "/sys/class/net/$persistent_name" ]]; then
     printf '%s' "$persistent_name"
-  else
-    printf '%s' "$fallback_name"
+    return
   fi
+  # Kernel canN numbering changes when a USB-CAN adapter is unplugged or a
+  # shared USB hub resets. Prefer the adapter's stable USB serial when known,
+  # then fall back to the documented workstation numbering.
+  if [[ -n "$serial_number" ]]; then
+    for path in /sys/class/net/can*; do
+      [[ -e "$path" ]] || continue
+      interface="${path##*/}"
+      if udevadm info -q property -p "$path" 2>/dev/null \
+        | grep -Fqx "ID_SERIAL_SHORT=$serial_number"; then
+        printf '%s' "$interface"
+        return
+      fi
+    done
+  fi
+  printf '%s' "$fallback_name"
 }
 
 bring_up_can() {
@@ -48,10 +64,22 @@ bring_up_can() {
   sudo ip link set "$interface" up type can bitrate 1000000
 }
 
-LEFT_FOLLOWER_CAN="${LEFT_FOLLOWER_CAN:-$(choose_can can_follower_l can2)}"
-RIGHT_FOLLOWER_CAN="${RIGHT_FOLLOWER_CAN:-$(choose_can can_follower_r can1)}"
-LEFT_LEADER_CAN="${LEFT_LEADER_CAN:-$(choose_can can_leader_l can3)}"
-RIGHT_LEADER_CAN="${RIGHT_LEADER_CAN:-$(choose_can can_leader_r can0)}"
+# Stable serials for the currently verified workstation. Override these four
+# variables when the adapters are replaced or moved to another host.
+I2RT_CAN_SERIAL_LEFT_FOLLOWER="${I2RT_CAN_SERIAL_LEFT_FOLLOWER:-2086337D594E5018}"
+I2RT_CAN_SERIAL_RIGHT_FOLLOWER="${I2RT_CAN_SERIAL_RIGHT_FOLLOWER:-20813381594E5018}"
+I2RT_CAN_SERIAL_LEFT_LEADER="${I2RT_CAN_SERIAL_LEFT_LEADER:-325F384633354B04}"
+I2RT_CAN_SERIAL_RIGHT_LEADER="${I2RT_CAN_SERIAL_RIGHT_LEADER:-207C3381594E5018}"
+
+LEFT_FOLLOWER_CAN="${LEFT_FOLLOWER_CAN:-$(choose_can can_follower_l can1 "$I2RT_CAN_SERIAL_LEFT_FOLLOWER")}"
+RIGHT_FOLLOWER_CAN="${RIGHT_FOLLOWER_CAN:-$(choose_can can_follower_r can2 "$I2RT_CAN_SERIAL_RIGHT_FOLLOWER")}"
+LEFT_LEADER_CAN="${LEFT_LEADER_CAN:-$(choose_can can_leader_l can0 "$I2RT_CAN_SERIAL_LEFT_LEADER")}"
+RIGHT_LEADER_CAN="${RIGHT_LEADER_CAN:-$(choose_can can_leader_r can3 "$I2RT_CAN_SERIAL_RIGHT_LEADER")}"
+LEFT_LEADER_GRIPPER_ENDPOINTS="${LEFT_LEADER_GRIPPER_ENDPOINTS:--0.007669904,-0.708699124}"
+RIGHT_LEADER_GRIPPER_ENDPOINTS="${RIGHT_LEADER_GRIPPER_ENDPOINTS:-0.030679616,-0.648873873}"
+
+echo "I2RT CAN mapping: follower(left=$LEFT_FOLLOWER_CAN right=$RIGHT_FOLLOWER_CAN) " \
+  "leader(left=$LEFT_LEADER_CAN right=$RIGHT_LEADER_CAN)" >&2
 
 if [[ "$ENABLE_LEADERS" != "0" && "$ENABLE_LEADERS" != "1" ]]; then
   echo "ENABLE_I2RT_LEADERS must be 0 or 1." >&2
@@ -124,6 +152,8 @@ if [[ "$ENABLE_LEADERS" == "1" ]]; then
   fi
   node_args+=(
     --leader-cans "$LEFT_LEADER_CAN" "$RIGHT_LEADER_CAN"
+    --leader-gripper-endpoint "left_arm=$LEFT_LEADER_GRIPPER_ENDPOINTS"
+    --leader-gripper-endpoint "right_arm=$RIGHT_LEADER_GRIPPER_ENDPOINTS"
     --direct-leader-control
   )
 fi

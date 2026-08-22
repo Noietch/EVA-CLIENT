@@ -133,6 +133,68 @@ class _D405Worker:
         )
         self._thread.start()
 
+    def _enable_auto_exposure(self, pipeline_profile: Any) -> None:
+        """Enable automatic exposure on the D405 imaging sensor on reconnect.
+
+        D405 devices expose their color stream through the ``Stereo Module``.
+        That sensor supports automatic exposure, but librealsense does not
+        classify it as a color sensor, so ``first_color_sensor()`` raises
+        ``Could not find requested sensor type!`` on this camera model.
+        """
+        option = self._rs.option.enable_auto_exposure
+        device = pipeline_profile.get_device()
+        sensors = tuple(device.query_sensors())
+        compatible_sensors = [sensor for sensor in sensors if sensor.supports(option)]
+        if not compatible_sensors:
+            raise RuntimeError(
+                f"RealSense D405 {self.spec.image_key} has no sensor that supports "
+                "automatic exposure"
+            )
+        # Prefer the sensor that owns the requested color stream.  On a D405
+        # the stereo module is often exposed as the color sensor; enabling AE
+        # on every compatible sensor can also change the IR/depth exposure and
+        # make the color image appear blown out after reconnects.
+        color_sensors = [
+            sensor
+            for sensor in compatible_sensors
+            if self._sensor_has_color_stream(sensor)
+        ]
+        selected_sensors = color_sensors or compatible_sensors
+        for sensor in selected_sensors:
+            sensor.set_option(option, 1.0)
+        logger.info(
+            "Enabled automatic exposure for D405 camera %s on %d sensor(s)",
+            self.spec.image_key,
+            len(selected_sensors),
+        )
+
+    def _sensor_has_color_stream(self, sensor: Any) -> bool:
+        """Return whether *sensor* advertises a color stream.
+
+        ``get_stream_profiles`` is not present on a few older SDK wrappers;
+        in that case we retain the historical behavior and let the caller use
+        any sensor supporting automatic exposure.
+        """
+        get_profiles = getattr(sensor, "get_stream_profiles", None)
+        if get_profiles is None:
+            return True
+        try:
+            profiles = get_profiles()
+            color_stream = self._rs.stream.color
+            return any(profile.stream_type() == color_stream for profile in profiles)
+        except Exception:
+            logger.debug("Could not inspect D405 sensor stream profiles", exc_info=True)
+            return True
+
+    def _warm_up_auto_exposure(self, pipeline: Any) -> None:
+        """Discard initial frames while the sensor converges its exposure."""
+        for _ in range(8):
+            try:
+                pipeline.wait_for_frames(self.spec.timeout_ms)
+            except Exception:
+                logger.debug("D405 auto-exposure warm-up ended early", exc_info=True)
+                return
+
     def _run(self) -> None:
         while not self._stop.is_set():
             pipeline: Any = None
@@ -155,7 +217,9 @@ class _D405Worker:
                     )
                 else:
                     config.enable_stream(self._rs.stream.color)
-                pipeline.start(config)
+                pipeline_profile = pipeline.start(config)
+                self._enable_auto_exposure(pipeline_profile)
+                self._warm_up_auto_exposure(pipeline)
                 self._set_state("online")
                 logger.info("Started D405 camera %s serial=%s", self.spec.image_key, serial)
                 while not self._stop.is_set():

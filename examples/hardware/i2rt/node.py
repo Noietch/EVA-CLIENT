@@ -22,6 +22,8 @@ from examples.hardware.i2rt.camera import (
     parse_camera_specs,
 )
 from examples.hardware.i2rt.robot import (
+    GRIPPER_INDEX,
+    GROUP_DOF,
     I2RTYamFollowers,
     I2RTYamLeaders,
     flatten_state,
@@ -102,6 +104,7 @@ class I2RTZmqConfig:
     group_names: tuple[str, ...]
     follower_can_channels: dict[str, str]
     leader_can_channels: dict[str, str]
+    leader_gripper_encoder_endpoints: dict[str, tuple[float, float]]
     direct_leader_control: bool
     arm_type: str
     gripper_type: str
@@ -144,6 +147,34 @@ def _parse_group_map(
         if not interface:
             raise ValueError(f"Missing CAN interface in {value!r}")
         result[group_name] = interface
+    return result
+
+
+def _parse_leader_gripper_endpoints(
+    values: list[str],
+    group_names: tuple[str, ...],
+) -> dict[str, tuple[float, float]]:
+    result: dict[str, tuple[float, float]] = {}
+    for value in values:
+        if "=" not in value:
+            raise ValueError(f"Expected GROUP=OPEN_RAD,CLOSED_RAD, got {value!r}")
+        group_name, encoded = (part.strip() for part in value.split("=", 1))
+        if group_name not in group_names:
+            raise ValueError(f"Unknown I2RT group {group_name!r}; expected one of {group_names}")
+        if group_name in result:
+            raise ValueError(f"Duplicate leader gripper endpoints for {group_name!r}")
+        try:
+            opened_text, closed_text = (part.strip() for part in encoded.split(",", 1))
+            opened, closed = float(opened_text), float(closed_text)
+        except ValueError as exc:
+            raise ValueError(
+                f"Expected GROUP=OPEN_RAD,CLOSED_RAD, got {value!r}"
+            ) from exc
+        if not np.isfinite([opened, closed]).all() or opened == closed:
+            raise ValueError(f"Leader gripper endpoints must be finite and distinct: {value!r}")
+        if not all(-2 * np.pi <= endpoint <= 2 * np.pi for endpoint in (opened, closed)):
+            raise ValueError(f"Leader gripper endpoints must be within [-2pi, 2pi]: {value!r}")
+        result[group_name] = (opened, closed)
     return result
 
 
@@ -336,6 +367,12 @@ class I2RTZmqNode:
             relative_control = self._hil_mode == "relative" if self._hil_active else True
             if relative_control:
                 action = self._follower_anchor + (leader - self._leader_anchor)
+                # Arm motor zeros need relative anchoring. Calibrated grippers
+                # already share the same [0, 1] space and must retain their
+                # absolute endpoints so full leader travel reaches both stops.
+                for index in range(len(self._config.group_names)):
+                    gripper_index = index * GROUP_DOF + GRIPPER_INDEX
+                    action[gripper_index] = leader[gripper_index]
             action = flatten_state(
                 split_action(action, self._config.group_names),
                 self._config.group_names,
@@ -349,11 +386,14 @@ class I2RTZmqNode:
         except Exception as exc:
             self._hil_error = str(exc)
             logger.warning("I2RT leader read/control failed: %s", exc)
-            if self._direct_leader_control and not self._collection_active and not self._hil_active:
-                self._leader_anchor = None
-                self._follower_anchor = None
-                self._leaders.close()
-                self._next_leader_connect_time = time.monotonic() + LEADER_CONNECT_RETRY_S
+            # A crashed SDK CAN loop keeps returning its last cached pose. Drop
+            # both leader objects on any read failure (including collection/HIL)
+            # so the next control tick can reconnect instead of replaying stale
+            # commands forever.
+            self._leader_anchor = None
+            self._follower_anchor = None
+            self._leaders.close()
+            self._next_leader_connect_time = time.monotonic() + LEADER_CONNECT_RETRY_S
             return None
 
     def _update_operator_buttons(
@@ -559,6 +599,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Dual teaching-handle CAN interfaces for collection/HIL.",
     )
     parser.add_argument(
+        "--leader-gripper-endpoint",
+        action="append",
+        default=[],
+        metavar="GROUP=OPEN_RAD,CLOSED_RAD",
+        help="Raw teaching-handle encoder endpoints; repeat once per leader.",
+    )
+    parser.add_argument(
         "--direct-leader-control",
         action="store_true",
         help="Start relative dual-leader follower control immediately.",
@@ -706,6 +753,10 @@ def build_config(args: argparse.Namespace) -> I2RTZmqConfig:
     group_names = GROUP_NAMES
     follower_defaults = {"left_arm": "can0", "right_arm": "can1"}
     follower_can = _parse_group_map(args.follower_can, group_names, follower_defaults)
+    leader_gripper_endpoints = _parse_leader_gripper_endpoints(
+        args.leader_gripper_endpoint,
+        group_names,
+    )
     leader_can: dict[str, str] = {}
     if args.leader_cans is not None:
         left_interface, right_interface = (value.strip() for value in args.leader_cans)
@@ -724,6 +775,10 @@ def build_config(args: argparse.Namespace) -> I2RTZmqConfig:
             )
     if args.direct_leader_control and not leader_can:
         raise ValueError("--direct-leader-control requires --leader-cans")
+    if leader_gripper_endpoints and set(leader_gripper_endpoints) != set(leader_can):
+        raise ValueError(
+            "--leader-gripper-endpoint must be provided once for each configured leader"
+        )
     cameras = parse_camera_specs(
         args.camera,
         width=args.camera_width,
@@ -777,6 +832,7 @@ def build_config(args: argparse.Namespace) -> I2RTZmqConfig:
         group_names=group_names,
         follower_can_channels=follower_can,
         leader_can_channels=leader_can,
+        leader_gripper_encoder_endpoints=leader_gripper_endpoints,
         direct_leader_control=bool(args.direct_leader_control),
         arm_type=args.arm_type,
         gripper_type=args.gripper_type,

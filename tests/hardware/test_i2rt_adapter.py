@@ -25,6 +25,7 @@ from examples.hardware.i2rt.robot import (
     I2RTYamFollowers,
     I2RTYamLeaders,
     clip_group_action,
+    map_leader_gripper,
     split_action,
 )
 from examples.hardware.i2rt.wire import (
@@ -54,6 +55,9 @@ class _Config:
         default_factory=lambda: {"left_arm": "can0", "right_arm": "can1"}
     )
     leader_can_channels: dict[str, str] = dataclasses.field(default_factory=dict)
+    leader_gripper_encoder_endpoints: dict[str, tuple[float, float]] = dataclasses.field(
+        default_factory=dict
+    )
     arm_type: str = "yam"
     gripper_type: str = "linear_4310"
     enable_auto_recovery: bool = False
@@ -108,6 +112,8 @@ class _FakeLeader:
         self.closed = False
         self.gravity_comp_count = 0
         self.motor_chain = self
+        self.encoder_position = 0.0
+        self.raw_encoder_position = 0.0
 
     def num_dofs(self) -> int:
         return 6
@@ -122,7 +128,13 @@ class _FakeLeader:
         self.gravity_comp_count += 1
 
     def get_same_bus_device_states(self) -> list[SimpleNamespace]:
-        return [SimpleNamespace(position=0.0, io_inputs=(False, False))]
+        return [
+            SimpleNamespace(
+                position=self.encoder_position,
+                raw_position=self.raw_encoder_position,
+                io_inputs=(False, False),
+            )
+        ]
 
     def close(self) -> None:
         self.closed = True
@@ -317,6 +329,20 @@ def test_follower_commands_both_arms_and_watchdog(monkeypatch: pytest.MonkeyPatc
     assert robots_by_channel["can1"].idle_count == 1
 
 
+def test_follower_rejects_sdk_motor_loop_that_stopped() -> None:
+    def factory(**_kwargs: object) -> _FakeYam:
+        robot = _FakeYam()
+        robot.motor_chain = SimpleNamespace(running=False)
+        return robot
+
+    followers = I2RTYamFollowers(_Config(), factory=factory)
+
+    state = followers.read_state()
+
+    assert state["left_arm"][6] == pytest.approx(1.0)
+    assert followers.hardware_status()["left_arm"] == "retrying"
+
+
 def test_dual_leaders_read_both_arms() -> None:
     leaders_by_channel = {"can2": _FakeLeader(), "can3": _FakeLeader()}
     leaders_by_channel["can3"].qpos += 0.2
@@ -342,6 +368,64 @@ def test_dual_leaders_read_both_arms() -> None:
     assert action[13] == pytest.approx(1.0)
     assert all(kwargs["zero_gravity_mode"] is True for kwargs in factory_kwargs)
     assert all(leader.gravity_comp_count == 1 for leader in leaders_by_channel.values())
+
+
+def test_leader_rejects_sdk_motor_loop_that_stopped() -> None:
+    def factory(**_kwargs: object) -> _FakeLeader:
+        robot = _FakeLeader()
+        robot.motor_chain.running = False
+        return robot
+
+    leaders = I2RTYamLeaders(
+        _Config(leader_can_channels={"left_arm": "can2", "right_arm": "can3"}),
+        factory=factory,
+    )
+
+    with pytest.raises(RuntimeError, match="CAN motor loop stopped"):
+        leaders.read_action()
+
+
+def test_dual_leaders_map_independent_raw_gripper_endpoints() -> None:
+    leaders_by_channel = {"can2": _FakeLeader(), "can3": _FakeLeader()}
+    endpoints = {
+        "left_arm": (-0.007669904, -0.708699124),
+        "right_arm": (0.030679616, -0.648873873),
+    }
+    leaders = I2RTYamLeaders(
+        _Config(
+            leader_can_channels={"left_arm": "can2", "right_arm": "can3"},
+            leader_gripper_encoder_endpoints=endpoints,
+        ),
+        factory=lambda **kwargs: leaders_by_channel[str(kwargs["channel"])],
+    )
+
+    for group_name, channel in (("left_arm", "can2"), ("right_arm", "can3")):
+        opened, _ = endpoints[group_name]
+        leaders_by_channel[channel].raw_encoder_position = opened
+    opened_action = leaders.read_action()
+
+    assert opened_action[[6, 13]] == pytest.approx([1.0, 1.0])
+
+    for group_name, channel in (("left_arm", "can2"), ("right_arm", "can3")):
+        opened, closed = endpoints[group_name]
+        leaders_by_channel[channel].raw_encoder_position = (opened + closed) / 2
+    midpoint_action = leaders.read_action()
+
+    assert midpoint_action[[6, 13]] == pytest.approx([0.5, 0.5])
+
+    for group_name, channel in (("left_arm", "can2"), ("right_arm", "can3")):
+        _, closed = endpoints[group_name]
+        leaders_by_channel[channel].raw_encoder_position = closed
+    closed_action = leaders.read_action()
+
+    assert closed_action[[6, 13]] == pytest.approx([0.0, 0.0])
+
+
+def test_map_leader_gripper_clips_beyond_calibrated_endpoints() -> None:
+    endpoints = (0.03, -0.65)
+
+    assert map_leader_gripper(0.04, endpoints) == pytest.approx(1.0)
+    assert map_leader_gripper(-0.66, endpoints) == pytest.approx(0.0)
 
 
 def test_dual_leaders_move_to_zero_then_restore_gravity_compensation(
@@ -385,6 +469,8 @@ def test_direct_leader_control_captures_anchors_and_commands_follower_delta() ->
     )
     leader = leader_anchor.copy()
     leader[1] += 0.2
+    leader[6] = 0.25
+    leader[13] = 0.75
 
     class _Followers:
         action: np.ndarray | None = None
@@ -432,6 +518,8 @@ def test_direct_leader_control_captures_anchors_and_commands_follower_delta() ->
     assert action is not None
     assert action[1] == pytest.approx(follower_anchor[1] + 0.2)
     assert action[8] == pytest.approx(follower_anchor[8])
+    assert action[6] == pytest.approx(0.25)
+    assert action[13] == pytest.approx(0.75)
     assert node._followers.action == pytest.approx(action)
     assert node._leader_control_updates == 1
 
@@ -659,6 +747,10 @@ def test_d405_specs_and_node_config() -> None:
             "--leader-cans",
             "can_leader_l",
             "can_leader_r",
+            "--leader-gripper-endpoint",
+            "left_arm=-0.01,-0.71",
+            "--leader-gripper-endpoint",
+            "right_arm=0.03,-0.65",
             "--direct-leader-control",
             "--allow-gripper-calibration",
         ]
@@ -671,6 +763,10 @@ def test_d405_specs_and_node_config() -> None:
     assert config.leader_can_channels == {
         "left_arm": "can_leader_l",
         "right_arm": "can_leader_r",
+    }
+    assert config.leader_gripper_encoder_endpoints == {
+        "left_arm": pytest.approx((-0.01, -0.71)),
+        "right_arm": pytest.approx((0.03, -0.65)),
     }
     assert config.direct_leader_control is True
     assert config.cameras[0].serial == "255323073172"
@@ -730,10 +826,10 @@ def test_run_hardware_defaults_to_dual_leaders_and_gripper_calibration(
 ) -> None:
     root = Path(__file__).resolve().parents[2]
     launcher = (root / "examples/hardware/i2rt/run_hardware.sh").read_text()
-    assert 'choose_can can_follower_l can2' in launcher
-    assert 'choose_can can_follower_r can1' in launcher
-    assert 'choose_can can_leader_l can3' in launcher
-    assert 'choose_can can_leader_r can0' in launcher
+    assert 'choose_can can_follower_l can1' in launcher
+    assert 'choose_can can_follower_r can2' in launcher
+    assert 'choose_can can_leader_l can0' in launcher
+    assert 'choose_can can_leader_r can3' in launcher
 
     fake_venv = tmp_path / "venv"
     fake_bin = fake_venv / "bin"
@@ -748,6 +844,12 @@ def test_run_hardware_defaults_to_dual_leaders_and_gripper_calibration(
         "ENABLE_I2RT_LEADERS",
         "I2RT_ALLOW_GRIPPER_CALIBRATION",
         "I2RT_GRIPPER_LIMITS",
+        "LEFT_LEADER_GRIPPER_ENDPOINTS",
+        "RIGHT_LEADER_GRIPPER_ENDPOINTS",
+        "I2RT_CAN_SERIAL_LEFT_FOLLOWER",
+        "I2RT_CAN_SERIAL_RIGHT_FOLLOWER",
+        "I2RT_CAN_SERIAL_LEFT_LEADER",
+        "I2RT_CAN_SERIAL_RIGHT_LEADER",
         "I2RT_STARTUP_POSITION",
         "D405_CAM_HIGH_SERIAL",
         "D405_CAM_LEFT_WRIST_SERIAL",
@@ -783,6 +885,13 @@ def test_run_hardware_defaults_to_dual_leaders_and_gripper_calibration(
     assert args[follower_index + 3] == "right_arm=test_follower_r"
     leader_index = args.index("--leader-cans")
     assert args[leader_index + 1 : leader_index + 3] == ["test_leader_l", "test_leader_r"]
+    endpoint_indexes = [
+        index for index, value in enumerate(args) if value == "--leader-gripper-endpoint"
+    ]
+    assert [args[index + 1] for index in endpoint_indexes] == [
+        "left_arm=-0.007669904,-0.708699124",
+        "right_arm=0.030679616,-0.648873873",
+    ]
     assert "--direct-leader-control" in args
     startup_index = args.index("--startup-position")
     assert args[startup_index + 1] == "zero"
