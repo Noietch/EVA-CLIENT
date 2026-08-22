@@ -16,15 +16,17 @@ D405_CAMERA_TIMEOUT_MS="${D405_CAMERA_TIMEOUT_MS:-3000}"
 D405_CAMERA_PROFILE="${D405_CAMERA_PROFILE:-$PWD/examples/hardware/i2rt/profiles/d405_workcell.json}"
 D405_ENABLED_CAMERAS="${D405_ENABLED_CAMERAS:-}"
 ORBBEC_CAM_HIGH_SERIAL="${ORBBEC_CAM_HIGH_SERIAL:-CP0HC530000Z}"
-ORBBEC_CAM_LEFT_WRIST_SERIAL="${ORBBEC_CAM_LEFT_WRIST_SERIAL:-CV2L360000CL}"
-ORBBEC_CAM_RIGHT_WRIST_SERIAL="${ORBBEC_CAM_RIGHT_WRIST_SERIAL:-CV2R1610003Z}"
+ORBBEC_CAM_LEFT_WRIST_SERIAL="${ORBBEC_CAM_LEFT_WRIST_SERIAL:-CV2R1610003Z}"
+ORBBEC_CAM_RIGHT_WRIST_SERIAL="${ORBBEC_CAM_RIGHT_WRIST_SERIAL:-CV2L360000CL}"
 ORBBEC_CAMERA_WIDTH="${ORBBEC_CAMERA_WIDTH:-640}"
 ORBBEC_CAMERA_HEIGHT="${ORBBEC_CAMERA_HEIGHT:-480}"
 ORBBEC_CAMERA_FPS="${ORBBEC_CAMERA_FPS:-30}"
 ORBBEC_CAMERA_FORMAT="${ORBBEC_CAMERA_FORMAT:-MJPG}"
 ORBBEC_CAMERA_TIMEOUT_MS="${ORBBEC_CAMERA_TIMEOUT_MS:-1000}"
 ORBBEC_CAMERA_WARMUP_FRAMES="${ORBBEC_CAMERA_WARMUP_FRAMES:-30}"
-ORBBEC_ENABLED_CAMERAS="${ORBBEC_ENABLED_CAMERAS-cam_high,cam_left_wrist,cam_right_wrist}"
+ORBBEC_CAMERA_BRIGHTNESS="${ORBBEC_CAMERA_BRIGHTNESS:-5}"
+ORBBEC_ENABLED_CAMERAS="${ORBBEC_ENABLED_CAMERAS-cam_left_wrist,cam_right_wrist,cam_high}"
+ORBBEC_USB_RESET="${ORBBEC_USB_RESET:-1}"
 I2RT_CPU_AFFINITY="${I2RT_CPU_AFFINITY-__auto__}"
 if [[ "$I2RT_CPU_AFFINITY" == "__auto__" ]]; then
   I2RT_CPU_AFFINITY=""
@@ -106,6 +108,10 @@ if [[ "$ALLOW_GRIPPER_CALIBRATION" != "0" && "$ALLOW_GRIPPER_CALIBRATION" != "1"
   echo "I2RT_ALLOW_GRIPPER_CALIBRATION must be 0 or 1." >&2
   exit 2
 fi
+if [[ "$ORBBEC_USB_RESET" != "0" && "$ORBBEC_USB_RESET" != "1" ]]; then
+  echo "ORBBEC_USB_RESET must be 0 or 1." >&2
+  exit 2
+fi
 show_help=0
 for arg in "$@"; do
   if [[ "$arg" == "-h" || "$arg" == "--help" || "$arg" == "--list-cameras" ]]; then
@@ -121,6 +127,36 @@ if [[ "$show_help" == "0" && "$ORBBEC_ENABLED_CAMERAS" == *,* \
     echo "Run: echo 256 | sudo tee /sys/module/usbcore/parameters/usbfs_memory_mb" >&2
     exit 1
   fi
+fi
+
+reset_orbbec_camera() {
+  local serial_number="$1"
+  local device properties bus_number device_number
+  command -v usbreset >/dev/null 2>&1 || return 0
+  for device in /dev/bus/usb/*/*; do
+    [[ -e "$device" ]] || continue
+    properties="$(udevadm info -q property -n "$device" 2>/dev/null || true)"
+    if grep -Fqx "ID_SERIAL_SHORT=$serial_number" <<< "$properties"; then
+      bus_number="$(basename "$(dirname "$device")")"
+      device_number="$(basename "$device")"
+      usbreset "$bus_number/$device_number"
+      return
+    fi
+  done
+}
+
+if [[ "$show_help" == "0" && "$ORBBEC_USB_RESET" == "1" ]]; then
+  case ",$ORBBEC_ENABLED_CAMERAS," in
+    *,cam_left_wrist,*) reset_orbbec_camera "$ORBBEC_CAM_LEFT_WRIST_SERIAL" ;;
+  esac
+  case ",$ORBBEC_ENABLED_CAMERAS," in
+    *,cam_right_wrist,*) reset_orbbec_camera "$ORBBEC_CAM_RIGHT_WRIST_SERIAL" ;;
+  esac
+  case ",$ORBBEC_ENABLED_CAMERAS," in
+    *,cam_high,*) reset_orbbec_camera "$ORBBEC_CAM_HIGH_SERIAL" ;;
+  esac
+  udevadm settle --timeout=10
+  sleep 2
 fi
 
 node_args=(
@@ -247,9 +283,11 @@ node_args+=(
   --orbbec-color-format "$ORBBEC_CAMERA_FORMAT"
   --orbbec-timeout-ms "$ORBBEC_CAMERA_TIMEOUT_MS"
   --orbbec-warmup-frames "$ORBBEC_CAMERA_WARMUP_FRAMES"
+  --orbbec-brightness "$ORBBEC_CAMERA_BRIGHTNESS"
 )
 
 export PYTHONPATH="$PWD/src:$PWD:${PYTHONPATH:-}"
+export JAX_PLATFORMS="${JAX_PLATFORMS:-cpu}"
 python_command=("$PYTHON_BIN")
 if [[ -n "$I2RT_CPU_AFFINITY" ]]; then
   if ! command -v taskset >/dev/null 2>&1; then

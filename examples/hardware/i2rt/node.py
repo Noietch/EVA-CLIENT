@@ -56,7 +56,6 @@ LEADER_CANCEL_BUTTON_INDEX = 0
 LEADER_RECORD_BUTTON_INDEX = 1
 LEADER_BUTTON_DEBOUNCE_S = 0.08
 LEADER_CONNECT_RETRY_S = 5.0
-ORBBEC_STARTUP_SETTLE_S = 2.0
 COLLECTION_RECORD_TOGGLE_EVENT = "collection_record_toggle"
 COLLECTION_CANCEL_EVENT = "collection_cancel"
 EEF_DOF = 8
@@ -532,19 +531,22 @@ class I2RTZmqNode:
                 publisher.close(linger=0)
 
     def serve_forever(self) -> None:
+        if self._config.orbbec_cameras:
+            self._orbbec_camera_cache = OrbbecCameraCache(self._config.orbbec_cameras)
+            self._camera_caches += (self._orbbec_camera_cache,)
+            if not self._orbbec_camera_cache.wait_until_online(timeout_s=30.0):
+                raise RuntimeError(
+                    "Orbbec cameras did not all become ready: "
+                    f"{self._orbbec_camera_cache.hardware_status()}"
+                )
+            logger.info(
+                "All Orbbec cameras online before motor bring-up: %s",
+                self._orbbec_camera_cache.hardware_status(),
+            )
         self._followers.move_to_startup_position()
         if self._config.leader_can_channels:
             self._leaders.move_to_startup_position()
         self._ensure_direct_leader_control()
-        if self._config.orbbec_cameras:
-            logger.info(
-                "Waiting %.1f s for motor control to settle before starting Orbbec cameras",
-                ORBBEC_STARTUP_SETTLE_S,
-            )
-            if self._stop.wait(ORBBEC_STARTUP_SETTLE_S):
-                return
-        self._orbbec_camera_cache = OrbbecCameraCache(self._config.orbbec_cameras)
-        self._camera_caches += (self._orbbec_camera_cache,)
         self._publisher_thread = threading.Thread(
             target=self._publish_loop,
             name="i2rt-observation-publisher",
@@ -794,6 +796,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--orbbec-color-format", default="MJPG")
     parser.add_argument("--orbbec-timeout-ms", type=int, default=1000)
     parser.add_argument("--orbbec-warmup-frames", type=int, default=30)
+    parser.add_argument("--orbbec-brightness", type=int, default=5)
     parser.add_argument(
         "--list-cameras",
         action="store_true",
@@ -884,6 +887,7 @@ def build_config(args: argparse.Namespace) -> I2RTZmqConfig:
         color_format=args.orbbec_color_format,
         timeout_ms=args.orbbec_timeout_ms,
         warmup_frames=args.orbbec_warmup_frames,
+        brightness=args.orbbec_brightness,
     )
     invalid_cameras = {
         camera.image_key

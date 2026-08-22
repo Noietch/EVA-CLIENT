@@ -851,7 +851,7 @@ def _camera_jpeg_payload(
     if get_jpeg is not None:
         jpeg = get_jpeg(key)
         if jpeg is not None:
-            return jpeg, ("jpeg", len(jpeg), jpeg[:64], jpeg[-64:])
+            return jpeg, ("jpeg", hashlib.blake2s(jpeg, digest_size=8).digest())
 
     get_one = getattr(reader, "get_camera_frame", None)
     if get_one is not None:
@@ -862,8 +862,11 @@ def _camera_jpeg_payload(
     if image is None:
         return None, None
     arr = np.asarray(image)
-    sig = ("array", arr.shape, int(arr[::32, ::32].sum(dtype=np.int64)))
-    return _encode_jpeg(image, convert_bgr_to_rgb), sig
+    jpeg = _encode_jpeg(image, convert_bgr_to_rgb)
+    if jpeg is None:
+        return None, None
+    sig = ("array", arr.shape, hashlib.blake2s(jpeg, digest_size=8).digest())
+    return jpeg, sig
 
 
 def _list_camera_keys(ctx: ConsoleContext) -> list[str]:
