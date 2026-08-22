@@ -11,7 +11,7 @@ PROJECT_DIR="$PWD/examples/hardware/i2rt"
 VENV_DIR="${I2RT_VENV_DIR:-$PROJECT_DIR/.venv}"
 I2RT_REPOSITORY="${I2RT_REPOSITORY:-https://github.com/Noietch/i2rt.git}"
 I2RT_BRANCH="main"
-I2RT_REVISION="93575a5eacca7d32da989514d2cc038a6c92f2ee"
+I2RT_REVISION="2e62d7b56f7ce98979c3fcddb4a087b8751ebc78"
 I2RT_RELEASE="Noietch/i2rt main"
 
 if ! command -v uv >/dev/null 2>&1; then
