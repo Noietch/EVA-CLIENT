@@ -5,7 +5,9 @@ from __future__ import annotations
 import ctypes
 import dataclasses
 import logging
-import threading
+import multiprocessing
+import os
+import signal
 import time
 from importlib import import_module
 from importlib.util import find_spec
@@ -212,111 +214,175 @@ def frame_to_bgr_image(frame: Any, sdk: ModuleType) -> np.ndarray:
     raise ValueError(f"Unsupported Orbbec color frame format: {fmt}")
 
 
+_STATE_NAMES = ("starting", "connecting", "warming", "online", "retrying", "stopped")
+
+
+def _set_process_state(state: Any, name: str) -> None:
+    state.value = _STATE_NAMES.index(name)
+
+
+def _capture_orbbec_camera(
+    spec: OrbbecCameraSpec,
+    frame_buffer: Any,
+    frame_lock: Any,
+    frame_count: Any,
+    last_frame_time: Any,
+    state: Any,
+    stop: Any,
+) -> None:
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    cv2.setNumThreads(1)
+    try:
+        os.nice(5)
+    except OSError:
+        logger.debug("Could not lower Orbbec camera process priority", exc_info=True)
+    while not stop.is_set():
+        try:
+            _run_orbbec_capture_loop(
+                spec,
+                frame_buffer,
+                frame_lock,
+                frame_count,
+                last_frame_time,
+                state,
+                stop,
+            )
+        except Exception as exc:
+            _set_process_state(state, "retrying")
+            logger.warning(
+                "Orbbec camera %s stopped; retrying in %.1f s: %s",
+                spec.image_key,
+                spec.retry_interval_s,
+                exc,
+            )
+            stop.wait(spec.retry_interval_s)
+    _set_process_state(state, "stopped")
+
+
+def _run_orbbec_capture_loop(
+    spec: OrbbecCameraSpec,
+    frame_buffer: Any,
+    frame_lock: Any,
+    frame_count: Any,
+    last_frame_time: Any,
+    state: Any,
+    stop: Any,
+) -> None:
+    _set_process_state(state, "connecting")
+    sdk = get_orbbec_sdk()
+    context = sdk.Context()
+    devices = context.query_devices()
+    if len(devices) == 0:
+        raise RuntimeError("No Orbbec camera is connected")
+    device = select_orbbec_device(devices, spec)
+    serial = device.get_device_info().get_serial_number()
+    auto_exposure = enable_auto_exposure(device, sdk)
+    pipeline = sdk.Pipeline(device)
+    stream_config = sdk.Config()
+    try:
+        profile = select_color_profile(sdk, pipeline, spec)
+    except Exception as exc:
+        logger.warning(
+            "Orbbec camera %s falling back to its default color profile after "
+            "%sx%s %s@%s failed: %s",
+            spec.image_key,
+            spec.width,
+            spec.height,
+            spec.color_format,
+            spec.fps,
+            exc,
+        )
+        profiles = pipeline.get_stream_profile_list(sdk.OBSensorType.COLOR_SENSOR)
+        profile = profiles.get_default_video_stream_profile()
+    stream_config.enable_stream(profile)
+    pipeline.start(stream_config)
+    _set_process_state(state, "warming")
+    logger.info(
+        "Started Orbbec camera %s serial=%s auto_exposure=%s warmup_frames=%d",
+        spec.image_key,
+        serial,
+        auto_exposure,
+        spec.warmup_frames,
+    )
+    remaining_warmup = spec.warmup_frames
+    shared_image = np.frombuffer(frame_buffer, dtype=np.uint8).reshape(
+        (spec.height, spec.width, 3)
+    )
+    try:
+        while not stop.is_set():
+            frameset = pipeline.wait_for_frames(spec.timeout_ms)
+            if frameset is None:
+                continue
+            color_frame = frameset.get_color_frame()
+            if color_frame is None:
+                continue
+            if remaining_warmup > 0:
+                remaining_warmup -= 1
+                continue
+            image = frame_to_bgr_image(color_frame, sdk)
+            if image.shape != shared_image.shape:
+                image = cv2.resize(image, (spec.width, spec.height))
+            with frame_lock:
+                np.copyto(shared_image, image)
+                frame_count.value += 1
+                last_frame_time.value = time.monotonic()
+                _set_process_state(state, "online")
+    finally:
+        pipeline.stop()
+
+
 class _OrbbecCameraWorker:
     def __init__(self, spec: OrbbecCameraSpec) -> None:
         self.spec = spec
-        self._lock = threading.RLock()
-        self._stop = threading.Event()
-        self._latest: np.ndarray | None = None
-        self._state = "starting"
-        self._last_frame_time: float | None = None
-        self._thread = threading.Thread(
-            target=self._run,
+        context = multiprocessing.get_context("spawn")
+        self._frame_buffer = context.RawArray("B", spec.width * spec.height * 3)
+        self._frame_lock = context.Lock()
+        self._frame_count = context.Value("Q", 0, lock=False)
+        self._last_frame_time = context.Value("d", 0.0, lock=False)
+        self._state = context.Value("i", 0, lock=False)
+        self._stop = context.Event()
+        self._process = context.Process(
+            target=_capture_orbbec_camera,
+            args=(
+                spec,
+                self._frame_buffer,
+                self._frame_lock,
+                self._frame_count,
+                self._last_frame_time,
+                self._state,
+                self._stop,
+            ),
             name=f"orbbec-{spec.image_key}",
             daemon=True,
         )
-        self._thread.start()
+        self._process.start()
 
     def snapshot(self) -> np.ndarray | None:
-        with self._lock:
-            return None if self._latest is None else self._latest.copy()
+        with self._frame_lock:
+            if self._frame_count.value == 0:
+                return None
+            image = np.frombuffer(self._frame_buffer, dtype=np.uint8).reshape(
+                (self.spec.height, self.spec.width, 3)
+            )
+            return image.copy()
 
     def status(self) -> str:
-        with self._lock:
-            state = self._state
-            last_frame_time = self._last_frame_time
-        if last_frame_time is None:
+        state = _STATE_NAMES[self._state.value]
+        if not self._process.is_alive() and not self._stop.is_set():
+            state = "stopped"
+        last_frame_time = self._last_frame_time.value
+        if last_frame_time == 0.0:
             return state
         return f"{state}(age={time.monotonic() - last_frame_time:.1f}s)"
 
     def stop(self) -> None:
         self._stop.set()
-        self._thread.join(timeout=2.0)
-
-    def _set_state(self, state: str) -> None:
-        with self._lock:
-            self._state = state
-
-    def _run(self) -> None:
-        while not self._stop.is_set():
-            try:
-                self._run_camera_loop()
-            except Exception as exc:
-                self._set_state("retrying")
-                logger.warning(
-                    "Orbbec camera %s stopped; retrying in %.1f s: %s",
-                    self.spec.image_key,
-                    self.spec.retry_interval_s,
-                    exc,
-                )
-                self._stop.wait(self.spec.retry_interval_s)
-
-    def _run_camera_loop(self) -> None:
-        self._set_state("connecting")
-        sdk = get_orbbec_sdk()
-        context = sdk.Context()
-        devices = context.query_devices()
-        if len(devices) == 0:
-            raise RuntimeError("No Orbbec camera is connected")
-        device = select_orbbec_device(devices, self.spec)
-        serial = device.get_device_info().get_serial_number()
-        auto_exposure = enable_auto_exposure(device, sdk)
-        pipeline = sdk.Pipeline(device)
-        stream_config = sdk.Config()
-        try:
-            profile = select_color_profile(sdk, pipeline, self.spec)
-        except Exception as exc:
-            logger.warning(
-                "Orbbec camera %s falling back to its default color profile after "
-                "%sx%s %s@%s failed: %s",
-                self.spec.image_key,
-                self.spec.width,
-                self.spec.height,
-                self.spec.color_format,
-                self.spec.fps,
-                exc,
-            )
-            profiles = pipeline.get_stream_profile_list(sdk.OBSensorType.COLOR_SENSOR)
-            profile = profiles.get_default_video_stream_profile()
-        stream_config.enable_stream(profile)
-        pipeline.start(stream_config)
-        self._set_state("warming")
-        logger.info(
-            "Started Orbbec camera %s serial=%s auto_exposure=%s warmup_frames=%d",
-            self.spec.image_key,
-            serial,
-            auto_exposure,
-            self.spec.warmup_frames,
-        )
-        remaining_warmup = self.spec.warmup_frames
-        try:
-            while not self._stop.is_set():
-                frameset = pipeline.wait_for_frames(self.spec.timeout_ms)
-                if frameset is None:
-                    continue
-                color_frame = frameset.get_color_frame()
-                if color_frame is None:
-                    continue
-                if remaining_warmup > 0:
-                    remaining_warmup -= 1
-                    continue
-                image = frame_to_bgr_image(color_frame, sdk)
-                with self._lock:
-                    self._latest = image
-                    self._last_frame_time = time.monotonic()
-                    self._state = "online"
-        finally:
-            pipeline.stop()
+        self._process.join(timeout=max(3.0, self.spec.timeout_ms / 1000.0 + 2.0))
+        if self._process.is_alive():
+            logger.warning("Terminating unresponsive Orbbec camera process %s", self.spec.image_key)
+            self._process.terminate()
+            self._process.join(timeout=2.0)
+        self._process.close()
 
 
 class OrbbecCameraCache:

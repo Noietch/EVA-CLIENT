@@ -1,9 +1,10 @@
 # I2RT YAM Hardware
 
 This adapter connects a two-follower YAM Cell-style pair (`i2rt_dual_yam`) to
-EVA through the existing ZMQ transport. The overhead Intel RealSense D405 and
-the two Orbbec wrist cameras are bound by serial number so camera roles remain
-stable across reboots. The adapter
+EVA through the existing ZMQ transport. The overhead and two wrist Orbbec
+cameras are bound by serial number so camera roles remain stable across reboots.
+An Intel RealSense D405 remains available as an optional alternative overhead
+camera. The adapter
 intentionally targets the base YAM arm; YAM Pro, YAM Ultra, and Big YAM need
 their own limits and robot descriptions before they can be enabled safely.
 
@@ -21,7 +22,7 @@ bash examples/hardware/i2rt/setup_sdk.sh
 ```
 
 The SDK is a Git submodule pinned to the tested `Noietch/i2rt` fork
-(`main`, commit `2e62d7b5`), based on the official v1.2.4 release. The fork
+(`main`, commit `fd90afef`), based on the official v1.2.4 release. The fork
 contains the reviewed EVA compatibility and safety changes, so setup initializes
 that exact revision directly and runs `uv sync --project examples/hardware/i2rt`.
 The subproject declares `i2rt`, `pyrealsense2`, `pyorbbecsdk2`, OpenCV, `pyzmq`,
@@ -82,26 +83,42 @@ Then launch EVA:
 eva --config configs/01_deploy/i2rt_dual_yam/openpi_qpos.py --web-port 8080
 ```
 
-The default mixed-camera mapping is:
+The default three-camera mapping is:
 
-- `cam_high=260422275306`
+- `cam_high=CP0HC530000Z` (Orbbec Gemini 335)
 - `cam_left_wrist=CV2L360000CL` (Orbbec Gemini 305)
 - `cam_right_wrist=CV2R1610003Z` (Orbbec Gemini 305)
 
-The launcher enables all three camera keys by default. The D405 supplies only
-`cam_high`; the Orbbec backend supplies both wrist keys. For single-camera
-diagnosis, set `D405_ENABLED_CAMERAS=` and
-`ORBBEC_ENABLED_CAMERAS=cam_right_wrist`. Streams default to `640x480` at 30 FPS.
-Override the wrist mappings with `ORBBEC_CAM_LEFT_WRIST_SERIAL` and
+The launcher enables all three Orbbec keys by default. For single-camera
+diagnosis, set `ORBBEC_ENABLED_CAMERAS=cam_right_wrist`. Streams default to
+`640x480` MJPG at 30 FPS, the highest rate verified with all three cameras on
+this workstation. A 60 FPS override is available, but all three devices are not
+reliably concurrent at that rate. Override mappings with
+`ORBBEC_CAM_HIGH_SERIAL`, `ORBBEC_CAM_LEFT_WRIST_SERIAL`, and
 `ORBBEC_CAM_RIGHT_WRIST_SERIAL`; tune the stream with `ORBBEC_CAMERA_WIDTH`,
 `ORBBEC_CAMERA_HEIGHT`, `ORBBEC_CAMERA_FPS`, `ORBBEC_CAMERA_FORMAT`, and
 `ORBBEC_CAMERA_TIMEOUT_MS`.
 
-Each Orbbec worker explicitly enables color auto exposure and discards 30 frames
-before publishing, so startup exposure can settle independently for the left and
-right cameras. Override this with `ORBBEC_CAMERA_WARMUP_FRAMES`.
+Before multi-camera capture, the launcher checks that the Linux USB transfer
+buffer is at least 256 MB. Set it for the current boot with:
 
-For `cam_high`, every `run_hardware.sh` launch loads
+```bash
+echo 256 | sudo tee /sys/module/usbcore/parameters/usbfs_memory_mb
+```
+
+On workstations with at least 32 logical CPUs, the launcher defaults to CPU
+affinity `0-15` so camera work does not contend with the USB controller IRQ.
+Set `I2RT_CPU_AFFINITY=` to disable affinity or provide another CPU list.
+
+Each Orbbec worker runs in a separate process, explicitly enables color auto
+exposure, and discards 30 frames before publishing. Camera waits therefore do
+not run inside the I2RT motor SDK process. Override the settling period with
+`ORBBEC_CAMERA_WARMUP_FRAMES`.
+
+To use the optional D405 overhead camera, disable the Orbbec `cam_high` mapping
+and enable the D405, for example
+`ORBBEC_ENABLED_CAMERAS=cam_left_wrist,cam_right_wrist D405_ENABLED_CAMERAS=cam_high`.
+For the D405, every `run_hardware.sh` launch loads
 `profiles/d405_workcell.json`. It enables automatic exposure, turns on the D405
 exposure/gain limit toggles, caps exposure at 33 ms and gain at 64, and discards
 90 startup frames while exposure converges. Override the profile with
