@@ -119,6 +119,16 @@ for arg in "$@"; do
   fi
 done
 
+# Keep a second launcher from resetting cameras that belong to a live node.
+if [[ "$show_help" == "0" ]]; then
+  I2RT_LOCK_FILE="${I2RT_LOCK_FILE:-${XDG_RUNTIME_DIR:-/tmp}/eva-i2rt-hardware-${UID}.lock}"
+  exec 9>"$I2RT_LOCK_FILE"
+  if ! flock -n 9; then
+    echo "I2RT hardware is already running. Stop it with Ctrl-C before restarting." >&2
+    exit 1
+  fi
+fi
+
 if [[ "$show_help" == "0" && "$ORBBEC_ENABLED_CAMERAS" == *,* \
       && -r /sys/module/usbcore/parameters/usbfs_memory_mb ]]; then
   usbfs_memory_mb="$(</sys/module/usbcore/parameters/usbfs_memory_mb)"
