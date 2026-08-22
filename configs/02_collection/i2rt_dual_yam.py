@@ -27,5 +27,8 @@ collection = dict(
             action_eef="action.eef",
         ),
     ),
-    tasks=["pick up the object and place it in the target area"],
+    tasks=["pick up the object and place it in the target area",
+           "put cup on the plate",
+           "put all objects into the box",
+           "put blocks on corresponding signs"],
 )

@@ -49,6 +49,9 @@ class I2RTArmConfig(Protocol):
     def leader_can_channels(self) -> dict[str, str]: ...
 
     @property
+    def leader_gripper_encoder_endpoints(self) -> dict[str, tuple[float, float]]: ...
+
+    @property
     def arm_type(self) -> str: ...
 
     @property
@@ -100,6 +103,20 @@ class I2RTArmConfig(Protocol):
 RobotFactory = Callable[..., Any]
 
 
+def _ensure_motor_chain_running(robot: Any, label: str) -> None:
+    """Reject stale SDK objects after their background CAN loop has crashed.
+
+    The SDK keeps returning the last cached joint state after a motor timeout.
+    Without this check the EVA node can continue publishing and commanding a
+    dead leader/follower object indefinitely, even though no CAN frames are
+    reaching the hardware. Test doubles do not expose ``running`` and remain
+    valid through the compatibility fallback.
+    """
+    motor_chain = getattr(robot, "motor_chain", None)
+    if getattr(motor_chain, "running", True) is False:
+        raise RuntimeError(f"I2RT {label} CAN motor loop stopped")
+
+
 def clip_group_action(action: np.ndarray) -> np.ndarray:
     """Validate and clip one YAM 7-D arm + normalized-gripper command."""
     vector = np.asarray(action, dtype=np.float32).reshape(-1)
@@ -125,6 +142,18 @@ def split_action(action: np.ndarray, group_names: tuple[str, ...]) -> dict[str, 
 
 def flatten_state(state: dict[str, np.ndarray], group_names: tuple[str, ...]) -> np.ndarray:
     return np.concatenate([state[name] for name in group_names]).astype(np.float32)
+
+
+def map_leader_gripper(
+    raw_position: float,
+    endpoints: tuple[float, float],
+) -> float:
+    """Map calibrated raw encoder radians to 1=open and 0=closed."""
+    opened, closed = endpoints
+    if opened == closed:
+        raise ValueError("Leader gripper encoder endpoints must be distinct")
+    closed_fraction = (raw_position - opened) / (closed - opened)
+    return float(np.clip(1.0 - closed_fraction, 0.0, 1.0))
 
 
 def _sdk_factory(
@@ -187,6 +216,7 @@ class I2RTYamFollowers:
         return self._config.group_names.index(group_name) * GROUP_DOF
 
     def _read_group_qpos(self, robot: Any) -> np.ndarray:
+        _ensure_motor_chain_running(robot, "follower")
         raw = np.asarray(robot.get_joint_pos(), dtype=np.float32).reshape(-1)
         if raw.shape != (GROUP_DOF,):
             raise ValueError(f"Expected a {GROUP_DOF}-D YAM + gripper state, got {raw.shape}")
@@ -690,11 +720,22 @@ class I2RTYamLeaders:
             raise
         logger.info("I2RT leaders reached zero and returned to gravity compensation")
 
-    def _read_gripper(self, robot: Any) -> float:
+    def _read_gripper(self, group_name: str, robot: Any) -> float:
+        _ensure_motor_chain_running(robot, f"leader {group_name}")
         encoder_states = robot.motor_chain.get_same_bus_device_states()
         if not encoder_states:
             raise RuntimeError("I2RT teaching-handle encoder state is not ready")
-        return float(np.clip(1.0 - encoder_states[0].position, 0.0, 1.0))
+        encoder = encoder_states[0]
+        endpoints = self._config.leader_gripper_encoder_endpoints.get(group_name)
+        if endpoints is None:
+            return float(np.clip(1.0 - encoder.position, 0.0, 1.0))
+        raw_position = getattr(encoder, "raw_position", None)
+        if raw_position is None:
+            raise RuntimeError(
+                "I2RT SDK does not expose raw teaching-handle encoder positions; "
+                "reinstall the in-tree SDK"
+            )
+        return map_leader_gripper(float(raw_position), endpoints)
 
     def read_buttons(self) -> dict[str, tuple[bool, ...]]:
         """Return cached teaching-handle digital inputs for connected leaders.
@@ -717,10 +758,12 @@ class I2RTYamLeaders:
         parts: list[np.ndarray] = []
         for name in self._config.group_names:
             robot = self._robots[name]
+            _ensure_motor_chain_running(robot, f"leader {name}")
             arm = np.asarray(robot.get_joint_pos(), dtype=np.float32).reshape(-1)
             if arm.shape != (ARM_DOF,):
                 raise ValueError(f"I2RT leader {name} returned shape {arm.shape}")
-            parts.append(clip_group_action(np.concatenate([arm, [self._read_gripper(robot)]])))
+            gripper = self._read_gripper(name, robot)
+            parts.append(clip_group_action(np.concatenate([arm, [gripper]])))
         return np.concatenate(parts).astype(np.float32)
 
     def close(self) -> None:

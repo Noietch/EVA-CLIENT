@@ -112,8 +112,11 @@ eva --config configs/02_collection/i2rt_dual_yam.py --web-port 8080
 The real node publishes leader positions as `action.qpos` while commanding the
 followers. Collection and relative HIL snapshot the current leader/follower
 poses and apply leader deltas on top of the follower pose, so different motor
-zero offsets do not cause a jump at takeover. Absolute HIL remains available
-when both arms have been calibrated into the same joint coordinate frame.
+zero offsets do not cause a jump at takeover. Grippers are the exception: each
+teaching handle is mapped through its calibrated raw encoder endpoints and sent
+in absolute `[0, 1]` space, so fully open and fully closed always reach the
+follower endpoints. Absolute HIL remains available when both arms have been
+calibrated into the same joint coordinate frame.
 Both leader CAN interfaces must be present and distinct; left-only and
 right-only leader control are not supported.
 Each teaching-handle leader starts in the SDK's gravity-compensation mode using
@@ -141,8 +144,8 @@ stiffness. It is disabled by default; enable it with `I2RT_TRACKING_KI=2.0`.
 The correction limit, deadband, settle delay, and startup learning duration have
 matching `I2RT_TRACKING_*` / `I2RT_STARTUP_TRIM_DURATION` variables.
 
-For the currently verified workstation mapping (can2 left follower, can1 right
-follower, can3 left leader, can0 right leader, and the three D405 serials listed
+For the currently verified workstation mapping (can1 left follower, can2 right
+follower, can0 left leader, can3 right leader, and the three D405 serials listed
 above), use the sole hardware launcher directly:
 
 ```bash
@@ -153,7 +156,14 @@ This defaults to the physical `linear_4310` gripper and starts the left and righ
 leaders as a required pair. The CAN mappings and camera serial remain
 overridable through the environment. CAN interface numbers can change after
 replugging or rebooting, so inspect the devices again before using the fallbacks
-if the USB layout changes.
+if the USB layout changes. The launcher first matches the four verified
+CANable USB serials and only then falls back to `can0` through `can3`; override
+`I2RT_CAN_SERIAL_LEFT_FOLLOWER`, `I2RT_CAN_SERIAL_RIGHT_FOLLOWER`,
+`I2RT_CAN_SERIAL_LEFT_LEADER`, and `I2RT_CAN_SERIAL_RIGHT_LEADER` when adapters
+are replaced or moved to another workstation.
+The verified teaching-handle encoder endpoints are passed as raw radians in
+`OPEN,CLOSED` order. Override them after recalibration with
+`LEFT_LEADER_GRIPPER_ENDPOINTS` and `RIGHT_LEADER_GRIPPER_ENDPOINTS`.
 Do not reuse raw `I2RT_GRIPPER_LIMITS` values across process restarts unless
 they have been converted into the SDK's post-wrap motor coordinate frame;
 an unverified override is unsafe.
