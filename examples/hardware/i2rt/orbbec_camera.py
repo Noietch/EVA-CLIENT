@@ -239,6 +239,7 @@ def frame_to_bgr_image(frame: Any, sdk: ModuleType) -> np.ndarray:
 
 _STATE_NAMES = ("starting", "connecting", "warming", "online", "retrying", "stopped")
 _CAMERA_START_TIMEOUT_S = 8.0
+_STALE_FRAME_TIMEOUT_S = 3.0
 
 
 def _set_process_state(state: Any, name: str) -> None:
@@ -439,7 +440,13 @@ class _OrbbecCameraWorker:
         last_frame_time = self._last_frame_time.value
         if last_frame_time == 0.0:
             return state
-        return f"{state}(age={time.monotonic() - last_frame_time:.1f}s)"
+        age = time.monotonic() - last_frame_time
+        if state == "online" and age > max(
+            _STALE_FRAME_TIMEOUT_S,
+            self.spec.timeout_ms / 1000.0 * 2,
+        ):
+            state = "stale"
+        return f"{state}(age={age:.1f}s)"
 
 class OrbbecCameraCache:
     """Background multi-camera cache using the Orbbec Python SDK."""

@@ -107,6 +107,8 @@ waits for all of them to be online before bringing up the motors.
 By default, `run_hardware.sh` also resets each enabled Orbbec USB device once
 before opening the SDK, which clears stale streams left by a previous run.
 Set `ORBBEC_USB_RESET=0` to skip this recovery step.
+The launcher holds a single-instance lock so a second invocation cannot reset
+cameras that are already streaming from a live hardware node.
 
 Before multi-camera capture, the launcher checks that the Linux USB transfer
 buffer is at least 256 MB. Set it for the current boot with:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import fcntl
 import os
 import subprocess
 import threading
@@ -958,3 +959,34 @@ def test_run_hardware_defaults_to_dual_leaders_and_gripper_calibration(
     )
     args = captured_args.read_text().splitlines()
     assert "--orbbec-camera" not in args
+
+
+def test_run_hardware_rejects_a_second_instance_before_hardware_setup(
+    tmp_path: Path,
+) -> None:
+    root = Path(__file__).resolve().parents[2]
+    fake_venv = tmp_path / "venv"
+    fake_python = fake_venv / "bin/python"
+    fake_python.parent.mkdir(parents=True)
+    fake_python.write_text("#!/usr/bin/env bash\nexit 0\n")
+    fake_python.chmod(0o755)
+    lock_path = tmp_path / "hardware.lock"
+
+    with lock_path.open("w") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        result = subprocess.run(
+            ["bash", "examples/hardware/i2rt/run_hardware.sh"],
+            cwd=root,
+            env={
+                **os.environ,
+                "I2RT_VENV_DIR": str(fake_venv),
+                "I2RT_LOCK_FILE": str(lock_path),
+            },
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+    assert result.returncode == 1
+    assert "I2RT hardware is already running" in result.stderr
+    assert "Resetting Orbbec" not in result.stdout

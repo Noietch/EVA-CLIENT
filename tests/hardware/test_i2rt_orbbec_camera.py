@@ -2,7 +2,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from examples.hardware.i2rt import orbbec_camera
 from examples.hardware.i2rt.orbbec_camera import (
+    OrbbecCameraSpec,
+    _OrbbecCameraWorker,
     enable_auto_exposure,
     parse_orbbec_camera_specs,
     set_color_brightness,
@@ -91,3 +94,13 @@ def test_set_color_brightness_clamps_to_camera_range() -> None:
 
     assert set_color_brightness(device, sdk, 15) == 10
     assert device.value == 10
+
+
+def test_worker_status_reports_stale_frames(monkeypatch: pytest.MonkeyPatch) -> None:
+    worker = _OrbbecCameraWorker.__new__(_OrbbecCameraWorker)
+    worker.spec = OrbbecCameraSpec(image_key="cam_left_wrist", timeout_ms=1000)
+    worker._state = SimpleNamespace(value=3)
+    worker._last_frame_time = SimpleNamespace(value=10.0)
+    monkeypatch.setattr(orbbec_camera.time, "monotonic", lambda: 14.0)
+
+    assert worker.status() == "stale(age=4.0s)"
