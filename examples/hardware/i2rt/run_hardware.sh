@@ -15,6 +15,8 @@ D405_CAMERA_WIDTH="${D405_CAMERA_WIDTH:-640}"
 D405_CAMERA_HEIGHT="${D405_CAMERA_HEIGHT:-480}"
 D405_CAMERA_FPS="${D405_CAMERA_FPS:-30}"
 D405_CAMERA_TIMEOUT_MS="${D405_CAMERA_TIMEOUT_MS:-3000}"
+D405_CAMERA_PROFILE="${D405_CAMERA_PROFILE:-$PWD/examples/hardware/i2rt/profiles/d405_workcell.json}"
+D405_ENABLED_CAMERAS="${D405_ENABLED_CAMERAS:-cam_high,cam_left_wrist,cam_right_wrist}"
 
 if [[ ! -x "$PYTHON_BIN" ]]; then
   echo "I2RT environment not found: $VENV_DIR" >&2
@@ -158,15 +160,39 @@ if [[ "$ENABLE_LEADERS" == "1" ]]; then
   )
 fi
 
+IFS=',' read -ra enabled_cameras <<< "$D405_ENABLED_CAMERAS"
+for camera_key in "${enabled_cameras[@]}"; do
+  case "$camera_key" in
+    cam_high) node_args+=(--camera "cam_high=$D405_CAM_HIGH_SERIAL") ;;
+    cam_left_wrist) node_args+=(--camera "cam_left_wrist=$D405_CAM_LEFT_WRIST_SERIAL") ;;
+    cam_right_wrist) node_args+=(--camera "cam_right_wrist=$D405_CAM_RIGHT_WRIST_SERIAL") ;;
+    *)
+      echo "Unknown D405 camera key: $camera_key" >&2
+      exit 2
+      ;;
+  esac
+done
+
 node_args+=(
-  --camera "cam_high=$D405_CAM_HIGH_SERIAL"
-  --camera "cam_left_wrist=$D405_CAM_LEFT_WRIST_SERIAL"
-  --camera "cam_right_wrist=$D405_CAM_RIGHT_WRIST_SERIAL"
   --camera-width "$D405_CAMERA_WIDTH"
   --camera-height "$D405_CAMERA_HEIGHT"
   --camera-fps "$D405_CAMERA_FPS"
   --camera-timeout-ms "$D405_CAMERA_TIMEOUT_MS"
+  --camera-profile "$D405_CAMERA_PROFILE"
 )
+
+if [[ -n "${D405_CAMERA_AUTO_EXPOSURE_LIMIT_US:-}" ]]; then
+  node_args+=(--camera-auto-exposure-limit-us "$D405_CAMERA_AUTO_EXPOSURE_LIMIT_US")
+fi
+if [[ -n "${D405_CAMERA_AUTO_GAIN_LIMIT:-}" ]]; then
+  node_args+=(--camera-auto-gain-limit "$D405_CAMERA_AUTO_GAIN_LIMIT")
+fi
+if [[ -n "${D405_CAMERA_EXPOSURE_US:-}" ]]; then
+  node_args+=(--camera-exposure-us "$D405_CAMERA_EXPOSURE_US")
+fi
+if [[ -n "${D405_CAMERA_WARMUP_FRAMES:-}" ]]; then
+  node_args+=(--camera-warmup-frames "$D405_CAMERA_WARMUP_FRAMES")
+fi
 
 export PYTHONPATH="$PWD/src:$PWD:${PYTHONPATH:-}"
 exec "$PYTHON_BIN" examples/hardware/i2rt/node.py "${node_args[@]}" "$@"

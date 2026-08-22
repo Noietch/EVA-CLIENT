@@ -3,16 +3,27 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 import logging
 import threading
 import time
 from importlib import import_module
+from pathlib import Path
 from types import ModuleType
 from typing import Any
 
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+
+@dataclasses.dataclass(frozen=True)
+class CameraProfile:
+    serial: str | None = None
+    exposure_us: int | None = None
+    auto_exposure_limit_us: int | None = None
+    auto_gain_limit: int | None = None
+    warmup_frames: int = 8
 
 
 @dataclasses.dataclass(frozen=True)
@@ -25,6 +36,52 @@ class CameraSpec:
     fps: int | None = None
     timeout_ms: int = 1000
     retry_interval_s: float = 3.0
+    auto_exposure_limit_us: int | None = None
+    auto_gain_limit: int | None = None
+    exposure_us: int | None = None
+    warmup_frames: int = 8
+
+
+def load_camera_profiles(path: str | Path) -> dict[str, CameraProfile]:
+    """Load per-camera exposure profiles from JSON."""
+    profile_path = Path(path)
+    try:
+        raw = json.loads(profile_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Could not load D405 camera profile {profile_path}: {exc}") from exc
+    if not isinstance(raw, dict) or raw.get("version") != 1:
+        raise ValueError("D405 camera profile must be an object with version=1")
+    raw_cameras = raw.get("cameras")
+    if not isinstance(raw_cameras, dict) or not raw_cameras:
+        raise ValueError("D405 camera profile must contain a non-empty cameras object")
+
+    allowed_fields = {
+        "serial",
+        "exposure_us",
+        "auto_exposure_limit_us",
+        "auto_gain_limit",
+        "warmup_frames",
+    }
+    profiles: dict[str, CameraProfile] = {}
+    for image_key, values in raw_cameras.items():
+        if not isinstance(image_key, str) or not image_key or not isinstance(values, dict):
+            raise ValueError("D405 camera profile entries must map image keys to objects")
+        unknown_fields = set(values) - allowed_fields
+        if unknown_fields:
+            raise ValueError(
+                f"Unknown D405 profile fields for {image_key}: {sorted(unknown_fields)}"
+            )
+        profile = CameraProfile(**values)
+        if profile.exposure_us is not None and profile.exposure_us <= 0:
+            raise ValueError(f"D405 {image_key} exposure_us must be positive")
+        if profile.auto_exposure_limit_us is not None and profile.auto_exposure_limit_us <= 0:
+            raise ValueError(f"D405 {image_key} auto_exposure_limit_us must be positive")
+        if profile.auto_gain_limit is not None and profile.auto_gain_limit <= 0:
+            raise ValueError(f"D405 {image_key} auto_gain_limit must be positive")
+        if profile.warmup_frames < 0:
+            raise ValueError(f"D405 {image_key} warmup_frames must be non-negative")
+        profiles[image_key] = profile
+    return profiles
 
 
 def get_realsense_sdk() -> ModuleType:
@@ -44,6 +101,11 @@ def parse_camera_specs(
     height: int | None = None,
     fps: int | None = None,
     timeout_ms: int = 1000,
+    camera_profiles: dict[str, CameraProfile] | None = None,
+    auto_exposure_limit_us: int | None = None,
+    auto_gain_limit: int | None = None,
+    exposure_us: int | None = None,
+    warmup_frames: int = 8,
 ) -> tuple[CameraSpec, ...]:
     """Parse repeated ``IMAGE_KEY=SERIAL`` or ``IMAGE_KEY=index:N`` mappings."""
     specs: list[CameraSpec] = []
@@ -56,6 +118,7 @@ def parse_camera_specs(
             raise ValueError(f"Invalid D405 camera mapping {value!r}")
         if image_key in seen:
             raise ValueError(f"Duplicate D405 camera key: {image_key}")
+        profile = (camera_profiles or {}).get(image_key, CameraProfile())
         serial: str | None = selector
         device_index: int | None = None
         if selector.startswith("index:"):
@@ -63,6 +126,10 @@ def parse_camera_specs(
             device_index = int(selector.removeprefix("index:"))
             if device_index < 0:
                 raise ValueError("RealSense device index must be non-negative")
+        if profile.serial is not None and serial != profile.serial:
+            raise ValueError(
+                f"D405 profile for {image_key} expects serial {profile.serial}, got {selector}"
+            )
         specs.append(
             CameraSpec(
                 image_key=image_key,
@@ -72,6 +139,18 @@ def parse_camera_specs(
                 height=height,
                 fps=fps,
                 timeout_ms=timeout_ms,
+                auto_exposure_limit_us=(
+                    profile.auto_exposure_limit_us
+                    if auto_exposure_limit_us is None
+                    else auto_exposure_limit_us
+                ),
+                auto_gain_limit=(
+                    profile.auto_gain_limit if auto_gain_limit is None else auto_gain_limit
+                ),
+                exposure_us=(profile.exposure_us if exposure_us is None else exposure_us),
+                warmup_frames=(
+                    profile.warmup_frames if camera_profiles is not None else warmup_frames
+                ),
             )
         )
         seen.add(image_key)
@@ -134,7 +213,7 @@ class _D405Worker:
         self._thread.start()
 
     def _enable_auto_exposure(self, pipeline_profile: Any) -> None:
-        """Enable automatic exposure on the D405 imaging sensor on reconnect.
+        """Configure exposure on the D405 imaging sensor on reconnect.
 
         D405 devices expose their color stream through the ``Stereo Module``.
         That sensor supports automatic exposure, but librealsense does not
@@ -155,18 +234,85 @@ class _D405Worker:
         # on every compatible sensor can also change the IR/depth exposure and
         # make the color image appear blown out after reconnects.
         color_sensors = [
-            sensor
-            for sensor in compatible_sensors
-            if self._sensor_has_color_stream(sensor)
+            sensor for sensor in compatible_sensors if self._sensor_has_color_stream(sensor)
         ]
         selected_sensors = color_sensors or compatible_sensors
+        exposure_us = getattr(self.spec, "exposure_us", None)
+        auto_exposure_limit_us = getattr(self.spec, "auto_exposure_limit_us", None)
+        auto_gain_limit = getattr(self.spec, "auto_gain_limit", None)
+        warmup_frames = getattr(self.spec, "warmup_frames", 8)
         for sensor in selected_sensors:
-            sensor.set_option(option, 1.0)
-        logger.info(
-            "Enabled automatic exposure for D405 camera %s on %d sensor(s)",
-            self.spec.image_key,
-            len(selected_sensors),
-        )
+            if exposure_us is not None:
+                self._set_sensor_option(sensor, option, 0.0, "automatic exposure")
+                self._set_sensor_option(
+                    sensor,
+                    self._rs.option.exposure,
+                    float(exposure_us),
+                    "manual exposure",
+                    required=True,
+                )
+            else:
+                if auto_exposure_limit_us is not None:
+                    self._set_sensor_option(
+                        sensor,
+                        getattr(self._rs.option, "auto_exposure_limit_toggle", None),
+                        1.0,
+                        "automatic-exposure limit toggle",
+                    )
+                    self._set_sensor_option(
+                        sensor,
+                        getattr(self._rs.option, "auto_exposure_limit", None),
+                        float(auto_exposure_limit_us),
+                        "automatic-exposure limit",
+                    )
+                if auto_gain_limit is not None:
+                    self._set_sensor_option(
+                        sensor,
+                        getattr(self._rs.option, "auto_gain_limit_toggle", None),
+                        1.0,
+                        "automatic-gain limit toggle",
+                    )
+                    self._set_sensor_option(
+                        sensor,
+                        getattr(self._rs.option, "auto_gain_limit", None),
+                        float(auto_gain_limit),
+                        "automatic-gain limit",
+                    )
+                self._set_sensor_option(sensor, option, 1.0, "automatic exposure")
+        if exposure_us is None:
+            logger.info(
+                "Enabled automatic exposure for D405 camera %s on %d sensor(s), "
+                "exposure_limit=%sus gain_limit=%s warmup_frames=%d",
+                self.spec.image_key,
+                len(selected_sensors),
+                auto_exposure_limit_us,
+                auto_gain_limit,
+                warmup_frames,
+            )
+        else:
+            logger.info(
+                "Set fixed exposure for D405 camera %s on %d sensor(s): %dus",
+                self.spec.image_key,
+                len(selected_sensors),
+                exposure_us,
+            )
+
+    def _set_sensor_option(
+        self,
+        sensor: Any,
+        option: Any,
+        value: float,
+        label: str,
+        *,
+        required: bool = False,
+    ) -> None:
+        if option is None or not sensor.supports(option):
+            message = f"D405 {self.spec.image_key} does not support {label}"
+            if required:
+                raise RuntimeError(message)
+            logger.warning(message)
+            return
+        sensor.set_option(option, value)
 
     def _sensor_has_color_stream(self, sensor: Any) -> bool:
         """Return whether *sensor* advertises a color stream.
@@ -188,12 +334,10 @@ class _D405Worker:
 
     def _warm_up_auto_exposure(self, pipeline: Any) -> None:
         """Discard initial frames while the sensor converges its exposure."""
-        for _ in range(8):
-            try:
-                pipeline.wait_for_frames(self.spec.timeout_ms)
-            except Exception:
-                logger.debug("D405 auto-exposure warm-up ended early", exc_info=True)
+        for _ in range(self.spec.warmup_frames):
+            if self._stop.is_set():
                 return
+            pipeline.wait_for_frames(self.spec.timeout_ms)
 
     def _run(self) -> None:
         while not self._stop.is_set():

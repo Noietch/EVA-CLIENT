@@ -826,10 +826,10 @@ def test_run_hardware_defaults_to_dual_leaders_and_gripper_calibration(
 ) -> None:
     root = Path(__file__).resolve().parents[2]
     launcher = (root / "examples/hardware/i2rt/run_hardware.sh").read_text()
-    assert 'choose_can can_follower_l can1' in launcher
-    assert 'choose_can can_follower_r can2' in launcher
-    assert 'choose_can can_leader_l can0' in launcher
-    assert 'choose_can can_leader_r can3' in launcher
+    assert "choose_can can_follower_l can1" in launcher
+    assert "choose_can can_follower_r can2" in launcher
+    assert "choose_can can_leader_l can0" in launcher
+    assert "choose_can can_leader_r can3" in launcher
 
     fake_venv = tmp_path / "venv"
     fake_bin = fake_venv / "bin"
@@ -858,6 +858,12 @@ def test_run_hardware_defaults_to_dual_leaders_and_gripper_calibration(
         "D405_CAMERA_HEIGHT",
         "D405_CAMERA_FPS",
         "D405_CAMERA_TIMEOUT_MS",
+        "D405_CAMERA_PROFILE",
+        "D405_ENABLED_CAMERAS",
+        "D405_CAMERA_AUTO_EXPOSURE_LIMIT_US",
+        "D405_CAMERA_AUTO_GAIN_LIMIT",
+        "D405_CAMERA_EXPOSURE_US",
+        "D405_CAMERA_WARMUP_FRAMES",
         "I2RT_SIM",
         "ENABLE_I2RT_CAMERAS",
     ):
@@ -909,4 +915,8 @@ def test_run_hardware_defaults_to_dual_leaders_and_gripper_calibration(
     assert args[camera_height_index + 1] == "480"
     assert args[camera_fps_index + 1] == "30"
     assert args[camera_timeout_index + 1] == "3000"
+    camera_profile_index = args.index("--camera-profile")
+    assert args[camera_profile_index + 1].endswith(
+        "examples/hardware/i2rt/profiles/d405_workcell.json"
+    )
     assert not list((root / "examples/hardware/i2rt").glob("run_*leader.sh"))
