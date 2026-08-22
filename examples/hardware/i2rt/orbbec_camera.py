@@ -8,6 +8,7 @@ import logging
 import multiprocessing
 import os
 import signal
+import threading
 import time
 from importlib import import_module
 from importlib.util import find_spec
@@ -35,6 +36,7 @@ class OrbbecCameraSpec:
     timeout_ms: int = 1000
     retry_interval_s: float = 3.0
     warmup_frames: int = 30
+    brightness: int = 5
 
 
 def parse_orbbec_camera_specs(
@@ -46,12 +48,15 @@ def parse_orbbec_camera_specs(
     color_format: str = "MJPG",
     timeout_ms: int = 1000,
     warmup_frames: int = 30,
+    brightness: int = 5,
 ) -> tuple[OrbbecCameraSpec, ...]:
     """Parse repeated ``IMAGE_KEY=SERIAL`` or ``IMAGE_KEY=index:N`` mappings."""
     if width <= 0 or height <= 0 or fps <= 0 or timeout_ms <= 0:
         raise ValueError("Orbbec width, height, fps, and timeout must be positive")
     if warmup_frames < 0:
         raise ValueError("Orbbec warmup frame count must be non-negative")
+    if not -64 <= brightness <= 64:
+        raise ValueError("Orbbec brightness must be in [-64, 64]")
 
     cameras: list[OrbbecCameraSpec] = []
     seen: set[str] = set()
@@ -83,6 +88,7 @@ def parse_orbbec_camera_specs(
                 color_format=color_format,
                 timeout_ms=timeout_ms,
                 warmup_frames=warmup_frames,
+                brightness=brightness,
             )
         )
     return tuple(cameras)
@@ -185,6 +191,23 @@ def enable_auto_exposure(device: Any, sdk: ModuleType) -> bool:
     return True
 
 
+def set_color_brightness(device: Any, sdk: ModuleType, value: int) -> int | None:
+    """Apply a small brightness compensation while retaining auto exposure."""
+    prop = getattr(sdk.OBPropertyID, "OB_PROP_COLOR_BRIGHTNESS_INT", None)
+    if prop is None:
+        return None
+    permissions = (
+        sdk.OBPermissionType.PERMISSION_READ_WRITE,
+        sdk.OBPermissionType.PERMISSION_WRITE,
+    )
+    if not any(device.is_property_supported(prop, item) for item in permissions):
+        return None
+    prop_range = device.get_int_property_range(prop)
+    value = max(int(prop_range.min), min(int(prop_range.max), int(value)))
+    device.set_int_property(prop, value)
+    return value
+
+
 def frame_to_bgr_image(frame: Any, sdk: ModuleType) -> np.ndarray:
     """Convert an Orbbec color frame into a contiguous OpenCV BGR image."""
     fmt = frame.get_format()
@@ -215,6 +238,7 @@ def frame_to_bgr_image(frame: Any, sdk: ModuleType) -> np.ndarray:
 
 
 _STATE_NAMES = ("starting", "connecting", "warming", "online", "retrying", "stopped")
+_CAMERA_START_TIMEOUT_S = 8.0
 
 
 def _set_process_state(state: Any, name: str) -> None:
@@ -229,13 +253,9 @@ def _capture_orbbec_camera(
     last_frame_time: Any,
     state: Any,
     stop: Any,
+    sdk: ModuleType | None = None,
+    device: Any = None,
 ) -> None:
-    signal.signal(signal.SIGINT, signal.SIG_IGN)
-    cv2.setNumThreads(1)
-    try:
-        os.nice(5)
-    except OSError:
-        logger.debug("Could not lower Orbbec camera process priority", exc_info=True)
     while not stop.is_set():
         try:
             _run_orbbec_capture_loop(
@@ -246,6 +266,8 @@ def _capture_orbbec_camera(
                 last_frame_time,
                 state,
                 stop,
+                sdk=sdk,
+                device=device,
             )
         except Exception as exc:
             _set_process_state(state, "retrying")
@@ -259,6 +281,53 @@ def _capture_orbbec_camera(
     _set_process_state(state, "stopped")
 
 
+def _capture_orbbec_cameras(capture_args: tuple[tuple[Any, ...], ...], stop: Any) -> None:
+    """Capture all cameras from device handles owned by one isolated SDK context."""
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    cv2.setNumThreads(1)
+    try:
+        os.nice(5)
+    except OSError:
+        logger.debug("Could not lower Orbbec camera process priority", exc_info=True)
+
+    sdk = get_orbbec_sdk()
+    context = sdk.Context()
+    devices = context.query_devices()
+    selected: list[tuple[tuple[Any, ...], Any]] = []
+    for args in capture_args:
+        spec = args[0]
+        device = select_orbbec_device(devices, spec)
+        actual_serial = str(device.get_device_info().get_serial_number())
+        if spec.serial is not None and actual_serial != spec.serial:
+            raise RuntimeError(
+                f"Orbbec camera {spec.image_key} resolved serial {actual_serial}, "
+                f"expected {spec.serial}"
+            )
+        selected.append((args, device))
+
+    threads: list[threading.Thread] = []
+    for index, (args, device) in enumerate(selected):
+        thread = threading.Thread(
+            target=_capture_orbbec_camera,
+            args=(*args, stop, sdk, device),
+            name=f"orbbec-{args[0].image_key}",
+            daemon=True,
+        )
+        thread.start()
+        threads.append(thread)
+        if index + 1 < len(selected):
+            state = args[5]
+            deadline = time.monotonic() + _CAMERA_START_TIMEOUT_S
+            while state.value != _STATE_NAMES.index("online") and time.monotonic() < deadline:
+                if stop.wait(0.05):
+                    break
+
+    while not stop.wait(0.2):
+        pass
+    for thread in threads:
+        thread.join(timeout=3.0)
+
+
 def _run_orbbec_capture_loop(
     spec: OrbbecCameraSpec,
     frame_buffer: Any,
@@ -267,16 +336,21 @@ def _run_orbbec_capture_loop(
     last_frame_time: Any,
     state: Any,
     stop: Any,
+    *,
+    sdk: ModuleType | None = None,
+    device: Any = None,
 ) -> None:
     _set_process_state(state, "connecting")
-    sdk = get_orbbec_sdk()
-    context = sdk.Context()
-    devices = context.query_devices()
-    if len(devices) == 0:
-        raise RuntimeError("No Orbbec camera is connected")
-    device = select_orbbec_device(devices, spec)
+    if sdk is None or device is None:
+        sdk = get_orbbec_sdk()
+        context = sdk.Context()
+        devices = context.query_devices()
+        if len(devices) == 0:
+            raise RuntimeError("No Orbbec camera is connected")
+        device = select_orbbec_device(devices, spec)
     serial = device.get_device_info().get_serial_number()
     auto_exposure = enable_auto_exposure(device, sdk)
+    brightness = set_color_brightness(device, sdk, spec.brightness)
     pipeline = sdk.Pipeline(device)
     stream_config = sdk.Config()
     try:
@@ -298,10 +372,11 @@ def _run_orbbec_capture_loop(
     pipeline.start(stream_config)
     _set_process_state(state, "warming")
     logger.info(
-        "Started Orbbec camera %s serial=%s auto_exposure=%s warmup_frames=%d",
+        "Started Orbbec camera %s serial=%s auto_exposure=%s brightness=%s warmup_frames=%d",
         spec.image_key,
         serial,
         auto_exposure,
+        brightness,
         spec.warmup_frames,
     )
     remaining_warmup = spec.warmup_frames
@@ -332,30 +407,23 @@ def _run_orbbec_capture_loop(
 
 
 class _OrbbecCameraWorker:
-    def __init__(self, spec: OrbbecCameraSpec) -> None:
+    def __init__(self, spec: OrbbecCameraSpec, context: Any) -> None:
         self.spec = spec
-        context = multiprocessing.get_context("spawn")
         self._frame_buffer = context.RawArray("B", spec.width * spec.height * 3)
         self._frame_lock = context.Lock()
         self._frame_count = context.Value("Q", 0, lock=False)
         self._last_frame_time = context.Value("d", 0.0, lock=False)
         self._state = context.Value("i", 0, lock=False)
-        self._stop = context.Event()
-        self._process = context.Process(
-            target=_capture_orbbec_camera,
-            args=(
-                spec,
-                self._frame_buffer,
-                self._frame_lock,
-                self._frame_count,
-                self._last_frame_time,
-                self._state,
-                self._stop,
-            ),
-            name=f"orbbec-{spec.image_key}",
-            daemon=True,
+
+    def capture_args(self) -> tuple[Any, ...]:
+        return (
+            self.spec,
+            self._frame_buffer,
+            self._frame_lock,
+            self._frame_count,
+            self._last_frame_time,
+            self._state,
         )
-        self._process.start()
 
     def snapshot(self) -> np.ndarray | None:
         with self._frame_lock:
@@ -368,29 +436,26 @@ class _OrbbecCameraWorker:
 
     def status(self) -> str:
         state = _STATE_NAMES[self._state.value]
-        if not self._process.is_alive() and not self._stop.is_set():
-            state = "stopped"
         last_frame_time = self._last_frame_time.value
         if last_frame_time == 0.0:
             return state
         return f"{state}(age={time.monotonic() - last_frame_time:.1f}s)"
 
-    def stop(self) -> None:
-        self._stop.set()
-        self._process.join(timeout=max(3.0, self.spec.timeout_ms / 1000.0 + 2.0))
-        if self._process.is_alive():
-            logger.warning("Terminating unresponsive Orbbec camera process %s", self.spec.image_key)
-            self._process.terminate()
-            self._process.join(timeout=2.0)
-        self._process.close()
-
-
 class OrbbecCameraCache:
     """Background multi-camera cache using the Orbbec Python SDK."""
 
     def __init__(self, camera_specs: tuple[OrbbecCameraSpec, ...]) -> None:
-        self._workers = [_OrbbecCameraWorker(spec) for spec in camera_specs]
-        logger.info("Started %d Orbbec camera worker(s)", len(self._workers))
+        context = multiprocessing.get_context("spawn")
+        self._stop = context.Event()
+        self._workers = [_OrbbecCameraWorker(spec, context) for spec in camera_specs]
+        self._process = context.Process(
+            target=_capture_orbbec_cameras,
+            args=(tuple(worker.capture_args() for worker in self._workers), self._stop),
+            name="orbbec-camera-sidecar",
+            daemon=True,
+        )
+        self._process.start()
+        logger.info("Started Orbbec sidecar for %d camera(s)", len(self._workers))
 
     def snapshot(self) -> dict[str, np.ndarray]:
         images: dict[str, np.ndarray] = {}
@@ -401,8 +466,30 @@ class OrbbecCameraCache:
         return images
 
     def hardware_status(self) -> dict[str, str]:
+        if not self._process.is_alive() and not self._stop.is_set():
+            return {worker.spec.image_key: "stopped" for worker in self._workers}
         return {worker.spec.image_key: worker.status() for worker in self._workers}
 
+    def wait_until_online(self, timeout_s: float) -> bool:
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            status = self.hardware_status()
+            if status and all(value.startswith("online") for value in status.values()):
+                return True
+            if not self._process.is_alive():
+                return False
+            time.sleep(0.05)
+        return False
+
     def close(self) -> None:
-        for worker in self._workers:
-            worker.stop()
+        self._stop.set()
+        max_timeout_s = max(
+            (worker.spec.timeout_ms / 1000.0 for worker in self._workers),
+            default=1.0,
+        )
+        self._process.join(timeout=max_timeout_s + 4.0)
+        if self._process.is_alive():
+            logger.warning("Terminating unresponsive Orbbec camera sidecar")
+            self._process.terminate()
+            self._process.join(timeout=2.0)
+        self._process.close()

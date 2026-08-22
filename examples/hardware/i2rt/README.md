@@ -22,7 +22,7 @@ bash examples/hardware/i2rt/setup_sdk.sh
 ```
 
 The SDK is a Git submodule pinned to the tested `Noietch/i2rt` fork
-(`main`, commit `fd90afef`), based on the official v1.2.4 release. The fork
+(`main`, commit `70a053b`), based on the official v1.2.4 release. The fork
 contains the reviewed EVA compatibility and safety changes, so setup initializes
 that exact revision directly and runs `uv sync --project examples/hardware/i2rt`.
 The subproject declares `i2rt`, `pyrealsense2`, `pyorbbecsdk2`, OpenCV, `pyzmq`,
@@ -86,8 +86,8 @@ eva --config configs/01_deploy/i2rt_dual_yam/openpi_qpos.py --web-port 8080
 The default three-camera mapping is:
 
 - `cam_high=CP0HC530000Z` (Orbbec Gemini 335)
-- `cam_left_wrist=CV2L360000CL` (Orbbec Gemini 305)
-- `cam_right_wrist=CV2R1610003Z` (Orbbec Gemini 305)
+- `cam_left_wrist=CV2R1610003Z` (Orbbec Gemini 305)
+- `cam_right_wrist=CV2L360000CL` (Orbbec Gemini 305)
 
 The launcher enables all three Orbbec keys by default. For single-camera
 diagnosis, set `ORBBEC_ENABLED_CAMERAS=cam_right_wrist`. Streams default to
@@ -97,7 +97,16 @@ reliably concurrent at that rate. Override mappings with
 `ORBBEC_CAM_HIGH_SERIAL`, `ORBBEC_CAM_LEFT_WRIST_SERIAL`, and
 `ORBBEC_CAM_RIGHT_WRIST_SERIAL`; tune the stream with `ORBBEC_CAMERA_WIDTH`,
 `ORBBEC_CAMERA_HEIGHT`, `ORBBEC_CAMERA_FPS`, `ORBBEC_CAMERA_FORMAT`, and
-`ORBBEC_CAMERA_TIMEOUT_MS`.
+`ORBBEC_CAMERA_TIMEOUT_MS`. Auto exposure remains enabled and a small default
+brightness compensation of `+5` is applied; override it with
+`ORBBEC_CAMERA_BRIGHTNESS` (`-64..64`).
+
+All enabled Orbbec streams share one isolated SDK process and one SDK context.
+The launcher starts the left, right, and overhead streams sequentially and
+waits for all of them to be online before bringing up the motors.
+By default, `run_hardware.sh` also resets each enabled Orbbec USB device once
+before opening the SDK, which clears stale streams left by a previous run.
+Set `ORBBEC_USB_RESET=0` to skip this recovery step.
 
 Before multi-camera capture, the launcher checks that the Linux USB transfer
 buffer is at least 256 MB. Set it for the current boot with:
@@ -110,9 +119,9 @@ On workstations with at least 32 logical CPUs, the launcher defaults to CPU
 affinity `0-15` so camera work does not contend with the USB controller IRQ.
 Set `I2RT_CPU_AFFINITY=` to disable affinity or provide another CPU list.
 
-Each Orbbec worker runs in a separate process, explicitly enables color auto
-exposure, and discards 30 frames before publishing. Camera waits therefore do
-not run inside the I2RT motor SDK process. Override the settling period with
+The three Orbbec streams run in one isolated camera process, explicitly enable
+color auto exposure, and discard 30 frames before publishing. Camera waits do
+not run in the motor SDK process. Override the warmup with
 `ORBBEC_CAMERA_WARMUP_FRAMES`.
 
 To use the optional D405 overhead camera, disable the Orbbec `cam_high` mapping
@@ -218,6 +227,7 @@ remains available for a calibrated fourth-joint gain override.
   after the gravity model and end-effector load have been calibrated.
 - Closing the node calls the SDK's safe `close()` path.
 - The pinned SDK fork closes partially initialized CAN connections and waits
-  for the motor-control loop before closing its socket.
+  for the motor-control loop before closing its socket. It also filters CAN
+  replies by motor ID, so stale frames cannot be decoded as another motor.
 - Linear grippers calibrate by default when no verified limit override is
   supplied. Follow I2RT's requirement to start them fully closed.

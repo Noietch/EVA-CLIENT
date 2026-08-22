@@ -874,7 +874,9 @@ def test_run_hardware_defaults_to_dual_leaders_and_gripper_calibration(
         "ORBBEC_CAMERA_FORMAT",
         "ORBBEC_CAMERA_TIMEOUT_MS",
         "ORBBEC_CAMERA_WARMUP_FRAMES",
+        "ORBBEC_CAMERA_BRIGHTNESS",
         "ORBBEC_ENABLED_CAMERAS",
+        "ORBBEC_USB_RESET",
         "I2RT_CPU_AFFINITY",
         "I2RT_SIM",
         "ENABLE_I2RT_CAMERAS",
@@ -917,9 +919,9 @@ def test_run_hardware_defaults_to_dual_leaders_and_gripper_calibration(
     assert camera_indexes == []
     orbbec_indexes = [index for index, value in enumerate(args) if value == "--orbbec-camera"]
     assert [args[index + 1] for index in orbbec_indexes] == [
+        "cam_left_wrist=CV2R1610003Z",
+        "cam_right_wrist=CV2L360000CL",
         "cam_high=CP0HC530000Z",
-        "cam_left_wrist=CV2L360000CL",
-        "cam_right_wrist=CV2R1610003Z",
     ]
     camera_width_index = args.index("--camera-width")
     camera_height_index = args.index("--camera-height")
@@ -934,11 +936,13 @@ def test_run_hardware_defaults_to_dual_leaders_and_gripper_calibration(
     orbbec_fps_index = args.index("--orbbec-fps")
     orbbec_format_index = args.index("--orbbec-color-format")
     orbbec_warmup_index = args.index("--orbbec-warmup-frames")
+    orbbec_brightness_index = args.index("--orbbec-brightness")
     assert args[orbbec_width_index + 1] == "640"
     assert args[orbbec_height_index + 1] == "480"
     assert args[orbbec_fps_index + 1] == "30"
     assert args[orbbec_format_index + 1] == "MJPG"
     assert args[orbbec_warmup_index + 1] == "30"
+    assert args[orbbec_brightness_index + 1] == "5"
     camera_profile_index = args.index("--camera-profile")
     assert args[camera_profile_index + 1].endswith(
         "examples/hardware/i2rt/profiles/d405_workcell.json"
