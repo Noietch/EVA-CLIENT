@@ -9,14 +9,21 @@ ENABLE_LEADERS="${ENABLE_I2RT_LEADERS:-1}"
 ALLOW_GRIPPER_CALIBRATION="${I2RT_ALLOW_GRIPPER_CALIBRATION:-1}"
 
 D405_CAM_HIGH_SERIAL="${D405_CAM_HIGH_SERIAL:-260422275306}"
-D405_CAM_LEFT_WRIST_SERIAL="${D405_CAM_LEFT_WRIST_SERIAL:-260422273576}"
-D405_CAM_RIGHT_WRIST_SERIAL="${D405_CAM_RIGHT_WRIST_SERIAL:-260322279472}"
 D405_CAMERA_WIDTH="${D405_CAMERA_WIDTH:-640}"
 D405_CAMERA_HEIGHT="${D405_CAMERA_HEIGHT:-480}"
 D405_CAMERA_FPS="${D405_CAMERA_FPS:-30}"
 D405_CAMERA_TIMEOUT_MS="${D405_CAMERA_TIMEOUT_MS:-3000}"
 D405_CAMERA_PROFILE="${D405_CAMERA_PROFILE:-$PWD/examples/hardware/i2rt/profiles/d405_workcell.json}"
-D405_ENABLED_CAMERAS="${D405_ENABLED_CAMERAS:-cam_high,cam_left_wrist,cam_right_wrist}"
+D405_ENABLED_CAMERAS="${D405_ENABLED_CAMERAS:-cam_high}"
+ORBBEC_CAM_LEFT_WRIST_SERIAL="${ORBBEC_CAM_LEFT_WRIST_SERIAL:-CV2L360000CL}"
+ORBBEC_CAM_RIGHT_WRIST_SERIAL="${ORBBEC_CAM_RIGHT_WRIST_SERIAL:-CV2R1610003Z}"
+ORBBEC_CAMERA_WIDTH="${ORBBEC_CAMERA_WIDTH:-640}"
+ORBBEC_CAMERA_HEIGHT="${ORBBEC_CAMERA_HEIGHT:-480}"
+ORBBEC_CAMERA_FPS="${ORBBEC_CAMERA_FPS:-30}"
+ORBBEC_CAMERA_FORMAT="${ORBBEC_CAMERA_FORMAT:-MJPG}"
+ORBBEC_CAMERA_TIMEOUT_MS="${ORBBEC_CAMERA_TIMEOUT_MS:-1000}"
+ORBBEC_CAMERA_WARMUP_FRAMES="${ORBBEC_CAMERA_WARMUP_FRAMES:-30}"
+ORBBEC_ENABLED_CAMERAS="${ORBBEC_ENABLED_CAMERAS:-cam_left_wrist,cam_right_wrist}"
 
 if [[ ! -x "$PYTHON_BIN" ]]; then
   echo "I2RT environment not found: $VENV_DIR" >&2
@@ -160,18 +167,18 @@ if [[ "$ENABLE_LEADERS" == "1" ]]; then
   )
 fi
 
-IFS=',' read -ra enabled_cameras <<< "$D405_ENABLED_CAMERAS"
-for camera_key in "${enabled_cameras[@]}"; do
-  case "$camera_key" in
-    cam_high) node_args+=(--camera "cam_high=$D405_CAM_HIGH_SERIAL") ;;
-    cam_left_wrist) node_args+=(--camera "cam_left_wrist=$D405_CAM_LEFT_WRIST_SERIAL") ;;
-    cam_right_wrist) node_args+=(--camera "cam_right_wrist=$D405_CAM_RIGHT_WRIST_SERIAL") ;;
-    *)
-      echo "Unknown D405 camera key: $camera_key" >&2
-      exit 2
-      ;;
-  esac
-done
+if [[ -n "$D405_ENABLED_CAMERAS" ]]; then
+  IFS=',' read -ra enabled_cameras <<< "$D405_ENABLED_CAMERAS"
+  for camera_key in "${enabled_cameras[@]}"; do
+    case "$camera_key" in
+      cam_high) node_args+=(--camera "cam_high=$D405_CAM_HIGH_SERIAL") ;;
+      *)
+        echo "Unknown D405 camera key: $camera_key" >&2
+        exit 2
+        ;;
+    esac
+  done
+fi
 
 node_args+=(
   --camera-width "$D405_CAMERA_WIDTH"
@@ -193,6 +200,33 @@ fi
 if [[ -n "${D405_CAMERA_WARMUP_FRAMES:-}" ]]; then
   node_args+=(--camera-warmup-frames "$D405_CAMERA_WARMUP_FRAMES")
 fi
+
+if [[ -n "$ORBBEC_ENABLED_CAMERAS" ]]; then
+  IFS=',' read -ra enabled_orbbec_cameras <<< "$ORBBEC_ENABLED_CAMERAS"
+  for camera_key in "${enabled_orbbec_cameras[@]}"; do
+    case "$camera_key" in
+      cam_left_wrist)
+        node_args+=(--orbbec-camera "cam_left_wrist=$ORBBEC_CAM_LEFT_WRIST_SERIAL")
+        ;;
+      cam_right_wrist)
+        node_args+=(--orbbec-camera "cam_right_wrist=$ORBBEC_CAM_RIGHT_WRIST_SERIAL")
+        ;;
+      *)
+        echo "Unknown Orbbec camera key: $camera_key" >&2
+        exit 2
+        ;;
+    esac
+  done
+fi
+
+node_args+=(
+  --orbbec-width "$ORBBEC_CAMERA_WIDTH"
+  --orbbec-height "$ORBBEC_CAMERA_HEIGHT"
+  --orbbec-fps "$ORBBEC_CAMERA_FPS"
+  --orbbec-color-format "$ORBBEC_CAMERA_FORMAT"
+  --orbbec-timeout-ms "$ORBBEC_CAMERA_TIMEOUT_MS"
+  --orbbec-warmup-frames "$ORBBEC_CAMERA_WARMUP_FRAMES"
+)
 
 export PYTHONPATH="$PWD/src:$PWD:${PYTHONPATH:-}"
 exec "$PYTHON_BIN" examples/hardware/i2rt/node.py "${node_args[@]}" "$@"

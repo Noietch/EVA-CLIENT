@@ -11,7 +11,7 @@ PROJECT_DIR="$PWD/examples/hardware/i2rt"
 VENV_DIR="${I2RT_VENV_DIR:-$PROJECT_DIR/.venv}"
 I2RT_REPOSITORY="${I2RT_REPOSITORY:-https://github.com/Noietch/i2rt.git}"
 I2RT_BRANCH="main"
-I2RT_REVISION="fd90afef5c75bf1d70b2a9f97b7b5454182a2d52"
+I2RT_REVISION="93575a5eacca7d32da989514d2cc038a6c92f2ee"
 I2RT_RELEASE="Noietch/i2rt main"
 
 if ! command -v uv >/dev/null 2>&1; then
@@ -52,10 +52,14 @@ UV_PROJECT_ENVIRONMENT="$VENV_DIR" uv sync --project "$PROJECT_DIR"
 
 "$VENV_DIR/bin/python" - <<'PY'
 import i2rt
+import cv2
+import pyorbbecsdk
 import pyrealsense2 as rs
 import zmq
 
 print(f"i2rt installed: {i2rt.__file__}")
+print(f"opencv available: {cv2.__file__}")
+print(f"pyorbbecsdk available: {pyorbbecsdk.__file__}")
 print(f"pyrealsense2 available: {rs.__file__}")
 print(f"pyzmq available: {zmq.__file__}")
 PY

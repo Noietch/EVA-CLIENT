@@ -193,7 +193,7 @@ def test_i2rt_observation_uses_eva_fk_for_state_and_action() -> None:
     node._latest_leader_action = action
     node._followers = type("_Followers", (), {"snapshot_state": lambda self: state})()
     node._fk_solver = solver
-    node._cameras = type("_Cameras", (), {"snapshot": lambda self: {}})()
+    node._camera_caches = (type("_Cameras", (), {"snapshot": lambda self: {}})(),)
     node._obs_pub = publisher
     node._tracking_error = {}
     node._hil_active = False
@@ -726,7 +726,7 @@ def test_isolated_i2rt_wire_is_eva_compatible() -> None:
     assert decoded_observation.operator_event_id == 3
 
 
-def test_d405_specs_and_node_config() -> None:
+def test_mixed_camera_specs_and_node_config() -> None:
     specs = parse_camera_specs(
         ["cam_high=255323073172", "cam_left_wrist=index:1"],
         width=848,
@@ -744,6 +744,8 @@ def test_d405_specs_and_node_config() -> None:
             "right_arm=can_follower_r",
             "--camera",
             "cam_high=255323073172",
+            "--orbbec-camera",
+            "cam_left_wrist=CV2L360000CL",
             "--leader-cans",
             "can_leader_l",
             "can_leader_r",
@@ -770,6 +772,7 @@ def test_d405_specs_and_node_config() -> None:
     }
     assert config.direct_leader_control is True
     assert config.cameras[0].serial == "255323073172"
+    assert config.orbbec_cameras[0].serial == "CV2L360000CL"
     assert config.control_rate_hz == pytest.approx(200.0)
     assert config.tracking_ki == pytest.approx(0.0)
     assert config.end_effector_mass is None
@@ -797,7 +800,7 @@ def test_d405_specs_and_node_config() -> None:
         build_config(unsafe_args)
 
 
-def test_i2rt_preset_enables_three_d405_cameras() -> None:
+def test_i2rt_preset_enables_three_camera_observations() -> None:
     root = Path(__file__).resolve().parents[2]
     deploy = load_config(root / "configs" / "01_deploy/i2rt_dual_yam/openpi_qpos.py")
 
@@ -852,8 +855,6 @@ def test_run_hardware_defaults_to_dual_leaders_and_gripper_calibration(
         "I2RT_CAN_SERIAL_RIGHT_LEADER",
         "I2RT_STARTUP_POSITION",
         "D405_CAM_HIGH_SERIAL",
-        "D405_CAM_LEFT_WRIST_SERIAL",
-        "D405_CAM_RIGHT_WRIST_SERIAL",
         "D405_CAMERA_WIDTH",
         "D405_CAMERA_HEIGHT",
         "D405_CAMERA_FPS",
@@ -864,6 +865,15 @@ def test_run_hardware_defaults_to_dual_leaders_and_gripper_calibration(
         "D405_CAMERA_AUTO_GAIN_LIMIT",
         "D405_CAMERA_EXPOSURE_US",
         "D405_CAMERA_WARMUP_FRAMES",
+        "ORBBEC_CAM_LEFT_WRIST_SERIAL",
+        "ORBBEC_CAM_RIGHT_WRIST_SERIAL",
+        "ORBBEC_CAMERA_WIDTH",
+        "ORBBEC_CAMERA_HEIGHT",
+        "ORBBEC_CAMERA_FPS",
+        "ORBBEC_CAMERA_FORMAT",
+        "ORBBEC_CAMERA_TIMEOUT_MS",
+        "ORBBEC_CAMERA_WARMUP_FRAMES",
+        "ORBBEC_ENABLED_CAMERAS",
         "I2RT_SIM",
         "ENABLE_I2RT_CAMERAS",
     ):
@@ -904,8 +914,11 @@ def test_run_hardware_defaults_to_dual_leaders_and_gripper_calibration(
     camera_indexes = [index for index, value in enumerate(args) if value == "--camera"]
     assert [args[index + 1] for index in camera_indexes] == [
         "cam_high=260422275306",
-        "cam_left_wrist=260422273576",
-        "cam_right_wrist=260322279472",
+    ]
+    orbbec_indexes = [index for index, value in enumerate(args) if value == "--orbbec-camera"]
+    assert [args[index + 1] for index in orbbec_indexes] == [
+        "cam_left_wrist=CV2L360000CL",
+        "cam_right_wrist=CV2R1610003Z",
     ]
     camera_width_index = args.index("--camera-width")
     camera_height_index = args.index("--camera-height")
@@ -915,6 +928,16 @@ def test_run_hardware_defaults_to_dual_leaders_and_gripper_calibration(
     assert args[camera_height_index + 1] == "480"
     assert args[camera_fps_index + 1] == "30"
     assert args[camera_timeout_index + 1] == "3000"
+    orbbec_width_index = args.index("--orbbec-width")
+    orbbec_height_index = args.index("--orbbec-height")
+    orbbec_fps_index = args.index("--orbbec-fps")
+    orbbec_format_index = args.index("--orbbec-color-format")
+    orbbec_warmup_index = args.index("--orbbec-warmup-frames")
+    assert args[orbbec_width_index + 1] == "640"
+    assert args[orbbec_height_index + 1] == "480"
+    assert args[orbbec_fps_index + 1] == "30"
+    assert args[orbbec_format_index + 1] == "MJPG"
+    assert args[orbbec_warmup_index + 1] == "30"
     camera_profile_index = args.index("--camera-profile")
     assert args[camera_profile_index + 1].endswith(
         "examples/hardware/i2rt/profiles/d405_workcell.json"
