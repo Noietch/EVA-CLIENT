@@ -1,8 +1,9 @@
 # I2RT YAM Hardware
 
 This adapter connects a two-follower YAM Cell-style pair (`i2rt_dual_yam`) to
-EVA through the existing ZMQ transport. Intel RealSense D405 cameras are bound
-by serial number so camera roles remain stable across reboots. The adapter
+EVA through the existing ZMQ transport. The overhead Intel RealSense D405 and
+the two Orbbec wrist cameras are bound by serial number so camera roles remain
+stable across reboots. The adapter
 intentionally targets the base YAM arm; YAM Pro, YAM Ultra, and Big YAM need
 their own limits and robot descriptions before they can be enabled safely.
 
@@ -20,11 +21,11 @@ bash examples/hardware/i2rt/setup_sdk.sh
 ```
 
 The SDK is a Git submodule pinned to the tested `Noietch/i2rt` fork
-(`main`, commit `fd90afef`), based on the official v1.2.4 release. The fork
+(`main`, commit `93575a5e`), based on the official v1.2.4 release. The fork
 contains the reviewed EVA compatibility and safety changes, so setup initializes
 that exact revision directly and runs `uv sync --project examples/hardware/i2rt`.
-The subproject declares `i2rt`, `pyrealsense2`, `pyzmq`, the EVA PyRoki/JAX FK
-stack, and the SDK's NumPy/build constraints. The hardware node uses the same
+The subproject declares `i2rt`, `pyrealsense2`, `pyorbbecsdk2`, OpenCV, `pyzmq`,
+the EVA PyRoki/JAX FK stack, and the SDK's NumPy/build constraints. The hardware node uses the same
 registered EVA kinematics model as inference, replay, and visualization.
 
 To install the official boot-time CAN udev rule:
@@ -33,22 +34,22 @@ To install the official boot-time CAN udev rule:
 sudo sh examples/hardware/i2rt/SDK/i2rt/devices/install_devices.sh
 ```
 
-## 2. CAN and D405 devices
+## 2. CAN and camera devices
 
 The adapter uses 1 Mbit/s CAN. `run_hardware.sh` brings configured interfaces
 up automatically; persistent I2RT names are preferred when present, otherwise
 it falls back to `can0` through `can3`. Run it in an interactive terminal so
 `sudo` can request the local password when the interfaces need configuration.
 
-To query camera model and serial through the RealSense SDK without starting a
-stream:
+To query camera model, serial, and USB connection through both vendor SDKs
+without starting a stream:
 
 ```bash
 bash examples/hardware/i2rt/run_hardware.sh --list-cameras
 ```
 
-The hardware launcher binds D405 cameras by serial rather than relying on USB
-enumeration order.
+The hardware launcher binds both camera families by serial rather than relying
+on USB enumeration order.
 
 If a CAN interface is stuck:
 
@@ -81,21 +82,27 @@ Then launch EVA:
 eva --config configs/01_deploy/i2rt_dual_yam/openpi_qpos.py --web-port 8080
 ```
 
-The verified D405 mapping is:
+The default mixed-camera mapping is:
 
 - `cam_high=260422275306`
-- `cam_left_wrist=260422273576`
-- `cam_right_wrist=260322279472`
+- `cam_left_wrist=CV2L360000CL` (Orbbec Gemini 305)
+- `cam_right_wrist=CV2R1610003Z` (Orbbec Gemini 305)
 
-The launcher enables all three cameras by default. For single-camera diagnosis,
-set `D405_ENABLED_CAMERAS=cam_high`. Streams default to `640x480` at 30 FPS.
-Override the mappings with
-`D405_CAM_HIGH_SERIAL`, `D405_CAM_LEFT_WRIST_SERIAL`, and
-`D405_CAM_RIGHT_WRIST_SERIAL`; override the stream with `D405_CAMERA_WIDTH`,
-`D405_CAMERA_HEIGHT`, `D405_CAMERA_FPS`, and `D405_CAMERA_TIMEOUT_MS`.
-Every `run_hardware.sh` launch loads
-`profiles/d405_workcell.json`. The profile contains serial-checked settings for
-all three camera roles. It enables automatic exposure, turns on the D405
+The launcher enables all three camera keys by default. The D405 supplies only
+`cam_high`; the Orbbec backend supplies both wrist keys. For single-camera
+diagnosis, set `D405_ENABLED_CAMERAS=` and
+`ORBBEC_ENABLED_CAMERAS=cam_right_wrist`. Streams default to `640x480` at 30 FPS.
+Override the wrist mappings with `ORBBEC_CAM_LEFT_WRIST_SERIAL` and
+`ORBBEC_CAM_RIGHT_WRIST_SERIAL`; tune the stream with `ORBBEC_CAMERA_WIDTH`,
+`ORBBEC_CAMERA_HEIGHT`, `ORBBEC_CAMERA_FPS`, `ORBBEC_CAMERA_FORMAT`, and
+`ORBBEC_CAMERA_TIMEOUT_MS`.
+
+Each Orbbec worker explicitly enables color auto exposure and discards 30 frames
+before publishing, so startup exposure can settle independently for the left and
+right cameras. Override this with `ORBBEC_CAMERA_WARMUP_FRAMES`.
+
+For `cam_high`, every `run_hardware.sh` launch loads
+`profiles/d405_workcell.json`. It enables automatic exposure, turns on the D405
 exposure/gain limit toggles, caps exposure at 33 ms and gain at 64, and discards
 90 startup frames while exposure converges. Override the profile with
 `D405_CAMERA_PROFILE`; the individual

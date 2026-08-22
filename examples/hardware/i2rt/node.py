@@ -22,6 +22,12 @@ from examples.hardware.i2rt.camera import (
     load_camera_profiles,
     parse_camera_specs,
 )
+from examples.hardware.i2rt.orbbec_camera import (
+    OrbbecCameraCache,
+    OrbbecCameraSpec,
+    list_orbbec_devices,
+    parse_orbbec_camera_specs,
+)
 from examples.hardware.i2rt.robot import (
     GRIPPER_INDEX,
     GROUP_DOF,
@@ -125,6 +131,7 @@ class I2RTZmqConfig:
     tracking_settle_delay_s: float
     startup_trim_duration_s: float
     cameras: tuple[CameraSpec, ...]
+    orbbec_cameras: tuple[OrbbecCameraSpec, ...]
     control_rate_hz: float
     publish_rate_hz: float
     status_log_interval_s: float
@@ -197,7 +204,10 @@ class I2RTZmqNode:
         self._leaders = I2RTYamLeaders(config)
         robot = ROBOT_REGISTRY.build(config.robot_name)
         self._fk_solver = robot.build_kinematics(initial_qpos_groups=robot.initial_qpos_by_group())
-        self._cameras = RealSenseCameraCache(config.cameras)
+        self._camera_caches = (
+            RealSenseCameraCache(config.cameras),
+            OrbbecCameraCache(config.orbbec_cameras),
+        )
         self._collection_active = False
         self._hil_active = False
         self._direct_leader_control = config.direct_leader_control
@@ -444,7 +454,7 @@ class I2RTZmqNode:
         action_eef = None if action is None else self._fk(action)
         observation = WireObservation(
             t=time.monotonic(),
-            images=self._cameras.snapshot(),
+            images=self._camera_snapshot(),
             state=state,
             action=action,
             eef=eef,
@@ -479,7 +489,7 @@ class I2RTZmqNode:
             "I2RT status: arms=%s cameras=%s obs=%.1fHz actions=%.1fHz "
             "leader_control=%.1fHz tracking_error_rad=%s tracking_trim_rad=%s",
             self._followers.hardware_status(),
-            self._cameras.hardware_status(),
+            self._camera_status(),
             obs_hz,
             action_hz,
             control_hz,
@@ -575,8 +585,21 @@ class I2RTZmqNode:
         self._leaders.close()
         self._followers.close()
         self._fk_solver.close()
-        self._cameras.close()
+        for camera_cache in self._camera_caches:
+            camera_cache.close()
         self._action_sub.close(linger=0)
+
+    def _camera_snapshot(self) -> dict[str, np.ndarray]:
+        images: dict[str, np.ndarray] = {}
+        for camera_cache in self._camera_caches:
+            images.update(camera_cache.snapshot())
+        return images
+
+    def _camera_status(self) -> dict[str, str]:
+        status: dict[str, str] = {}
+        for camera_cache in self._camera_caches:
+            status.update(camera_cache.hardware_status())
+        return status
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -751,9 +774,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--camera-auto-gain-limit", type=int, default=None)
     parser.add_argument("--camera-warmup-frames", type=int, default=None)
     parser.add_argument(
+        "--orbbec-camera",
+        action="append",
+        default=[],
+        metavar="IMAGE_KEY=SERIAL_OR_INDEX",
+        help="Orbbec mapping, e.g. cam_left_wrist=CV2L...; repeatable.",
+    )
+    parser.add_argument("--orbbec-width", type=int, default=640)
+    parser.add_argument("--orbbec-height", type=int, default=480)
+    parser.add_argument("--orbbec-fps", type=int, default=30)
+    parser.add_argument("--orbbec-color-format", default="MJPG")
+    parser.add_argument("--orbbec-timeout-ms", type=int, default=1000)
+    parser.add_argument("--orbbec-warmup-frames", type=int, default=30)
+    parser.add_argument(
         "--list-cameras",
         action="store_true",
-        help="List connected RealSense devices and exit.",
+        help="List connected RealSense and Orbbec devices and exit.",
     )
     parser.add_argument("--rate", type=float, default=30.0)
     parser.add_argument(
@@ -832,12 +868,31 @@ def build_config(args: argparse.Namespace) -> I2RTZmqConfig:
             dataclasses.replace(camera, warmup_frames=args.camera_warmup_frames)
             for camera in cameras
         )
+    orbbec_cameras = parse_orbbec_camera_specs(
+        args.orbbec_camera,
+        width=args.orbbec_width,
+        height=args.orbbec_height,
+        fps=args.orbbec_fps,
+        color_format=args.orbbec_color_format,
+        timeout_ms=args.orbbec_timeout_ms,
+        warmup_frames=args.orbbec_warmup_frames,
+    )
     invalid_cameras = {
-        camera.image_key for camera in cameras if camera.image_key not in CAMERA_KEYS
+        camera.image_key
+        for camera in cameras + orbbec_cameras
+        if camera.image_key not in CAMERA_KEYS
     }
     if invalid_cameras:
         allowed = ", ".join(CAMERA_KEYS)
         raise ValueError(f"Unknown camera keys: {sorted(invalid_cameras)}; expected {allowed}")
+    duplicate_camera_keys = {camera.image_key for camera in cameras} & {
+        camera.image_key for camera in orbbec_cameras
+    }
+    if duplicate_camera_keys:
+        raise ValueError(
+            "Camera keys cannot use both RealSense and Orbbec backends: "
+            f"{sorted(duplicate_camera_keys)}"
+        )
     if args.camera_auto_exposure_limit_us is not None and args.camera_auto_exposure_limit_us < 0:
         raise ValueError("--camera-auto-exposure-limit-us must be non-negative")
     if args.camera_exposure_us is not None and args.camera_exposure_us <= 0:
@@ -916,6 +971,7 @@ def build_config(args: argparse.Namespace) -> I2RTZmqConfig:
         tracking_settle_delay_s=float(args.tracking_settle_delay),
         startup_trim_duration_s=float(args.startup_trim_duration),
         cameras=cameras,
+        orbbec_cameras=orbbec_cameras,
         control_rate_hz=float(args.control_rate),
         publish_rate_hz=float(args.rate),
         status_log_interval_s=float(args.status_log_interval),
@@ -932,7 +988,12 @@ def main() -> None:
     if args.list_cameras:
         for device in list_realsense_devices():
             print(
+                "RealSense "
                 f"{device['name']} serial={device['serial']} product_line={device['product_line']}"
+            )
+        for device in list_orbbec_devices():
+            print(
+                f"Orbbec {device['name']} serial={device['serial']} usb={device['connection_type']}"
             )
         return
     try:

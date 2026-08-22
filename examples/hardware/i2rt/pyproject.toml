@@ -1,7 +1,7 @@
 [project]
 name = "eva-i2rt-hardware"
 version = "0.1.0"
-description = "Isolated I2RT YAM and RealSense D405 execution layer for EVA Client."
+description = "Isolated I2RT YAM, RealSense, and Orbbec execution layer for EVA Client."
 requires-python = ">=3.11,<3.12"
 dependencies = [
     "addict>=2.4.0",
@@ -11,6 +11,8 @@ dependencies = [
     "jaxls @ git+https://github.com/brentyi/jaxls.git@50a58be88c5ef74532f09e3f55268b4f02c490e3",
     "msgpack==1.1.2",
     "numpy==2.2.6",
+    "opencv-python==4.10.0.84",
+    "pyorbbecsdk2 @ https://github.com/orbbec/pyorbbecsdk/releases/download/v2.1.1/pyorbbecsdk2-2.1.1-cp311-cp311-linux_x86_64.whl",
     "pyrealsense2==2.58.3.10794",
     "pyroki @ git+https://github.com/chungmin99/pyroki.git@388e43e1fc0d0ee382968d3dd72970fd62a0450c",
     "pyzmq==27.1.0",
@@ -25,6 +27,14 @@ environments = [
 # ruckig 0.15.3 still uses the old cmake.targets key and cannot build with
 # scikit-build-core >=0.10. This mirrors the constraint in the official SDK.
 build-constraint-dependencies = ["scikit-build-core<0.10"]
+# The Orbbec wheel includes dependencies used only by its example programs.
+# This node imports the SDK core and OpenCV, and keeps the I2RT SDK's NumPy pin.
+override-dependencies = [
+    "numpy==2.2.6",
+    "av; sys_platform == 'never'",
+    "open3d; sys_platform == 'never'",
+    "pynput; sys_platform == 'never'",
+]
 
 [tool.uv.sources]
 i2rt = { path = "SDK/i2rt", editable = true }
