@@ -56,6 +56,7 @@ LEADER_CANCEL_BUTTON_INDEX = 0
 LEADER_RECORD_BUTTON_INDEX = 1
 LEADER_BUTTON_DEBOUNCE_S = 0.08
 LEADER_CONNECT_RETRY_S = 5.0
+ORBBEC_STARTUP_SETTLE_S = 2.0
 COLLECTION_RECORD_TOGGLE_EVENT = "collection_record_toggle"
 COLLECTION_CANCEL_EVENT = "collection_cancel"
 EEF_DOF = 8
@@ -204,10 +205,8 @@ class I2RTZmqNode:
         self._leaders = I2RTYamLeaders(config)
         robot = ROBOT_REGISTRY.build(config.robot_name)
         self._fk_solver = robot.build_kinematics(initial_qpos_groups=robot.initial_qpos_by_group())
-        self._camera_caches = (
-            RealSenseCameraCache(config.cameras),
-            OrbbecCameraCache(config.orbbec_cameras),
-        )
+        self._camera_caches = (RealSenseCameraCache(config.cameras),)
+        self._orbbec_camera_cache: OrbbecCameraCache | None = None
         self._collection_active = False
         self._hil_active = False
         self._direct_leader_control = config.direct_leader_control
@@ -537,6 +536,15 @@ class I2RTZmqNode:
         if self._config.leader_can_channels:
             self._leaders.move_to_startup_position()
         self._ensure_direct_leader_control()
+        if self._config.orbbec_cameras:
+            logger.info(
+                "Waiting %.1f s for motor control to settle before starting Orbbec cameras",
+                ORBBEC_STARTUP_SETTLE_S,
+            )
+            if self._stop.wait(ORBBEC_STARTUP_SETTLE_S):
+                return
+        self._orbbec_camera_cache = OrbbecCameraCache(self._config.orbbec_cameras)
+        self._camera_caches += (self._orbbec_camera_cache,)
         self._publisher_thread = threading.Thread(
             target=self._publish_loop,
             name="i2rt-observation-publisher",

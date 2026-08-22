@@ -14,7 +14,8 @@ D405_CAMERA_HEIGHT="${D405_CAMERA_HEIGHT:-480}"
 D405_CAMERA_FPS="${D405_CAMERA_FPS:-30}"
 D405_CAMERA_TIMEOUT_MS="${D405_CAMERA_TIMEOUT_MS:-3000}"
 D405_CAMERA_PROFILE="${D405_CAMERA_PROFILE:-$PWD/examples/hardware/i2rt/profiles/d405_workcell.json}"
-D405_ENABLED_CAMERAS="${D405_ENABLED_CAMERAS:-cam_high}"
+D405_ENABLED_CAMERAS="${D405_ENABLED_CAMERAS:-}"
+ORBBEC_CAM_HIGH_SERIAL="${ORBBEC_CAM_HIGH_SERIAL:-CP0HC530000Z}"
 ORBBEC_CAM_LEFT_WRIST_SERIAL="${ORBBEC_CAM_LEFT_WRIST_SERIAL:-CV2L360000CL}"
 ORBBEC_CAM_RIGHT_WRIST_SERIAL="${ORBBEC_CAM_RIGHT_WRIST_SERIAL:-CV2R1610003Z}"
 ORBBEC_CAMERA_WIDTH="${ORBBEC_CAMERA_WIDTH:-640}"
@@ -23,7 +24,14 @@ ORBBEC_CAMERA_FPS="${ORBBEC_CAMERA_FPS:-30}"
 ORBBEC_CAMERA_FORMAT="${ORBBEC_CAMERA_FORMAT:-MJPG}"
 ORBBEC_CAMERA_TIMEOUT_MS="${ORBBEC_CAMERA_TIMEOUT_MS:-1000}"
 ORBBEC_CAMERA_WARMUP_FRAMES="${ORBBEC_CAMERA_WARMUP_FRAMES:-30}"
-ORBBEC_ENABLED_CAMERAS="${ORBBEC_ENABLED_CAMERAS:-cam_left_wrist,cam_right_wrist}"
+ORBBEC_ENABLED_CAMERAS="${ORBBEC_ENABLED_CAMERAS-cam_high,cam_left_wrist,cam_right_wrist}"
+I2RT_CPU_AFFINITY="${I2RT_CPU_AFFINITY-__auto__}"
+if [[ "$I2RT_CPU_AFFINITY" == "__auto__" ]]; then
+  I2RT_CPU_AFFINITY=""
+  if [[ "$(nproc)" -ge 32 ]]; then
+    I2RT_CPU_AFFINITY="0-15"
+  fi
+fi
 
 if [[ ! -x "$PYTHON_BIN" ]]; then
   echo "I2RT environment not found: $VENV_DIR" >&2
@@ -104,6 +112,16 @@ for arg in "$@"; do
     show_help=1
   fi
 done
+
+if [[ "$show_help" == "0" && "$ORBBEC_ENABLED_CAMERAS" == *,* \
+      && -r /sys/module/usbcore/parameters/usbfs_memory_mb ]]; then
+  usbfs_memory_mb="$(</sys/module/usbcore/parameters/usbfs_memory_mb)"
+  if [[ "$usbfs_memory_mb" =~ ^[0-9]+$ && "$usbfs_memory_mb" -lt 256 ]]; then
+    echo "Orbbec multi-camera capture requires usbfs_memory_mb >= 256 (current: $usbfs_memory_mb)." >&2
+    echo "Run: echo 256 | sudo tee /sys/module/usbcore/parameters/usbfs_memory_mb" >&2
+    exit 1
+  fi
+fi
 
 node_args=(
   --obs-endpoint "${OBS_ENDPOINT:-tcp://127.0.0.1:5555}"
@@ -205,6 +223,9 @@ if [[ -n "$ORBBEC_ENABLED_CAMERAS" ]]; then
   IFS=',' read -ra enabled_orbbec_cameras <<< "$ORBBEC_ENABLED_CAMERAS"
   for camera_key in "${enabled_orbbec_cameras[@]}"; do
     case "$camera_key" in
+      cam_high)
+        node_args+=(--orbbec-camera "cam_high=$ORBBEC_CAM_HIGH_SERIAL")
+        ;;
       cam_left_wrist)
         node_args+=(--orbbec-camera "cam_left_wrist=$ORBBEC_CAM_LEFT_WRIST_SERIAL")
         ;;
@@ -229,4 +250,13 @@ node_args+=(
 )
 
 export PYTHONPATH="$PWD/src:$PWD:${PYTHONPATH:-}"
-exec "$PYTHON_BIN" examples/hardware/i2rt/node.py "${node_args[@]}" "$@"
+python_command=("$PYTHON_BIN")
+if [[ -n "$I2RT_CPU_AFFINITY" ]]; then
+  if ! command -v taskset >/dev/null 2>&1; then
+    echo "I2RT_CPU_AFFINITY requires taskset." >&2
+    exit 1
+  fi
+  echo "I2RT CPU affinity: $I2RT_CPU_AFFINITY" >&2
+  python_command=(taskset -c "$I2RT_CPU_AFFINITY" "$PYTHON_BIN")
+fi
+exec "${python_command[@]}" examples/hardware/i2rt/node.py "${node_args[@]}" "$@"

@@ -867,6 +867,7 @@ def test_run_hardware_defaults_to_dual_leaders_and_gripper_calibration(
         "D405_CAMERA_WARMUP_FRAMES",
         "ORBBEC_CAM_LEFT_WRIST_SERIAL",
         "ORBBEC_CAM_RIGHT_WRIST_SERIAL",
+        "ORBBEC_CAM_HIGH_SERIAL",
         "ORBBEC_CAMERA_WIDTH",
         "ORBBEC_CAMERA_HEIGHT",
         "ORBBEC_CAMERA_FPS",
@@ -874,6 +875,7 @@ def test_run_hardware_defaults_to_dual_leaders_and_gripper_calibration(
         "ORBBEC_CAMERA_TIMEOUT_MS",
         "ORBBEC_CAMERA_WARMUP_FRAMES",
         "ORBBEC_ENABLED_CAMERAS",
+        "I2RT_CPU_AFFINITY",
         "I2RT_SIM",
         "ENABLE_I2RT_CAMERAS",
     ):
@@ -912,11 +914,10 @@ def test_run_hardware_defaults_to_dual_leaders_and_gripper_calibration(
     startup_index = args.index("--startup-position")
     assert args[startup_index + 1] == "zero"
     camera_indexes = [index for index, value in enumerate(args) if value == "--camera"]
-    assert [args[index + 1] for index in camera_indexes] == [
-        "cam_high=260422275306",
-    ]
+    assert camera_indexes == []
     orbbec_indexes = [index for index, value in enumerate(args) if value == "--orbbec-camera"]
     assert [args[index + 1] for index in orbbec_indexes] == [
+        "cam_high=CP0HC530000Z",
         "cam_left_wrist=CV2L360000CL",
         "cam_right_wrist=CV2R1610003Z",
     ]
@@ -943,3 +944,13 @@ def test_run_hardware_defaults_to_dual_leaders_and_gripper_calibration(
         "examples/hardware/i2rt/profiles/d405_workcell.json"
     )
     assert not list((root / "examples/hardware/i2rt").glob("run_*leader.sh"))
+
+    env["ORBBEC_ENABLED_CAMERAS"] = ""
+    subprocess.run(
+        ["bash", "examples/hardware/i2rt/run_hardware.sh", "--help"],
+        cwd=root,
+        env=env,
+        check=True,
+    )
+    args = captured_args.read_text().splitlines()
+    assert "--orbbec-camera" not in args
