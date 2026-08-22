@@ -47,8 +47,8 @@ stream:
 bash examples/hardware/i2rt/run_hardware.sh --list-cameras
 ```
 
-The hardware launcher binds all three installed D405 cameras by serial rather
-than relying on USB enumeration order.
+The hardware launcher binds D405 cameras by serial rather than relying on USB
+enumeration order.
 
 If a CAN interface is stuck:
 
@@ -81,19 +81,30 @@ Then launch EVA:
 eva --config configs/01_deploy/i2rt_dual_yam/openpi_qpos.py --web-port 8080
 ```
 
-The verified default D405 mapping is:
+The verified D405 mapping is:
 
 - `cam_high=260422275306`
 - `cam_left_wrist=260422273576`
 - `cam_right_wrist=260322279472`
 
-All three streams default to `640x480` at 30 FPS. Override the mappings with
+The launcher enables all three cameras by default. For single-camera diagnosis,
+set `D405_ENABLED_CAMERAS=cam_high`. Streams default to `640x480` at 30 FPS.
+Override the mappings with
 `D405_CAM_HIGH_SERIAL`, `D405_CAM_LEFT_WRIST_SERIAL`, and
 `D405_CAM_RIGHT_WRIST_SERIAL`; override the stream with `D405_CAMERA_WIDTH`,
 `D405_CAMERA_HEIGHT`, `D405_CAMERA_FPS`, and `D405_CAMERA_TIMEOUT_MS`.
+Every `run_hardware.sh` launch loads
+`profiles/d405_workcell.json`. The profile contains serial-checked settings for
+all three camera roles. It enables automatic exposure, turns on the D405
+exposure/gain limit toggles, caps exposure at 33 ms and gain at 64, and discards
+90 startup frames while exposure converges. Override the profile with
+`D405_CAMERA_PROFILE`; the individual
+`D405_CAMERA_AUTO_EXPOSURE_LIMIT_US`, `D405_CAMERA_AUTO_GAIN_LIMIT`,
+`D405_CAMERA_EXPOSURE_US`, and `D405_CAMERA_WARMUP_FRAMES` variables remain
+available for temporary tuning.
 
 The supplied dual-arm EVA deploy and collection configs enable and record all
-three camera keys. The hardware node always starts all three streams.
+three camera keys.
 
 ## Dual-leader collection and HIL
 

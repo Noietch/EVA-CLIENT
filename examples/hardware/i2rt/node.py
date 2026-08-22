@@ -19,6 +19,7 @@ from examples.hardware.i2rt.camera import (
     CameraSpec,
     RealSenseCameraCache,
     list_realsense_devices,
+    load_camera_profiles,
     parse_camera_specs,
 )
 from examples.hardware.i2rt.robot import (
@@ -167,9 +168,7 @@ def _parse_leader_gripper_endpoints(
             opened_text, closed_text = (part.strip() for part in encoded.split(",", 1))
             opened, closed = float(opened_text), float(closed_text)
         except ValueError as exc:
-            raise ValueError(
-                f"Expected GROUP=OPEN_RAD,CLOSED_RAD, got {value!r}"
-            ) from exc
+            raise ValueError(f"Expected GROUP=OPEN_RAD,CLOSED_RAD, got {value!r}") from exc
         if not np.isfinite([opened, closed]).all() or opened == closed:
             raise ValueError(f"Leader gripper endpoints must be finite and distinct: {value!r}")
         if not all(-2 * np.pi <= endpoint <= 2 * np.pi for endpoint in (opened, closed)):
@@ -733,6 +732,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--camera-fps", type=int, default=None)
     parser.add_argument("--camera-timeout-ms", type=int, default=1000)
     parser.add_argument(
+        "--camera-profile",
+        default=None,
+        help="JSON file containing per-camera D405 exposure profiles.",
+    )
+    parser.add_argument(
+        "--camera-auto-exposure-limit-us",
+        type=int,
+        default=None,
+        help="Maximum D405 auto-exposure time in microseconds; 0 disables the limit.",
+    )
+    parser.add_argument(
+        "--camera-exposure-us",
+        type=int,
+        default=None,
+        help="Fixed D405 exposure time in microseconds; overrides automatic exposure.",
+    )
+    parser.add_argument("--camera-auto-gain-limit", type=int, default=None)
+    parser.add_argument("--camera-warmup-frames", type=int, default=None)
+    parser.add_argument(
         "--list-cameras",
         action="store_true",
         help="List connected RealSense devices and exit.",
@@ -779,19 +797,55 @@ def build_config(args: argparse.Namespace) -> I2RTZmqConfig:
         raise ValueError(
             "--leader-gripper-endpoint must be provided once for each configured leader"
         )
+    camera_profiles = load_camera_profiles(args.camera_profile) if args.camera_profile else None
     cameras = parse_camera_specs(
         args.camera,
         width=args.camera_width,
         height=args.camera_height,
         fps=args.camera_fps,
         timeout_ms=args.camera_timeout_ms,
+        camera_profiles=camera_profiles,
     )
+    if args.camera_auto_exposure_limit_us is not None:
+        cameras = tuple(
+            dataclasses.replace(
+                camera,
+                auto_exposure_limit_us=(
+                    None
+                    if args.camera_auto_exposure_limit_us == 0
+                    else args.camera_auto_exposure_limit_us
+                ),
+            )
+            for camera in cameras
+        )
+    if args.camera_auto_gain_limit is not None:
+        cameras = tuple(
+            dataclasses.replace(camera, auto_gain_limit=args.camera_auto_gain_limit)
+            for camera in cameras
+        )
+    if args.camera_exposure_us is not None:
+        cameras = tuple(
+            dataclasses.replace(camera, exposure_us=args.camera_exposure_us) for camera in cameras
+        )
+    if args.camera_warmup_frames is not None:
+        cameras = tuple(
+            dataclasses.replace(camera, warmup_frames=args.camera_warmup_frames)
+            for camera in cameras
+        )
     invalid_cameras = {
         camera.image_key for camera in cameras if camera.image_key not in CAMERA_KEYS
     }
     if invalid_cameras:
         allowed = ", ".join(CAMERA_KEYS)
         raise ValueError(f"Unknown camera keys: {sorted(invalid_cameras)}; expected {allowed}")
+    if args.camera_auto_exposure_limit_us is not None and args.camera_auto_exposure_limit_us < 0:
+        raise ValueError("--camera-auto-exposure-limit-us must be non-negative")
+    if args.camera_exposure_us is not None and args.camera_exposure_us <= 0:
+        raise ValueError("--camera-exposure-us must be positive")
+    if args.camera_auto_gain_limit is not None and args.camera_auto_gain_limit <= 0:
+        raise ValueError("--camera-auto-gain-limit must be positive")
+    if args.camera_warmup_frames is not None and args.camera_warmup_frames < 0:
+        raise ValueError("--camera-warmup-frames must be non-negative")
     if args.joint4_kp is not None and not 0.0 < args.joint4_kp <= 500.0:
         raise ValueError("--joint4-kp must be in (0, 500]")
     if args.end_effector_mass is not None and not 0.0 <= args.end_effector_mass <= 5.0:
