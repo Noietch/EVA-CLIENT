@@ -1209,9 +1209,7 @@ def run(
         channel_cfg = config.get("control_channel") or {}
         if not channel_cfg.get("enabled", False):
             # Headless with no channel would be uncontrollable — force it on.
-            config.control_channel = ConfigDict(
-                {**dict(channel_cfg), "enabled": True}
-            )
+            config.control_channel = ConfigDict({**dict(channel_cfg), "enabled": True})
         maybe_start_control_channel(config, runtime)
         ch = config.control_channel
         disp_host = "127.0.0.1" if ch.get("host") == "0.0.0.0" else ch.get("host", "127.0.0.1")
@@ -1289,10 +1287,7 @@ def run(
                 and session.status is SessionStatus.RUNNING
             ):
                 running_tick = time.monotonic()
-                if (
-                    last_running_tick is not None
-                    and running_tick - last_running_tick >= 0.1
-                ):
+                if last_running_tick is not None and running_tick - last_running_tick >= 0.1:
                     logger.warning(
                         "[CONTROL_TIMING] stage=main_loop_gap duration_ms=%.1f step=%d",
                         (running_tick - last_running_tick) * 1000.0,

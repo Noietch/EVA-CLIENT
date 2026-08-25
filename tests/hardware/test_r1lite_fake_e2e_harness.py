@@ -59,16 +59,15 @@ def test_rl_browser_harness_covers_episode_switch_and_sync_metrics():
     source = HARNESS_PATH.read_text()
 
     assert (
-        'document.querySelectorAll("#rl-save-tiles .collect-tile.replayable").length >= 2'
-        in source
+        'document.querySelectorAll("#rl-save-tiles .collect-tile.replayable").length >= 2' in source
     )
-    assert '#rl-save-tiles .collect-tile.replayable:nth-of-type(1)' in source
-    assert '#rl-save-tiles .collect-tile.replayable:nth-of-type(2)' in source
-    assert 'window.__evaReplaySync' in source
-    assert 'maxReadyVideos' in source
-    assert 'maxCameraSkewSec' in source
-    assert 'maxUrdfFrameSkew' in source
-    assert 'maxFrameGapMs' in source
+    assert "#rl-save-tiles .collect-tile.replayable:nth-of-type(1)" in source
+    assert "#rl-save-tiles .collect-tile.replayable:nth-of-type(2)" in source
+    assert "window.__evaReplaySync" in source
+    assert "maxReadyVideos" in source
+    assert "maxCameraSkewSec" in source
+    assert "maxUrdfFrameSkew" in source
+    assert "maxFrameGapMs" in source
 
 
 def test_assert_fixed_clock_accepts_exact_grid_and_rejects_jitter():

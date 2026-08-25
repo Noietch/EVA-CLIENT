@@ -192,8 +192,7 @@ def digit_version(version_str: str, length: int = 4):
         if version.pre:
             if version.pre[0] not in mapping:
                 warnings.warn(
-                    f"unknown prerelease version {version.pre[0]}, "
-                    "version checking may go wrong",
+                    f"unknown prerelease version {version.pre[0]}, version checking may go wrong",
                     stacklevel=2,
                 )
             else:
@@ -280,8 +279,7 @@ def get_installed_path(package: str) -> str:
                 # `get_installed_path` cannot get the installed path of
                 # namespace packages
                 raise RuntimeError(
-                    f"{package} is a namespace package, "
-                    "which is invalid for `get_install_path`"
+                    f"{package} is a namespace package, which is invalid for `get_install_path`"
                 )
         else:
             raise PackageNotFoundError(f"Package {package} is not installed")
@@ -292,5 +290,3 @@ def get_installed_path(package: str) -> str:
         return possible_path
     else:
         return osp.join(location, package2module(package))
-
-

@@ -145,7 +145,10 @@ class DualArmChunkSolver:
             if pos_err >= self._position_tolerance:
                 _logger.warning(
                     "%s frame %d tracking pos err %.4f >= tol %.4f",
-                    label, t, pos_err, self._position_tolerance,
+                    label,
+                    t,
+                    pos_err,
+                    self._position_tolerance,
                 )
 
     def solve_chunk(self, chunk: np.ndarray, seed_qpos: np.ndarray | None = None) -> np.ndarray:
@@ -317,7 +320,9 @@ class SingleArmChunkSolver:
                 if pos_err >= self._position_tolerance:
                     _logger.warning(
                         "frame %d tracking pos err %.4f >= tol %.4f",
-                        t, pos_err, self._position_tolerance,
+                        t,
+                        pos_err,
+                        self._position_tolerance,
                     )
             solved = np.concatenate([arm_traj, eef_primary[:, 7:8]], axis=1)
             self._seed_qpos = solved[-1].astype(np.float64).copy()

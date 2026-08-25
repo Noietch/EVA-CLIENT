@@ -84,12 +84,8 @@ class StreamActionBuffer:
             if overlap_len == 1:
                 old_weights = np.ones((1, 1), dtype=np.float32)
             else:
-                old_weights = np.linspace(
-                    1.0, 0.0, overlap_len, dtype=np.float32
-                )[:, np.newaxis]
-            smoothed = old[:overlap_len] * old_weights + new[:overlap_len] * (
-                1.0 - old_weights
-            )
+                old_weights = np.linspace(1.0, 0.0, overlap_len, dtype=np.float32)[:, np.newaxis]
+            smoothed = old[:overlap_len] * old_weights + new[:overlap_len] * (1.0 - old_weights)
             combined = np.concatenate((smoothed, new[overlap_len:]), axis=0)
             prepared_chunk = deque(row.copy() for row in combined)
             with self._lock:

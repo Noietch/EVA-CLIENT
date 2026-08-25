@@ -136,14 +136,22 @@ class DualFranka(Robot):
             vis_config=RobotVisConfig(
                 parts=(
                     VisPart.from_segments(
-                        "left_arm", self.URDF, (0.036395, 0.050681, 0.0508858),
+                        "left_arm",
+                        self.URDF,
+                        (0.036395, 0.050681, 0.0508858),
                         (0.865806672, -0.436878319, 0.022287915, -0.242939065),
-                        0, 8, self.GRIPPER_SEGMENTS,
+                        0,
+                        8,
+                        self.GRIPPER_SEGMENTS,
                     ),
                     VisPart.from_segments(
-                        "right_arm", self.URDF, (0.036395, -0.050681, 0.0508858),
+                        "right_arm",
+                        self.URDF,
+                        (0.036395, -0.050681, 0.0508858),
                         (0.865806672, 0.436878319, 0.022287915, 0.242939065),
-                        8, 8, self.GRIPPER_SEGMENTS,
+                        8,
+                        8,
+                        self.GRIPPER_SEGMENTS,
                     ),
                 )
             ),

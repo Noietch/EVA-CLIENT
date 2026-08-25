@@ -72,9 +72,7 @@ class Ur5eZmqNode:
         self._action_sub.setsockopt(zmq.RCVTIMEO, 0)
         self._robot = Ur5eRobot(config)
         robot = ROBOT_REGISTRY.build("ur5e")
-        self._fk_solver = robot.build_kinematics(
-            initial_qpos_groups=robot.initial_qpos_by_group()
-        )
+        self._fk_solver = robot.build_kinematics(initial_qpos_groups=robot.initial_qpos_by_group())
         self._captures = open_cameras(config.cameras)
         self._collection_active = False
         self._hil_active = False

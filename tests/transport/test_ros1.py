@@ -138,9 +138,7 @@ def test_ros1_hil_relative_relay_reorders_named_input(monkeypatch):
         observation_schema=ObservationSchema(cameras=(), state_composition=("arm",)),
     )
     transport = ros1.Ros1Transport(config, robot)
-    transport._group_state_deques["arm"].append(
-        types.SimpleNamespace(position=[10.0, 20.0])
-    )
+    transport._group_state_deques["arm"].append(types.SimpleNamespace(position=[10.0, 20.0]))
     assert transport.start_hil_control("relative").active is True
     callback = _subscription_callback(fake_rospy, "/hil_input")
 

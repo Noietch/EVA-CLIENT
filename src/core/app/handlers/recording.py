@@ -295,10 +295,7 @@ def mark_rollout_save_ready(runtime: RuntimeState, reason: str) -> None:
         logger_obj.active_frame_count
         + len(runtime.rollout_policy_actions)
         + runtime.rollout_raw_snapshots.qsize()
-        + sum(
-            len(segment.frames)
-            for segment in runtime.rollout_intervention_segments
-        )
+        + sum(len(segment.frames) for segment in runtime.rollout_intervention_segments)
     )
     if buffered_frames <= 0:
         logger_obj.cancel_episode("empty rollout")

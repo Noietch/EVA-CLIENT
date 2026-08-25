@@ -174,5 +174,3 @@ class Gr00tPolicyClient(PolicyClient):
     def reset(self) -> None:
         """Call the server's ``reset`` endpoint to clear its per-episode state."""
         self._call("reset", {"options": None})
-
-

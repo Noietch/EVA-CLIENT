@@ -72,9 +72,7 @@ def _kill(pid: int, sig: int) -> None:
 
 
 @FUNCTIONS.register("ssh_forward")
-def start_ssh_forward(
-    ssh: dict, ports: list[int]
-) -> subprocess.Popen[bytes] | None:
+def start_ssh_forward(ssh: dict, ports: list[int]) -> subprocess.Popen[bytes] | None:
     """Start one multiplexed `ssh -fN -L` forwarding each port 1:1 to remote localhost.
 
     Args:

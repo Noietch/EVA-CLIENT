@@ -8,9 +8,7 @@ def test_quality_issue_status_summary_preserves_codes_and_exact_counts() -> None
         {"severity": "red", "code": "image_skew_exceeded", "detail": f"frame {i}"}
         for i in range(396)
     ]
-    issues.append(
-        {"severity": "red", "code": "frame_count_mismatch", "detail": "camera short"}
-    )
+    issues.append({"severity": "red", "code": "frame_count_mismatch", "detail": "camera short"})
 
     summaries, count = summarize_quality_issues(issues)
 
