@@ -607,9 +607,7 @@ def test_raw_episode_action_column_follows_recording_space(tmp_path):
 
     assert qpos_logger.end_episode()
 
-    qpos_table = pq.read_table(
-        tmp_path / "qpos" / "data" / "chunk-000" / "episode_000000.parquet"
-    )
+    qpos_table = pq.read_table(tmp_path / "qpos" / "data" / "chunk-000" / "episode_000000.parquet")
     assert "action.qpos" in qpos_table.column_names
     assert "action" not in qpos_table.column_names
 
@@ -630,9 +628,7 @@ def test_raw_episode_action_column_follows_recording_space(tmp_path):
 
     assert eef_logger.end_episode()
 
-    eef_table = pq.read_table(
-        tmp_path / "eef" / "data" / "chunk-000" / "episode_000000.parquet"
-    )
+    eef_table = pq.read_table(tmp_path / "eef" / "data" / "chunk-000" / "episode_000000.parquet")
     assert "action.eef" in eef_table.column_names
     np.testing.assert_allclose(eef_table.column("action.eef").to_pylist(), [action_eef] * 2)
 
@@ -671,9 +667,7 @@ def test_raw_episode_video_writer_holds_only_one_decoded_image(tmp_path, monkeyp
     logger = _logger(tmp_path, fps=10, async_save=True)
 
     def snapshot(timestamp: float, value: int) -> RawCollectionSnapshot:
-        image = CollectionRawImage(
-            lambda value=value: np.full((2, 2, 3), value, dtype=np.uint8)
-        )
+        image = CollectionRawImage(lambda value=value: np.full((2, 2, 3), value, dtype=np.uint8))
         raw_images.append(image)
 
         def decode_raw() -> CollectionRawBatch:

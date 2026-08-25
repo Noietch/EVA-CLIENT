@@ -421,9 +421,7 @@ def test_replay_load_resolves_relative_collection_qpos_dataset(tmp_path, monkeyp
     np.testing.assert_allclose(runtime.replay_source.get_scene_qpos(1), state[1])
 
 
-def test_replay_load_reuses_transport_trajectory_without_second_parquet_read(
-    tmp_path, monkeypatch
-):
+def test_replay_load_reuses_transport_trajectory_without_second_parquet_read(tmp_path, monkeypatch):
     dataset_dir = tmp_path / "dataset"
     meta_dir = dataset_dir / "meta"
     data_dir = dataset_dir / "data" / "chunk-000"
@@ -501,9 +499,7 @@ def test_eef_replay_fills_missing_action_gripper_when_mode_is_eef(monkeypatch):
             _ = initial_qpos_groups, dt
             self.chunks = []
 
-        def solve_chunk(
-            self, chunk: np.ndarray, seed_qpos: np.ndarray | None = None
-        ) -> np.ndarray:
+        def solve_chunk(self, chunk: np.ndarray, seed_qpos: np.ndarray | None = None) -> np.ndarray:
             _ = seed_qpos
             self.chunks.append(np.asarray(chunk, dtype=np.float32).copy())
             return np.zeros((1, 7), dtype=np.float32)
@@ -512,14 +508,10 @@ def test_eef_replay_fills_missing_action_gripper_when_mode_is_eef(monkeypatch):
         robot=ROBOT_REGISTRY.build("ur5e"),
         transport=_FakeTransport(),
     )
-    monkeypatch.setattr(
-        runtime.robot, "build_kinematics", lambda **kw: _FakeUr5eSolver(**kw)
-    )
+    monkeypatch.setattr(runtime.robot, "build_kinematics", lambda **kw: _FakeUr5eSolver(**kw))
     runtime.replay_source = cast(
         DatasetTransport,
-        _ReplaySource(
-            np.asarray([[0.1, -0.2, 0.3, -1.0, 0.5, 1.2, 0.75]], dtype=np.float32)
-        ),
+        _ReplaySource(np.asarray([[0.1, -0.2, 0.3, -1.0, 0.5, 1.2, 0.75]], dtype=np.float32)),
     )
     runtime.replay_trajectory = np.asarray(
         [[0.4, 0.5, 0.6, 1.0, 0.0, 0.0, 0.0]],
@@ -549,9 +541,7 @@ def test_eef_replay_with_joint_config_fills_gripper_and_solves_ik(monkeypatch):
             _ = initial_qpos_groups, dt
             self.chunks = []
 
-        def solve_chunk(
-            self, chunk: np.ndarray, seed_qpos: np.ndarray | None = None
-        ) -> np.ndarray:
+        def solve_chunk(self, chunk: np.ndarray, seed_qpos: np.ndarray | None = None) -> np.ndarray:
             _ = seed_qpos
             self.chunks.append(np.asarray(chunk, dtype=np.float32).copy())
             return np.zeros((1, 7), dtype=np.float32)
@@ -560,14 +550,10 @@ def test_eef_replay_with_joint_config_fills_gripper_and_solves_ik(monkeypatch):
         robot=ROBOT_REGISTRY.build("ur5e"),
         transport=_FakeTransport(),
     )
-    monkeypatch.setattr(
-        runtime.robot, "build_kinematics", lambda **kw: _FakeUr5eSolver(**kw)
-    )
+    monkeypatch.setattr(runtime.robot, "build_kinematics", lambda **kw: _FakeUr5eSolver(**kw))
     runtime.replay_source = cast(
         DatasetTransport,
-        _ReplaySource(
-            np.asarray([[0.1, -0.2, 0.3, -1.0, 0.5, 1.2, 0.75]], dtype=np.float32)
-        ),
+        _ReplaySource(np.asarray([[0.1, -0.2, 0.3, -1.0, 0.5, 1.2, 0.75]], dtype=np.float32)),
     )
     runtime.replay_trajectory = np.asarray(
         [[0.4, 0.5, 0.6, 1.0, 0.0, 0.0, 0.0]],

@@ -343,9 +343,7 @@ class Ros1Transport(_RosTransportBase):
         """Create a deque for ``group_name`` and subscribe ``topic`` into it."""
         deque: collections.deque = collections.deque()
         deques[group_name] = deque
-        self._register_subscriber(
-            topic, msg_type, lambda msg, d=deque: self._append_msg(d, msg)
-        )
+        self._register_subscriber(topic, msg_type, lambda msg, d=deque: self._append_msg(d, msg))
 
     def close(self) -> None:
         """Unregister all subscribers and publishers and drop publisher handles."""

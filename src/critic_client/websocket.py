@@ -36,17 +36,13 @@ class WebSocketCriticClient(CriticClient):
         client: tuple[Any, dict] | None = None,
     ) -> None:
         if client is None:
-            self._ws, self._metadata = self._connect(
-                host, port, retry_until_connected, max_retries
-            )
+            self._ws, self._metadata = self._connect(host, port, retry_until_connected, max_retries)
         else:
             self._ws, self._metadata = client
         self._packer = msgpack_numpy.Packer()
 
     @classmethod
-    def from_config(
-        cls, config: ConfigDict, ctx: CriticBuildContext
-    ) -> WebSocketCriticClient:
+    def from_config(cls, config: ConfigDict, ctx: CriticBuildContext) -> WebSocketCriticClient:
         return cls(
             str(config.host),
             int(config.port),

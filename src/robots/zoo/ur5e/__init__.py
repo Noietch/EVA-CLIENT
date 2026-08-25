@@ -35,12 +35,21 @@ class UR5e(Robot):
 
     URDF = Path(__file__).resolve().parent / "assets" / "ur5e_description" / "urdf" / "ur5e.urdf"
     ARM_JOINTS = (
-        "shoulder_pan_joint", "shoulder_lift_joint", "elbow_joint",
-        "wrist_1_joint", "wrist_2_joint", "wrist_3_joint",
+        "shoulder_pan_joint",
+        "shoulder_lift_joint",
+        "elbow_joint",
+        "wrist_1_joint",
+        "wrist_2_joint",
+        "wrist_3_joint",
     )
     INITIAL_QPOS = (
-        -3.3475797812091272, -1.2882714432528992, 1.4286816755877894,
-        1.5116821962543945, 1.6023021936416626, -0.21513206163515264, 1.0,
+        -3.3475797812091272,
+        -1.2882714432528992,
+        1.4286816755877894,
+        1.5116821962543945,
+        1.6023021936416626,
+        -0.21513206163515264,
+        1.0,
     )
 
     def __init__(self) -> None:
@@ -60,7 +69,12 @@ class UR5e(Robot):
             vis_config=RobotVisConfig(
                 parts=(
                     VisPart.from_segments(
-                        "arm", self.URDF, (0.0, 0.0, 0.0), (1.0, 0.0, 0.0, 0.0), 0, 7,
+                        "arm",
+                        self.URDF,
+                        (0.0, 0.0, 0.0),
+                        (1.0, 0.0, 0.0, 0.0),
+                        0,
+                        7,
                         [
                             {"copy": [0, 6]},
                             {

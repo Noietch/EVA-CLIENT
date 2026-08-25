@@ -1,36 +1,36 @@
 """UR5e: openpi policy deploy, EEF-pose action space."""
 
-_base_ = ['_base.py']
+_base_ = ["_base.py"]
 
 policy = dict(
-    type='openpi_rtc',
+    type="openpi_rtc",
     backend_options=dict(latency_k=4),
 )
 
 inference_cfg = dict(
     obs_space=dict(
-        type='EEFPose',
+        type="EEFPose",
         n_arms=1,
-        rotation='quat',
+        rotation="quat",
         include_gripper=True,
     ),
     action_space=dict(
-        type='EEFPose',
+        type="EEFPose",
         n_arms=1,
-        rotation='quat',
+        rotation="quat",
         include_gripper=True,
     ),
     publish_rate=25,
-    debug_tasks=['placeholder task — replace with the real EEF task prompt'],
+    debug_tasks=["placeholder task — replace with the real EEF task prompt"],
 )
 
 inference_strategies = {
-    'async': dict(
+    "async": dict(
         args=dict(
             latency_k=4,
         ),
     ),
-    'rtc': dict(
+    "rtc": dict(
         args=dict(
             latency_k=4,
         ),

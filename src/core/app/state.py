@@ -286,8 +286,8 @@ class RuntimeState:
     rl_pending_critic_observation: dict | None = None
     rl_pending_critic_action: np.ndarray | None = None
     rl_pending_critic_timestamp: float | None = None
-    rl_live_samples: list[tuple[float, np.ndarray, np.ndarray, str, int]] = (
-        dataclasses.field(default_factory=list)
+    rl_live_samples: list[tuple[float, np.ndarray, np.ndarray, str, int]] = dataclasses.field(
+        default_factory=list
     )
     rl_replay_source: DatasetTransport | None = None
     rl_replay_sources: list[DatasetTransport] = dataclasses.field(default_factory=list)
