@@ -218,8 +218,8 @@ def normalize_policy_action_chunk(
     """
     if not resolve_policy_action_mode(config, runtime, response=response).is_eef():
         return action_chunk
-    canonical_eef_chunk = (
-        config.inference_cfg.action_space.normalize_chunk_to_canonical(action_chunk)
+    canonical_eef_chunk = config.inference_cfg.action_space.normalize_chunk_to_canonical(
+        action_chunk
     )
     ik_solver = ensure_ik_solver(config, runtime)
     seed_qpos = runtime.transport.get_latest_qpos()
@@ -295,9 +295,7 @@ def _replay_action_at(config: ConfigDict, runtime: RuntimeState, index: int) -> 
     action_chunk = normalize_action_chunk(raw_action)
     replay_mode = _resolve_replay_action_mode(config, runtime)
     if isinstance(replay_mode, EEFPose):
-        action_chunk = _fill_missing_replay_eef_gripper(
-            runtime, replay_mode, action_chunk, index
-        )
+        action_chunk = _fill_missing_replay_eef_gripper(runtime, replay_mode, action_chunk, index)
         canonical_eef_chunk = replay_mode.normalize_chunk_to_canonical(action_chunk)
         ik_solver = ensure_ik_solver(config, runtime)
         seed_qpos = _replay_qpos_at(runtime, index) if index == 0 else None
@@ -400,9 +398,7 @@ def fetch_action_chunk(
     raise SystemExit(0)
 
 
-def _loop_observation(
-    config: ConfigDict, runtime: RuntimeState, prompt: str
-) -> dict | None:
+def _loop_observation(config: ConfigDict, runtime: RuntimeState, prompt: str) -> dict | None:
     """Build a policy observation from the latest frame; None if none is available."""
     frame = runtime.transport.get_frame()
     if frame is None:
@@ -465,11 +461,7 @@ def run_warmup_and_start(config: ConfigDict, runtime: RuntimeState, session: Ses
 
     warmup_n = max(1, config.inference_cfg.setup_warmup_chunks)
 
-    skip_warmup = (
-        config.eval
-        and config.eval.skip_warmup_after_first
-        and runtime._eval_warmup_done
-    )
+    skip_warmup = config.eval and config.eval.skip_warmup_after_first and runtime._eval_warmup_done
 
     if runtime.infer_strategy is not None:
         runtime.infer_strategy.reset()
@@ -774,6 +766,7 @@ def _build_replay_dataset_config(
     only the dataset-relevant fields so the source decodes the right columns/videos.
     """
     import copy
+
     new_config = copy.deepcopy(config)
     new_config.transport.dataset_dir = dataset_dir
     new_config.transport.episode_id = episode_id

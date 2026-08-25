@@ -1,6 +1,6 @@
 """ARX R5: eval checkpoint sweep."""
 
-_base_ = ['../01_deploy/arx_r5/_base.py']
+_base_ = ["../01_deploy/arx_r5/_base.py"]
 
 eval_cfg = dict(
     storage=dict(
@@ -8,19 +8,19 @@ eval_cfg = dict(
         save_queue_max=15,
     ),
     trials_per_prompt=5,
-    cli_mode='real',
-    inference_strategy='async',
+    cli_mode="real",
+    inference_strategy="async",
     reset_after_each_trial=False,
     skip_warmup_after_first=True,
     checkpoints=[
         dict(
-            name='arx_r5_openpi_modified',
-            config='../01_deploy/arx_r5/openpi_qpos.py',
+            name="arx_r5_openpi_modified",
+            config="../01_deploy/arx_r5/openpi_qpos.py",
             port=9000,
         ),
         dict(
-            name='arx_r5_openpi_baseline',
-            config='../01_deploy/arx_r5/openpi_qpos.py',
+            name="arx_r5_openpi_baseline",
+            config="../01_deploy/arx_r5/openpi_qpos.py",
             port=9000,
         ),
     ],
@@ -37,19 +37,19 @@ eval_cfg = dict(
     # ),
     tasks=[
         dict(
-            prompt_en='pick up the apple',
+            prompt_en="pick up the apple",
             milestones=(
-                ('approach', 'approach the apple'),
-                ('pick', 'pick up the apple'),
-                ('place', 'place the apple into the plate'),
+                ("approach", "approach the apple"),
+                ("pick", "pick up the apple"),
+                ("place", "place the apple into the plate"),
             ),
         ),
         dict(
-            prompt_en='pick up the orange',
+            prompt_en="pick up the orange",
             milestones=(
-                ('approach', 'approach the orange'),
-                ('pick', 'pick up the orange'),
-                ('place', 'place the orange into the plate'),
+                ("approach", "approach the orange"),
+                ("pick", "pick up the orange"),
+                ("place", "place the orange into the plate"),
             ),
         ),
     ],

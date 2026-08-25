@@ -90,9 +90,7 @@ class R1LiteFakeDataset:
                     CollectionRawSample(
                         timestamp,
                         CollectionRawImage(
-                            lambda key=camera_key, index=frame_index: self._camera_frame(
-                                key, index
-                            )
+                            lambda key=camera_key, index=frame_index: self._camera_frame(key, index)
                         ),
                     )
                 ]

@@ -67,12 +67,22 @@ class AgilexPiper(Robot):
             vis_config=RobotVisConfig(
                 parts=(
                     VisPart.from_segments(
-                        "left_arm", self.URDF, (-0.25, 0.0, 0.0), (0.7071068, 0.0, 0.0, 0.7071068),
-                        0, 7, self.GRIPPER_SEGMENTS,
+                        "left_arm",
+                        self.URDF,
+                        (-0.25, 0.0, 0.0),
+                        (0.7071068, 0.0, 0.0, 0.7071068),
+                        0,
+                        7,
+                        self.GRIPPER_SEGMENTS,
                     ),
                     VisPart.from_segments(
-                        "right_arm", self.URDF, (0.25, 0.0, 0.0), (0.7071068, 0.0, 0.0, 0.7071068),
-                        7, 7, self.GRIPPER_SEGMENTS,
+                        "right_arm",
+                        self.URDF,
+                        (0.25, 0.0, 0.0),
+                        (0.7071068, 0.0, 0.0, 0.7071068),
+                        7,
+                        7,
+                        self.GRIPPER_SEGMENTS,
                     ),
                 )
             ),

@@ -59,6 +59,7 @@ logger = logging.getLogger(__name__)
 
 # ===== from lazy.py =====
 
+
 class LazyObject:
     """LazyObject is used to lazily initialize the imported module during
     parsing the configuration file.
@@ -287,6 +288,7 @@ class LazyAttr:
     def __setstate__(self, state: dict[str, Any]) -> None:
         self.__dict__ = state
 
+
 # ===== from fileio_shim.py =====
 
 try:
@@ -335,6 +337,7 @@ def dump(obj: Any, file: str | Path | None = None, file_format: str | None = Non
         else:
             json.dump(obj, f, default=str)
     return None
+
 
 # ===== from config_utils.py =====
 
@@ -673,9 +676,7 @@ class ImportTransformer(ast.NodeTransformer):
                 # case2:
                 # from eva.engine.model import BaseModel
                 # BaseModel = LazyObject('engine.model', 'BaseModel')
-                code = (
-                    f'{alias_node.name} = LazyObject("{module}", "{alias_node.name}", "{self.filename}, line {lineno}")'  # noqa: E501
-                )
+                code = f'{alias_node.name} = LazyObject("{module}", "{alias_node.name}", "{self.filename}, line {lineno}")'  # noqa: E501
                 self.imported_obj.add(alias_node.name)
             try:
                 nodes.append(ast.parse(code).body[0])  # type: ignore
@@ -775,6 +776,7 @@ def _gather_abs_import_lazyobj(tree: ast.Module, filename: str | None = None):
         new_body.insert(0, lazy_module_assign.body[0])
     tree.body = new_body
     return tree, abs_imported
+
 
 # ===== Config + ConfigDict =====
 
@@ -2401,7 +2403,7 @@ class Config:
         )
 
     @staticmethod
-    def diff(cfg1: str  | Config, cfg2: str  | Config) -> str:
+    def diff(cfg1: str | Config, cfg2: str | Config) -> str:
         if isinstance(cfg1, str):
             cfg1 = Config.fromfile(cfg1)
 

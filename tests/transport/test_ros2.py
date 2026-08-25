@@ -461,9 +461,7 @@ def test_ros2_hil_relay_restamps_commands_with_local_clock(monkeypatch):
     transport = ros2.Ros2Transport(config, robot)
     transport.set_hil_relay_enabled(True)
     transport.set_hil_control_mode("relative")
-    transport._group_state_deques["left_arm"].append(
-        _stamped_msg(100, [10, 20, 30, 40, 50, 60])
-    )
+    transport._group_state_deques["left_arm"].append(_stamped_msg(100, [10, 20, 30, 40, 50, 60]))
     callback = _subscription_callback(node, "/eva/hil/input_joint_state_arm_left")
 
     node.clock_stamp = types.SimpleNamespace(sec=100, nanosec=123)
@@ -496,9 +494,7 @@ def test_ros2_collection_action_qpos_subscribes_motion_target_when_hil_enabled(m
     config = load_config(_R1LITE_COLLECTION)
     robot = ROBOT_REGISTRY.build(config.robot.type)
     transport = ros2.Ros2Transport(config, robot)
-    action_callback = _subscription_callback(
-        node, "/motion_target/target_joint_state_arm_left"
-    )
+    action_callback = _subscription_callback(node, "/motion_target/target_joint_state_arm_left")
 
     action_callback(_stamped_msg(2, [1, 2, 3, 4, 5, 6]))
 
@@ -816,9 +812,7 @@ def test_ros2_collection_joint_vector_merges_configured_gripper_topics(monkeypat
     robot = ROBOT_REGISTRY.build(config.robot.type)
     transport = ros2.Ros2Transport(config, robot)
     transport._collection_qpos_deques["left_arm"].append(_stamped_msg(1, [0, 1, 2, 3, 4, 5]))
-    transport._collection_qpos_deques["right_arm"].append(
-        _stamped_msg(1, [10, 11, 12, 13, 14, 15])
-    )
+    transport._collection_qpos_deques["right_arm"].append(_stamped_msg(1, [10, 11, 12, 13, 14, 15]))
     transport._collection_qpos_gripper_deques["left_arm"].append(_stamped_msg(1, [42]))
     transport._collection_qpos_gripper_deques["right_arm"].append(_stamped_msg(1, [43]))
 
@@ -850,9 +844,7 @@ def test_ros2_collection_action_gripper_snaps_to_robot_open_close(monkeypatch):
     config = load_config(_R1LITE_COLLECTION)
     robot = ROBOT_REGISTRY.build(config.robot.type)
     transport = ros2.Ros2Transport(config, robot)
-    transport._collection_action_qpos_deques["left_arm"].append(
-        _stamped_msg(1, [0, 1, 2, 3, 4, 5])
-    )
+    transport._collection_action_qpos_deques["left_arm"].append(_stamped_msg(1, [0, 1, 2, 3, 4, 5]))
     transport._collection_action_qpos_deques["right_arm"].append(
         _stamped_msg(1, [10, 11, 12, 13, 14, 15])
     )
@@ -896,9 +888,7 @@ def test_ros2_collection_raw_batch_merges_gripper_topics(monkeypatch):
     for camera in transport._collection_camera_specs():
         transport._collection_camera_deques[camera.name].append(_compressed_msg(1, b"jpeg"))
     transport._collection_qpos_deques["left_arm"].append(_stamped_msg(1, [0, 1, 2, 3, 4, 5]))
-    transport._collection_qpos_deques["right_arm"].append(
-        _stamped_msg(1, [10, 11, 12, 13, 14, 15])
-    )
+    transport._collection_qpos_deques["right_arm"].append(_stamped_msg(1, [10, 11, 12, 13, 14, 15]))
     transport._collection_qpos_gripper_deques["left_arm"].append(_stamped_msg(1, [42]))
     transport._collection_qpos_gripper_deques["right_arm"].append(_stamped_msg(1, [43]))
 
@@ -1166,9 +1156,7 @@ def test_ros2_collection_raw_action_qpos_is_complete_from_seeded_gripper(monkeyp
     for camera in transport._collection_camera_specs():
         transport._collection_camera_deques[camera.name].append(_compressed_msg(2, b"jpeg"))
     transport._collection_qpos_deques["left_arm"].append(_stamped_msg(2, [0, 1, 2, 3, 4, 5]))
-    transport._collection_qpos_deques["right_arm"].append(
-        _stamped_msg(2, [10, 11, 12, 13, 14, 15])
-    )
+    transport._collection_qpos_deques["right_arm"].append(_stamped_msg(2, [10, 11, 12, 13, 14, 15]))
     transport._collection_action_qpos_deques["left_arm"].append(
         _stamped_msg(2, [20, 21, 22, 23, 24, 25])
     )
@@ -1206,9 +1194,7 @@ def test_ros2_collection_diagnostics_reports_missing_action_gripper(monkeypatch)
     config = load_config(_R1LITE_COLLECTION)
     robot = ROBOT_REGISTRY.build(config.robot.type)
     transport = ros2.Ros2Transport(config, robot)
-    transport._collection_action_qpos_deques["left_arm"].append(
-        _stamped_msg(1, [0, 1, 2, 3, 4, 5])
-    )
+    transport._collection_action_qpos_deques["left_arm"].append(_stamped_msg(1, [0, 1, 2, 3, 4, 5]))
     transport._collection_action_qpos_deques["right_arm"].append(
         _stamped_msg(1, [10, 11, 12, 13, 14, 15])
     )

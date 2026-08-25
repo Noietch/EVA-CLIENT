@@ -118,9 +118,7 @@ class RtcOpenPiPolicyClient(OpenPiPolicyClient):
         retry_until_connected: bool = True,
         client: tuple[websockets.sync.client.ClientConnection, dict] | None = None,
     ) -> None:
-        super().__init__(
-            host, port, retry_until_connected=retry_until_connected, client=client
-        )
+        super().__init__(host, port, retry_until_connected=retry_until_connected, client=client)
         self._latency_k = latency_k
         self._active_response: dict | None = None
         self._lock = threading.Lock()

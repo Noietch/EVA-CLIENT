@@ -87,6 +87,7 @@ def _release_failed_save_payload(job: SaveJob) -> None:
     job.raw_video_samples = None
     job.intervention_segments = []
 
+
 # Observation vector fields (everything except timestamp/images) recorded per collection frame.
 _COLLECTION_VECTOR_FIELDS = (
     "state_qpos",
@@ -415,9 +416,7 @@ class EpisodeLogger:
                 self._raw_episode_batch.vectors.setdefault("state_eef", []).append(
                     CollectionRawSample(timestamp, np.asarray(state_eef, dtype=np.float32).copy())
                 )
-            self._raw_episode_frame_labels.append(
-                RawEpisodeFrameLabel(timestamp, False, -1)
-            )
+            self._raw_episode_frame_labels.append(RawEpisodeFrameLabel(timestamp, False, -1))
             self._extend_raw_episode_time_bounds(
                 self._raw_episode_batch,
                 self._raw_episode_batch.vectors["action_qpos"][-1:],
@@ -657,9 +656,7 @@ class EpisodeLogger:
         raw_snapshots = [
             RawEpisodeSnapshot(
                 snapshot=sample.snapshot,
-                action_qpos=None
-                if sample.action_qpos is None
-                else sample.action_qpos.copy(),
+                action_qpos=None if sample.action_qpos is None else sample.action_qpos.copy(),
                 intervention=sample.intervention,
                 segment_index=sample.segment_index,
             )
@@ -1030,8 +1027,7 @@ class EpisodeLogger:
                 (
                     index
                     for index, interval in enumerate(ranges)
-                    if float(interval["start_time"]) < timestamp
-                    < float(interval["end_time"])
+                    if float(interval["start_time"]) < timestamp < float(interval["end_time"])
                 ),
                 None,
             )
@@ -1454,9 +1450,7 @@ class EpisodeLogger:
             )
             path.parent.mkdir(parents=True, exist_ok=True)
             encoded = [
-                sample.value.encoded
-                if isinstance(sample.value, CollectionRawImage)
-                else None
+                sample.value.encoded if isinstance(sample.value, CollectionRawImage) else None
                 for sample in samples
             ]
             if self._convert_bgr_to_rgb and all(payload is not None for payload in encoded):
@@ -1825,9 +1819,7 @@ class EpisodeLogger:
 
     def _save_job_summary(self, job: SaveJob) -> dict[str, Any]:
         row = job.collection_episode_row or {}
-        quality_issues, quality_issue_count = summarize_quality_issues(
-            row.get("quality_issues")
-        )
+        quality_issues, quality_issue_count = summarize_quality_issues(row.get("quality_issues"))
         payload = job.raw_episode_payload
         pending_length = 0
         if payload is not None:

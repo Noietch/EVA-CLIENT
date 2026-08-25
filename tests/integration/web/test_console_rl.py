@@ -454,9 +454,7 @@ def test_rl_replay_switch_closes_previous_source(console, tmp_path, monkeypatch)
     assert console.runtime.rl_replay_sources == [sources[1]]
 
 
-def test_rl_replay_switch_waits_for_active_critic_frame_builder(
-    console, tmp_path, monkeypatch
-):
+def test_rl_replay_switch_waits_for_active_critic_frame_builder(console, tmp_path, monkeypatch):
     _configure_rl(console, tmp_path)
     console.do("/api/tab_switch", {"tab": "rl"})
     read_started = threading.Event()

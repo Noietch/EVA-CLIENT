@@ -560,8 +560,7 @@ def _serialize_rl(ctx: ConsoleContext) -> dict:
         "inference_strategy": str(rl_cfg.inference_strategy),
         "tasks": [str(task) for task in rl_cfg.tasks],
         "policies": [
-            {"slot": slot, "name": str(model.name)}
-            for slot, model in enumerate(rl_cfg.policies)
+            {"slot": slot, "name": str(model.name)} for slot, model in enumerate(rl_cfg.policies)
         ],
         "critics": [
             {"slot": slot, "name": str(model.name), "type": str(model.type)}
@@ -1804,9 +1803,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         if transform_range is not None:
             start, count = transform_range
         raw = (
-            preview.transforms_blob(ep, start=start, count=count)
-            if (preview and ep >= 0)
-            else None
+            preview.transforms_blob(ep, start=start, count=count) if (preview and ep >= 0) else None
         )
         if raw is None:
             self._send_json(404, {"available": False})
@@ -2350,6 +2347,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         side = str(body.get("side", "") or "")
         arg = f"{action}:{side}" if side in ("l", "r") else action
         self._enqueue_ok(f"web:init_gripper:{arg}")
+
 
 # Exact-path GET routes (prefix routes — camera/assets/meshes — are handled inline in
 # do_GET because they own a path subtree). Values are unbound handler methods.

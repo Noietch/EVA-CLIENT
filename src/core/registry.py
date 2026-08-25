@@ -63,7 +63,6 @@ class Registry(_BaseRegistry, Generic[T]):
         return decorator
 
 
-
 ROBOT_REGISTRY: Registry[Robot] = Registry("robot")
 TRANSPORT_REGISTRY: Registry[TransportBridge] = Registry("transport")
 STRATEGY_REGISTRY: Registry[BaseInferStrategy] = Registry("strategy")

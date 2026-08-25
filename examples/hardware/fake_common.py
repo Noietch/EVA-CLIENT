@@ -167,8 +167,7 @@ class FakeRobotNode:
 
     def _zero_eef_by_group(self) -> dict[str, np.ndarray]:
         return {
-            group.name: np.zeros(_EEF_DOF, dtype=np.float32)
-            for group in self._robot.arm_groups
+            group.name: np.zeros(_EEF_DOF, dtype=np.float32) for group in self._robot.arm_groups
         }
 
     def _read_images(self) -> dict[str, np.ndarray]:
@@ -328,9 +327,7 @@ class FakeRobotNode:
         # recording starts; COLLECT only additionally reports it as action_qpos.
         if self._hil_active:
             if self._hil_mode == "relative":
-                self._qpos = self._hil_robot_anchor + (
-                    self._hil_input - self._hil_input_anchor
-                )
+                self._qpos = self._hil_robot_anchor + (self._hil_input - self._hil_input_anchor)
             else:
                 self._qpos = self._hil_input.copy()
             action_qpos = self._qpos.copy()

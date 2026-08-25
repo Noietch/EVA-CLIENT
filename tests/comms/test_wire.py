@@ -342,9 +342,7 @@ def test_zmq_clear_collection_backlog_drops_raw_queue_and_returns_cutoff(monkeyp
     reader = object.__new__(_ObservationReader)
     reader._zmq = types.SimpleNamespace(NOBLOCK=object(), Again=_Again)
     reader._sub = _Sub()
-    reader._collection_queue = collections.deque(
-        [WireObservation(t=6.0, images={}, state={})]
-    )
+    reader._collection_queue = collections.deque([WireObservation(t=6.0, images={}, state={})])
     reader._raw_collection_queue = collections.deque(
         [pack_observation(WireObservation(t=6.5, images={}, state={}))]
     )
