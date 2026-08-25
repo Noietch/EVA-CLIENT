@@ -146,9 +146,7 @@ class CollectionEpisodeWriter:
             raise ValueError("collection frame missing timestamp or state_qpos")
         with self._state_lock:
             frame_index = len(self._records)
-            images = {
-                key: np.asarray(value) for key, value in frame.images.items()
-            }
+            images = {key: np.asarray(value) for key, value in frame.images.items()}
             vectors = {
                 field: (
                     None
@@ -317,8 +315,7 @@ class CollectionEpisodeWriter:
         self._alignment_report = None
         self._max_capture_time = None
         logger.info(
-            "collection end_episode queued raw=%s raw_snapshots=%d: package=%.1fms "
-            "total=%.1fms",
+            "collection end_episode queued raw=%s raw_snapshots=%d: package=%.1fms total=%.1fms",
             has_raw,
             len(raw_snapshots),
             (package_done - started) * 1000.0,
@@ -413,9 +410,7 @@ class CollectionEpisodeWriter:
                     "alignment_grid_end": self._alignment_report.grid_end,
                     "alignment_image_skew_tolerance_sec": self._image_skew_tolerance_sec(),
                     "alignment_image_max_skew_sec": self._alignment_report.image_max_skew,
-                    "alignment_image_stream_stats": (
-                        self._alignment_report.image_stream_stats
-                    ),
+                    "alignment_image_stream_stats": (self._alignment_report.image_stream_stats),
                 }
             )
         if job.episode_meta:
@@ -442,9 +437,7 @@ class CollectionEpisodeWriter:
     def _alignment_failure_detail(self) -> str:
         issues = []
         if self._alignment_report is not None:
-            issues = [
-                f"{issue.code}: {issue.detail}" for issue in self._alignment_report.issues
-            ]
+            issues = [f"{issue.code}: {issue.detail}" for issue in self._alignment_report.issues]
         issue_text = "; ".join(issues) if issues else "none"
         return (
             "collection episode produced 0 frames; "
@@ -673,9 +666,7 @@ class CollectionEpisodeWriter:
         if not episodes or not stats_rows:
             return None
 
-        stats_by_episode = {
-            int(row["episode_index"]): row.get("stats", {}) for row in stats_rows
-        }
+        stats_by_episode = {int(row["episode_index"]): row.get("stats", {}) for row in stats_rows}
         episode_indices = {int(row["episode_index"]) for row in episodes}
         if set(stats_by_episode) != episode_indices:
             return None
@@ -683,8 +674,7 @@ class CollectionEpisodeWriter:
         stats: dict[str, Any] = {}
         for output_key in self._schema.columns.values():
             combined = self._combine_episode_stats(
-                stats_by_episode[int(row["episode_index"])].get(output_key)
-                for row in episodes
+                stats_by_episode[int(row["episode_index"])].get(output_key) for row in episodes
             )
             if combined is None:
                 return None

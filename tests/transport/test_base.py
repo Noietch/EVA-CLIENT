@@ -195,9 +195,7 @@ def test_acquire_collection_raw_scans_only_messages_after_cursor():
 def test_acquire_collection_raw_blocks_concurrent_deque_append_during_scan():
     image = np.zeros((4, 4, 3), dtype=np.uint8)
     transport = _FakeRosCollectionTransport(image)
-    transport._camera_deques["front"] = deque(
-        [transport._msg(float(i)) for i in range(10)]
-    )
+    transport._camera_deques["front"] = deque([transport._msg(float(i)) for i in range(10)])
     transport._collection_qpos_deques["arm"] = deque(
         [transport._msg(float(i), [float(i), float(i + 1)]) for i in range(10)]
     )
@@ -257,9 +255,7 @@ def test_ros_camera_append_updates_image_min_hz():
     transport._append_camera_msg(
         "front", transport._camera_deques["front"], transport._msg(1.0), 0.0
     )
-    transport._append_camera_msg(
-        "left", transport._camera_deques["left"], transport._msg(1.0), 0.0
-    )
+    transport._append_camera_msg("left", transport._camera_deques["left"], transport._msg(1.0), 0.0)
     transport._append_camera_msg(
         "front", transport._camera_deques["front"], transport._msg(1.1), 0.05
     )

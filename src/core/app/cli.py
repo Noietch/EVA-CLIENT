@@ -150,9 +150,7 @@ def _resolve_task(arg: str, config: ConfigDict) -> str | None:
     return arg
 
 
-def _dispatch(
-    line: str, config: ConfigDict, runtime: RuntimeState, session: SessionState
-) -> None:
+def _dispatch(line: str, config: ConfigDict, runtime: RuntimeState, session: SessionState) -> None:
     """Map one CLI line to a queued command or an inline print."""
     parts = line.split(maxsplit=1)
     verb = parts[0].lower()

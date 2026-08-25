@@ -125,9 +125,7 @@ def main() -> None:
     parts = robot.vis_config.parts
     n_arms = _arm_eef_width(seed_eef.shape[0])
     if len(parts) < n_arms:
-        raise SystemExit(
-            f"{len(parts)} vis parts but solver reports {n_arms} arms; mismatch."
-        )
+        raise SystemExit(f"{len(parts)} vis parts but solver reports {n_arms} arms; mismatch.")
 
     server = viser.ViserServer(port=args.port)
     server.scene.set_up_direction("+z")
@@ -232,9 +230,7 @@ def main() -> None:
             tgt = chunk[:, i * 8 : i * 8 + 7]
             got = fk[:, i * 8 : i * 8 + 7]
             pos_err = np.linalg.norm(tgt[:, :3] - got[:, :3], axis=1)
-            ori_err = np.array(
-                [_quat_angle_deg(tgt[t, 3:7], got[t, 3:7]) for t in range(len(tgt))]
-            )
+            ori_err = np.array([_quat_angle_deg(tgt[t, 3:7], got[t, 3:7]) for t in range(len(tgt))])
             max_pos_mm = max(max_pos_mm, float(pos_err.max() * 1000.0))
             max_ori_deg = max(max_ori_deg, float(ori_err.max()))
             print(

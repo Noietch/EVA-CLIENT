@@ -275,9 +275,7 @@ class Ros2Transport(_RosTransportBase):
             gripper = self._last_group_gripper_commands.get(group.name)
             if gripper is None:
                 gripper = float(state[group.gripper_index])
-            action_parts.append(
-                np.insert(command, group.gripper_index, gripper).astype(np.float32)
-            )
+            action_parts.append(np.insert(command, group.gripper_index, gripper).astype(np.float32))
         state_qpos = np.concatenate(state_parts).astype(np.float32)
         return Observation(
             images={},
@@ -296,9 +294,7 @@ class Ros2Transport(_RosTransportBase):
         self._image_rate.mark(camera_name)
         with self._deque_guard():
             targets = (
-                (live_deque, collection_deque)
-                if self._collection_capture_active
-                else (live_deque,)
+                (live_deque, collection_deque) if self._collection_capture_active else (live_deque,)
             )
             for target in targets:
                 if len(target) >= _COLLECTION_DEQUE_MAX:

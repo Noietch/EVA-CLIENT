@@ -69,8 +69,11 @@ class AgibotKinematicsSolver(PyrokiDualArm):
 
         def make_arm(arm_index: int) -> PyrokiSingleArm:
             return PyrokiSingleArm(
-                urdf, arm_joints[arm_index], eef_links[arm_index],
-                reference_frame=frame_name, fixed_joints=fixed,
+                urdf,
+                arm_joints[arm_index],
+                eef_links[arm_index],
+                reference_frame=frame_name,
+                fixed_joints=fixed,
             )
 
         super().__init__(
@@ -109,10 +112,30 @@ class AgibotG2(Robot):
     RIGHT_GROUP = (*RIGHT_ARM, "idx81_gripper_r_outer_joint1")
     EEF_LINKS = ("gripper_l_center_link", "gripper_r_center_link")
     INITIAL_QPOS = (
-        0.739033, -0.717023, -1.524419, -1.537612, 0.27811, -0.925845, -0.839257, -0.785,
-        -0.739033, -0.717023, 1.524419, -1.537612, -0.27811, -0.925845, 0.839257, -0.785,
-        0.0, 0.0, 0.11464,
-        -0.83423, 1.2172, 0.10025, 0.0, 0.0,
+        0.739033,
+        -0.717023,
+        -1.524419,
+        -1.537612,
+        0.27811,
+        -0.925845,
+        -0.839257,
+        -0.785,
+        -0.739033,
+        -0.717023,
+        1.524419,
+        -1.537612,
+        -0.27811,
+        -0.925845,
+        0.839257,
+        -0.785,
+        0.0,
+        0.0,
+        0.11464,
+        -0.83423,
+        1.2172,
+        0.10025,
+        0.0,
+        0.0,
     )
     # One gripper scalar -> its 8 driven finger joints (visualization only; IK freezes grippers).
     GRIPPER_COUPLING = (1.0, 0.1, 0.25, -0.7, -1.0, 0.1, -0.25, 0.7)

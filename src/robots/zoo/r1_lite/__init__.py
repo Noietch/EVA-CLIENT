@@ -60,8 +60,11 @@ class R1LiteKinematicsSolver(PyrokiDualArm):
     ) -> None:
         def make_arm(arm: int) -> PyrokiSingleArm:
             return PyrokiSingleArm(
-                urdf, arm_joints[arm], eef_links[arm],
-                reference_frame=reference_frame, fixed_joints=fixed_joints,
+                urdf,
+                arm_joints[arm],
+                eef_links[arm],
+                reference_frame=reference_frame,
+                fixed_joints=fixed_joints,
             )
 
         super().__init__(
@@ -79,11 +82,7 @@ class R1Lite(Robot):
     """R1 Lite: dual 6-DoF arm + gripper on a fixed torso, 14-D action."""
 
     URDF = (
-        Path(__file__).resolve().parent
-        / "assets"
-        / "r1lite_description"
-        / "urdf"
-        / "r1lite.urdf"
+        Path(__file__).resolve().parent / "assets" / "r1lite_description" / "urdf" / "r1lite.urdf"
     )
     ARM_JOINTS = {
         0: [f"left_arm_joint{i}" for i in range(1, 7)],
@@ -97,11 +96,11 @@ class R1Lite(Robot):
     SUPPORTED_FRAMES = ("base_link", "torso_link3")
     # 14-D qpos -> 25-D URDF cfg in joint order; whole body as one part.
     VIS_SEGMENTS = [
-        {"fixed": [0, 0, 0, 0, 0, 0]},                # wheels / steer
-        {"fixed": [-0.657, 1.516, 0.845]},           # torso (held fixed)
-        {"copy": [0, 6]},                            # left arm joint1..6
+        {"fixed": [0, 0, 0, 0, 0, 0]},  # wheels / steer
+        {"fixed": [-0.657, 1.516, 0.845]},  # torso (held fixed)
+        {"copy": [0, 6]},  # left arm joint1..6
         {"gripper": 6, "range": [0.0, 100.0], "stroke": 0.035, "fingers": [1, -1]},
-        {"copy": [7, 13]},                           # right arm joint1..6
+        {"copy": [7, 13]},  # right arm joint1..6
         {"gripper": 13, "range": [0.0, 100.0], "stroke": 0.035, "fingers": [1, -1]},
     ]
 
@@ -113,8 +112,7 @@ class R1Lite(Robot):
                 ActuatorGroup("right_arm", 7, self.RIGHT_JOINTS, gripper_index=6),
             ),
             initial_qpos=np.array(
-                [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 100.0,
-                 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 100.0],
+                [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 100.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 100.0],
                 dtype=np.float32,
             ),
             observation_schema=ObservationSchema(
@@ -150,6 +148,10 @@ class R1Lite(Robot):
             allowed = ", ".join(self.SUPPORTED_FRAMES)
             raise ValueError(f"Unsupported R1 Lite reference frame {frame!r}; expected: {allowed}")
         return R1LiteKinematicsSolver(
-            urdf=self.URDF, arm_joints=self.ARM_JOINTS, eef_links=self.EEF_LINKS,
-            fixed_joints=self.FIXED_JOINTS, reference_frame=frame, **kwargs,
+            urdf=self.URDF,
+            arm_joints=self.ARM_JOINTS,
+            eef_links=self.EEF_LINKS,
+            fixed_joints=self.FIXED_JOINTS,
+            reference_frame=frame,
+            **kwargs,
         )

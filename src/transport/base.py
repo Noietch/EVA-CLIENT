@@ -565,9 +565,7 @@ class _RosTransportBase(TransportBridge):
             return None
         return min(self._stamp_to_sec(deque[-1]) for deque in required)
 
-    def _gather_collection_columns(
-        self, frame_time: float
-    ) -> tuple[np.ndarray | None, ...] | None:
+    def _gather_collection_columns(self, frame_time: float) -> tuple[np.ndarray | None, ...] | None:
         """Gather the configured collection column vectors at ``frame_time``.
 
         Returns:
@@ -809,9 +807,7 @@ class _RosTransportBase(TransportBridge):
             for kind, field, source_name, _source, deque in streams:
                 key = f"{kind}:{field}:{source_name}"
                 last_stamp = cursors.get(key)
-                fresh, first_stamp, latest = self._collection_fresh_messages(
-                    deque, last_stamp
-                )
+                fresh, first_stamp, latest = self._collection_fresh_messages(deque, last_stamp)
                 if not fresh:
                     continue
                 new_messages[key] = fresh

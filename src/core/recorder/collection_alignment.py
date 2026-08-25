@@ -107,9 +107,7 @@ def align_collection_samples(
     image_series: dict[str, list[CollectionRawSample]] = {
         key: _sorted_samples(batch.images.get(key, [])) for key in required_images
     }
-    vector_series = {
-        field: _vector_components(batch, field, robot) for field in required_vectors
-    }
+    vector_series = {field: _vector_components(batch, field, robot) for field in required_vectors}
     issues: list[AlignmentIssue] = []
     coverage_starts: list[float] = []
     coverage_ends: list[float] = []
@@ -337,10 +335,7 @@ def _stream_stats(
     count = len(samples)
     start_time = samples[0].timestamp
     end_time = samples[-1].timestamp
-    gaps = [
-        samples[index].timestamp - samples[index - 1].timestamp
-        for index in range(1, count)
-    ]
+    gaps = [samples[index].timestamp - samples[index - 1].timestamp for index in range(1, count)]
     duration = end_time - start_time
     estimated_hz = None
     if count > 1 and duration > 0.0:
@@ -403,9 +398,7 @@ def _vector_components(
         gripper_samples = None
         default_gripper = None
         if field in {"state_qpos", "action_qpos"}:
-            samples, gripper_samples = _split_group_gripper_samples(
-                batch, field, group, samples
-            )
+            samples, gripper_samples = _split_group_gripper_samples(batch, field, group, samples)
             if group.gripper_index is not None:
                 default_gripper = _initial_gripper_value(robot, group)
         components.append(

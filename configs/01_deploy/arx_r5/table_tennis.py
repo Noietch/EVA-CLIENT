@@ -1,12 +1,12 @@
 """ARX R5: table-tennis deploy task preset."""
 
-_base_ = ['openpi_qpos.py']
+_base_ = ["openpi_qpos.py"]
 
 inference_cfg = dict(
     inference_rate=3,
     publish_rate=30,
     debug_tasks=[
-        'play the table tennis',
+        "play the table tennis",
     ],
 )
 

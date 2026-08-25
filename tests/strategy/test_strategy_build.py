@@ -43,9 +43,7 @@ def test_build_sync_basic():
 
 
 def test_build_sync_ignore_gripper_wait_flag():
-    strategy = _build(
-        {"type": "BaseInferStrategy", "args": {"sync_wait_ignore_gripper": True}}
-    )
+    strategy = _build({"type": "BaseInferStrategy", "args": {"sync_wait_ignore_gripper": True}})
     assert strategy.sync_wait_ignore_gripper is True
 
 

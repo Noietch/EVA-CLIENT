@@ -23,13 +23,11 @@ def test_catalog_is_json_ready_and_exposes_rl_templates() -> None:
     entries = control_command_catalog()
     assert all(set(entry) == {"verb", "command", "controls"} for entry in entries)
     assert any(
-        entry["verb"] == "rl_select_critic"
-        and entry["command"] == "web:rl_select_critic:{slot}"
+        entry["verb"] == "rl_select_critic" and entry["command"] == "web:rl_select_critic:{slot}"
         for entry in entries
     )
     assert any(
-        entry["verb"] == "gripper"
-        and entry["command"] == "web:gripper:{side}:{state}:{lock}"
+        entry["verb"] == "gripper" and entry["command"] == "web:gripper:{side}:{state}:{lock}"
         for entry in entries
     )
 

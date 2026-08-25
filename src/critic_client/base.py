@@ -51,9 +51,7 @@ class MockCriticClient(CriticClient):
     """Deterministic scalar critic used by unit tests and offline demos."""
 
     @classmethod
-    def from_config(
-        cls, config: ConfigDict, ctx: CriticBuildContext
-    ) -> MockCriticClient:
+    def from_config(cls, config: ConfigDict, ctx: CriticBuildContext) -> MockCriticClient:
         _ = config, ctx
         return cls()
 

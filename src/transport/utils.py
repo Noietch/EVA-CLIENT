@@ -50,9 +50,7 @@ class ImageRateTracker:
     def mark(self, key: str, timestamp: float | None = None) -> None:
         stamp = time.monotonic() if timestamp is None else float(timestamp)
         with self._lock:
-            stamps = self._stamps.setdefault(
-                key, collections.deque(maxlen=self._sample_limit)
-            )
+            stamps = self._stamps.setdefault(key, collections.deque(maxlen=self._sample_limit))
             if stamps and stamp <= stamps[-1]:
                 return
             stamps.append(stamp)

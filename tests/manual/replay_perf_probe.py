@@ -875,7 +875,7 @@ def summarize(name: str, data: dict[str, Any]) -> dict[str, Any]:
         for marker in (video.get("playing"), video.get("play"))
         if marker is not None
     ]
-    stable_start = (min(play_markers) if play_markers else data.get("playCommand"))
+    stable_start = min(play_markers) if play_markers else data.get("playCommand")
     stable_start = None if stable_start is None else float(stable_start) + 250.0
     stable_waiting = sum(
         sum(1 for row in video["waiting"] if stable_start is not None and row[0] >= stable_start)
@@ -885,6 +885,7 @@ def summarize(name: str, data: dict[str, Any]) -> dict[str, Any]:
         sum(1 for row in video["stalled"] if stable_start is not None and row[0] >= stable_start)
         for video in videos
     )
+
     def percentile(values: list[float], ratio: float) -> float | None:
         if not values:
             return None
@@ -914,14 +915,8 @@ def summarize(name: str, data: dict[str, Any]) -> dict[str, Any]:
         ]
         for v in videos
     }
-    media_p95 = {
-        key: percentile(values, 0.95)
-        for key, values in media_intervals.items()
-    }
-    media_max = {
-        key: max(values) if values else None
-        for key, values in media_intervals.items()
-    }
+    media_p95 = {key: percentile(values, 0.95) for key, values in media_intervals.items()}
+    media_max = {key: max(values) if values else None for key, values in media_intervals.items()}
     long_tasks = [
         float(row.get("duration", 0))
         for row in data.get("longTasks") or []
@@ -960,9 +955,7 @@ def summarize(name: str, data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def capture_measurement(
-    cdp: Cdp, name: str, timeout: float, play_seconds: float
-) -> dict[str, Any]:
+def capture_measurement(cdp: Cdp, name: str, timeout: float, play_seconds: float) -> dict[str, Any]:
     try:
         wait_for(cdp, VIDEOS_VISIBLE_READY_EXPR, timeout)
         if play_seconds > 0:
@@ -1120,9 +1113,7 @@ def main() -> None:
                 target = select_clickable_tile(cdp, "#rollout-save-queue-tiles", i)
                 human_click_target_and_start_probe(cdp, target, f"debug-tile-{i}")
                 summaries.append(
-                    capture_measurement(
-                        cdp, f"debug-{i}", args.visible_timeout, args.play_seconds
-                    )
+                    capture_measurement(cdp, f"debug-{i}", args.visible_timeout, args.play_seconds)
                 )
 
         if args.rl_count > 0:
@@ -1145,16 +1136,12 @@ def main() -> None:
                 wait_for(cdp, ".rv-task .rv-node-head", 5)
                 human_click(cdp, ".rv-task .rv-node-head")
                 wait_for(cdp, RESULT_TRIAL_READY_EXPR, 5)
-                target = select_clickable_tile(
-                    cdp, ".rv-trials", i, ".eval-trial.scored"
-                )
+                target = select_clickable_tile(cdp, ".rv-trials", i, ".eval-trial.scored")
                 human_click_target_and_start_probe(cdp, target, f"result-trial-{i}")
                 wait_for(cdp, RESULT_POP_READY_EXPR, 10)
                 human_click(cdp, "#tp-play")
                 summaries.append(
-                    capture_measurement(
-                        cdp, f"result-{i}", args.visible_timeout, args.play_seconds
-                    )
+                    capture_measurement(cdp, f"result-{i}", args.visible_timeout, args.play_seconds)
                 )
 
         if args.rapid_switches:

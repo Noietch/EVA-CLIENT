@@ -136,7 +136,8 @@ class ManagerMixin(metaclass=ManagerMeta):
             warnings.warn(
                 f"{cls} instance named of {name} has been created, "
                 "the method `get_instance` should not accept any other "
-                "arguments", stacklevel=2
+                "arguments",
+                stacklevel=2,
             )
         # Get latest instantiated instance or root instance.
         _release_lock()
@@ -193,7 +194,9 @@ class ManagerMixin(metaclass=ManagerMeta):
         """
         return self._instance_name
 
+
 # ===== from default_scope.py =====
+
 
 class DefaultScope(ManagerMixin):
     """Scope of current task used to reset the current registry, which can be
@@ -280,7 +283,9 @@ class DefaultScope(ManagerMixin):
             finally:
                 cls._instance_dict = tmp
 
+
 # ===== Registry =====
+
 
 class Registry:
     """A registry to map strings to classes or functions.
@@ -827,9 +832,9 @@ class Registry:
 
         assert isinstance(registry, Registry)
         assert registry.scope is not None
-        assert (
-            registry.scope not in self.children
-        ), f"scope {registry.scope} exists in {self.name} registry"
+        assert registry.scope not in self.children, (
+            f"scope {registry.scope} exists in {self.name} registry"
+        )
         self.children[registry.scope] = registry
 
     def _register_module(
@@ -860,8 +865,7 @@ class Registry:
             if not force and name in self._module_dict:
                 existed_module = self.module_dict[name]
                 raise KeyError(
-                    f"{name} is already registered in {self.name} "
-                    f"at {existed_module.__module__}"
+                    f"{name} is already registered in {self.name} at {existed_module.__module__}"
                 )
             self._module_dict[name] = module
 
@@ -880,7 +884,6 @@ class Registry:
             return obj
 
         return decorator
-
 
     def available(self) -> list[str]:
         """Return the sorted list of registered keys (legacy api)."""
@@ -928,8 +931,7 @@ class Registry:
         # raise the error ahead of time
         if not (name is None or isinstance(name, str) or is_seq_of(name, str)):
             raise TypeError(
-                f"name must be None, an instance of str, or a sequence of str, "
-                f"but got {type(name)}"
+                f"name must be None, an instance of str, or a sequence of str, but got {type(name)}"
             )
 
         # use it as a normal method: x.register_module(module=SomeClass)
@@ -943,6 +945,7 @@ class Registry:
             return module
 
         return _register
+
 
 # ===== from build_functions.py =====
 

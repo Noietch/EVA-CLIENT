@@ -114,9 +114,7 @@ def _solve_frame_jax(
         pk.costs.pose_cost_analytic_jac(
             robot,
             joint_var,
-            jaxlie.SE3.from_rotation_and_translation(
-                jaxlie.SO3(target_wxyz), target_pos
-            ),
+            jaxlie.SE3.from_rotation_and_translation(jaxlie.SO3(target_wxyz), target_pos),
             target_link_index,
             pos_weight=pos_weight,
             ori_weight=ori_weight,
@@ -127,9 +125,7 @@ def _solve_frame_jax(
     ]
 
     @jaxls.Cost.factory(name="limit_velocity")
-    def limit_velocity_cost(
-        vals: jaxls.VarValues, var: jaxls.Var[jax.Array]
-    ) -> jax.Array:
+    def limit_velocity_cost(vals: jaxls.VarValues, var: jaxls.Var[jax.Array]) -> jax.Array:
         joint_vel = (vals[var] - prev_cfg) / dt
         residual = jnp.maximum(0.0, jnp.abs(joint_vel) - robot.joints.velocity_limits)
         return (residual * vel_weight).flatten()
@@ -373,13 +369,16 @@ class PyrokiSingleArm:
                 )
             )
             _logger.info(
-                "ik frame %d/%d solved in %.1f ms", t + 1, n_frames,
+                "ik frame %d/%d solved in %.1f ms",
+                t + 1,
+                n_frames,
                 (time.perf_counter() - t0) * 1e3,
             )
             sol[t] = cfg
             prev_cfg = cfg
         _logger.info(
-            "ik chunk: %d frames in %.1f ms", n_frames,
+            "ik chunk: %d frames in %.1f ms",
+            n_frames,
             (time.perf_counter() - t_start) * 1e3,
         )
         return sol[:, self._arm_cols]
