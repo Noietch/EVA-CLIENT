@@ -16,6 +16,7 @@ import transport.utils as transport_utils
 import transport.zmq as zmq_transport
 from core.config import ConfigDict
 from core.registry import ROBOT_REGISTRY
+from core.types import CollectionRawImage
 from robots.base import Robot
 from transport.utils import ImageRateTracker
 from transport.zmq import (
@@ -23,6 +24,7 @@ from transport.zmq import (
     WireAction,
     WireObservation,
     ZmqTransport,
+    _CollectionImageSpool,
     _ObservationReader,
     pack_action,
     pack_observation,
@@ -41,6 +43,7 @@ def _build_zmq_transport_with_fake_readers(monkeypatch):
             _robot,
             _zmq_mod,
             preserve_collection_backlog=False,
+            conflate=False,
         ) -> None:
             self.frame = None
             self.collection_frame = None
@@ -48,6 +51,7 @@ def _build_zmq_transport_with_fake_readers(monkeypatch):
             self.age = None
             self.calls = []
             self.closed = False
+            self.conflate = conflate
             readers.append(self)
 
         def get_frame(self):
@@ -107,6 +111,49 @@ def _build_zmq_transport_with_fake_readers(monkeypatch):
         readers,
         ctx,
     )
+
+
+def test_observation_reader_enables_conflate_before_connect():
+    operations = []
+
+    class _Socket:
+        def setsockopt(self, option, value):
+            operations.append(("setsockopt", option, value))
+
+        def connect(self, endpoint):
+            operations.append(("connect", endpoint))
+
+    socket = _Socket()
+    fake_zmq = types.SimpleNamespace(
+        SUB=1,
+        CONFLATE=2,
+        SUBSCRIBE=3,
+        RCVTIMEO=4,
+        Context=types.SimpleNamespace(
+            instance=lambda: types.SimpleNamespace(socket=lambda _kind: socket)
+        ),
+    )
+    config = types.SimpleNamespace(
+        transport=types.SimpleNamespace(
+            disabled_cameras=[],
+            disabled_groups=[],
+            sub_endpoint="tcp://127.0.0.1:5555",
+        )
+    )
+
+    _ObservationReader(
+        cast(ConfigDict, config),
+        ROBOT_REGISTRY.build("agilex_piper"),
+        fake_zmq,
+        conflate=True,
+    )
+
+    assert operations == [
+        ("setsockopt", fake_zmq.CONFLATE, 1),
+        ("setsockopt", fake_zmq.SUBSCRIBE, b""),
+        ("setsockopt", fake_zmq.RCVTIMEO, 0),
+        ("connect", config.transport.sub_endpoint),
+    ]
 
 
 def test_observation_roundtrip_preserves_images_state_and_timestamp():
@@ -321,6 +368,123 @@ def test_zmq_raw_collection_reader_keeps_latest_with_bounded_socket_drain():
     assert len(payloads) == 5
 
 
+_PIPER_CAMERA_KEYS = ("cam_high", "cam_left_wrist", "cam_right_wrist")
+
+
+def _build_piper_raw_collection_payloads(robot):
+    state = {group.name: np.zeros(group.dof, dtype=np.float32) for group in robot.actuator_groups}
+    enabled_camera_keys = {camera.observation_key for camera in robot.observation_schema.cameras}
+    assert enabled_camera_keys == set(_PIPER_CAMERA_KEYS)
+    images = {
+        key: np.full((4, 4, 3), index + 1, dtype=np.uint8)
+        for index, key in enumerate(_PIPER_CAMERA_KEYS)
+    }
+    return collections.deque(
+        [
+            pack_observation(
+                WireObservation(
+                    t=1.0,
+                    images=images,
+                    state=state,
+                    action=np.ones(robot.total_action_dim, dtype=np.float32),
+                )
+            ),
+            pack_observation(
+                WireObservation(
+                    t=2.0,
+                    images={},
+                    state=state,
+                    action=np.ones(robot.total_action_dim, dtype=np.float32) * 2,
+                )
+            ),
+        ]
+    )
+
+
+def _build_raw_collection_reader(robot, payloads):
+    class _Again(Exception):
+        pass
+
+    class _Sub:
+        def recv(self, _flags):
+            if not payloads:
+                raise _Again
+            return payloads.popleft()
+
+    reader = object.__new__(_ObservationReader)
+    reader._robot = robot
+    reader._zmq = types.SimpleNamespace(NOBLOCK=object(), Again=_Again)
+    reader._sub = _Sub()
+    reader._raw_collection_queue = collections.deque()
+    reader._freshness = types.SimpleNamespace(mark=lambda: None)  # type: ignore[reportAttributeAccessIssue]
+    reader._lock = threading.Lock()
+    return reader
+
+
+def test_zmq_raw_collection_stream_keeps_newer_state_only_payload():
+    robot = ROBOT_REGISTRY.build("agilex_piper")
+    reader = _build_raw_collection_reader(robot, _build_piper_raw_collection_payloads(robot))
+
+    snapshot = reader.acquire_collection_raw()
+
+    assert snapshot is not None
+    assert snapshot.timestamp == 2.0
+    action = snapshot.decode_raw().vectors["action_qpos"][0].value
+    np.testing.assert_array_equal(action, np.ones(robot.total_action_dim) * 2)
+
+
+def test_zmq_raw_collection_spools_full_resolution_images_off_heap():
+    robot = ROBOT_REGISTRY.build("agilex_piper")
+    shape = (480, 640, 3)
+    images = {
+        key: np.full(shape, 40 + index * 40, dtype=np.uint8)
+        for index, key in enumerate(_PIPER_CAMERA_KEYS)
+    }
+    payloads = collections.deque(
+        [
+            pack_observation(
+                WireObservation(
+                    t=3.0,
+                    images=images,
+                    state={
+                        group.name: np.zeros(group.dof, dtype=np.float32)
+                        for group in robot.actuator_groups
+                    },
+                )
+            )
+        ]
+    )
+    reader = _build_raw_collection_reader(robot, payloads)
+
+    snapshot = reader.acquire_collection_raw()
+
+    assert snapshot is not None
+    batch = snapshot.decode_raw()
+    reader.rotate_collection_image_spool()
+    raw_bytes = sum(image.nbytes for image in images.values())
+    stored_images = [sample.value for samples in batch.images.values() for sample in samples]
+    assert all(isinstance(image, CollectionRawImage) for image in stored_images)
+    assert all(image.encoded is None and image.has_encoded for image in stored_images)
+    assert sum(len(image.load_encoded()) for image in stored_images) < raw_bytes // 20
+    assert all(image._decoded is None for image in stored_images)
+    decoded = stored_images[0].decode()
+    assert decoded.shape == shape
+    assert abs(float(decoded.mean()) - 40.0) < 2.0
+
+
+def test_collection_image_spool_appends_after_interleaved_read():
+    spool = _CollectionImageSpool()
+    first = spool.append(b"first")
+    second = spool.append(b"second")
+
+    assert first.read() == b"first"
+    third = spool.append(b"third")
+
+    assert first.read() == b"first"
+    assert second.read() == b"second"
+    assert third.read() == b"third"
+
+
 def test_zmq_clear_collection_backlog_drops_raw_queue_and_returns_cutoff(monkeypatch):
     monkeypatch.setattr(zmq_transport.time, "monotonic", lambda: 123.0)
     payloads = collections.deque(
@@ -523,6 +687,7 @@ def test_action_default_target_is_real():
 def test_zmq_transport_uses_separate_internal_readers(monkeypatch):
     transport, readers, _ctx = _build_zmq_transport_with_fake_readers(monkeypatch)
 
+    assert [reader.conflate for reader in readers] == [False, True, False]
     readers[0].frame = "frame"
     readers[1].collection_frame = "collection"
     readers[2].qpos = "qpos"
@@ -552,7 +717,8 @@ def test_zmq_transport_reports_freshest_reader_and_closes_all_readers(monkeypatc
     assert ctx.sockets[0].closed
 
 
-def test_zmq_transport_sends_collection_control_actions(monkeypatch):
+@pytest.mark.parametrize("control_source", ["transport", "client"])
+def test_zmq_transport_sends_collection_control_actions(monkeypatch, control_source):
     monkeypatch.setattr(zmq_transport.time, "sleep", lambda _seconds: None)
 
     class _Publisher:
@@ -568,6 +734,9 @@ def test_zmq_transport_sends_collection_control_actions(monkeypatch):
     transport = object.__new__(ZmqTransport)
     transport._pub = _Publisher()
     transport._robot = cast(Robot, _Robot())
+    transport._config = ConfigDict(
+        collection=ConfigDict(teleop=ConfigDict(control_source=control_source))
+    )
 
     transport.start_collection()
     transport.stop_collection()
@@ -577,6 +746,34 @@ def test_zmq_transport_sends_collection_control_actions(monkeypatch):
         + ["collect_stop"] * COLLECTION_CONTROL_REPEATS
     )
     np.testing.assert_allclose(unpack_action(transport._pub.payloads[0]).action, np.zeros(7))
+    assert unpack_action(transport._pub.payloads[0]).mode == control_source
+    assert unpack_action(transport._pub.payloads[-1]).mode is None
+
+
+def test_zmq_transport_policy_collection_uses_client_mode(monkeypatch):
+    monkeypatch.setattr(zmq_transport.time, "sleep", lambda _seconds: None)
+
+    class _Publisher:
+        def __init__(self):
+            self.payloads = []
+
+        def send(self, payload):
+            self.payloads.append(payload)
+
+    class _Robot:
+        total_action_dim = 7
+
+    transport = object.__new__(ZmqTransport)
+    transport._pub = _Publisher()
+    transport._robot = cast(Robot, _Robot())
+    transport._config = ConfigDict(
+        collection=ConfigDict(teleop=ConfigDict(control_source="transport"))
+    )
+
+    transport.start_policy_collection()
+
+    assert len(transport._pub.payloads) == COLLECTION_CONTROL_REPEATS
+    assert all(unpack_action(payload).mode == "client" for payload in transport._pub.payloads)
 
 
 def test_wire_hil_status_and_control_mode_round_trip():

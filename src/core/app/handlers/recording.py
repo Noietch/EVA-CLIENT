@@ -14,6 +14,11 @@ import numpy as np
 
 from core.app.collection_capture import start_collection_capture, stop_collection_capture
 from core.app.handlers.imaging import prepare_image
+from core.app.handlers.teleop import (
+    PublishedTeleopAction,
+    activate_teleop,
+    deactivate_teleop,
+)
 from core.app.handlers.utils import _resolve_runtime_path
 from core.app.rl import record_rl_sample
 from core.app.state import (
@@ -212,6 +217,7 @@ def maybe_build_episode_logger(config: ConfigDict, runtime: RuntimeState) -> Non
         gripper_open=gripper_open,
         gripper_close=gripper_close,
         gripper_threshold=gripper_threshold,
+        eef_reference_frame=config.robot.eef_reference_frame,
     )
 
 
@@ -233,8 +239,8 @@ def rollout_save_log_dir(config: ConfigDict, runtime: RuntimeState | None = None
 
 def maybe_build_rollout_episode_logger(config: ConfigDict, runtime: RuntimeState) -> None:
     """Construct the rollout EpisodeLogger when explicit rollout saving is enabled."""
-    storage = config.rollout.storage
-    if not storage.enabled or runtime.rollout_episode_logger is not None:
+    storage = _rollout_storage(config, runtime)
+    if not bool(storage.get("enabled", True)) or runtime.rollout_episode_logger is not None:
         return
     gripper_open, gripper_close, gripper_threshold = _gripper_recording_config(config)
     runtime.rollout_episode_logger = EpisodeLogger(
@@ -276,7 +282,7 @@ def begin_rollout_save_episode(
     runtime.rollout_exclusions = []
     runtime.rollout_raw_snapshots = queue.Queue()
     runtime.rollout_policy_actions = []
-    runtime.transport.start_collection()
+    runtime.transport.start_policy_collection()
     runtime.transport.clear_collection_backlog()
     logger_obj.start_episode(task=format_task_label(session.selected_task))
     start_collection_capture(
@@ -340,7 +346,9 @@ def save_rollout_episode(runtime: RuntimeState, session: SessionState) -> bool:
         session.last_error = "Stop or reset before saving the rollout"
         return False
     stop_collection_capture(runtime)
-    logger_obj.release_unused_memory()
+    release_memory = getattr(logger_obj, "release_unused_memory", None)
+    if release_memory is not None:
+        release_memory()
     runtime.transport.stop_collection()
     _close_rollout_exclusion(runtime, time.time())
     intervention_ranges = []
@@ -572,8 +580,8 @@ def eval_model_name(config: ConfigDict, runtime: RuntimeState | None) -> str:
 
 
 def eval_episode_dir(output_dir: str, model_name: str) -> Path:
-    """<output_dir>/<model_name>/episodes — the per-model eval lerobot dataset root."""
-    return Path(output_dir) / sanitize_path_component(model_name) / "episodes"
+    """Return the raw per-model eval dataset, isolated from future exports."""
+    return Path(output_dir) / sanitize_path_component(model_name) / "episodes" / "raw"
 
 
 def rebuild_eval_episode_logger(config: ConfigDict, runtime: RuntimeState) -> None:
@@ -852,15 +860,7 @@ def collect_start_teleop(config: ConfigDict, runtime: RuntimeState, session: Ses
 
 def collect_stop_teleop(config: ConfigDict, runtime: RuntimeState, session: SessionState) -> None:
     """Leave collect teleoperation; callers close any active recording episode first."""
-    stop_collection_capture(runtime)
-    runtime.transport.set_hil_relay_enabled(False)
-    runtime.transport.stop_collection()
-    runtime.collection_teleop_active = False
-    runtime.last_collection_timestamp = None
-    if session.mode is SessionMode.COLLECT and session.status is not SessionStatus.RUNNING:
-        session.status = SessionStatus.UNSET
-    logger.info("Collection teleop stopped")
-    _ = config
+    deactivate_teleop(config, runtime, session)
 
 
 def collect_start(config: ConfigDict, runtime: RuntimeState, session: SessionState) -> bool:
@@ -877,18 +877,58 @@ def collect_start(config: ConfigDict, runtime: RuntimeState, session: SessionSta
     runtime.collection_replay_qpos = None
     runtime.collection_replay_episode = None
     if runtime.episode_logger.is_collection_enabled:
-        if not collect_start_teleop(config, runtime, session):
+        if not activate_teleop(config, runtime, session):
             return False
-        collection_min_capture_time = runtime.transport.clear_collection_backlog()
-        runtime.episode_logger.start_episode(
-            task=format_task_label(session.selected_collect_task),
-            collection_min_capture_time=collection_min_capture_time,
-        )
-        start_collection_capture(
-            runtime,
-            fps=config.inference_cfg.publish_rate,
-            max_raw_snapshots_per_tick=COLLECT_STEP_MAX_RAW_SNAPSHOTS,
-        )
+        logger_obj = runtime.episode_logger
+        try:
+            collection_min_capture_time = runtime.transport.clear_collection_backlog()
+            logger_obj.start_episode(
+                task=format_task_label(session.selected_collect_task),
+                collection_min_capture_time=collection_min_capture_time,
+            )
+            control_source = str(
+                (config.collection.teleop or {}).get("control_source", "transport")
+            )
+            if control_source == "transport":
+                start_collection_capture(
+                    runtime,
+                    fps=config.inference_cfg.publish_rate,
+                    max_raw_snapshots_per_tick=COLLECT_STEP_MAX_RAW_SNAPSHOTS,
+                )
+        except Exception as error:
+            # The episode may have been opened before capture startup failed. Cancel it
+            # first, then use the same idempotent teleop shutdown as normal deactivation.
+            cleanup_errors: list[Exception] = []
+            try:
+                episode_active = bool(getattr(logger_obj, "has_active_episode", False))
+            except Exception as active_error:
+                episode_active = False
+                cleanup_errors.append(active_error)
+            if episode_active:
+                try:
+                    logger_obj.cancel_episode("collection start failed")
+                except Exception as cancel_error:
+                    cleanup_errors.append(cancel_error)
+                    logger.error(
+                        "Failed to cancel collection episode after start failure: %s",
+                        cancel_error,
+                        exc_info=True,
+                    )
+            try:
+                # This single path stops capture (if it started), disables the relay,
+                # and stops transport collection. The input worker remains available
+                # for a later ARM command.
+                deactivate_teleop(config, runtime, session)
+            except Exception as deactivate_error:
+                cleanup_errors.append(deactivate_error)
+            message = f"Collection start failed: {error}"
+            if cleanup_errors:
+                message += "; cleanup failed: " + "; ".join(
+                    str(cleanup_error) for cleanup_error in cleanup_errors
+                )
+            session.last_error = message
+            logger.exception("Collection start failed")
+            return False
     else:
         runtime.episode_logger.start_episode(task=format_task_label(session.selected_collect_task))
     session.step_index = 0
@@ -918,6 +958,31 @@ def collect_step(config: ConfigDict, runtime: RuntimeState) -> bool:
         return False
     _fill_record_eef(config, runtime, frame, action)
     runtime.episode_logger.record_step(frame, action)
+    return True
+
+
+def ingest_client_teleop_action(
+    config: ConfigDict,
+    runtime: RuntimeState,
+    published: PublishedTeleopAction,
+) -> bool:
+    """Pair one successfully published client action with at most one raw snapshot.
+
+    The call is intentionally single-shot and non-blocking. When no observation is
+    ready, the control loop keeps running and the action is omitted from the dataset.
+    """
+    del config
+    logger_obj = runtime.episode_logger
+    if (
+        logger_obj is None
+        or not logger_obj.is_collection_enabled
+        or not logger_obj.has_active_episode
+    ):
+        return False
+    snapshot = runtime.transport.acquire_collection_raw()
+    if snapshot is None:
+        return False
+    logger_obj.ingest_collection_action_snapshot(snapshot, published.qpos)
     return True
 
 
@@ -1073,6 +1138,7 @@ __all__ = [
     "collect_stop_teleop",
     "collect_start",
     "collect_step",
+    "ingest_client_teleop_action",
     "collect_stop",
     "collect_cancel",
     "_active_loggers",

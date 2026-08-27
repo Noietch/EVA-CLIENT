@@ -147,6 +147,8 @@ class RuntimeState:
         collection_teleop_armed: True only while the console is on COLLECT with the
             local activation switch on; required before teleop can affect hardware.
         collection_teleop_active: True while a teleop collection run is active.
+        teleop_client: Input-source-neutral client; None for transport-driven collection.
+        teleop_execution: Application-side client execution and safety state.
         last_collection_timestamp: Timestamp of the last recorded collection frame.
         collection_capture_runner: Background raw snapshot capture loop for the
             active collection episode.
@@ -229,6 +231,8 @@ class RuntimeState:
     episode_logger: EpisodeLogger | None = None
     collection_teleop_armed: bool = False
     collection_teleop_active: bool = False
+    teleop_client: Any | None = None
+    teleop_execution: Any | None = None
     last_collection_timestamp: float | None = None
     collection_capture_runner: CollectionCaptureRunner | None = None
     rollout_raw_snapshots: queue.Queue[RawCollectionSnapshot] = dataclasses.field(

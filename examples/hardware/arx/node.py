@@ -68,6 +68,10 @@ from transport.zmq import (  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
+COLLECTION_CONTROL_TRANSPORT = "transport"
+COLLECTION_CONTROL_CLIENT = "client"
+COLLECTION_CONTROL_SOURCES = frozenset({COLLECTION_CONTROL_TRANSPORT, COLLECTION_CONTROL_CLIENT})
+
 
 @dataclasses.dataclass(frozen=True)
 class ArxZmqConfig:
@@ -291,6 +295,7 @@ class ArxZmqNode:
         self._cameras = self._build_camera_cache(config)
         self._teleop_source = ArxTeleopSource(config)
         self._collection_active = False
+        self._collection_control_source = COLLECTION_CONTROL_TRANSPORT
         self._hil_active = False
         self._hil_error = ""
         self._fk_solver: Any = None
@@ -324,12 +329,26 @@ class ArxZmqNode:
     def get_latest_qpos(self) -> np.ndarray:
         return flatten_group_state(self._robot.read_state())
 
-    def start_collection(self) -> None:
+    def start_collection(self, control_source: str = COLLECTION_CONTROL_TRANSPORT) -> None:
+        if control_source not in COLLECTION_CONTROL_SOURCES:
+            raise ValueError(f"Unsupported ARX collection control source: {control_source!r}")
         if self._collection_active:
+            if control_source != self._collection_control_source:
+                logger.warning(
+                    "Ignoring collection control-source change while active: "
+                    "current=%s requested=%s",
+                    self._collection_control_source,
+                    control_source,
+                )
             return
         self._last_published_seqs = {}
+        self._collection_control_source = control_source
         if self._config.passive_collection:
             self._collection_active = True
+            return
+        if control_source == COLLECTION_CONTROL_CLIENT:
+            self._collection_active = True
+            logger.info("ARX collection started with EVA client control")
             return
         try:
             self._teleop_source.connect()
@@ -337,11 +356,13 @@ class ArxZmqNode:
             self._collection_active = True
         except Exception:
             self._collection_active = False
+            self._collection_control_source = COLLECTION_CONTROL_TRANSPORT
             self._teleop_source.disconnect()
             raise
 
     def stop_collection(self) -> None:
         self._collection_active = False
+        self._collection_control_source = COLLECTION_CONTROL_TRANSPORT
         self._teleop_source.disconnect()
 
     def start_hil(self, mode: str) -> None:
@@ -382,7 +403,10 @@ class ArxZmqNode:
                 )
                 continue
             if action.target == COLLECTION_START_TARGET:
-                self.start_collection()
+                try:
+                    self.start_collection(action.mode or COLLECTION_CONTROL_TRANSPORT)
+                except ValueError as exc:
+                    logger.warning("Ignored invalid collection start: %s", exc)
                 continue
             if action.target == COLLECTION_STOP_TARGET:
                 self.stop_collection()
@@ -413,6 +437,9 @@ class ArxZmqNode:
             if self._config.passive_collection:
                 action_qpos = qpos.copy()
                 action_eef = eef_flat.copy()
+            elif self._collection_control_source == COLLECTION_CONTROL_CLIENT:
+                # EVA pairs its published client action with this state/camera snapshot.
+                pass
             else:
                 action_qpos = self._teleop_source.read_action_qpos(qpos)
                 action_eef = self._fk(action_qpos)

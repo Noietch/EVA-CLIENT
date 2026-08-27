@@ -181,14 +181,37 @@ def ensure_ik_solver(config: ConfigDict, runtime: RuntimeState) -> Any:
     """Return the cached IK solver, building it from the robot's kinematics on first use.
 
     Raises RuntimeError when EEF control is requested but the robot provides no
-    kinematics. The solver is seeded from the robot's initial qpos and runs at the
-    configured control dt.
+    kinematics. The solver is seeded from the latest transport state when feedback
+    is available, falling back to the registered initial qpos during startup.
     """
     if runtime.ik_solver is not None:
         return runtime.ik_solver
+
+    seed_groups = runtime.robot.initial_qpos_by_group()
+    try:
+        live_qpos = runtime.transport.get_latest_qpos()
+    except Exception as error:
+        logger.debug("Unable to read live qpos for IK seed; using initial qpos: %s", error)
+    else:
+        if live_qpos is not None:
+            live = np.asarray(live_qpos, dtype=np.float32).reshape(-1)
+            if live.shape == (runtime.robot.total_action_dim,) and np.all(np.isfinite(live)):
+                seed_groups = []
+                offset = 0
+                for group in runtime.robot.actuator_groups:
+                    seed_groups.append(live[offset : offset + group.dof].copy())
+                    offset += group.dof
+                logger.info("Seeding IK solver from live transport qpos")
+            else:
+                logger.warning(
+                    "Ignoring invalid live qpos for IK seed: expected shape (%d,), got %s",
+                    runtime.robot.total_action_dim,
+                    live.shape,
+                )
+
     solver_kwargs: dict[str, object] = {
         "dt": 1.0 / max(config.inference_cfg.publish_rate, 1),
-        "initial_qpos_groups": runtime.robot.initial_qpos_by_group(),
+        "initial_qpos_groups": seed_groups,
     }
     if config.robot.eef_reference_frame in runtime.robot.supported_reference_frames:
         solver_kwargs["reference_frame"] = config.robot.eef_reference_frame

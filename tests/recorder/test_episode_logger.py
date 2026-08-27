@@ -54,6 +54,7 @@ def _logger(
     fps: int = 30,
     async_save: bool = False,
     recording_space: str = "qpos",
+    eval_mode: bool = False,
 ) -> EpisodeLogger:
     return EpisodeLogger(
         log_dir,
@@ -67,7 +68,29 @@ def _logger(
         ),
         async_save=async_save,
         recording_space=recording_space,
+        eval_mode=eval_mode,
     )
+
+
+def test_eval_status_exposes_activity_fields(tmp_path):
+    logger = _logger(tmp_path, eval_mode=True)
+
+    idle = logger.status_snapshot()
+    assert idle["active"] is False
+    assert idle["saving"] is False
+    assert idle["queued_jobs"] == 0
+
+    logger.start_episode("task")
+    active = logger.status_snapshot()
+    assert active["active"] is True
+    assert active["saving"] is False
+    assert active["queued_jobs"] == 0
+
+    logger.cancel_episode("test")
+    cancelled = logger.status_snapshot()
+    assert cancelled["active"] is False
+    assert cancelled["saving"] is False
+    assert cancelled["queued_jobs"] == 0
 
 
 def _rollout_logger(
@@ -99,6 +122,8 @@ def _collection_logger(
     save_image_height: int | None = None,
     save_image_width: int | None = None,
     async_save: bool = False,
+    image_skew_tolerance_sec: float | None = None,
+    tasks: dict[str, list[tuple[str, int]]] | None = None,
 ) -> EpisodeLogger:
     return EpisodeLogger(
         log_dir,
@@ -112,6 +137,8 @@ def _collection_logger(
         ),
         collection=ConfigDict(
             enabled=True,
+            tasks=tasks or {},
+            storage=ConfigDict(image_skew_tolerance_sec=image_skew_tolerance_sec),
             schema=ConfigDict(
                 robot_type="fake_arm",
                 min_episode_frames=1,
@@ -131,8 +158,15 @@ def _collection_logger(
     )
 
 
+def test_collection_image_skew_tolerance_can_be_overridden(tmp_path):
+    logger = _collection_logger(tmp_path, image_skew_tolerance_sec=0.035)
+
+    assert logger._collection_writer is not None
+    assert logger._collection_writer._image_skew_tolerance_sec() == pytest.approx(0.035)
+
+
 def _collection_task_dir(root, task: str = "t"):
-    return root / sanitize_path_component(task)
+    return root / sanitize_path_component(task) / "raw"
 
 
 def _obs(state: np.ndarray, image: np.ndarray | None = None) -> Observation:
@@ -930,6 +964,49 @@ def test_encoded_video_writer_pipes_jpegs_directly_to_ffmpeg(tmp_path, monkeypat
     assert command[command.index("-g") + 1] == "15"
 
 
+def test_encoded_video_writer_streams_disk_backed_jpegs(tmp_path, monkeypatch):
+    written = []
+    loaded = []
+
+    class _Input:
+        def write(self, payload: bytes) -> None:
+            written.append(payload)
+
+        def close(self) -> None:
+            pass
+
+    class _Process:
+        stdin = _Input()
+        stderr = io.BytesIO()
+
+        def wait(self) -> int:
+            return 0
+
+    monkeypatch.setattr(
+        episode_module.subprocess,
+        "Popen",
+        lambda *args, **kwargs: _Process(),
+    )
+    frames = [
+        CollectionRawImage(
+            decoder=lambda: None,
+            encoded_loader=lambda index=index: loaded.append(index) or f"jpeg-{index}".encode(),
+        )
+        for index in range(3)
+    ]
+    logger = _logger(tmp_path, fps=15)
+
+    logger._write_encoded_sample_video(
+        tmp_path / "episode.mp4",
+        frames,
+        15.0,
+        None,
+    )
+
+    assert loaded == [0, 1, 2]
+    assert written == [b"jpeg-0", b"jpeg-1", b"jpeg-2"]
+
+
 def test_collection_raw_end_episode_defers_alignment_and_video_preprocess(tmp_path, monkeypatch):
     logger = _collection_logger(
         tmp_path,
@@ -1305,8 +1382,11 @@ def test_collection_qc_rewrite_is_atomic_for_concurrent_readers(tmp_path, monkey
     assert _read_jsonl(path)[0]["qc_verdict"] == "pass"
 
 
-def test_collection_saves_each_task_in_own_dataset_dir(tmp_path):
-    logger = _collection_logger(tmp_path)
+def test_collection_saves_multiple_prompts_in_one_dataset_set(tmp_path):
+    logger = _collection_logger(
+        tmp_path,
+        tasks={"cup_set": [("pick up cup", 10), ("place cup", -1)]},
+    )
     qpos = np.zeros(_DIM, dtype=np.float32)
     image = np.zeros((8, 8, 3), dtype=np.uint8)
 
@@ -1322,26 +1402,34 @@ def test_collection_saves_each_task_in_own_dataset_dir(tmp_path):
         )
         assert logger.end_episode()
 
-    pick_dir = _collection_task_dir(tmp_path, "pick up cup")
-    place_dir = _collection_task_dir(tmp_path, "place cup")
-    assert pick_dir == tmp_path / "pick_up_cup"
-    assert place_dir == tmp_path / "place_cup"
-    assert (pick_dir / "data" / "chunk-000" / "episode_000000.parquet").exists()
-    assert (place_dir / "data" / "chunk-000" / "episode_000000.parquet").exists()
+    dataset_dir = tmp_path / "cup_set" / "raw"
+    assert (dataset_dir / "data" / "chunk-000" / "episode_000000.parquet").exists()
+    assert (dataset_dir / "data" / "chunk-000" / "episode_000001.parquet").exists()
     assert not (tmp_path / "data" / "chunk-000" / "episode_000000.parquet").exists()
 
-    pick_episode = _read_jsonl(pick_dir / "meta" / "episodes.jsonl")[0]
-    place_episode = _read_jsonl(place_dir / "meta" / "episodes.jsonl")[0]
+    pick_episode, place_episode = _read_jsonl(dataset_dir / "meta" / "episodes.jsonl")
     assert pick_episode["tasks"] == ["pick up cup"]
     assert place_episode["tasks"] == ["place cup"]
-    assert logger.status_snapshot("pick up cup")["dataset_dir"] == str(pick_dir)
+    assert _read_jsonl(dataset_dir / "meta" / "tasks.jsonl") == [
+        {"task_index": 0, "task": "pick up cup", "required_episodes": 10},
+        {"task_index": 1, "task": "place cup", "required_episodes": -1},
+    ]
+    first_table = pq.read_table(dataset_dir / "data" / "chunk-000" / "episode_000000.parquet")
+    second_table = pq.read_table(dataset_dir / "data" / "chunk-000" / "episode_000001.parquet")
+    assert set(first_table["task_index"].to_pylist()) == {0}
+    assert set(second_table["task_index"].to_pylist()) == {1}
+    assert logger.status_snapshot("pick up cup")["dataset_dir"] == str(dataset_dir)
     assert logger.status_snapshot("pick up cup")["episodes"][0]["episode_index"] == 0
-    assert logger.status_snapshot("place cup")["dataset_dir"] == str(place_dir)
-    assert logger.status_snapshot("place cup")["episodes"][0]["episode_index"] == 0
+    assert logger.status_snapshot("place cup")["dataset_dir"] == str(dataset_dir)
+    assert logger.status_snapshot("place cup")["episodes"][1]["episode_index"] == 1
 
 
-def test_collection_status_queue_is_scoped_to_selected_task_dir(tmp_path, monkeypatch):
-    logger = _collection_logger(tmp_path, async_save=True)
+def test_collection_status_queue_is_shared_by_prompts_in_one_set(tmp_path, monkeypatch):
+    logger = _collection_logger(
+        tmp_path,
+        async_save=True,
+        tasks={"cup_set": [("pick up cup", 10), ("place cup", -1)]},
+    )
     monkeypatch.setattr(logger, "_start_save_worker", lambda: None)
     qpos = np.zeros(_DIM, dtype=np.float32)
     image = np.zeros((8, 8, 3), dtype=np.uint8)
@@ -1353,10 +1441,10 @@ def test_collection_status_queue_is_scoped_to_selected_task_dir(tmp_path, monkey
 
     pick_status = logger.status_snapshot("pick up cup")
     place_status = logger.status_snapshot("place cup")
-    assert pick_status["dataset_dir"] == str(_collection_task_dir(tmp_path, "pick up cup"))
-    assert place_status["dataset_dir"] == str(_collection_task_dir(tmp_path, "place cup"))
-    assert [item["episode_index"] for item in pick_status["queue"]] == [0]
-    assert [item["episode_index"] for item in place_status["queue"]] == [0]
+    assert pick_status["dataset_dir"] == str(tmp_path / "cup_set" / "raw")
+    assert place_status["dataset_dir"] == str(tmp_path / "cup_set" / "raw")
+    assert [item["episode_index"] for item in pick_status["queue"]] == [0, 1]
+    assert [item["episode_index"] for item in place_status["queue"]] == [0, 1]
     assert pick_status["episodes"] == []
     assert place_status["episodes"] == []
 

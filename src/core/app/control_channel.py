@@ -61,7 +61,7 @@ def _handle_command(runtime: RuntimeState, message: dict) -> dict:
     Two verbs need the console-context mutations the HTTP layer applies before
     enqueueing (they don't reach through the queue otherwise):
       - select_collect_task: sets session.selected_collect_task (no enqueue).
-      - tab_switch: when entering COLLECT, arms teleop via runtime fields.
+      - tab_switch: updates the active Console tab.
     Everything else is a straight passthrough onto command_queue.
     """
     command = str(message.get("cmd", "")).strip()
@@ -83,18 +83,13 @@ def _handle_command(runtime: RuntimeState, message: dict) -> dict:
         ctx.session.selected_collect_task = task
         return {"ok": True, "selected_collect_task": task}
 
-    # tab_switch into COLLECT: arm teleop the same way _post_tab_switch does, so a
-    # later collect_start passes its ctx.active_tab + collection_teleop_armed gate.
     if verb == "tab_switch":
         tab = arg or "debug"
-        armed = tab == "collect" and bool(message.get("armed", False))
         ctx.active_tab = tab
-        runtime.collection_teleop_armed = armed
         ctx.session.last_error = ""
-        command_tab = "collect" if armed else ("debug" if tab == "collect" else tab)
         assert runtime.command_queue is not None
-        runtime.command_queue.put(f"web:tab_switch:{command_tab}")
-        return {"ok": True, "tab": tab, "armed": armed}
+        runtime.command_queue.put(f"web:tab_switch:{tab}")
+        return {"ok": True, "tab": tab}
 
     assert runtime.command_queue is not None
     runtime.command_queue.put(command)
