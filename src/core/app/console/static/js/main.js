@@ -3,10 +3,11 @@
 import { $, LIVE, S, apiGet, apiPost, setCommandMetadata } from "./core.js";
 import { closeChartModal, drawLiveCharts, liveDimsAll, onScrubInput, openChartModal, resetLiveSeries } from "./charts.js";
 import { applyTune, applyManualTune, renderConfig, manualConnect, manualDisconnect, manualDispatchToggle, enterManualSim, applyStatus, pauseSetup, replayIsLocalMode, resumeSetup, retrySetup, startRunFromDebug, updateGuide } from "./run.js";
-import { collectConfigured, renderCollect, renderRolloutSave, returnReviewToLive, startCollectFromTab, saveAnnotation, submitEpisodeNote, submitEpisodeQc, submitQc, clearReviewPlayback, reviewActiveInCurrentTab } from "./collect.js";
-import { evalEnabled, evalReset, evalSetup, evalRunToggle, evalResumeOnEnter, submitEvalScore, loadEvalResults, renderEvalSelectors, loadResultsAll, tpSeek, tpToggle, trialPopClose } from "./eval.js";
+import { collectConfigured, exportCollectionQuality, installCollectKeyboardControls, renderCollect, renderRolloutSave, returnReviewToLive, startCollectFromTab, saveAnnotation, submitEpisodeNote, submitEpisodeQc, submitQc, uploadCollectionQuality, clearReviewPlayback, reviewActiveInCurrentTab } from "./collect.js";
+import { evalReset, evalSetup, evalRunToggle, evalResumeOnEnter, submitEvalScore, loadEvalResults, renderEvalSelectors, loadResultsAll, tpSeek, tpToggle, trialPopClose } from "./eval.js";
 import { replayPlay, replayStop, replayToggle, seekReplay, loop, pollFrame, pollScene, refreshCameraStreams, exitReplayMode } from "./replay.js";
 import { pollRlSeries, renderRlConfig, renderRlStatus } from "./rl.js";
+import { initDashboard, loadDashboard } from "./dashboard.js";
 
 const FIXED_COMMANDS = {
   "b-run": "web:run",
@@ -29,6 +30,7 @@ const FIXED_COMMANDS = {
   "bm-home": "web:manual_home",
   "b-collect-toggle": "web:operator_action:{intent}:ui",
   "b-collect-cancel": "web:collect_cancel",
+  "b-collect-home": "web:collect_home",
   "rl-b-setup": "web:rl_setup",
   "rl-b-run": "web:run",
   "rl-b-reset": "web:console_reset",
@@ -73,7 +75,7 @@ function relocateCanvas(tab) {
     // DEBUG view so its single WebGL context stays alive. EVAL and RL host the same
     // live stage in their dedicated right columns.
     let host;
-    if (tab === "result") host = $("view-debug");
+    if (tab === "result" || tab === "dashboard") host = $("view-debug");
     else if (tab === "eval") host = $("eval-replay-col");
     else if (tab === "rl") host = $("rl-stage-col");
     else host = $("view-" + tab);
@@ -160,6 +162,7 @@ function setActiveTab(tab) {
     // control column. REPLAY has its own control view and only reuses the WebGL canvas.
     const viewTab = tab === "collect" ? "debug" : tab;
     $("view-" + viewTab).classList.add("active");
+    $("guidebar").style.display = tab === "dashboard" ? "none" : "";
     if (viewTab === "debug") {
       $("view-debug").classList.toggle("collect-mode", tab === "collect");
     }
@@ -181,6 +184,7 @@ function setActiveTab(tab) {
     if (tab === "rl") renderRlConfig();
     if (tab === "eval") { renderEvalSelectors(); loadEvalResults().then(evalResumeOnEnter); }
     if (tab === "result") { loadResultsAll(); }
+    if (tab === "dashboard") { loadDashboard(true); }
     updateGuide();
     renderCollect();
   }
@@ -194,6 +198,8 @@ Object.assign(window, { tpToggle, tpSeek, trialPopClose, replayToggle });
 
 async function boot() {
     S.CFG = await apiGet("/api/config");
+    initDashboard();
+    installCollectKeyboardControls();
     renderConfig();
     // EVAL/RESULT use inline onclick handlers; expose them.
     window.tpToggle = tpToggle; window.tpSeek = tpSeek;
@@ -207,9 +213,11 @@ async function boot() {
     if (!(S.CFG.rl && S.CFG.rl.enabled)) {
       document.querySelector('.tab[data-tab="rl"]').classList.add("disabled");
     }
-    // An eval config opens straight on the EVAL tab. Without one the console still boots on
-    // DEBUG, but EVAL/RESULT stay reachable as a read-only viewer over recorded results.
-    if (evalEnabled()) { setActiveTab("eval"); }
+    // The backend context starts on the same configured workspace.
+    const initialTab = S.CFG.initial_tab || "debug";
+    if (initialTab !== S.ACTIVE_TAB) {
+      setActiveTab(initialTab);
+    }
     annotateFixedCommands();
     // stage scrub bar + per-chart ALL toggles
     $("scrub-range").addEventListener("input", (e) => onScrubInput(e.target.value));
@@ -258,10 +266,7 @@ document.querySelectorAll(".tab").forEach((t) => {
       // Soft reset on every tab switch. COLLECT teleop is armed only after the
       // local motion gate is switched on; START RECORD still controls recording.
       if (tab !== "collect") disarmCollectArm();
-      apiPost("/api/tab_switch", {
-        tab,
-        collect_teleop_armed: tab === "collect" && S.collectArmEnabled,
-      });
+      apiPost("/api/tab_switch", { tab });
       // Leaving MANUAL: drop both the SIM-debug flag and any real-robot link so
       // re-entering starts fresh (SIM debug auto-arms, REAL needs CONNECT again).
       S.manualActive = false;
@@ -338,19 +343,27 @@ $("collect-arm-enable").onchange = () => {
     if (!enabled) S.collectToggleBusy = null;
     renderCollect();
     updateGuide();
-    apiPost("/api/tab_switch", {
-      tab: S.ACTIVE_TAB,
-      collect_teleop_armed: S.ACTIVE_TAB === "collect" && S.collectArmEnabled,
-    });
+    apiPost("/api/collect_arm", { enabled: S.collectArmEnabled });
   };
 $("b-collect-cancel").onclick = () => {
     S.collectQueueEnabled = false;
     renderCollect();
     return apiPost("/api/operator_action", { intent: "cancel" });
   };
+$("b-collect-home").onclick = () => {
+    if (S.collectHomeBusy) return;
+    S.collectHomeBusy = true;
+    renderCollect();
+    return apiPost("/api/collect_home").catch(() => {
+      S.collectHomeBusy = false;
+      renderCollect();
+    });
+  };
 $("b-collect-qc-pass").onclick = () => submitEpisodeQc("collect", "pass");
 $("b-goto-qc").onclick = () => submitEpisodeQc("collect", "fail");
 $("b-collect-note-save").onclick = () => submitEpisodeNote("collect");
+$("b-collect-quality-export").onclick = exportCollectionQuality;
+$("b-collect-quality-upload").onclick = uploadCollectionQuality;
 $("review-return-live").onclick = returnReviewToLive;
 $("replay-b-qc-pass").onclick = () => submitQc("pass");
 $("replay-b-qc-fail").onclick = () => submitQc("fail");

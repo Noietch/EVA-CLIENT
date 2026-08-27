@@ -2,13 +2,318 @@
 // stage-video playback control (review).
 import { $, LIVE, S, apiGet, apiPost, clientTrace } from "./core.js";
 import { updateScrub } from "./charts.js";
-import { collectTaskValue, setPanel, applyStatus, uiMode } from "./run.js";
+import { collectTaskTarget, collectTaskValue, setPanel, applyStatus, uiMode } from "./run.js";
 import {
   exitReplayMode, loadReviewPlayback, refreshCameraStreams, replayStop,
 } from "./replay.js";
 import { setActiveTab } from "./main.js";
 
 // ===== collect =====
+
+const qualityTransfer = {
+  phase: "idle",
+  exporting: false,
+  exportJobId: "",
+  exportState: "idle",
+  episodesCompleted: 0,
+  episodesTotal: 0,
+  uploading: false,
+  acceptedDir: "",
+  uploadJobId: "",
+  uploadState: "idle",
+  filesCompleted: 0,
+  filesTotal: 0,
+  bytesCompleted: 0,
+  bytesTotal: 0,
+};
+
+function formatTransferBytes(value) {
+    const bytes = Math.max(0, Number(value) || 0);
+    if (bytes < 1024) return `${Math.round(bytes)} B`;
+    const units = ["KiB", "MiB", "GiB", "TiB"];
+    let scaled = bytes / 1024;
+    let unit = units[0];
+    for (let index = 1; index < units.length && scaled >= 1024; index += 1) {
+      scaled /= 1024;
+      unit = units[index];
+    }
+    return `${scaled.toFixed(scaled >= 10 ? 1 : 2)} ${unit}`;
+  }
+
+const keyboardControlState = {
+  active: new Map(),
+  pressed: new Set(),
+  holdProgress: {},
+  animationFrame: null,
+  installed: false,
+};
+
+function collectControlsConfig() {
+  return (S.CFG && S.CFG.collection && S.CFG.collection.controls) || {
+    mode: "keyboard", bindings: {}, groups: [],
+  };
+}
+
+function controlBinding(action) {
+  return (collectControlsConfig().bindings || {})[action] || null;
+}
+
+function createSvgElement(name, attributes = {}) {
+  const node = document.createElementNS("http://www.w3.org/2000/svg", name);
+  Object.entries(attributes).forEach(([key, value]) => node.setAttribute(key, String(value)));
+  return node;
+}
+
+let controlHintSvgId = 0;
+
+function buildControlHint(host, binding) {
+  host.replaceChildren();
+  if (!binding) {
+    host.hidden = true;
+    delete host.dataset.binding;
+    return;
+  }
+  const mode = collectControlsConfig().mode === "vr" ? "gamepad" : "keyboard";
+  const key = String(binding.key || "?").toUpperCase();
+  const signature = `${mode}:${key}:${binding.gesture || "tap"}`;
+  host.hidden = false;
+  host.dataset.binding = signature;
+  host.dataset.key = mode === "gamepad" ? key : "";
+  host.dataset.gesture = String(binding.gesture || "tap");
+  host.className = `control-hint ${mode}`;
+  host.setAttribute("aria-label", `${key} ${String(binding.gesture || "tap")}`);
+
+  const keycap = document.createElement("span");
+  keycap.className = "control-keycap";
+  const wide = key.length > 1;
+  const circular = mode === "gamepad" && !wide;
+  const svg = createSvgElement("svg", {
+    viewBox: wide ? "0 0 52 32" : "0 0 32 32",
+    "aria-hidden": "true",
+  });
+  controlHintSvgId += 1;
+  const clipId = `control-key-clip-${controlHintSvgId}`;
+  const defs = createSvgElement("defs");
+  const clip = createSvgElement("clipPath", { id: clipId });
+  const shapeName = circular ? "circle" : "rect";
+  const shape = circular
+    ? { cx: 16, cy: 16, r: 13 }
+    : { x: 2, y: 2, width: wide ? 48 : 28, height: 28, rx: 5 };
+  clip.appendChild(createSvgElement(shapeName, shape));
+  defs.appendChild(clip);
+  svg.appendChild(defs);
+  svg.appendChild(createSvgElement(shapeName, {
+    class: "control-key-track", ...shape, pathLength: 100,
+  }));
+  svg.appendChild(createSvgElement("rect", {
+    class: "control-key-fill", x: 2, y: 2,
+    width: wide ? 48 : 28, height: 28,
+    "clip-path": `url(#${clipId})`,
+  }));
+  svg.appendChild(createSvgElement(shapeName, {
+    class: "control-key-progress", ...shape, pathLength: 100,
+  }));
+  const label = document.createElement("span");
+  label.className = "control-key-label";
+  label.dataset.label = key;
+  label.textContent = key;
+  keycap.classList.toggle("wide", wide);
+  keycap.append(svg, label);
+
+  const gesture = document.createElement("span");
+  gesture.className = "control-gesture";
+  gesture.textContent = String(binding.gesture || "tap").toUpperCase();
+  host.append(keycap, gesture);
+}
+
+function controlFeedback() {
+  if (collectControlsConfig().mode !== "vr") {
+    return {
+      pressed: keyboardControlState.pressed,
+      holdProgress: keyboardControlState.holdProgress,
+    };
+  }
+  const teleop = (S.STATUS && S.STATUS.teleop) || {};
+  return {
+    pressed: new Set(teleop.pressed_controls || []),
+    holdProgress: teleop.hold_progress || {},
+  };
+}
+
+function updateControlHint(host, binding, feedback) {
+  if (!host) return;
+  if (!binding) {
+    if (!host.hidden) buildControlHint(host, null);
+    return;
+  }
+  const mode = collectControlsConfig().mode === "vr" ? "gamepad" : "keyboard";
+  const signature = `${mode}:${String(binding.key || "?").toUpperCase()}:${binding.gesture || "tap"}`;
+  if (host.dataset.binding !== signature) buildControlHint(host, binding);
+  const control = String(binding.control || "");
+  const pressed = feedback.pressed.has(control);
+  const progress = binding.gesture === "hold"
+    ? Math.max(0, Math.min(1, Number(feedback.holdProgress[control] || 0)))
+    : 0;
+  host.classList.toggle("pressed", pressed);
+  host.classList.toggle("holding", pressed && progress > 0);
+  host.classList.toggle("complete", pressed && progress >= 1);
+  host.style.setProperty("--control-progress", String(progress * 100));
+  host.style.setProperty("--control-fill-width", `${progress * 100}%`);
+  const gesture = host.querySelector(".control-gesture");
+  if (gesture) {
+    gesture.textContent = pressed && binding.gesture === "hold"
+      ? `${Math.round(progress * 100)}%`
+      : String(binding.gesture || "tap").toUpperCase();
+  }
+}
+
+function buildControlGroups(groups) {
+  const host = $("collect-control-groups");
+  if (!host) return;
+  const signature = JSON.stringify(groups);
+  if (host.dataset.groups === signature) return;
+  host.dataset.groups = signature;
+  host.replaceChildren();
+  groups.forEach((group) => {
+    const row = document.createElement("div");
+    row.className = "collect-control-state";
+    row.dataset.group = String(group.id || "");
+    const name = document.createElement("span");
+    name.className = "collect-state-name";
+    name.textContent = String(group.label || group.id || "ARM").toUpperCase();
+    const value = document.createElement("span");
+    value.className = "collect-state-value";
+    value.textContent = "UNAVAILABLE";
+    const hint = document.createElement("span");
+    hint.className = "control-hint";
+    row.append(name, value, hint);
+    host.appendChild(row);
+  });
+}
+
+function renderCollectControls() {
+  const config = collectControlsConfig();
+  const isVr = config.mode === "vr";
+  const groups = isVr ? (config.groups || []) : [];
+  const feedback = controlFeedback();
+  buildControlGroups(groups);
+  updateControlHint($("collect-hint-motion"), controlBinding("motion"), feedback);
+  updateControlHint($("collect-hint-record-toggle"), controlBinding("record_toggle"), feedback);
+  updateControlHint($("collect-hint-record-cancel"), controlBinding("record_cancel"), feedback);
+  updateControlHint($("collect-hint-home"), controlBinding("home"), feedback);
+
+  const teleop = (S.STATUS && S.STATUS.teleop) || {};
+  const connected = !!teleop.connected;
+  const authorized = new Set(teleop.authorized_groups || []);
+  const engaged = new Set(teleop.engaged_groups || []);
+  $("collect-control-groups").querySelectorAll(".collect-control-state").forEach((row) => {
+    const group = groups.find((item) => String(item.id) === row.dataset.group);
+    if (!group) return;
+    let state = "locked";
+    if (!connected) state = "unavailable";
+    else if (engaged.has(group.id)) state = "active";
+    else if (authorized.has(group.id)) state = "ready";
+    const value = row.querySelector(".collect-state-value");
+    if (value) value.textContent = state.toUpperCase();
+    row.dataset.state = state;
+    const armBinding = controlBinding(group.binding) || {};
+    updateControlHint(row.querySelector(".control-hint"), {
+      ...armBinding,
+      control: group.control,
+    }, feedback);
+  });
+}
+
+function keyboardTarget(action) {
+  if (action === "motion") return $("collect-arm-enable");
+  if (action === "record_toggle") return $("b-collect-toggle");
+  if (action === "record_cancel") return $("b-collect-cancel");
+  if (action === "home") return $("b-collect-home");
+  return null;
+}
+
+function triggerKeyboardAction(action) {
+  const target = keyboardTarget(action);
+  if (!target || target.disabled) return;
+  target.click();
+}
+
+function keyboardShortcutAllowed(event) {
+  if (S.ACTIVE_TAB !== "collect" || collectControlsConfig().mode !== "keyboard") return false;
+  if (event.altKey || event.ctrlKey || event.metaKey) return false;
+  const target = event.target;
+  return !(target instanceof HTMLElement && (
+    target.isContentEditable || /^(INPUT|SELECT|TEXTAREA)$/.test(target.tagName)
+  ));
+}
+
+function resetKeyboardControl(control) {
+  keyboardControlState.pressed.delete(control);
+  delete keyboardControlState.holdProgress[control];
+  renderCollectControls();
+}
+
+function animateKeyboardHold(entry) {
+  const binding = entry.binding;
+  const holdMs = Math.max(1, Number(binding.hold_ms || 1000));
+  const progress = Math.min(1, (performance.now() - entry.startedAt) / holdMs);
+  keyboardControlState.holdProgress[binding.control] = progress;
+  renderCollectControls();
+  if (progress >= 1) {
+    if (!entry.triggered) {
+      entry.triggered = true;
+      triggerKeyboardAction(entry.action);
+    }
+    keyboardControlState.animationFrame = null;
+    return;
+  }
+  keyboardControlState.animationFrame = requestAnimationFrame(() => animateKeyboardHold(entry));
+}
+
+function installCollectKeyboardControls() {
+  if (keyboardControlState.installed) return;
+  keyboardControlState.installed = true;
+  window.addEventListener("keydown", (event) => {
+    if (!keyboardShortcutAllowed(event) || event.repeat) return;
+    const bindings = Object.entries(collectControlsConfig().bindings || {});
+    const match = bindings.find(([, binding]) => binding.control === event.code);
+    if (!match) return;
+    const [action, binding] = match;
+    const target = keyboardTarget(action);
+    if (!target || target.disabled) return;
+    event.preventDefault();
+    const entry = { action, binding, startedAt: performance.now(), triggered: false };
+    keyboardControlState.active.set(binding.control, entry);
+    keyboardControlState.pressed.add(binding.control);
+    keyboardControlState.holdProgress[binding.control] = 0;
+    renderCollectControls();
+    if (binding.gesture === "hold") animateKeyboardHold(entry);
+  });
+  window.addEventListener("keyup", (event) => {
+    const entry = keyboardControlState.active.get(event.code);
+    if (!entry) return;
+    event.preventDefault();
+    keyboardControlState.active.delete(event.code);
+    if (entry.binding.gesture !== "hold" && !entry.triggered) {
+      triggerKeyboardAction(entry.action);
+    }
+    if (keyboardControlState.animationFrame !== null) {
+      cancelAnimationFrame(keyboardControlState.animationFrame);
+      keyboardControlState.animationFrame = null;
+    }
+    resetKeyboardControl(event.code);
+  });
+  window.addEventListener("blur", () => {
+    keyboardControlState.active.clear();
+    keyboardControlState.pressed.clear();
+    keyboardControlState.holdProgress = {};
+    if (keyboardControlState.animationFrame !== null) {
+      cancelAnimationFrame(keyboardControlState.animationFrame);
+      keyboardControlState.animationFrame = null;
+    }
+    renderCollectControls();
+  });
+}
 
 async function startCollectFromTab() {
     if (S.reviewKind === "collect") {
@@ -37,14 +342,26 @@ function collectEnabled() {
     return !!(collectConfigured() && S.STATUS.collect);
   }
 
+function collectOutcome(item) {
+    if (item.status === "failed") return "rejected";
+    if (item.qc_verdict === "pass") return "usable";
+    if (item.qc_verdict === "fail") return "rejected";
+    if (item.quality === "red") return "rejected";
+    if (savedEpisodeId(item) != null && item.quality === "green") return "usable";
+    return "pending";
+  }
+
 function collectTone(item) {
     if (item.status === "queued") return "cq-queued";
     if (item.status === "saving") return "cq-busy";
-    if (item.status === "failed") return "cq-fail";
-    if (item.qc_verdict === "pass") return "cq-ok";
-    if (item.qc_verdict === "fail") return "cq-fail";
-    if (item.quality === "red") return "cq-fail";
+    const outcome = collectOutcome(item);
+    if (outcome === "usable") return "cq-ok";
+    if (outcome === "rejected") return "cq-fail";
     return "cq-queued";
+  }
+
+function threeDigitCount(value) {
+    return String(Math.max(0, Number(value) || 0)).padStart(3, "0");
   }
 
 function collectIssueText(item) {
@@ -120,6 +437,11 @@ function renderCollectTiles(items) {
       } else {
         tile.title = `episode ${item.episode_index} · ${item.status}`;
       }
+      const episodeIndex = Number(item.episode_index);
+      tile.textContent = Number.isFinite(episodeIndex)
+        ? String(episodeIndex).padStart(3, "0")
+        : "---";
+      tile.setAttribute("aria-label", tile.title);
       host.appendChild(tile);
     });
   }
@@ -273,11 +595,34 @@ function renderCollect() {
     const episodes = collect.episodes || [];
     const queue = collect.queue || [];
     const items = episodes.concat(queue);
+    const taskEpisodes = episodes.filter((item) => (item.task || item.prompt || "") === prompt);
+    const required = collectTaskTarget(prompt);
+    const hasRequirement = Number.isInteger(required) && required > 0;
+    const unlimited = required === -1;
+    const usableCollected = taskEpisodes.filter(
+      (item) => collectOutcome(item) === "usable"
+    ).length;
+    const requirementComplete = hasRequirement && usableCollected >= required;
     const progress = Math.max(0, Math.min(1, Number(collect.progress || 0)));
+    const outcomes = items.map(collectOutcome);
+    const usableCount = outcomes.filter((value) => value === "usable").length;
+    const rejectedCount = outcomes.filter((value) => value === "rejected").length;
+    const pendingCount = outcomes.length - usableCount - rejectedCount;
 
     const collectFps = S.CFG && S.CFG.collection ? S.CFG.collection.fps : null;
     $("collect-fps").textContent = collectFps ? `${collectFps} FPS` : "";
     $("collect-count").textContent = `${episodes.length}/${items.length}`;
+    $("collect-usable-count").textContent = threeDigitCount(usableCount);
+    $("collect-rejected-count").textContent = threeDigitCount(rejectedCount);
+    $("collect-pending-count").textContent = threeDigitCount(pendingCount);
+    $("collect-requirement-count").textContent = `${usableCollected} / ${unlimited ? "∞" : (hasRequirement ? required : "--")}`;
+    $("collect-requirement-status").textContent = unlimited
+      ? "NO LIMIT"
+      : hasRequirement
+      ? (requirementComplete ? "COMPLETE" : `${required - usableCollected} REMAINING`)
+      : "TARGET NOT SET";
+    $("collect-requirement").classList.toggle("complete", requirementComplete);
+    $("collect-requirement").classList.toggle("unset", !hasRequirement && !unlimited);
     $("collect-progress-label").textContent = `${Math.round(progress * 100)}%`;
     $("collect-progress-fill").style.width = `${progress * 100}%`;
     $("collect-eta").textContent = fmtEta(collect.eta_sec);
@@ -293,7 +638,7 @@ function renderCollect() {
       }
     }
     const armLabel = $("collect-arm-label");
-    if (armLabel) armLabel.textContent = S.collectArmEnabled ? "ARM ON" : "ARM OFF";
+    if (armLabel) armLabel.textContent = S.collectArmEnabled ? "ENABLED" : "LOCKED";
 
     const toggle = $("b-collect-toggle");
     toggle.disabled = toggleBusy ||
@@ -302,11 +647,60 @@ function renderCollect() {
     toggle.classList.toggle("primary", !collecting);
     toggle.querySelector(".rec-label").textContent = collecting ? "END / SAVE" : "START RECORD";
     $("b-collect-cancel").disabled = !collecting;
+    const home = $("b-collect-home");
+    if (home) {
+      home.disabled = S.collectHomeBusy || S.collectArmEnabled || collecting || !!S.STATUS.setup_stage;
+    }
     const selectedEpisode = selectedCollectEpisodeItem();
     const selectedEpisodeSaved = savedEpisodeId(selectedEpisode) != null;
     $("b-collect-qc-pass").disabled = !enabled || !selectedEpisodeSaved;
     $("b-goto-qc").disabled = !enabled || !selectedEpisodeSaved;
     $("b-collect-note-save").disabled = S.collectReplayEpisode == null;
+    const exportButton = $("b-collect-quality-export");
+    const uploadButton = $("b-collect-quality-upload");
+    const upload = (S.CFG && S.CFG.collection && S.CFG.collection.upload) || {};
+    if (exportButton) {
+      exportButton.disabled = !enabled || !episodes.length ||
+        qualityTransfer.exporting || qualityTransfer.uploading;
+    }
+    if (uploadButton) {
+      uploadButton.disabled = !upload.configured || !qualityTransfer.acceptedDir ||
+        qualityTransfer.exporting || qualityTransfer.uploading;
+      const backendLabel = (upload.backends || []).map((value) => String(value).toUpperCase());
+      uploadButton.textContent = backendLabel.length
+        ? `UPLOAD ${backendLabel.join(" + ")}`
+        : "UPLOAD ACCEPTED";
+    }
+    const transferProgressBar = $("collect-quality-progress-bar");
+    const transferProgressFill = $("collect-quality-progress-fill");
+    const transferProgressLabel = $("collect-quality-progress-label");
+    const transferProgressDetail = $("collect-quality-progress-detail");
+    const showingExport = qualityTransfer.phase === "export";
+    const transferFraction = showingExport
+      ? (qualityTransfer.episodesTotal > 0
+          ? qualityTransfer.episodesCompleted / qualityTransfer.episodesTotal
+          : (qualityTransfer.exportState === "completed" ? 1 : 0))
+      : (qualityTransfer.bytesTotal > 0
+          ? qualityTransfer.bytesCompleted / qualityTransfer.bytesTotal
+          : (qualityTransfer.filesTotal > 0
+              ? qualityTransfer.filesCompleted / qualityTransfer.filesTotal
+              : (qualityTransfer.uploadState === "completed" ? 1 : 0)));
+    const transferPercent = Math.round(Math.max(0, Math.min(1, transferFraction)) * 100);
+    if (transferProgressBar) {
+      transferProgressBar.setAttribute("aria-valuenow", String(transferPercent));
+      transferProgressBar.setAttribute(
+        "aria-label", showingExport ? "Dataset export progress" : "Dataset upload progress"
+      );
+    }
+    if (transferProgressFill) transferProgressFill.style.width = `${transferPercent}%`;
+    if (transferProgressLabel) transferProgressLabel.textContent = `${transferPercent}%`;
+    if (transferProgressDetail) {
+      transferProgressDetail.textContent = showingExport
+        ? `${qualityTransfer.episodesCompleted}/${qualityTransfer.episodesTotal} episodes`
+        : (`${qualityTransfer.filesCompleted}/${qualityTransfer.filesTotal} files · ` +
+          `${formatTransferBytes(qualityTransfer.bytesCompleted)}/` +
+          `${formatTransferBytes(qualityTransfer.bytesTotal)}`);
+    }
 
     const recordState = collecting || (hasPrompt && !S.collectArmEnabled)
       ? "active"
@@ -319,6 +713,7 @@ function renderCollect() {
 
     renderCollectTiles(items);
     renderCollectList(items);
+    renderCollectControls();
 
     const replayStatus = $("collect-replay-status");
     if (S.reviewKind === "collect" && LIVE.replayOwner === "collect") {
@@ -334,6 +729,115 @@ function renderCollect() {
     } else if (S.collectReplayEpisode == null) {
       replayStatus.textContent = "";
       replayStatus.style.display = "none";
+    }
+  }
+
+async function exportCollectionQuality() {
+    if (qualityTransfer.exporting || qualityTransfer.uploading) return;
+    const status = $("collect-quality-status");
+    qualityTransfer.phase = "export";
+    qualityTransfer.exporting = true;
+    qualityTransfer.exportJobId = "";
+    qualityTransfer.exportState = "queued";
+    qualityTransfer.episodesCompleted = 0;
+    qualityTransfer.episodesTotal = 0;
+    qualityTransfer.acceptedDir = "";
+    if (status) status.textContent = "exporting…";
+    renderCollect();
+    try {
+      const result = await apiPost("/api/collect_quality_export", {
+        task: collectTaskValue(),
+      }, { concurrent: true });
+      if (!result.ok) {
+        qualityTransfer.exportState = "failed";
+        if (status) status.textContent = `✗ ${result.error || "export failed"}`;
+        return;
+      }
+      qualityTransfer.exportJobId = result.job_id || "";
+      while (qualityTransfer.exportJobId === result.job_id) {
+        const job = await apiGet(
+          `/api/collect_quality_export?job_id=${encodeURIComponent(result.job_id)}`
+        );
+        if (!job.ok) throw new Error(job.error || "export status unavailable");
+        qualityTransfer.exportState = job.state || "running";
+        qualityTransfer.episodesCompleted = Number(job.episodes_completed || 0);
+        qualityTransfer.episodesTotal = Number(job.episodes_total || 0);
+        renderCollect();
+        if (job.state === "completed") {
+          qualityTransfer.acceptedDir = job.accepted_dir || "";
+          if (status) {
+            status.textContent = `${job.accepted_episodes} accepted · ` +
+              `${job.rejected_episodes} rejected`;
+          }
+          return;
+        }
+        if (job.state === "failed") {
+          if (status) status.textContent = `✗ ${job.error || "export failed"}`;
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 300));
+      }
+    } catch (error) {
+      qualityTransfer.exportState = "failed";
+      if (status) status.textContent = `✗ ${error instanceof Error ? error.message : String(error)}`;
+    } finally {
+      qualityTransfer.exporting = false;
+      renderCollect();
+    }
+  }
+
+async function uploadCollectionQuality() {
+    if (!qualityTransfer.acceptedDir || qualityTransfer.exporting || qualityTransfer.uploading) {
+      return;
+    }
+    const status = $("collect-quality-status");
+    qualityTransfer.phase = "upload";
+    qualityTransfer.uploading = true;
+    qualityTransfer.uploadJobId = "";
+    qualityTransfer.uploadState = "queued";
+    qualityTransfer.filesCompleted = 0;
+    qualityTransfer.filesTotal = 0;
+    qualityTransfer.bytesCompleted = 0;
+    qualityTransfer.bytesTotal = 0;
+    if (status) status.textContent = "uploading…";
+    renderCollect();
+    try {
+      const result = await apiPost("/api/collect_quality_upload", {
+        task: collectTaskValue(),
+      }, { concurrent: true });
+      if (!result.ok) {
+        qualityTransfer.uploadState = "failed";
+        if (status) status.textContent = `✗ ${result.error || "upload failed"}`;
+        return;
+      }
+      qualityTransfer.uploadJobId = result.job_id || "";
+      while (qualityTransfer.uploadJobId === result.job_id) {
+        const job = await apiGet(
+          `/api/collect_quality_upload?job_id=${encodeURIComponent(result.job_id)}`
+        );
+        if (!job.ok) throw new Error(job.error || "upload status unavailable");
+        qualityTransfer.uploadState = job.state || "running";
+        qualityTransfer.filesCompleted = Number(job.files_completed || 0);
+        qualityTransfer.filesTotal = Number(job.files_total || 0);
+        qualityTransfer.bytesCompleted = Number(job.bytes_completed || 0);
+        qualityTransfer.bytesTotal = Number(job.bytes_total || 0);
+        renderCollect();
+        if (job.state === "completed") {
+          if (status) status.textContent = `uploaded ${job.files_total} files`;
+          return;
+        }
+        if (job.state === "failed") {
+          if (status) status.textContent = `✗ ${job.error || "upload failed"}`;
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 300));
+      }
+    } catch (error) {
+      qualityTransfer.uploadState = "failed";
+      if (status) status.textContent = `✗ ${error instanceof Error ? error.message : String(error)}`;
+    } finally {
+      qualityTransfer.uploading = false;
+      renderCollect();
     }
   }
 
@@ -590,5 +1094,6 @@ export {
   collectConfigured, collectEnabled, dotClass, renderCollect,
   renderRolloutSave, returnReviewToLive, savedEpisodeId, startCollectFromTab,
   clearReviewPlayback, loadAnnotation, reviewActiveInCurrentTab, reviewEpisode,
-  saveAnnotation, submitEpisodeNote, submitEpisodeQc, submitQc,
+  exportCollectionQuality, saveAnnotation, submitEpisodeNote, submitEpisodeQc, submitQc,
+  installCollectKeyboardControls, renderCollectControls, uploadCollectionQuality,
 };

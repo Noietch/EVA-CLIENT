@@ -1,7 +1,7 @@
 """Episode preview backend for the read-only viewer.
 
 A trial's result row carries a clip_id and (joined) episode_index into the dataset
-recorded under <results_dir>/episodes. This module reads that episode's per-frame
+recorded under <results_dir>/episodes/raw. This module reads that episode's per-frame
 state/action series and camera mp4s, and runs the robot's forward kinematics so the
 viewer can replay the URDF motion frame by frame — reusing the console's
 "geometry once + per-frame 4x4 transform" scheme (UrdfScene).
@@ -31,7 +31,7 @@ def read_result_rows(dataset_root: Path) -> list[dict[str, Any]]:
     """Scored/owned trial rows for one per-model dataset, read from meta/episodes.jsonl.
 
     Args:
-        dataset_root: the per-model lerobot dataset root (``<model>/episodes``).
+        dataset_root: the per-model lerobot dataset root (``<model>/episodes/raw``).
 
     Returns:
         rows: list of result dicts, deduped to the latest episode per clip_id. Rows
@@ -79,7 +79,7 @@ class EpisodePreview:
 
     def __init__(self, config: ConfigDict, results_dir: Path) -> None:
         self._config = config
-        self._dataset_root = results_dir / "episodes"
+        self._dataset_root = results_dir / "episodes" / "raw"
         self._robot = ROBOT_REGISTRY.build(config.robot.type)
         self._reader: EpisodeLogger | None = None
         self._scene: UrdfScene | None = None
