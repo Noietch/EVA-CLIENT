@@ -73,6 +73,8 @@ _MOTION_INTERRUPTING_VERBS = frozenset(
     }
 )
 
+_MOTION_DEFERRED_VERBS = frozenset({"start"})
+
 
 MANUAL_MAX_QPOS_STEP = 0.02
 
@@ -549,16 +551,26 @@ def poll_motion_commands(config: ConfigDict, runtime: RuntimeState, session: Ses
     if runtime.command_queue is None:
         return session.interrupt_requested
     interrupted = session.interrupt_requested
+    deferred_commands: list[str] = []
     while True:
         try:
             command = runtime.command_queue.get_nowait()
         except queue.Empty:
             break
+        raw_verb = command.strip().lower().removeprefix("web:")
+        verb, _, _ = raw_verb.partition(":")
+        if verb in _MOTION_DEFERRED_VERBS:
+            # Lifecycle commands belong to the main loop. Keep them queued until the
+            # current synchronous setup/reset motion has returned.
+            deferred_commands.append(command)
+            continue
         if handle_motion_command(command, config, runtime, session):
             interrupted = True
             unlock_prompt(runtime)
             break
         unlock_prompt(runtime)
+    for command in deferred_commands:
+        runtime.command_queue.put(command)
     return interrupted or session.interrupt_requested
 
 
@@ -1316,9 +1328,11 @@ def select_mode(
     # Leaving COLLECT disarms teleop: stop any open recording episode, then close the
     # collection stream so the arm is no longer driven by the human after the switch.
     if mode is not SessionMode.COLLECT and runtime.collection_teleop_active:
-        if session.mode is SessionMode.COLLECT and session.status is SessionStatus.RUNNING:
-            collect_stop(config, runtime, session)
-        collect_stop_teleop(config, runtime, session)
+        try:
+            if session.mode is SessionMode.COLLECT and session.status is SessionStatus.RUNNING:
+                collect_stop(config, runtime, session)
+        finally:
+            collect_stop_teleop(config, runtime, session)
     session.mode = mode
     reset_session_progress(session)
     reset_infer_strategy(runtime)

@@ -149,6 +149,79 @@ def test_load_collection_config_exposes_schema():
     assert cfg.collection.storage.log_dir
 
 
+def test_load_vr_collection_config_selects_client_input_source():
+    cfg = load_config(_CONFIGS_DIR / "02_collection" / "dual_agilex_piper_vr.py")
+
+    assert cfg.collection.teleop.control_source == "client"
+    assert cfg.collection.teleop.client.type == "vr_webxr"
+    assert set(cfg.collection.schema.columns) == {
+        "qpos",
+        "eef",
+        "action_qpos",
+        "action_eef",
+    }
+
+
+def test_load_arx_r5_collection_uses_transport_teleop():
+    cfg = load_config(_CONFIGS_DIR / "02_collection" / "arx_r5.py")
+
+    assert cfg.robot.type == "arx_r5"
+    assert cfg.transport.type == "zmq"
+    assert cfg.transport.sub_endpoint == "tcp://127.0.0.1:5555"
+    assert cfg.transport.pub_endpoint == "tcp://127.0.0.1:5556"
+    assert cfg.transport.disabled_cameras == []
+    assert cfg.collection.storage.log_dir == "work_dirs/collection/arx_r5/"
+    assert cfg.collection.teleop.control_source == "transport"
+    assert cfg.collection.teleop.client == {}
+
+
+def test_x5_collection_has_no_default_remote_upload_target():
+    cfg = load_config(_CONFIGS_DIR / "02_collection" / "arx_x5_vr.py")
+
+    assert not cfg.collection.storage.get("sftp")
+    assert not cfg.collection.storage.get("s3")
+    assert cfg.collection.storage.log_dir == "work_dirs/collection/arx_x5_vr"
+
+
+def test_arx_x5_vr_collection_opens_on_collect_tab():
+    cfg = load_config(_CONFIGS_DIR / "02_collection" / "arx_x5_vr.py")
+
+    assert cfg.console.initial_tab == "collect"
+
+
+def test_console_initial_tab_rejects_unknown_workspace(tmp_path):
+    with pytest.raises(ValueError, match="console.initial_tab"):
+        load_config(
+            _write_config(
+                tmp_path / "invalid_initial_tab.py",
+                "console = dict(initial_tab='unknown')\n",
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    ("body", "match"),
+    [
+        (
+            "collection = dict(teleop=dict(control_source='invalid'))\n",
+            "control_source",
+        ),
+        (
+            "collection = dict(teleop=dict(client=dict(type='vr_webxr')))\n",
+            "transport-driven",
+        ),
+        (
+            "collection = dict(teleop=dict("
+            "control_source='client', client=dict(type='unknown')))\n",
+            "unsupported teleop client type",
+        ),
+    ],
+)
+def test_teleop_config_validation_rejects_unsafe_combinations(tmp_path, body, match):
+    with pytest.raises(ValueError, match=match):
+        load_config(_write_config(tmp_path / "invalid_teleop.py", body))
+
+
 @pytest.mark.parametrize(
     "robot_name",
     ["r1lite", "ur5e", "arx_r5", "dual_agilex_piper"],
@@ -265,6 +338,42 @@ def test_collection_schema_requires_cameras(tmp_path):
         load_config(cfg_path)
 
 
+def test_collection_tasks_are_dataset_to_prompt_target_lists(tmp_path):
+    cfg_path = _write_config(
+        tmp_path / "tasks.py",
+        "collection = dict(tasks=dict(cup_set=[('pick up cup', 10), ('place cup', -1)]))\n",
+    )
+
+    cfg = load_config(cfg_path)
+
+    assert dict(cfg.collection.tasks) == {
+        "cup_set": [("pick up cup", 10), ("place cup", -1)],
+    }
+
+
+@pytest.mark.parametrize(
+    "tasks",
+    [
+        "['pick up cup']",
+        "dict(cup_set=[])",
+        "dict(cup_set=['pick up cup'])",
+        "dict(cup_set=[('pick up cup',)])",
+        "dict(a=[('pick up cup', 1)], b=[('pick up cup', 2)])",
+        "dict(cup_set=[('pick up cup', 0)])",
+        "dict(cup_set=[('pick up cup', -2)])",
+        "dict(cup_set=[('pick up cup', 1.5)])",
+    ],
+)
+def test_collection_tasks_reject_invalid_grouping(tmp_path, tasks):
+    cfg_path = _write_config(
+        tmp_path / "bad_tasks.py",
+        f"collection = dict(tasks={tasks})\n",
+    )
+
+    with pytest.raises(ValueError, match="collection.tasks|collection prompt"):
+        load_config(cfg_path)
+
+
 @pytest.mark.parametrize(
     "preset",
     sorted(str(p) for p in _CONFIGS_DIR.glob("01_deploy/**/*.py") if not p.name.startswith("_")),
@@ -283,6 +392,17 @@ def test_all_collection_presets_load_without_error(preset):
     cfg = load_config(preset)
     assert cfg.collection.schema.robot_type
     assert set(cfg.collection.schema.columns) == {"qpos", "eef", "action_qpos", "action_eef"}
+    assert isinstance(cfg.collection.tasks, dict)
+
+
+def test_arx_x5_vr_defines_only_mango_with_target():
+    cfg = load_config(_CONFIGS_DIR / "02_collection" / "arx_x5_vr.py")
+
+    assert dict(cfg.collection.tasks) == {
+        "pick_up_the_mango_and_place_it_in_the_plate": [
+            ("pick up the mango and place it in the plate", 100),
+        ],
+    }
 
 
 @pytest.mark.parametrize(

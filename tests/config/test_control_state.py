@@ -111,6 +111,7 @@ def test_resolve_label_explicit_key_passthrough():
 class _CollectionTransport:
     def __init__(self) -> None:
         self.started = 0
+        self.policy_started = 0
         self.stopped = 0
         self.cleared = 0
         self.latest_qpos = np.array([0.1, 0.2], dtype=np.float32)
@@ -129,6 +130,10 @@ class _CollectionTransport:
 
     def start_collection(self) -> None:
         self.started += 1
+
+    def start_policy_collection(self) -> None:
+        self.policy_started += 1
+        self.start_collection()
 
     def stop_collection(self) -> None:
         self.stopped += 1
@@ -484,6 +489,7 @@ def test_rollout_episode_starts_collection_before_policy_capture(monkeypatch):
     recording.begin_rollout_save_episode(config, runtime, session)
 
     assert runtime.transport.started == 1
+    assert runtime.transport.policy_started == 1
     assert runtime.transport.cleared == 1
     assert episode_logger.started_tasks == ["pick"]
     assert capture_args == [(20, 1)]
@@ -872,6 +878,18 @@ def test_rollout_intervention_enabled_is_applied_during_sync_motion_wait():
 
     assert interrupted is False
     assert runtime.rollout_intervention_enabled is False
+    assert runtime.command_queue.empty()
+
+
+def test_start_is_deferred_during_sync_motion_wait():
+    runtime, session = _runtime_and_session()
+    runtime.command_queue = queue.Queue()
+    runtime.command_queue.put("web:start")
+
+    interrupted = control.poll_motion_commands(_config(), runtime, session)
+
+    assert interrupted is False
+    assert runtime.command_queue.get_nowait() == "web:start"
     assert runtime.command_queue.empty()
 
 

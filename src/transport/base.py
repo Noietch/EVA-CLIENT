@@ -147,6 +147,10 @@ class TransportBridge(abc.ABC):
         """Signal the source to begin emitting collection frames (no-op default)."""
         return None
 
+    def start_policy_collection(self) -> None:
+        """Start collection capture for actions produced by the policy."""
+        self.start_collection()
+
     def clear_collection_backlog(self) -> float | None:
         """Discard collection frames captured before the active recording episode.
 

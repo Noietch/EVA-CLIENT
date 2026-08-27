@@ -90,8 +90,10 @@ def history_row(row: dict[str, Any], fallback_index: int) -> dict[str, Any]:
         The summary dict the console renders (status always "saved" on disk).
     """
     quality_issues, quality_issue_count = summarize_quality_issues(row.get("quality_issues"))
+    tasks = row.get("tasks") or []
     return {
         "episode_index": int(row.get("episode_index", fallback_index)),
+        "task": str(row.get("prompt") or (tasks[0] if tasks else "")),
         "length": int(row.get("length", 0)),
         "status": "saved",
         "quality": row.get("quality", "green"),

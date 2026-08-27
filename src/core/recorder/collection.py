@@ -92,6 +92,7 @@ class CollectionEpisodeWriter:
         self._raw_snapshots: list[RawCollectionSnapshot] = []
         self._alignment_report: CollectionAlignmentReport | None = None
         self._image_shapes: dict[str, tuple[int, int]] = {}
+        self._active_camera_keys: tuple[str, ...] = ()
         self._state_lock = threading.Lock()
         self._received_snapshots = 0
         self._skipped_before_start = 0
@@ -110,6 +111,7 @@ class CollectionEpisodeWriter:
         self._raw_batch = CollectionRawBatch(start_time=min_capture_time)
         self._raw_snapshots = []
         self._alignment_report = None
+        self._active_camera_keys = ()
         self._received_snapshots = 0
         self._skipped_before_start = 0
         self._min_capture_time = min_capture_time
@@ -165,6 +167,7 @@ class CollectionEpisodeWriter:
             self._records.append(record)
             self._check_timestamp(float(frame.timestamp), frame_index)
             self._check_images(record, frame_index)
+            assert record.timestamp is not None
             self._max_capture_time = (
                 record.timestamp
                 if self._max_capture_time is None
@@ -236,15 +239,46 @@ class CollectionEpisodeWriter:
             self._merge_raw_batch(snapshot.decode_raw())
 
     def _image_skew_tolerance_sec(self) -> float:
-        return image_skew_tolerance_sec(float(self._logger._fps))
+        storage = self._collection.get("storage") or {}
+        configured = storage.get("image_skew_tolerance_sec")
+        if configured is None:
+            return image_skew_tolerance_sec(float(self._logger._fps))
+        tolerance = float(configured)
+        if not np.isfinite(tolerance) or tolerance <= 0.0:
+            raise ValueError(
+                "collection.storage.image_skew_tolerance_sec must be a positive number"
+            )
+        return tolerance
 
     def _align_raw_records(self) -> None:
         self._records = []
-        fields = tuple(_COLUMN_TO_FIELD[column] for column in self._schema.columns)
+        configured_camera_keys = tuple(self._schema.cameras.keys())
+        raw_image_keys = {key for key, samples in self._raw_batch.images.items() if samples}
+        self._active_camera_keys = tuple(
+            key for key in configured_camera_keys if key in raw_image_keys
+        )
+        if raw_image_keys:
+            for camera_key in configured_camera_keys:
+                if camera_key not in raw_image_keys:
+                    self._add_issue(
+                        "missing_camera_stream",
+                        f"configured camera {camera_key} has no raw image samples",
+                    )
+            for camera_key in sorted(raw_image_keys - set(configured_camera_keys)):
+                self._add_issue(
+                    "unexpected_image_stream",
+                    f"raw image stream {camera_key} is not configured",
+                )
+
+        # qpos is the common source of truth for both transport- and client-driven
+        # collection. EEF streams from the execution endpoint are optional and are
+        # deliberately excluded from the coverage window; the save worker derives
+        # both EEF columns from the aligned qpos streams below.
+        fields = _JOINT_FIELDS
         frames, report = align_collection_samples(
             self._raw_batch,
             robot=self._logger._robot,
-            camera_keys=tuple(self._schema.cameras.keys()),
+            camera_keys=self._active_camera_keys,
             vector_fields=fields,
             fps=float(self._logger._fps),
             image_skew_sec=self._image_skew_tolerance_sec(),
@@ -252,8 +286,68 @@ class CollectionEpisodeWriter:
         self._alignment_report = report
         for issue in report.issues:
             self._add_issue(issue.code, issue.detail)
+        if "eef" in self._schema.columns or "action_eef" in self._schema.columns:
+            self._derive_eef(frames)
         for frame in frames:
             self._append_aligned_frame(frame)
+
+    def _derive_eef(self, frames: list[Observation]) -> None:
+        """Derive both EEF columns from aligned qpos in save-worker batches."""
+        if not frames:
+            return
+        if any(frame.state_qpos is None or frame.action_qpos is None for frame in frames):
+            raise ValueError("collection aligned frame is missing qpos")
+        expected = 8 * len(self._schema.arms)
+        robot_expected = 8 * len(self._logger._robot.arm_groups)
+        if expected != robot_expected:
+            raise ValueError(
+                "collection schema/robot arm count mismatch: "
+                f"schema={len(self._schema.arms)} robot={len(self._logger._robot.arm_groups)}"
+            )
+        solver = getattr(self, "_client_fk_solver", None)
+        if solver is None:
+            kwargs: dict[str, object] = {
+                "dt": 1.0 / max(float(self._logger._fps), 1.0),
+                "initial_qpos_groups": self._logger._robot.initial_qpos_by_group(),
+            }
+            reference_frame = getattr(self._logger, "_eef_reference_frame", None)
+            supported_frames = getattr(self._logger._robot, "supported_reference_frames", ())
+            if reference_frame and reference_frame in supported_frames:
+                kwargs["reference_frame"] = reference_frame
+            try:
+                solver = self._logger._robot.build_kinematics(**kwargs)
+            except TypeError:
+                # Small test/dummy robots may expose only the required seed hook.
+                solver = self._logger._robot.build_kinematics(
+                    initial_qpos_groups=self._logger._robot.initial_qpos_by_group()
+                )
+            if solver is None:
+                raise ValueError("collection requires a robot FK solver for EEF columns")
+            self._client_fk_solver = solver
+        state_qpos = np.asarray(
+            [np.asarray(frame.state_qpos, dtype=np.float32) for frame in frames]
+        )
+        action_qpos = np.asarray(
+            [np.asarray(frame.action_qpos, dtype=np.float32) for frame in frames]
+        )
+        state_eef = np.asarray(solver.fk_chunk(state_qpos), dtype=np.float32).reshape(
+            len(frames), -1
+        )
+        action_eef = np.asarray(solver.fk_chunk(action_qpos), dtype=np.float32).reshape(
+            len(frames), -1
+        )
+        if state_eef.shape[1] < expected or action_eef.shape[1] < expected:
+            raise ValueError(
+                f"FK returned too few EEF values: expected at least {expected}, "
+                f"got state={state_eef.shape}, action={action_eef.shape}"
+            )
+        if not np.all(np.isfinite(state_eef)):
+            raise ValueError("collection FK produced non-finite state_eef")
+        if not np.all(np.isfinite(action_eef)):
+            raise ValueError("collection FK produced non-finite action_eef")
+        for frame, state_value, action_value in zip(frames, state_eef, action_eef, strict=True):
+            frame.state_eef = state_value[:expected].copy()
+            frame.action_eef = action_value[:expected].copy()
 
     def expected_dim(self, field: str) -> int:
         """Expected vector length for a collection field (joints / eef).
@@ -288,7 +382,7 @@ class CollectionEpisodeWriter:
         task = self._logger._task or ""
         dataset_dir = self._logger._collection_dataset_dir(task)
         episode_index = self._logger._next_collection_episode_index(dataset_dir)
-        task_index = 0
+        task_index, task_to_index = self._logger._resolve_collection_task(dataset_dir, task)
         package_done = time.perf_counter()
 
         job = SaveJob(
@@ -298,7 +392,7 @@ class CollectionEpisodeWriter:
             global_index=-1,
             steps=[],
             episode_meta=dict(self._logger._episode_meta),
-            task_to_index={task: task_index},
+            task_to_index=task_to_index,
             collection_payload=CollectionSavePayload(
                 raw_snapshots=raw_snapshots,
                 quality_issues=list(self._quality_issues),
@@ -313,6 +407,7 @@ class CollectionEpisodeWriter:
         self._raw_batch = CollectionRawBatch()
         self._raw_snapshots = []
         self._alignment_report = None
+        self._active_camera_keys = ()
         self._max_capture_time = None
         logger.info(
             "collection end_episode queued raw=%s raw_snapshots=%d: package=%.1fms total=%.1fms",
@@ -359,7 +454,8 @@ class CollectionEpisodeWriter:
         n_frames = len(self._records)
 
         if self._logger._save_video:
-            for video_key in self._schema.cameras.values():
+            for camera_key in self._active_camera_keys:
+                video_key = self._schema.cameras[camera_key]
                 got = len(videos.get(video_key, [])) if videos else 0
                 if got != n_frames:
                     self._add_issue(
@@ -399,6 +495,8 @@ class CollectionEpisodeWriter:
             "length": n_frames,
             "quality": "red" if self._quality_issues else "green",
             "quality_issues": [dataclasses.asdict(issue) for issue in self._quality_issues],
+            "video_keys": sorted(videos or {}),
+            "total_videos": len(videos or {}),
         }
         if collection_fps is not None:
             row["collection_fps"] = collection_fps
@@ -470,6 +568,7 @@ class CollectionEpisodeWriter:
         self._raw_batch = CollectionRawBatch()
         self._raw_snapshots = []
         self._alignment_report = None
+        self._active_camera_keys = ()
         self._max_capture_time = None
 
     def finalize(self, dataset_dir: Path | None = None) -> None:
@@ -530,11 +629,14 @@ class CollectionEpisodeWriter:
                 frames.append(rgb)
             if frames:
                 videos[video_key] = frames
-        return videos or None
+        # Keep an image-enabled episode with no valid images distinguishable from
+        # save_video=False while still preventing empty video files or columns.
+        return videos
 
     def _check_images(self, record: Observation, frame_index: int) -> None:
         size = self._save_size()
-        for camera_key, video_key in self._schema.cameras.items():
+        for camera_key in self._active_camera_keys:
+            video_key = self._schema.cameras[camera_key]
             image = record.images.get(camera_key)
             if image is None:
                 self._add_issue(
@@ -580,11 +682,36 @@ class CollectionEpisodeWriter:
             arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
         return arr.astype(np.float32, copy=True)
 
+    def _episode_video_keys(self, row: dict[str, Any], dataset_dir: Path) -> tuple[str, ...]:
+        """Return actual video files represented by one episode metadata row."""
+        keys = row.get("video_keys")
+        if keys is not None:
+            return tuple(sorted(str(key) for key in keys))
+        episode_index = row.get("episode_index")
+        if episode_index is None or not self._logger._save_video:
+            return ()
+        return tuple(
+            video_key
+            for video_key in self._schema.cameras.values()
+            if (
+                dataset_dir
+                / "videos"
+                / "chunk-000"
+                / video_key
+                / f"episode_{int(episode_index):06d}.mp4"
+            ).exists()
+        )
+
     def _write_info_json(self, dataset_dir: Path) -> None:
         episodes = _read_jsonl(self._logger._meta_path("episodes.jsonl", dataset_dir))
         total_episodes = len(episodes)
         total_frames = sum(int(e.get("length", 0)) for e in episodes)
-        total_videos = total_episodes * len(self._schema.cameras) if self._logger._save_video else 0
+        video_keys: set[str] = set()
+        total_videos = 0
+        for episode in episodes:
+            episode_keys = self._episode_video_keys(episode, dataset_dir)
+            video_keys.update(episode_keys)
+            total_videos += len(episode_keys)
         # fps must equal the integer target used to synthesize timestamps, not the
         # measured (jittery) average — LeRobot validates timestamp[i] == i/fps.
         fps = float(self._logger._fps)
@@ -596,15 +723,15 @@ class CollectionEpisodeWriter:
             total_tasks=total_tasks,
             total_videos=total_videos,
             fps=fps,
-            features=self._build_features(fps),
+            features=self._build_features(fps, video_keys),
         )
         with self._logger._meta_path("info.json", dataset_dir).open("w") as f:
             json.dump(info, f, indent=2, ensure_ascii=False)
 
-    def _build_features(self, fps: float) -> dict[str, Any]:
+    def _build_features(self, fps: float, video_keys: Iterable[str] = ()) -> dict[str, Any]:
         features: dict[str, Any] = {}
         if self._logger._save_video:
-            for video_key in self._schema.cameras.values():
+            for video_key in sorted(set(video_keys)):
                 h, w = self._image_shapes.get(video_key, (480, 640))
                 features[video_key] = {
                     "dtype": "video",
@@ -635,10 +762,10 @@ class CollectionEpisodeWriter:
         return features
 
     def _write_stats_json(self, dataset_dir: Path) -> None:
-        stats = self._stats_from_episode_stats(dataset_dir)
-        if stats is not None:
+        cached_stats = self._stats_from_episode_stats(dataset_dir)
+        if cached_stats is not None:
             with self._logger._meta_path("stats.json", dataset_dir).open("w") as f:
-                json.dump(stats, f, indent=2)
+                json.dump(cached_stats, f, indent=2)
             return
 
         accumulators = {

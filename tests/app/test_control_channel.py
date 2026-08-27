@@ -68,7 +68,11 @@ def test_channel_handles_rl_and_collect_commands() -> None:
     assert runtime.command_queue.empty()
 
     reply = _handle_message(runtime, {"cmd": "web:tab_switch:collect", "armed": True})
-    assert reply == {"ok": True, "tab": "collect", "armed": True}
+    assert reply == {"ok": True, "tab": "collect"}
     assert runtime.console_ctx.active_tab == "collect"
-    assert runtime.collection_teleop_armed is True
+    assert runtime.collection_teleop_armed is False
     assert runtime.command_queue.get_nowait() == "web:tab_switch:collect"
+
+    reply = _handle_message(runtime, {"cmd": "web:collect_arm:on"})
+    assert reply == {"ok": True, "cmd": "web:collect_arm:on"}
+    assert runtime.command_queue.get_nowait() == "web:collect_arm:on"

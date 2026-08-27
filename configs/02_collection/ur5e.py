@@ -33,5 +33,5 @@ collection = dict(
             source="analog",
         ),
     ),
-    tasks=["pick up the apple"],
+    tasks=dict(pick_up_the_apple=[("pick up the apple", -1)]),
 )

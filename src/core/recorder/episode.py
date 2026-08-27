@@ -48,6 +48,7 @@ from core.types import (
     CollectionRawImage,
     CollectionRawSample,
     Observation,
+    RawCollectionSnapshot,
     RolloutInterventionSegment,
 )
 from core.utils.images import resize_direct
@@ -229,6 +230,7 @@ class EpisodeLogger:
         gripper_open: float | None = None,
         gripper_close: float | None = None,
         gripper_threshold: float | None = None,
+        eef_reference_frame: str | None = None,
     ) -> None:
         self._log_dir = Path(log_dir)
         self._robot = robot
@@ -237,6 +239,7 @@ class EpisodeLogger:
         self._keys = dataset_keys
         self._convert_bgr_to_rgb = convert_bgr_to_rgb
         self._collection = collection
+        self._eef_reference_frame = eef_reference_frame
         if recording_space not in {"qpos", "eef"}:
             raise ValueError(f"unsupported recording space: {recording_space}")
         self._recording_space = recording_space
@@ -279,6 +282,13 @@ class EpisodeLogger:
         self._raw_episode_batch = CollectionRawBatch()
         self._raw_episode_frame_labels: list[RawEpisodeFrameLabel] = []
         self._raw_episode_snapshots: list[RawEpisodeSnapshot] = []
+        self._episode_started_at: _dt.datetime | None = None
+        self._episode_started_wall_time = 0.0
+        session_mode = (
+            "eval" if eval_mode else "collection" if self._collection_writer else "episode"
+        )
+        session_time = _dt.datetime.now().astimezone()
+        self._session_id = f"{session_mode}-{session_time.strftime('%Y%m%dT%H%M%S%z')}"
 
         # async save queue: end_episode hands a frozen SaveJob snapshot to a background
         # worker so live capture/control can resume without waiting for alignment,
@@ -291,6 +301,7 @@ class EpisodeLogger:
         # _save_jobs) can never be counted twice and collide a later episode's index.
         self._collection_next_index: dict[Path, int] = {}
         self._collection_next_global: dict[Path, int] = {}
+        self._collection_task_indices: dict[Path, dict[str, int]] = {}
         self._save_jobs: list[SaveJob] = []
         self._save_worker: threading.Thread | None = None
         self._lock = threading.Lock()
@@ -320,6 +331,8 @@ class EpisodeLogger:
         self._raw_episode_batch = CollectionRawBatch()
         self._raw_episode_frame_labels = []
         self._raw_episode_snapshots = []
+        self._episode_started_at = _dt.datetime.now().astimezone()
+        self._episode_started_wall_time = time.time()
         if self._collection_writer is not None:
             self._collection_writer.start_episode(collection_min_capture_time)
             return
@@ -448,6 +461,45 @@ class EpisodeLogger:
             return
         self._collection_writer.ingest(snapshot)
 
+    def ingest_collection_action_snapshot(
+        self,
+        snapshot: RawCollectionSnapshot,
+        action_qpos: np.ndarray,
+    ) -> None:
+        """Pair one client-published qpos with a raw observation snapshot.
+
+        The wrapper intentionally removes action/state EEF streams supplied by the
+        execution endpoint. Client collection owns the action source, and both EEF
+        columns are derived from qpos after fixed-grid alignment by the save worker.
+        """
+        if not self._active or self._collection_writer is None:
+            return
+        action = np.asarray(action_qpos, dtype=np.float32).reshape(-1)
+        if action.shape != (self._robot.total_action_dim,) or not np.all(np.isfinite(action)):
+            raise ValueError(
+                "client collection action must be finite with shape "
+                f"({self._robot.total_action_dim},), got {action.shape}"
+            )
+
+        client_action = action.copy()
+
+        def decode_paired(source: RawCollectionSnapshot = snapshot) -> CollectionRawBatch:
+            batch = source.decode_raw()
+            batch.vectors = {
+                key: samples
+                for key, samples in batch.vectors.items()
+                if key not in {"action_qpos", "state_eef", "action_eef"}
+                and not key.startswith(("action_qpos:", "state_eef:", "action_eef:"))
+            }
+            batch.vectors["action_qpos"] = [
+                CollectionRawSample(source.timestamp, client_action.copy())
+            ]
+            return batch
+
+        self._collection_writer.ingest(
+            RawCollectionSnapshot(timestamp=snapshot.timestamp, decode_raw=decode_paired)
+        )
+
     def set_episode_meta(self, **fields: Any) -> None:
         """Attach eval metadata (score, milestones, ...) to the current episode."""
         self._episode_meta.update(fields)
@@ -558,6 +610,11 @@ class EpisodeLogger:
         return self._collection_writer is not None
 
     @property
+    def is_evaluation(self) -> bool:
+        """True when this logger owns the formal evaluation Dataset."""
+        return self._eval_mode
+
+    @property
     def has_active_episode(self) -> bool:
         """True while an episode is open (between start_episode and end/cancel)."""
         return self._active
@@ -595,6 +652,8 @@ class EpisodeLogger:
             return False
         if self._collection_writer is not None:
             job = self._collection_writer.end_episode()
+            if job is not None:
+                job.episode_meta.update(self._episode_timing_meta("collection"))
             self._active = False
             self._task = None
             self._episode_meta = {}
@@ -669,7 +728,8 @@ class EpisodeLogger:
         )
 
         episode_meta = dict(episode_meta)
-        episode_meta.setdefault("recorded_at", _dt.datetime.now().isoformat(timespec="seconds"))
+        episode_meta.update(self._episode_timing_meta("eval" if self._eval_mode else "episode"))
+        episode_meta.setdefault("recorded_at", episode_meta["ended_at"])
         job = SaveJob(
             episode_index=episode_index,
             task=task,
@@ -1449,14 +1509,13 @@ class EpisodeLogger:
                 / f"episode_{episode_index:06d}.mp4"
             )
             path.parent.mkdir(parents=True, exist_ok=True)
-            encoded = [
-                sample.value.encoded if isinstance(sample.value, CollectionRawImage) else None
-                for sample in samples
-            ]
-            if self._convert_bgr_to_rgb and all(payload is not None for payload in encoded):
+            encoded = [sample.value for sample in samples]
+            if self._convert_bgr_to_rgb and all(
+                isinstance(value, CollectionRawImage) and value.has_encoded for value in encoded
+            ):
                 self._write_encoded_sample_video(
                     path,
-                    cast(list[bytes], encoded),
+                    cast(list[CollectionRawImage], encoded),
                     video_fps,
                     size,
                 )
@@ -1500,7 +1559,7 @@ class EpisodeLogger:
     def _write_encoded_sample_video(
         self,
         path: Path,
-        frames: list[bytes],
+        frames: list[bytes | CollectionRawImage],
         fps: float,
         size: tuple[int, int] | None,
     ) -> None:
@@ -1508,7 +1567,7 @@ class EpisodeLogger:
 
         Args:
             path: Destination MP4 path.
-            frames: Ordered JPEG payloads, one per aligned output frame.
+            frames: Ordered in-memory or disk-backed JPEGs, one per output frame.
             fps: Constant output video frame rate.
             size: Optional output (height, width).
         """
@@ -1559,7 +1618,8 @@ class EpisodeLogger:
         assert process.stdin is not None
         assert process.stderr is not None
         for frame in frames:
-            process.stdin.write(frame)
+            payload = frame.load_encoded() if isinstance(frame, CollectionRawImage) else frame
+            process.stdin.write(payload)
         process.stdin.close()
         stderr = process.stderr.read().decode("utf-8", errors="replace")
         returncode = process.wait()
@@ -1690,6 +1750,9 @@ class EpisodeLogger:
             eta_sec = round((sum(save_durations) / len(save_durations)) * active_jobs, 1)
         return {
             "pipeline_state": pipeline_state,
+            "active": active_for_task,
+            "saving": saving,
+            "queued_jobs": active_jobs,
             "dataset_dir": str(dataset_dir),
             "collecting": active_for_task,
             "current_episode_frames": current_episode_frames,
@@ -1826,6 +1889,10 @@ class EpisodeLogger:
             pending_length = max(len(payload.frame_labels), len(payload.raw_snapshots))
         return {
             "episode_index": job.episode_index,
+            "task": str(row.get("prompt") or job.task),
+            "clip_id": job.episode_meta.get("clip_id"),
+            "prompt": job.episode_meta.get("prompt"),
+            "trial": job.episode_meta.get("trial"),
             "length": int(row.get("length", max(len(job.steps), pending_length))),
             "status": job.status,
             "quality": row.get("quality", "green"),
@@ -1973,7 +2040,11 @@ class EpisodeLogger:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("w") as f:
             for task, idx in items:
-                f.write(json.dumps({"task_index": idx, "task": task}, ensure_ascii=False) + "\n")
+                row: dict[str, Any] = {"task_index": idx, "task": task}
+                required = self._collection_task_target(task)
+                if required is not None:
+                    row["required_episodes"] = int(required)
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     def _write_info_json(self) -> None:
         episodes = _read_jsonl(self._meta_path("episodes.jsonl"))
@@ -2158,7 +2229,45 @@ class EpisodeLogger:
         return history[-200:]
 
     def _collection_dataset_dir(self, task: str | None) -> Path:
-        return self._log_dir / sanitize_path_component(task or "unset")
+        prompt = str(task or "")
+        configured_tasks = (self._collection or {}).get("tasks") or {}
+        for dataset_name, entries in configured_tasks.items():
+            if prompt in {str(entry[0]) for entry in entries}:
+                return self._log_dir / sanitize_path_component(str(dataset_name)) / "raw"
+        return self._log_dir / sanitize_path_component(prompt or "unset") / "raw"
+
+    def _collection_task_target(self, task: str) -> int | None:
+        configured_tasks = (self._collection or {}).get("tasks") or {}
+        for entries in configured_tasks.values():
+            for prompt, target in entries:
+                if str(prompt) == task:
+                    return int(target)
+        return None
+
+    def _episode_timing_meta(self, mode: str) -> dict[str, Any]:
+        ended_at = _dt.datetime.now().astimezone()
+        started_at = self._episode_started_at or ended_at
+        elapsed = max(0.0, time.time() - self._episode_started_wall_time)
+        if self._episode_started_wall_time <= 0.0:
+            elapsed = max(0.0, (ended_at - started_at).total_seconds())
+        return {
+            "mode": mode,
+            "started_at": started_at.isoformat(timespec="seconds"),
+            "ended_at": ended_at.isoformat(timespec="seconds"),
+            "duration_seconds": round(elapsed, 3),
+            "robot_id": self._robot.name,
+            "session_id": self._session_id,
+        }
+
+    def _resolve_collection_task(self, dataset_dir: Path, task: str) -> tuple[int, dict[str, int]]:
+        with self._lock:
+            mapping = self._collection_task_indices.get(dataset_dir)
+            if mapping is None:
+                mapping = self._load_existing_tasks(dataset_dir)
+                self._collection_task_indices[dataset_dir] = mapping
+            if task not in mapping:
+                mapping[task] = len(mapping)
+            return mapping[task], dict(mapping)
 
     def _resolve_task_index(self, task: str) -> int:
         if task not in self._task_to_index:

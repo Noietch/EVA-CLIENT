@@ -20,15 +20,23 @@ from __future__ import annotations
 import collections
 import dataclasses
 import logging
+import tempfile
 import threading
 import time
 
+import cv2
 import numpy as np
 from openpi_client import msgpack_numpy
 
 from core.config import ConfigDict
 from core.registry import TRANSPORT_REGISTRY
-from core.types import CollectionRawBatch, CollectionRawSample, Observation, RawCollectionSnapshot
+from core.types import (
+    CollectionRawBatch,
+    CollectionRawImage,
+    CollectionRawSample,
+    Observation,
+    RawCollectionSnapshot,
+)
 from robots.base import Robot
 from transport.base import HilStatus, TransportBridge
 from transport.utils import ImageRateTracker, StreamFreshness
@@ -44,6 +52,7 @@ COLLECTION_CONTROL_REPEATS = 5
 COLLECTION_CONTROL_INTERVAL_S = 0.02
 COLLECTION_SOCKET_DRAIN_MAX = 64
 HIL_ACK_TIMEOUT_S = 1.0
+COLLECTION_JPEG_QUALITY = 90
 
 
 # --- wire protocol -------------------------------------------------------------
@@ -82,6 +91,8 @@ class WireAction:
         t: client-side send timestamp in seconds.
         action: flat action vector (joint space, full robot DOF).
         target: "real", "sim", "collect_start", or "collect_stop".
+        mode: Optional control mode. Collection start uses the teleop control
+            source; HIL start uses the intervention mode.
     """
 
     t: float
@@ -175,6 +186,60 @@ def unpack_action(payload: bytes) -> WireAction:
 # --- transport -----------------------------------------------------------------
 
 
+class _CollectionImageSpool:
+    """Append-only temporary storage for compressed collection images."""
+
+    def __init__(self) -> None:
+        # TemporaryFile is unlinked immediately on Linux, so an interrupted EVA
+        # process cannot leave a multi-gigabyte partial rollout in /tmp.
+        self._file = tempfile.TemporaryFile(prefix="eva-zmq-images-", buffering=0)
+        self._lock = threading.Lock()
+        self._size = 0
+
+    def append(self, payload: bytes) -> _CollectionImageSlice:
+        with self._lock:
+            offset = self._size
+            self._file.seek(offset)
+            written = self._file.write(payload)
+            if written != len(payload):
+                raise OSError(f"short write to collection image spool: {written}/{len(payload)}")
+            self._size += written
+        return _CollectionImageSlice(self, offset, written)
+
+    def read(self, offset: int, size: int) -> bytes:
+        with self._lock:
+            self._file.seek(offset)
+            payload = self._file.read(size)
+        if len(payload) != size:
+            raise OSError(f"short read from collection image spool: {len(payload)}/{size}")
+        return payload
+
+
+@dataclasses.dataclass(frozen=True)
+class _CollectionImageSlice:
+    spool: _CollectionImageSpool
+    offset: int
+    size: int
+
+    def read(self) -> bytes:
+        return self.spool.read(self.offset, self.size)
+
+    def decode(self) -> np.ndarray | None:
+        encoded = np.frombuffer(self.read(), dtype=np.uint8)
+        return cv2.imdecode(encoded, cv2.IMREAD_COLOR)
+
+
+def _encode_collection_image(image: np.ndarray) -> bytes:
+    ok, encoded = cv2.imencode(
+        ".jpg",
+        np.ascontiguousarray(image),
+        [int(cv2.IMWRITE_JPEG_QUALITY), COLLECTION_JPEG_QUALITY],
+    )
+    if not ok:
+        raise ValueError("failed to JPEG-encode ZMQ collection image")
+    return encoded.tobytes()
+
+
 class _ObservationReader:
     """One independent SUB socket + the WireObservation->Observation conversion.
 
@@ -191,6 +256,7 @@ class _ObservationReader:
         robot: Robot,
         zmq_mod,
         preserve_collection_backlog: bool = False,
+        conflate: bool = False,
     ) -> None:
         self._robot = robot
         self._zmq = zmq_mod
@@ -203,6 +269,7 @@ class _ObservationReader:
         self._image_rate = ImageRateTracker()
         self._lock = threading.Lock()
         self._closed = False
+        self._collection_image_spool: _CollectionImageSpool | None = None
 
         self._disabled_cameras = set(config.transport.disabled_cameras)
         self._disabled_groups = set(config.transport.disabled_groups)
@@ -218,9 +285,14 @@ class _ObservationReader:
 
         ctx = zmq_mod.Context.instance()
         self._sub = ctx.socket(zmq_mod.SUB)
-        self._sub.connect(config.transport.sub_endpoint)
+        if conflate:
+            # Collection capture only consumes the freshest complete observation.
+            # Conflation prevents an idle reader from replaying pre-START frames
+            # that are still buffered below the application-level drain.
+            self._sub.setsockopt(zmq_mod.CONFLATE, 1)
         self._sub.setsockopt(zmq_mod.SUBSCRIBE, b"")
         self._sub.setsockopt(zmq_mod.RCVTIMEO, 0)  # non-blocking drain
+        self._sub.connect(config.transport.sub_endpoint)
 
     def _drain_latest(self) -> WireObservation | None:
         """Pop all queued SUB messages, keeping only the newest by timestamp."""
@@ -486,7 +558,7 @@ class _ObservationReader:
             return latest
 
     def acquire_collection_raw(self) -> RawCollectionSnapshot | None:
-        """Capture one raw collection payload and expose it as timestamped streams.
+        """Capture one collection payload into memory-bounded timestamped streams.
 
         Returns None when the backlog is empty.
         """
@@ -494,45 +566,61 @@ class _ObservationReader:
         if payload is None:
             return None
         wire_obs = unpack_observation(payload)
+        spool = getattr(self, "_collection_image_spool", None)
+        if spool is None:
+            spool = _CollectionImageSpool()
+            self._collection_image_spool = spool
 
-        def decode_raw(wire_obs: WireObservation = wire_obs) -> CollectionRawBatch:
-            batch = CollectionRawBatch()
-            for key, image in wire_obs.images.items():
-                batch.images.setdefault(key, []).append(
-                    CollectionRawSample(timestamp=wire_obs.t, value=np.asarray(image))
+        batch = CollectionRawBatch()
+        for key, image in wire_obs.images.items():
+            image_slice = spool.append(_encode_collection_image(np.asarray(image)))
+            batch.images.setdefault(key, []).append(
+                CollectionRawSample(
+                    timestamp=wire_obs.t,
+                    value=CollectionRawImage(
+                        decoder=image_slice.decode,
+                        encoded_loader=image_slice.read,
+                    ),
                 )
-            for group_name, state in wire_obs.state.items():
-                batch.vectors.setdefault(f"state_qpos:{group_name}", []).append(
+            )
+        for group_name, state in wire_obs.state.items():
+            batch.vectors.setdefault(f"state_qpos:{group_name}", []).append(
+                CollectionRawSample(
+                    timestamp=wire_obs.t,
+                    value=np.asarray(state, dtype=np.float32).copy(),
+                )
+            )
+        if wire_obs.action is not None:
+            batch.vectors.setdefault("action_qpos", []).append(
+                CollectionRawSample(
+                    timestamp=wire_obs.t,
+                    value=np.asarray(wire_obs.action, dtype=np.float32).copy(),
+                )
+            )
+        if wire_obs.eef is not None:
+            for group_name, eef in wire_obs.eef.items():
+                batch.vectors.setdefault(f"state_eef:{group_name}", []).append(
                     CollectionRawSample(
                         timestamp=wire_obs.t,
-                        value=np.asarray(state, dtype=np.float32),
+                        value=np.asarray(eef, dtype=np.float32).copy(),
                     )
                 )
-            if wire_obs.action is not None:
-                batch.vectors.setdefault("action_qpos", []).append(
-                    CollectionRawSample(
-                        timestamp=wire_obs.t,
-                        value=np.asarray(wire_obs.action, dtype=np.float32),
-                    )
+        if wire_obs.action_eef is not None:
+            batch.vectors.setdefault("action_eef", []).append(
+                CollectionRawSample(
+                    timestamp=wire_obs.t,
+                    value=np.asarray(wire_obs.action_eef, dtype=np.float32).copy(),
                 )
-            if wire_obs.eef is not None:
-                for group_name, eef in wire_obs.eef.items():
-                    batch.vectors.setdefault(f"state_eef:{group_name}", []).append(
-                        CollectionRawSample(
-                            timestamp=wire_obs.t,
-                            value=np.asarray(eef, dtype=np.float32),
-                        )
-                    )
-            if wire_obs.action_eef is not None:
-                batch.vectors.setdefault("action_eef", []).append(
-                    CollectionRawSample(
-                        timestamp=wire_obs.t,
-                        value=np.asarray(wire_obs.action_eef, dtype=np.float32),
-                    )
-                )
-            return batch
+            )
 
-        return RawCollectionSnapshot(timestamp=wire_obs.t, decode_raw=decode_raw)
+        return RawCollectionSnapshot(
+            timestamp=wire_obs.t,
+            decode_raw=lambda batch=batch: batch,
+        )
+
+    def rotate_collection_image_spool(self) -> None:
+        """Start a new spool while old save jobs retain their previous one."""
+        self._collection_image_spool = None
 
     def close(self) -> None:
         """Close this reader's SUB socket (idempotent)."""
@@ -540,6 +628,7 @@ class _ObservationReader:
             return
         self._closed = True
         self._sub.close(linger=0)
+        self._collection_image_spool = None
 
 
 class ZmqTransport(TransportBridge):
@@ -566,7 +655,7 @@ class ZmqTransport(TransportBridge):
         self._zmq = zmq
 
         self._reader = _ObservationReader(config, robot, zmq)
-        self._collection_reader = _ObservationReader(config, robot, zmq)
+        self._collection_reader = _ObservationReader(config, robot, zmq, conflate=True)
         self._qpos_reader = _ObservationReader(config, robot, zmq)
         self._extra_readers: list[_ObservationReader] = []
 
@@ -691,18 +780,37 @@ class ZmqTransport(TransportBridge):
         message = WireAction(t=time.monotonic(), action=np.asarray(action), target=target)
         self._pub.send(pack_action(message))
 
-    def _send_collection_control(self, target: str) -> None:
+    def _send_collection_control(self, target: str, mode: str | None = None) -> None:
         action = np.zeros(self._robot.total_action_dim, dtype=np.float32)
         for attempt in range(COLLECTION_CONTROL_REPEATS):
             self._pub.send(
-                pack_action(WireAction(t=time.monotonic(), action=action, target=target))
+                pack_action(
+                    WireAction(
+                        t=time.monotonic(),
+                        action=action,
+                        target=target,
+                        mode=mode,
+                    )
+                )
             )
             if attempt + 1 < COLLECTION_CONTROL_REPEATS:
                 time.sleep(COLLECTION_CONTROL_INTERVAL_S)
 
     def start_collection(self) -> None:
         """Tell the execution layer to start recording (sends repeated start signals)."""
-        self._send_collection_control(COLLECTION_START_TARGET)
+        reader = getattr(self, "_collection_reader", None)
+        if reader is not None:
+            reader.rotate_collection_image_spool()
+        teleop = (self._config.get("collection") or {}).get("teleop") or {}
+        control_source = str(teleop.get("control_source", "transport"))
+        self._send_collection_control(COLLECTION_START_TARGET, mode=control_source)
+
+    def start_policy_collection(self) -> None:
+        """Start a policy-driven rollout without connecting the teleop source."""
+        reader = getattr(self, "_collection_reader", None)
+        if reader is not None:
+            reader.rotate_collection_image_spool()
+        self._send_collection_control(COLLECTION_START_TARGET, mode="client")
 
     def clear_collection_backlog(self) -> float | None:
         """Drop collection frames buffered before the active recording episode."""

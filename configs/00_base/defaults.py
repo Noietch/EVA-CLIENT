@@ -9,7 +9,7 @@ configs/02_collection/* and configs/03_evaluation/* should start with:
 merge (via Config.fromfile / _merge_a_into_b) means partial overrides on
 nested dicts work without re-stating the whole section.
 
-The 9 top-level items below are the single source of truth for "what happens
+The top-level sections below are the single source of truth for "what happens
 when a field is omitted from a preset". load_config() (src/core/config.py)
 does NOT apply fallback defaults — it relies on this base file being merged
 in via _base_.
@@ -62,10 +62,27 @@ policy = dict(
 )
 
 collection = dict(
+    controls=dict(
+        keyboard=dict(
+            motion=dict(control="KeyM", key="M", gesture="tap"),
+            record_toggle=dict(control="KeyR", key="R", gesture="tap"),
+            record_cancel=dict(control="Escape", key="ESC", gesture="hold", hold_ms=1000),
+            home=dict(control="KeyH", key="H", gesture="tap"),
+        ),
+        vr=dict(
+            motion=dict(control="right.secondary", key="B", gesture="tap"),
+            record_toggle=dict(control="right.primary", key="A", gesture="tap"),
+            record_cancel=dict(control="right.primary", key="A", gesture="hold", hold_ms=1000),
+            home=dict(control="left.primary", key="X", gesture="tap"),
+            left_arm_toggle=dict(control="left.grip", key="L GRIP", gesture="hold", hold_ms=1000),
+            right_arm_toggle=dict(control="right.grip", key="R GRIP", gesture="hold", hold_ms=1000),
+        ),
+    ),
     storage=dict(
         log_dir="",
         fps=30,
         save_queue_max=15,
+        image_skew_tolerance_sec=None,
         # Saved video resolution; uncomment BOTH to resize each saved frame to exactly
         # (image_width, image_height). Omitted/commented -> keep the camera's native size.
         # image_height=224,
@@ -80,7 +97,9 @@ collection = dict(
         columns={},
     ),
     teleop=dict(
+        control_source="transport",
         type="",
+        client={},
         port="",
         joint_coef=[],
         gripper=dict(
@@ -92,12 +111,19 @@ collection = dict(
             raw_open=1000.0,
             raw_close=0.0,
         ),
+        safety=dict(
+            max_qpos_step=0.08,
+            max_position_error_m=0.08,
+            max_orientation_error_rad=0.35,
+        ),
     ),
     transport=dict(
         ros1=dict(primary_camera="", max_frame_skew_sec=0.1, groups={}),
         ros2=dict(primary_camera="", max_frame_skew_sec=0.1, groups={}),
     ),
-    tasks=[],
+    # Dataset directory name -> (prompt, target) pairs in one shared LeRobot dataset.
+    # Use target=-1 when collection has no episode limit.
+    tasks={},
 )
 
 rollout = dict(
@@ -116,6 +142,12 @@ rollout = dict(
 operator_control = dict(
     enabled=False,
     action_topic="/eva/operator_action",
+)
+
+# Console startup workspace. "auto" preserves the workflow-specific defaults:
+# EVAL for evaluation configs, otherwise DEBUG.
+console = dict(
+    initial_tab="auto",
 )
 
 # ZMQ control channel: exposes every console button (web:* commands) + read-only

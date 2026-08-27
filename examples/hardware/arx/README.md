@@ -278,6 +278,28 @@ commands the ARX followers, and publishes the aligned collection fields:
 - `action`: Alicia leader command mapped into ARX joint/gripper space.
 - `action_eef`: FK from that mapped Alicia action.
 
+### X5 WebXR VR collection
+
+Use `configs/02_collection/arx_x5_vr.py` when EVA Client WebXR controls the X5
+followers directly. R5 collection uses the transport teleop flow above. The ZMQ `collect_start`
+message carries `mode=client`; the ARX node then skips Alicia-D setup, continues
+publishing real arm/camera state, and accepts EVA's `target=real` actions. Do not
+launch the node with `--passive-collection`, because passive mode intentionally
+blocks motion commands during collection.
+
+```bash
+bash examples/hardware/arx/run_hardware.sh
+python examples/input_sources/vr_webxr/node.py \
+  --host 127.0.0.1 \
+  --port 43876 \
+  --endpoint tcp://127.0.0.1:8765 \
+  --ack-endpoint tcp://127.0.0.1:8766
+eva --config configs/02_collection/arx_x5_vr.py --web-port 8080
+```
+
+The VR config writes to `work_dirs/collection/arx_x5_vr` so X5 VR episodes do
+not mix with R5 transport-teleop collection output.
+
 Default Alicia ports match `teleop.py`:
 
 - `left_arm`: `/dev/serial/by-id/usb-1a86_USB_Single_Serial_5C4C192742-if00`

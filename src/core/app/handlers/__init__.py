@@ -16,4 +16,5 @@ from __future__ import annotations
 from core.app.handlers.control import *  # noqa: F401,F403
 from core.app.handlers.io import *  # noqa: F401,F403
 from core.app.handlers.recording import *  # noqa: F401,F403
+from core.app.handlers.teleop import *  # noqa: F401,F403
 from core.app.handlers.utils import *  # noqa: F401,F403
