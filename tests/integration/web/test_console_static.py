@@ -112,8 +112,25 @@ def test_console_post_requests_are_serialized():
     html = console_source()
 
     assert "let postQueue = Promise.resolve();" in html
+    assert "if (concurrent) return request();" in html
     assert "const result = postQueue.catch(() => {}).then(request);" in html
     assert "postQueue = result.then(() => undefined, () => undefined);" in html
+
+
+def test_quality_export_and_upload_do_not_block_collection_controls():
+    html = console_source()
+
+    assert 'apiPost("/api/collect_quality_export", {' in html
+    assert 'apiPost("/api/collect_quality_upload", {' in html
+    assert html.count("}, { concurrent: true });") >= 2
+    assert "/api/collect_quality_export?job_id=" in html
+
+
+def test_console_boots_into_the_configured_tab():
+    html = console_source()
+
+    assert 'const initialTab = S.CFG.initial_tab || "debug";' in html
+    assert "setActiveTab(initialTab);" in html
 
 
 def test_console_controls_expose_shared_command_templates():
@@ -175,6 +192,80 @@ def test_telemetry_bar_renders_image_hz_metric():
     assert '$("t-image-hz").textContent = formatImageHz(s.image_min_hz);' in html
 
 
+def test_collect_omits_detailed_teleop_status_panel():
+    html = console_source()
+
+    assert "function renderTeleopStatus" not in html
+    assert "collect-teleop-status" not in html
+    assert "teleop_collection_metrics" not in html
+
+
+def test_collect_control_panel_renders_configured_input_hints_and_motion_states():
+    html = console_source()
+
+    assert 'id="collect-hint-motion"' in html
+    assert 'id="collect-control-groups"' in html
+    assert 'id="collect-hint-record-toggle"' in html
+    assert 'id="collect-hint-record-cancel"' in html
+    assert 'id="collect-hint-home"' in html
+    assert 'armLabel.textContent = S.collectArmEnabled ? "ENABLED" : "LOCKED";' in html
+    assert 'state = "unavailable"' in html
+    assert 'state = "active"' in html
+    assert 'state = "ready"' in html
+
+
+def test_collect_controls_use_svg_progress_and_keyboard_shortcuts():
+    html = console_source()
+
+    assert 'createElementNS("http://www.w3.org/2000/svg"' in html
+    assert 'class: "control-key-fill"' in html
+    assert 'class: "control-key-progress"' in html
+    assert '"clip-path": `url(#${clipId})`' in html
+    assert "stroke-dashoffset: calc(100 - var(--control-progress))" in html
+    assert "transform: scaleX(calc(var(--control-progress) / 100))" in html
+    assert 'host.style.setProperty("--control-fill-width", `${progress * 100}%`);' in html
+    assert "clip-path: inset(0 calc(100% - var(--control-fill-width)) 0 0)" in html
+    assert 'window.addEventListener("keydown"' in html
+    assert 'window.addEventListener("keyup"' in html
+    assert "requestAnimationFrame(() => animateKeyboardHold(entry))" in html
+    assert "@keyframes controlConfirm" in html
+    assert '.control-hint.gamepad[data-key="A"]' in html
+    assert '.control-hint.gamepad[data-key="B"]' in html
+    assert '.control-hint.gamepad[data-key="X"]' in html
+    assert '.control-hint.gamepad[data-key="Y"]' in html
+    assert ".control-hint.pressed .control-key-fill { transform: scaleX(1); }" in html
+    assert ".control-hint.pressed .control-key-progress { stroke: var(--paper); }" in html
+    assert "min-height: 40px; padding: 5px 10px" in html
+    assert "fill: var(--paper); stroke: var(--control-color)" in html
+    assert "@media (prefers-reduced-motion: reduce)" in html
+
+
+def test_collect_requirement_renderer_imports_its_task_target_helper():
+    html = console_source()
+
+    assert (
+        'import { collectTaskTarget, collectTaskValue, setPanel, applyStatus, uiMode } from "./run.js";'
+        in html
+    )
+    assert "function collectTaskTarget(prompt = collectTaskValue())" in html
+    assert "applyTune, applyManualTune, collectTaskTarget, collectTaskValue" in html
+
+
+def test_collect_guide_appends_client_input_source_health():
+    html = console_source()
+
+    assert 'const TELEOP_CLIENT_LABELS = { vr_webxr: "VR" };' in html
+    assert 'teleopCfg.control_source !== "client"' in html
+    assert (
+        'const state = faulted ? "ERROR" : (teleop && teleop.connected ? "LINKED" : "DOWN");'
+        in html
+    )
+    assert 'state === "DOWN" ? "down" : "error"' in html
+    assert 'class="vr-input-status ${stateClass}"' in html
+    assert "vr-hand-status" not in html
+    assert '$("gb-msg").innerHTML = message + collectInputSourceSuffix(s);' in html
+
+
 def test_manual_target_qpos_renders_from_status_without_frame_qpos():
     html = console_source()
 
@@ -223,6 +314,8 @@ def test_manual_dispatch_uses_single_send_stop_toggle():
     assert 'send.textContent = S.manualDispatching ? "STOP ■" : "SEND TO REAL ▶";' in html
     assert "syncManualDispatchState(s);" in html
     assert "const active = !!status.manual_publish_active;" in html
+    assert "async function flushManualQpos()" in html
+    assert "await flushManualQpos();" in html
     assert 'return apiPost("/api/manual_send");' in html
     assert 'return apiPost("/api/halt");' in html
 
@@ -762,6 +855,28 @@ def test_manual_qc_fail_marks_episode_tile_red():
     assert 'item.qc_verdict === "fail"' in html
 
 
+def test_collection_quality_export_and_upload_are_config_driven():
+    html = console_source()
+
+    assert 'id="b-collect-quality-export"' in html
+    assert 'id="b-collect-quality-upload"' in html
+    assert ">EXPORT DATASET</button>" in html
+    assert 'id="collect-quality-target"' not in html
+    assert 'id="collect-quality-progress-label"' in html
+    assert 'id="collect-quality-progress-bar"' in html
+    assert 'id="collect-quality-progress-fill"' in html
+    assert 'apiPost("/api/collect_quality_export", {' in html
+    assert 'apiPost("/api/collect_quality_upload", {' in html
+    assert "job.bytes_completed" in html
+    assert "job.bytes_total" in html
+    assert "job.episodes_completed" in html
+    assert "job.episodes_total" in html
+    assert 'job.state === "completed"' in html
+    assert "function qualityUploadTargets(upload)" not in html
+    assert 'backendLabel.join(" + ")' in html
+    assert "upload.configured" in html
+
+
 def test_rl_manual_qc_pass_overrides_automatic_quality_tone():
     html = console_source()
     start = html.index("function episodeTone(item)")
@@ -770,19 +885,20 @@ def test_rl_manual_qc_pass_overrides_automatic_quality_tone():
     assert body.index('item.qc_verdict === "pass"') < body.index('item.quality === "red"')
 
 
-def test_saved_collect_episode_is_gray_until_manual_qc():
+def test_saved_collect_episode_tone_and_summary_follow_quality():
     html = console_source()
     start = html.index("function collectTone(item)")
-    body = html[start : html.index("function collectIssueText", start)]
+    body = html[start : html.index("function threeDigitCount", start)]
 
-    assert 'if (item.qc_verdict === "pass") return "cq-ok";' in body
-    assert 'if (item.qc_verdict === "fail") return "cq-fail";' in body
-    assert 'item.quality === "green"' not in body
-    assert 'if (item.quality === "red") return "cq-fail";' in body
-    assert "if (savedEpisodeId(item) != null" not in body
+    assert 'if (outcome === "usable") return "cq-ok";' in body
+    assert 'if (outcome === "rejected") return "cq-fail";' in body
+    assert 'item.quality === "green"' in html
+    assert 'item.quality === "red"' in html
     assert body.rstrip().endswith('return "cq-queued";\n  }')
-    assert "Green means saved" not in html
-    assert "Pass green / fail red" in html
+    assert 'id="collect-usable-count"' in html
+    assert 'id="collect-rejected-count"' in html
+    assert 'id="collect-pending-count"' in html
+    assert 'String(episodeIndex).padStart(3, "0")' in html
 
 
 def test_selected_batch_qc_episode_is_highlighted():
@@ -958,6 +1074,9 @@ def test_task_and_strategy_controls_are_dropdown_selects():
         '<select class="choice-select strategy-select" id="strategy-list" aria-label="Strategy"></select>'
         in html
     )
+    assert 'aria-label="Previous dataset set">&#8592;</button>' in html
+    assert 'aria-label="Next task in this set">&#8594;</button>' in html
+    assert "grid-template-columns: 36px minmax(0, 1fr) 36px" in html
 
 
 def test_eval_model_selector_is_dropdown():
@@ -975,7 +1094,7 @@ def test_eval_model_selector_is_dropdown():
     assert 'background-image: url("data:image/svg+xml' in html
     assert 'placeholder.textContent = "SELECT TASK";' in html
     assert 'apiPost("/api/select_task", { task });' in html
-    assert 'apiPost("/api/select_collect_task", { task });' in html
+    assert 'apiPost("/api/select_collect_task", { task: prompt });' in html
     assert 'const opt = document.createElement("option");' in html
     assert "sl.onchange = () => {" in html
     assert 'apiPost("/api/select_strategy", { strategy: key });' in html
@@ -992,27 +1111,27 @@ def test_collect_start_requires_motion_switch():
     assert "|| !S.collectArmEnabled" in html
     assert "function disarmCollectArm()" in html
     assert 'if (tab !== "collect") disarmCollectArm();' in html
-    assert 'collect_teleop_armed: tab === "collect" && S.collectArmEnabled' in html
-    assert 'collect_teleop_armed: S.ACTIVE_TAB === "collect" && S.collectArmEnabled' in html
     assert 'apiPost("/api/tab_switch", {' in html
     assert 'S.collectArmEnabled = enabled && S.ACTIVE_TAB === "collect";' in html
+    assert 'apiPost("/api/collect_arm", { enabled: S.collectArmEnabled });' in html
+    assert "S.collectArmEnabled = !!s.collection_teleop_armed;" in html
 
 
 def test_collect_task_selection_refreshes_record_gate_immediately():
     html = console_source()
 
-    assert (
-        "S.STATUS.selected_collect_task = task;\n"
-        '        apiPost("/api/select_collect_task", { task });\n'
-        '        mark("collect-prompt-list", "prompt", task);\n'
-        "        renderCollect();"
-    ) in html
-    assert (
-        "S.STATUS.selected_collect_task = p;\n"
-        '        apiPost("/api/select_collect_task", { task: p });\n'
-        '        mark("collect-prompt-list", "prompt", p);\n'
-        "        renderCollect();"
-    ) in html
+    assert "function selectCollectTask(prompt)" in html
+    assert "S.STATUS.selected_collect_task = prompt;" in html
+    assert 'apiPost("/api/select_collect_task", { task: prompt });' in html
+    assert "function stepCollectSet(delta)" in html
+    assert "function stepCollectTask(delta)" in html
+    assert 'id="collect-set-list"' in html
+    assert '<div class="collect-task-field-label">DATASET NAME</div>' in html
+    assert '<div class="collect-task-field-label">TASK / PROMPT</div>' in html
+    assert 'id="b-collect-prev-set" title="Previous dataset set"' in html
+    assert 'id="b-collect-next-set" title="Next dataset set"' in html
+    assert 'id="b-collect-prev-task" title="Previous task in this set"' in html
+    assert 'id="b-collect-next-task" title="Next task in this set"' in html
 
 
 def test_collect_queue_unlocks_after_end_save_click():
@@ -1276,3 +1395,47 @@ def test_replay_and_review_defer_video_network_until_playback_needs_it():
     assert 'data-src="/api/replay_video?${params.toString()}"' in media_body
     assert "function ensureVideoSource(v)" in html
     assert "ensureVideoSource(v);" in ready_body
+
+
+def test_dashboard_uses_animated_multi_month_calendar_heatmaps():
+    html = console_source()
+
+    assert "Dataset overview" in html
+    assert "Evaluation overview" in html
+    assert "while (weeks < 24)" in html
+    assert 'class="dashboard-calendar-cell level-${level}"' in html
+    assert 'class="dashboard-calendar-tooltip"' in html
+    assert 'cell.addEventListener("pointerenter", show);' in html
+    assert "@keyframes dashboard-cell-in" in html
+    assert "#9BE9A8" in html
+    assert "#216E39" in html
+    assert 'rx="2.5"' in html
+    assert ">LESS</text>" in html
+    assert ">MORE</text>" in html
+    assert (
+        "scrollHost.scrollLeft = Math.max(0, peak.x * scale - scrollHost.clientWidth / 2);" in html
+    )
+    assert "dashboard-trend-track" not in html
+
+
+def test_collection_target_is_explicit_and_unset_targets_stay_blank():
+    html = console_source()
+
+    assert 'id="collect-requirement-count"' in html
+    assert 'id="collect-requirement-status"' in html
+    task_panel = html[
+        html.index('id="collect-panel-task"') : html.index('id="collect-panel-record"')
+    ]
+    queue_panel = html[
+        html.index('id="collect-panel-queue"') : html.index('id="collect-panel-replay"')
+    ]
+    assert 'id="collect-requirement"' not in task_panel
+    assert 'id="collect-requirement"' in queue_panel
+    assert "COLLECTION TARGET · USABLE ONLY" in queue_panel
+    assert "const required = collectTaskTarget(prompt);" in html
+    assert 'collectOutcome(item) === "usable"' in html
+    assert 'unlimited ? "∞" : (hasRequirement ? required : "--")' in html
+    assert '? "NO LIMIT"' in html
+    assert ".collect-requirement.complete { border-left-color: var(--ok); }" in html
+    assert ".collect-requirement.complete strong { color: var(--ok); }" in html
+    assert ': "TARGET NOT SET";' in html

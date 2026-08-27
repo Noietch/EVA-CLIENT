@@ -38,6 +38,8 @@ from core.app.state import (
     SessionStatus,
 )
 from core.config import ConfigDict
+from core.utils.dataset_upload import DatasetUploadProgress, DatasetUploadResult
+from core.utils.quality_dataset import QualityExportProgress, QualitySplitSummary
 
 
 def test_run_before_setup_is_rejected(console):
@@ -401,7 +403,7 @@ def test_collect_qc_mark_rejects_review_from_previous_collection_task():
 
     with serve_console(console_config()) as h:
         h.runtime.episode_logger = cast(Any, _Logger())
-        h.session.selected_collect_task = "place cup"
+        h.session.selected_collect_task = "pour soybean"
 
         resp = h.post(
             "/api/collect_qc_mark",
@@ -416,6 +418,174 @@ def test_collect_qc_mark_rejects_review_from_previous_collection_task():
     assert resp.status == 409
     assert resp.json == {"ok": False, "error": "collection review task is no longer active"}
     assert calls == []
+
+
+def test_collect_qc_mark_allows_review_after_switching_prompt_in_same_set():
+    calls = []
+
+    class _Logger:
+        def mark_collection_qc(self, task, episode, verdict, note):
+            calls.append((task, episode, verdict, note))
+            return True
+
+    with serve_console(console_config()) as h:
+        h.runtime.episode_logger = cast(Any, _Logger())
+        h.session.selected_collect_task = "place cup"
+
+        resp = h.post(
+            "/api/collect_qc_mark",
+            {
+                "task": "pick up cup",
+                "episode": 0,
+                "verdict": "pass",
+                "note": "same dataset set",
+            },
+        )
+
+    assert resp.status == 200
+    assert calls == [("pick up cup", 0, "pass", "same dataset set")]
+
+
+def test_collect_quality_export_uses_active_task_dataset(tmp_path, monkeypatch):
+    source = tmp_path / "pick_up_cup"
+    source.mkdir()
+    calls = []
+
+    class _Logger:
+        def status_snapshot(self, task):
+            assert task == "pick up cup"
+            return {"dataset_dir": str(source)}
+
+    def split(
+        source_dir,
+        accepted_dir,
+        rejected_dir,
+        *,
+        replace_existing,
+        progress_callback,
+    ):
+        assert replace_existing is True
+        calls.append((source_dir, accepted_dir, rejected_dir))
+        progress_callback(QualityExportProgress(1, 3, "accepted", 0))
+        progress_callback(QualityExportProgress(3, 3, "rejected", 2))
+        return QualitySplitSummary(
+            source_dir=str(source_dir),
+            accepted_dir=str(accepted_dir),
+            rejected_dir=str(rejected_dir),
+            source_episodes=3,
+            accepted_episodes=2,
+            rejected_episodes=1,
+            accepted_frames=20,
+            rejected_frames=10,
+            rejected_source_indices=(1,),
+        )
+
+    monkeypatch.setattr(console_server, "split_dataset_by_quality", split)
+    with serve_console(console_config()) as h:
+        h.runtime.episode_logger = cast(Any, _Logger())
+        h.session.selected_collect_task = "pick up cup"
+        response = h.post("/api/collect_quality_export", {"task": "pick up cup"})
+        assert response.status == 202
+        job_id = response.json["job_id"]
+        deadline = time.monotonic() + 2
+        while True:
+            status = h.get(f"/api/collect_quality_export?job_id={job_id}")
+            if status.json["state"] in {"completed", "failed"}:
+                break
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+
+    assert status.status == 200
+    assert status.json["state"] == "completed"
+    assert status.json["progress"] == 1.0
+    assert status.json["episodes_completed"] == 3
+    assert status.json["accepted_episodes"] == 2
+    assert status.json["rejected_episodes"] == 1
+    assert calls[0][0] == source.resolve()
+    assert calls[0][1] == source.with_name("pick_up_cup_export") / "accepted"
+    assert calls[0][2] == source.with_name("pick_up_cup_export") / "rejected"
+
+
+def test_collect_quality_upload_uses_config_and_accepts_only_accepted_export(tmp_path, monkeypatch):
+    source = tmp_path / "legacy_local_name" / "raw"
+    source.mkdir(parents=True)
+    accepted = source.parent / "export" / "accepted"
+    (accepted / "meta").mkdir(parents=True)
+    (accepted / "meta" / "quality_split.json").write_text(
+        json.dumps({"subset": "accepted", "source_dir": str(source)})
+    )
+    calls = []
+
+    def upload(local_dir, specs, *, progress_callback):
+        calls.append((local_dir, specs))
+        progress_callback(DatasetUploadProgress(14, 14, 246, 246, "sftp: meta/info"))
+        return DatasetUploadResult(
+            local_dir=str(local_dir),
+            remote_dir=", ".join(spec.target for spec in specs),
+            destination="sftp",
+            files=14,
+            bytes=246,
+        )
+
+    monkeypatch.setattr(console_server, "upload_dataset_directory", upload)
+    config = console_config()
+    config.collection.storage.sftp = ConfigDict(
+        host="upload.example.com",
+        port=22,
+        user="robot",
+        identity_file=str(tmp_path / "key"),
+        remote_dir="/datasets/arx_x5",
+    )
+    with serve_console(config) as h:
+
+        class _Logger:
+            has_active_episode = False
+
+            def status_snapshot(self, task):
+                assert task == "pick up cup"
+                return {"dataset_dir": str(source)}
+
+        h.runtime.episode_logger = cast(Any, _Logger())
+        h.session.selected_collect_task = "pick up cup"
+        ctx = console_server.ConsoleRequestHandler.ctx
+        ctx.quality_export_jobs["completed-export"] = console_server._QualityExportJob(
+            job_id="completed-export",
+            source_dir=str(source.resolve()),
+            accepted_dir=str(accepted.resolve()),
+            rejected_dir=str((source.parent / "export" / "rejected").resolve()),
+            state="completed",
+        )
+        public_config = h.get("/api/config")
+        assert public_config.json["collection"]["upload"] == {
+            "configured": True,
+            "backends": ["sftp"],
+            "targets": ["upload.example.com:22 · /datasets/arx_x5"],
+        }
+        response = h.post(
+            "/api/collect_quality_upload",
+            {"task": "pick up cup"},
+        )
+        assert response.status == 202
+        job_id = response.json["job_id"]
+        deadline = time.monotonic() + 2
+        while True:
+            status = h.get(f"/api/collect_quality_upload?job_id={job_id}")
+            if status.json["state"] in {"completed", "failed"}:
+                break
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+
+    assert status.status == 200
+    assert status.json["state"] == "completed"
+    assert status.json["progress"] == 1.0
+    assert status.json["files_completed"] == 14
+    assert status.json["bytes_completed"] == 246
+    assert status.json["backends"] == ["sftp"]
+    assert len(calls) == 1
+    assert calls[0][0] == accepted.resolve()
+    specs = calls[0][1]
+    assert [spec.backend for spec in specs] == ["sftp"]
+    assert specs[0].target == "/datasets/arx_x5/cup_set"
 
 
 def test_status_exposes_replay_action_key_for_series_cache():
@@ -1123,6 +1293,7 @@ def test_collect_start_requires_activation_gate():
 
 def test_collect_start_api_requires_collect_tab_activation():
     with serve_console(console_config()) as h:
+        h.runtime.transport.supports_collection = lambda: True
         resp = h.post("/api/collect_start")
         assert resp.json["ok"] is False
         assert h.status()["collection_teleop_armed"] is False
@@ -1132,7 +1303,7 @@ def test_collect_start_api_requires_collect_tab_activation():
         resp = h.post("/api/collect_start")
         assert resp.json["ok"] is False
 
-        h.post("/api/tab_switch", {"tab": "collect", "collect_teleop_armed": True})
+        h.do("/api/collect_arm", {"enabled": True})
         assert h.status()["collection_teleop_armed"] is True
 
 

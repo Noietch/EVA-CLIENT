@@ -93,7 +93,7 @@ def test_results_read_from_episodes_jsonl(tmp_path):
     with _serve_eval_console(_eval_config(), str(tmp_path)) as h:
         assert h.get("/api/results").json["records"] == []
 
-        ep_meta = tmp_path / "episodes" / "meta"
+        ep_meta = tmp_path / "episodes" / "raw" / "meta"
         ep_meta.mkdir(parents=True)
         (ep_meta / "episodes.jsonl").write_text(
             '{"episode_index": 7, "clip_id": "c1", "prompt": "pick up the block", '
@@ -113,7 +113,7 @@ def test_results_read_from_episodes_jsonl(tmp_path):
 def test_results_dedup_latest_episode_per_clip(tmp_path):
     # A re-test reuses the clip_id on a later episode; the latest episode row wins.
     with _serve_eval_console(_eval_config(), str(tmp_path)) as h:
-        ep_meta = tmp_path / "episodes" / "meta"
+        ep_meta = tmp_path / "episodes" / "raw" / "meta"
         ep_meta.mkdir(parents=True)
         (ep_meta / "episodes.jsonl").write_text(
             '{"episode_index": 0, "clip_id": "c1", "trial": 1, "score": 1}\n'

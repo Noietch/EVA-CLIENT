@@ -83,6 +83,7 @@ export const S = {
   collectQueueEnabled: false,
   collectArmEnabled: false,
   collectToggleBusy: null,
+  collectHomeBusy: false,
   rolloutSaveQueueExpanded: false,
   rolloutSaveEpisode: null,
   runToggleBusy: null,
@@ -159,7 +160,7 @@ async function apiGet(path) {
 
 let postQueue = Promise.resolve();
 
-async function apiPost(path, body) {
+async function apiPost(path, body, { concurrent = false } = {}) {
   const request = async () => {
     const traceId = `${CLIENT_TRACE_ID}:${clientTraceSeq + 1}`;
     const started = performance.now();
@@ -188,6 +189,7 @@ async function apiPost(path, body) {
       throw error;
     }
   };
+  if (concurrent) return request();
   const result = postQueue.catch(() => {}).then(request);
   postQueue = result.then(() => undefined, () => undefined);
   return result;

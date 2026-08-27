@@ -257,6 +257,10 @@ def console_config(**overrides: Any) -> ConfigDict:
     cfg.policy.backend_options = ConfigDict(dict(chunk_size=8))
     cfg.inference_cfg.publish_rate = 1000
     cfg.inference_cfg.debug_tasks = ("pick up the cup", "pour soybean")
+    cfg.collection.tasks = ConfigDict(
+        cup_set=[("pick up cup", 10), ("place cup", -1)],
+        pouring_set=[("pour soybean", 20)],
+    )
     cfg.inference_strategies = ConfigDict(SYNC_STRATEGY)
 
     if "supported_inference_strategies" in overrides:

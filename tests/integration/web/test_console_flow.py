@@ -17,7 +17,13 @@ def test_config_route_serves_static_frontend_inputs(console):
     cfg = console.get("/api/config").json
     assert cfg["robot_type"] == "agilex_piper"
     assert cfg["transport_type"] == "debug"
+    assert cfg["initial_tab"] == "debug"
     assert "pick up the cup" in cfg["tasks"]
+    assert cfg["collect_tasks"] == {
+        "cup_set": [["pick up cup", 10], ["place cup", -1]],
+        "pouring_set": [["pour soybean", 20]],
+    }
+    assert "collect_task_requirements" not in cfg
     assert cfg["camera_keys"] == ["cam_high", "cam_left_wrist", "cam_right_wrist"]
     assert {s["key"] for s in cfg["strategies"]} == {"sync"}
     assert cfg["modes"] == ["real", "sim", "step", "manual"]
@@ -27,6 +33,26 @@ def test_config_route_serves_static_frontend_inputs(console):
         item["command"] == "web:rl_select_critic:{slot}"
         for item in cfg["control_channel"]["commands"]
     )
+
+
+def test_config_route_exposes_configured_initial_tab(console):
+    console.config.console.initial_tab = "collect"
+
+    assert console.get("/api/config").json["initial_tab"] == "collect"
+
+
+def test_config_route_exposes_teleop_client_for_frontend_bootstrap(console):
+    console.config.collection.teleop = ConfigDict(
+        control_source="client",
+        client=ConfigDict(type="vr_webxr"),
+    )
+
+    teleop = console.get("/api/config").json["collection"]["teleop"]
+
+    assert teleop == {
+        "control_source": "client",
+        "client_type": "vr_webxr",
+    }
 
 
 def test_config_route_serves_rl_workspace_contract(console):

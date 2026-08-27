@@ -24,6 +24,7 @@
   <!-- ============ tab strip ============ -->
   <div class="tabs">
     <span class="tab-thumb" id="tab-thumb"></span>
+    <button class="tab" data-tab="dashboard"><span class="idx">00</span> DASHBOARD</button>
     <button class="tab active" data-tab="debug"><span class="idx">01</span> DEBUG</button>
     <button class="tab" data-tab="manual"><span class="idx">02</span> MANUAL</button>
     <button class="tab" data-tab="collect"><span class="idx">03</span> COLLECT</button>
@@ -47,6 +48,83 @@
 
   <!-- ============ workspace ============ -->
   <div class="workspace">
+
+    <!-- ---- DASHBOARD ---- -->
+    <div class="view" id="view-dashboard">
+      <div class="dashboard-shell">
+        <header class="dashboard-head">
+          <div>
+            <div class="dashboard-kicker">RAW DATA OPERATIONS</div>
+            <h1>Operations dashboard</h1>
+            <p>Raw episode throughput, demand, and quality over time.</p>
+          </div>
+          <span class="dashboard-scope">RAW ONLY</span>
+        </header>
+
+        <div class="dashboard-query" aria-label="Dashboard date range">
+          <span>DATE RANGE</span>
+          <label>FROM<input type="date" id="dash-date-from" /></label>
+          <i></i>
+          <label>TO<input type="date" id="dash-date-to" /></label>
+          <button class="btn primary" id="dash-date-apply">APPLY</button>
+          <button class="btn" id="dash-date-reset" title="Reset date range" aria-label="Reset date range">&#8635;</button>
+          <small id="dash-date-result"></small>
+        </div>
+
+        <div class="dashboard-error" id="dashboard-error" style="display:none"></div>
+
+        <section class="dashboard-mode-panel" id="dashboard-collection">
+          <div class="dashboard-mode-head"><span class="dashboard-mode-index">01</span><div><h2>Dataset overview</h2><p>Raw data output, efficiency, and task demand</p></div></div>
+          <section class="dashboard-metrics" aria-label="Collection metrics">
+            <div class="dashboard-metric"><span>DATA RECORDED</span><strong id="collection-duration">0m</strong><small>raw episode time</small></div>
+            <div class="dashboard-metric"><span>EPISODES</span><strong id="collection-episodes">0</strong><small id="collection-valid-count">0 valid</small></div>
+            <div class="dashboard-metric"><span>AVG DURATION</span><strong id="collection-average">0s</strong><small>per episode</small></div>
+            <div class="dashboard-metric accent"><span>EFFICIENCY</span><strong id="collection-efficiency">--</strong><small>valid recording / collection window</small></div>
+            <div class="dashboard-metric"><span>VALID RATE</span><strong id="collection-valid-rate">0%</strong><small>QC pass</small></div>
+          </section>
+          <div class="dashboard-grid">
+            <section class="dashboard-section dashboard-trend-section">
+              <div class="dashboard-section-head"><div><span class="dashboard-section-label">OUTPUT TREND</span><h2>Collection by day</h2></div><span id="collection-trend-total" class="dashboard-section-note"></span></div>
+              <div class="dashboard-trend" id="collection-trend"></div>
+            </section>
+            <section class="dashboard-section dashboard-health-section">
+              <div class="dashboard-section-head"><div><span class="dashboard-section-label">PIPELINE HEALTH</span><h2>Usable output</h2></div></div>
+              <div class="dashboard-health-value" id="collection-health-value">0%</div>
+              <div class="dashboard-meter"><i id="collection-health-fill"></i></div>
+              <div class="dashboard-health-row"><span>Collection window (first to last)</span><b id="collection-active-span">0m</b></div>
+              <div class="dashboard-health-row"><span>Raw datasets</span><b id="collection-sources">0</b></div>
+            </section>
+          </div>
+          <section class="dashboard-section dashboard-demand-section">
+            <div class="dashboard-section-head"><div><span class="dashboard-section-label">TASK DEMAND</span><h2>Collection requirements</h2></div><span class="dashboard-section-note">Collected against target</span></div>
+            <div class="dashboard-table-wrap"><table class="dashboard-table dashboard-demand-table"><thead><tr><th>DATASET / TASK</th><th>ROBOT</th><th>COLLECTED</th><th>REQUIRED</th><th>GAP</th><th>PROGRESS</th></tr></thead><tbody id="collection-demand"></tbody></table><div class="dashboard-empty" id="collection-demand-empty" style="display:none">No collection tasks found</div></div>
+          </section>
+          <section class="dashboard-section dashboard-recent-section">
+            <div class="dashboard-section-head"><div><span class="dashboard-section-label">EPISODE LOG</span><h2>Collection activity</h2></div><span class="dashboard-section-note">Exact local timestamps</span></div>
+            <div class="dashboard-table-wrap"><table class="dashboard-table"><thead><tr><th>STARTED</th><th>DATASET / TASK</th><th>ROBOT</th><th>DURATION</th><th>STATUS</th></tr></thead><tbody id="collection-recent"></tbody></table><div class="dashboard-empty" id="collection-empty" style="display:none">No raw collection episodes found</div></div>
+          </section>
+        </section>
+
+        <section class="dashboard-mode-panel" id="dashboard-eval">
+          <div class="dashboard-mode-head"><span class="dashboard-mode-index">02</span><div><h2>Evaluation overview</h2><p>Trial throughput, evaluation efficiency, and success</p></div></div>
+          <section class="dashboard-metrics" aria-label="Eval metrics">
+            <div class="dashboard-metric"><span>TRIAL TIME</span><strong id="eval-duration">0m</strong><small>raw trial time</small></div>
+            <div class="dashboard-metric"><span>TRIALS</span><strong id="eval-episodes">0</strong><small id="eval-valid-count">0 valid</small></div>
+            <div class="dashboard-metric"><span>AVG DURATION</span><strong id="eval-average">0s</strong><small>per trial</small></div>
+            <div class="dashboard-metric accent"><span>EFFICIENCY</span><strong id="eval-efficiency">--</strong><small>valid trial time / evaluation window</small></div>
+            <div class="dashboard-metric"><span>SUCCESS RATE</span><strong id="eval-valid-rate">--</strong><small>completed eval results</small></div>
+          </section>
+          <div class="dashboard-grid">
+            <section class="dashboard-section dashboard-trend-section"><div class="dashboard-section-head"><div><span class="dashboard-section-label">OUTPUT TREND</span><h2>Eval by day</h2></div><span id="eval-trend-total" class="dashboard-section-note"></span></div><div class="dashboard-trend" id="eval-trend"></div></section>
+            <section class="dashboard-section dashboard-health-section"><div class="dashboard-section-head"><div><span class="dashboard-section-label">EVAL HEALTH</span><h2>Trial completion</h2></div></div><div class="dashboard-health-value" id="eval-health-value">0%</div><div class="dashboard-meter"><i id="eval-health-fill"></i></div><div class="dashboard-health-row"><span>Evaluation window (first to last)</span><b id="eval-active-span">0m</b></div><div class="dashboard-health-row"><span>Raw datasets</span><b id="eval-sources">0</b></div></section>
+          </div>
+          <section class="dashboard-section dashboard-recent-section">
+            <div class="dashboard-section-head"><div><span class="dashboard-section-label">TRIAL LOG</span><h2>Eval activity</h2></div><span class="dashboard-section-note">Exact local timestamps</span></div>
+            <div class="dashboard-table-wrap"><table class="dashboard-table"><thead><tr><th>STARTED</th><th>MODEL / TASK</th><th>ROBOT</th><th>DURATION</th><th>RESULT</th></tr></thead><tbody id="eval-recent"></tbody></table><div class="dashboard-empty" id="eval-empty" style="display:none">No raw eval trials found</div></div>
+          </section>
+        </section>
+      </div>
+    </div>
 
     <!-- ---- DEBUG ---- -->
     <div class="view active" id="view-debug">
@@ -137,7 +215,18 @@
         <div class="panel" id="collect-panel-task">
           <div class="panel-h"><span class="step-badge">1</span>TASK <span class="n" id="collect-fps"></span><span class="sel-chip" id="collect-prompt-chip"></span></div>
           <div class="card">
-            <select class="choice-select task-select" id="collect-prompt-list" aria-label="Collection task"></select>
+            <div class="collect-task-field-label">DATASET NAME</div>
+            <div class="collect-task-selector">
+              <button class="btn collect-nav-btn" id="b-collect-prev-set" title="Previous dataset set" aria-label="Previous dataset set">&#8592;</button>
+              <select class="choice-select task-select" id="collect-set-list" aria-label="Collection dataset set"></select>
+              <button class="btn collect-nav-btn" id="b-collect-next-set" title="Next dataset set" aria-label="Next dataset set">&#8594;</button>
+            </div>
+            <div class="collect-task-field-label">TASK / PROMPT</div>
+            <div class="collect-task-selector">
+              <button class="btn collect-nav-btn" id="b-collect-prev-task" title="Previous task in this set" aria-label="Previous task in this set">&#8592;</button>
+              <select class="choice-select task-select" id="collect-prompt-list" aria-label="Collection task"></select>
+              <button class="btn collect-nav-btn" id="b-collect-next-task" title="Next task in this set" aria-label="Next task in this set">&#8594;</button>
+            </div>
           </div>
         </div>
 
@@ -145,13 +234,18 @@
           <div class="panel-h"><span class="step-badge">2</span>RECORD</div>
           <div class="card">
             <div class="collect-actions">
-              <label class="collect-arm-gate" title="Enable collection motion">
-                <span class="collect-arm-text" id="collect-arm-label">ARM OFF</span>
-                <input type="checkbox" id="collect-arm-enable" aria-label="Enable collection motion">
-                <span class="ios-sw"></span>
-              </label>
-              <button class="btn primary full" id="b-collect-toggle"><span class="rec-dot"></span><span class="rec-label">START RECORD</span></button>
-              <button class="btn danger full" id="b-collect-cancel">CANCEL</button>
+              <div class="collect-motion-row">
+                <label class="collect-arm-gate" title="Enable collection motion">
+                  <span class="collect-state-copy"><span class="collect-state-name">MOTION</span><span class="collect-arm-text" id="collect-arm-label">LOCKED</span></span>
+                  <input type="checkbox" id="collect-arm-enable" aria-label="Enable collection motion">
+                  <span class="ios-sw"></span>
+                </label>
+                <span class="control-hint" id="collect-hint-motion"></span>
+              </div>
+              <div class="collect-control-groups" id="collect-control-groups"></div>
+              <button class="btn primary full collect-command" id="b-collect-toggle"><span class="collect-command-label"><span class="rec-dot"></span><span class="rec-label">START RECORD</span></span><span class="control-hint" id="collect-hint-record-toggle"></span></button>
+              <button class="btn danger full collect-command" id="b-collect-cancel"><span class="collect-command-label">CANCEL</span><span class="control-hint" id="collect-hint-record-cancel"></span></button>
+              <button class="btn full collect-command" id="b-collect-home"><span class="collect-command-label">HOME</span><span class="control-hint" id="collect-hint-home"></span></button>
             </div>
             <div class="errline" id="collect-err"></div>
           </div>
@@ -163,6 +257,15 @@
             <div class="collect-queue-head">
               <span><span id="collect-count">0/0</span> done</span>
               <button class="btn" id="collect-queue-toggle">EXPAND</button>
+            </div>
+            <div class="collect-episode-summary" aria-label="Collection episode counts">
+              <span class="usable"><b id="collect-usable-count">000</b><small>USABLE</small></span>
+              <span class="rejected"><b id="collect-rejected-count">000</b><small>REJECTED</small></span>
+              <span class="pending"><b id="collect-pending-count">000</b><small>PENDING</small></span>
+            </div>
+            <div class="collect-requirement" id="collect-requirement">
+              <span><small>COLLECTION TARGET · USABLE ONLY</small><b id="collect-requirement-count">0 / --</b></span>
+              <strong id="collect-requirement-status">TARGET NOT SET</strong>
             </div>
             <div class="collect-progress"><i id="collect-progress-fill"></i></div>
             <div class="kv"><span class="k">eta</span><span class="v tnum" id="collect-eta">—</span></div>
@@ -182,6 +285,23 @@
             <textarea class="review-note" id="collect-qc-note" rows="3" placeholder="QC note (optional)" style="margin-top:8px"></textarea>
             <button class="btn full" id="b-collect-note-save" style="margin-top:6px">SAVE NOTE</button>
             <div class="qc-status" id="collect-qc-status"></div>
+          </div>
+        </div>
+
+        <div class="panel" id="collect-panel-export">
+          <div class="panel-h"><span class="step-badge">5</span>QUALITY EXPORT <span class="n" id="collect-quality-progress-label">0%</span></div>
+          <div class="card">
+            <div class="quality-export-actions">
+              <button class="btn full" id="b-collect-quality-export">EXPORT DATASET</button>
+              <button class="btn primary full" id="b-collect-quality-upload">UPLOAD ACCEPTED</button>
+            </div>
+            <div class="collect-progress" role="progressbar" aria-label="Dataset transfer progress"
+                 aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"
+                 id="collect-quality-progress-bar">
+              <i id="collect-quality-progress-fill"></i>
+            </div>
+            <div class="kv"><span class="k">progress</span><span class="v tnum" id="collect-quality-progress-detail">0/0 episodes</span></div>
+            <div class="qc-status" id="collect-quality-status"></div>
           </div>
         </div>
       </div>
