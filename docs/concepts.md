@@ -45,7 +45,7 @@ Tunable knobs: `execute_horizon` (all), `inference_rate` (default 3 Hz for
 async/naive/act/rtc), `latency_k` (async/naive/rtc — front-trims new chunks),
 `exp_weight_m` (act only).
 
-**Robots** — `agilex_piper`, `arx_r5`, `dual_franka`, `r1lite`, `ur5e`,
+**Robots** — `agilex_piper`, `arx_r5`, `arx_x5`, `dual_franka`, `r1lite`, `ur5e`,
 `agibot_g2`. All kinematics go through one PyRoki (JAX + jaxls) backend:
 per-frame Levenberg–Marquardt IK chained for continuity (a velocity cost ties
 each frame to the previous solve; a rest cost biases toward home to fight

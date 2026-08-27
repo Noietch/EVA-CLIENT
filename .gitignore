@@ -29,6 +29,7 @@ Log/
 
 # Local helper directory (new files are ignored; existing tracked files stay tracked).
 tools/
+temp/
 
 # Native libraries and bundled external dependencies.
 upload_parallel*.sh

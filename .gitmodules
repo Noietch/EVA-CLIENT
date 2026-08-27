@@ -1,0 +1,3 @@
+[submodule "examples/hardware/x5/SDK/X5"]
+	path = examples/hardware/x5/SDK/X5
+	url = https://github.com/ARXroboticsX/ARX5_beta.git
