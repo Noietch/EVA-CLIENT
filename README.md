@@ -74,6 +74,7 @@
 |-------|-------------|:---------:|
 | AgileX Piper | Dual 6-DoF arm + gripper | ✅ |
 | ARX R5 | Dual 6-DoF arm + gripper | ✅ |
+| ARX X5 | Dual 6-DoF arm + gripper | ✅ |
 | Dual Franka Panda | Dual 7-DoF arm + gripper | ✅ |
 | Galaxea R1 Lite | Dual 6-DoF arm on torso | ✅ |
 | Universal Robots UR5e | Single 6-DoF arm + gripper | ✅ |

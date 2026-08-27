@@ -4,7 +4,7 @@
 
 Requirements:
 
-- Python ≥ 3.10 (any 3.10+ works; `uv` will fetch on demand)
+- Python 3.11 (the main project is intentionally separate from hardware-specific runtimes)
 - [uv](https://github.com/astral-sh/uv) for dependency management
 - ROS Noetic — **only** for the `ros1` transport; `ros2` / `zmq` / `dataset`
   need no ROS
@@ -15,7 +15,7 @@ cd EVA-CLIENT
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # Standard install (non-ROS backends)
-uv venv --python 3.10 .venv
+uv venv --python 3.11 .venv
 source .venv/bin/activate
 uv pip install -e ".[dev]"
 ```
@@ -24,7 +24,7 @@ uv pip install -e ".[dev]"
 <summary><b>ROS1 install</b> — expose the system ROS install to the venv</summary>
 
 ```bash
-uv venv --python 3.10 --system-site-packages .venv
+uv venv --python 3.11 --system-site-packages .venv
 ```
 
 </details>

@@ -27,9 +27,13 @@ from core.app.console.server import (
     ConsoleContext,
     ConsoleRequestHandler,
     _camera_jpeg_payload,
+    _serialize_config,
     _serialize_frame,
     _serialize_status,
 )
+from core.app.handlers.teleop import TeleopExecutionState
+from core.config import ConfigDict
+from teleop_client.base import TeleopStatus
 
 
 def test_frame_carries_telemetry_not_image_bytes(console: WebHarness):
@@ -48,6 +52,9 @@ def test_status_reports_image_min_hz_from_observation_reader():
     runtime, session = build_runtime(config)
 
     class _Reader:
+        def get_latest_qpos(self):
+            return np.zeros(14, dtype=np.float32)
+
         def seconds_since_last_recv(self):
             return 0.0
 
@@ -67,6 +74,199 @@ def test_status_reports_image_min_hz_from_observation_reader():
         runtime.transport.close()
 
     assert status["image_min_hz"] == 14.25
+
+
+def test_status_consumes_observation_reader_before_checking_live_state():
+    config = console_config()
+    runtime, session = build_runtime(config)
+
+    class _Reader:
+        consumed = False
+
+        def get_latest_qpos(self):
+            self.consumed = True
+            return np.zeros(14, dtype=np.float32)
+
+        def seconds_since_last_recv(self):
+            return 0.0 if self.consumed else None
+
+        def image_min_hz(self):
+            return 30.0 if self.consumed else None
+
+    reader = _Reader()
+    try:
+        status = _serialize_status(
+            ConsoleContext(
+                config=config,
+                runtime=runtime,
+                session=session,
+                obs_reader=reader,  # type: ignore[reportArgumentType]
+            )
+        )
+    finally:
+        runtime.transport.close()
+
+    assert reader.consumed
+    assert status["transport_connected"] is True
+    assert status["image_min_hz"] == 30.0
+
+
+def test_status_exposes_collection_arm_lifecycle_without_transport_teleop_details():
+    config = console_config()
+    runtime, session = build_runtime(config)
+    runtime.collection_teleop_armed = True
+    runtime.collection_teleop_active = True
+    try:
+        status = _serialize_status(
+            ConsoleContext(
+                config=config,
+                runtime=runtime,
+                session=session,
+                obs_reader=runtime.transport.create_observation_reader(),
+            )
+        )
+    finally:
+        runtime.transport.close()
+
+    assert status["collection_teleop_armed"] is True
+    assert status["collection_teleop_active"] is True
+    assert status["teleop"] is None
+    assert "teleop_collection_metrics" not in status
+
+
+def test_status_exposes_lightweight_client_input_source_health():
+    config = console_config()
+    runtime, session = build_runtime(config)
+
+    class _TeleopClient:
+        def status(self):
+            return TeleopStatus(
+                source_type="vr_webxr",
+                connected=True,
+                input_age_ms=12.5,
+                engaged_groups=("left_arm",),
+                held_groups=("right_arm",),
+                authorized_groups=("left_arm", "right_arm"),
+                pressed_controls=("right.primary",),
+                hold_progress=(("right.primary", 0.65),),
+                neutral=True,
+            )
+
+    runtime.teleop_execution = TeleopExecutionState(
+        control_source="client",
+        client_type="vr_webxr",
+        active=True,
+    )
+    runtime.teleop_client = _TeleopClient()
+    try:
+        status = _serialize_status(
+            ConsoleContext(
+                config=config,
+                runtime=runtime,
+                session=session,
+                obs_reader=runtime.transport.create_observation_reader(),
+            )
+        )
+    finally:
+        runtime.transport.close()
+
+    assert status["teleop"] == {
+        "control_source": "client",
+        "client_type": "vr_webxr",
+        "active": True,
+        "condition": "idle",
+        "connected": True,
+        "input_age_ms": 12.5,
+        "engaged_groups": ["left_arm"],
+        "held_groups": ["right_arm"],
+        "authorized_groups": ["left_arm", "right_arm"],
+        "pressed_controls": ["right.primary"],
+        "hold_progress": {"right.primary": 0.65},
+        "neutral": True,
+        "motion_started": False,
+        "published_actions": 0,
+        "last_fault": "",
+        "source_error": "",
+    }
+
+
+def test_config_exposes_client_teleop_identity_for_console_bootstrap():
+    config = console_config()
+    config.collection.teleop = ConfigDict(
+        control_source="client",
+        client=ConfigDict(
+            type="vr_webxr",
+            arms=ConfigDict(
+                left_arm=ConfigDict(controller="left"),
+                right_arm=ConfigDict(controller="right", label="Tool Arm"),
+            ),
+        ),
+    )
+    runtime, session = build_runtime(config)
+    try:
+        serialized = _serialize_config(
+            ConsoleContext(config=config, runtime=runtime, session=session)
+        )
+    finally:
+        runtime.transport.close()
+
+    assert serialized["collection"]["teleop"] == {
+        "control_source": "client",
+        "client_type": "vr_webxr",
+    }
+    assert serialized["collection"]["controls"]["mode"] == "vr"
+    assert serialized["collection"]["controls"]["bindings"]["record_cancel"] == {
+        "control": "right.primary",
+        "key": "A",
+        "gesture": "hold",
+        "hold_ms": 1000,
+    }
+    assert serialized["collection"]["controls"]["bindings"]["left_arm_toggle"] == {
+        "control": "left.grip",
+        "key": "L GRIP",
+        "gesture": "hold",
+        "hold_ms": 1000,
+    }
+    assert serialized["collection"]["controls"]["bindings"]["right_arm_toggle"] == {
+        "control": "right.grip",
+        "key": "R GRIP",
+        "gesture": "hold",
+        "hold_ms": 1000,
+    }
+    assert serialized["collection"]["controls"]["groups"] == [
+        {
+            "id": "left_arm",
+            "label": "LEFT ARM",
+            "control": "left.grip",
+            "binding": "left_arm_toggle",
+        },
+        {
+            "id": "right_arm",
+            "label": "TOOL ARM",
+            "control": "right.grip",
+            "binding": "right_arm_toggle",
+        },
+    ]
+
+
+def test_config_exposes_keyboard_collection_controls_by_default():
+    config = console_config()
+    runtime, session = build_runtime(config)
+    try:
+        serialized = _serialize_config(
+            ConsoleContext(config=config, runtime=runtime, session=session)
+        )
+    finally:
+        runtime.transport.close()
+
+    controls = serialized["collection"]["controls"]
+    assert controls["mode"] == "keyboard"
+    assert controls["groups"] == []
+    assert controls["bindings"]["motion"] == {
+        "control": "KeyM",
+        "key": "M",
+        "gesture": "tap",
+    }
 
 
 def test_frame_uses_live_camera_keys_when_reader_reports_them():

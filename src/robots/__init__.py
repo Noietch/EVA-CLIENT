@@ -12,6 +12,7 @@ from robots.zoo import (
     agibot_g2,  # noqa: F401
     agilex_piper,  # noqa: F401
     arx_r5,  # noqa: F401
+    arx_x5,  # noqa: F401
     dual_franka,  # noqa: F401
     r1_lite,  # noqa: F401
     ur5e,  # noqa: F401

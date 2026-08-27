@@ -3,7 +3,8 @@ name = "eva-client"
 version = "0.1.0"
 description = "Unified robot debugging client for VLA inference serving."
 readme = "README.md"
-requires-python = ">=3.10,<3.12"
+license = "Apache-2.0"
+requires-python = ">=3.11,<3.12"
 dependencies = [
     "addict>=2.4.0",
     "av>=17.1.0",
@@ -114,13 +115,12 @@ include = ["src"]
 
 [tool.ruff]
 line-length = 100
-# Vendored third-party SDKs (ARX / alicia_d) ship their own style; never lint or format them.
-extend-exclude = ["examples/hardware/arx/SDK"]
+# Vendored third-party SDKs ship their own style; never lint or format them.
+extend-exclude = ["examples/hardware/arx/SDK", "examples/hardware/x5/SDK"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
-# UP042 wants `enum.StrEnum`, but we keep `class X(str, enum.Enum)` for Python 3.10
-# compatibility (StrEnum is 3.11+).
+# Keep the existing `class X(str, enum.Enum)` declarations for stable public enum behavior.
 ignore = ["UP042"]
 
 # These modules must run setup before importing project code: manual verify scripts
