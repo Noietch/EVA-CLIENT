@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import logging
 import threading
+from typing import Any
 
 import numpy as np
 import pytest
@@ -83,7 +84,7 @@ def _buttons(*pressed: int) -> list[dict[str, object]]:
     ]
 
 
-def _controller(hand: str, *, pressed: tuple[int, ...] = ()) -> dict[str, object]:
+def _controller(hand: str, *, pressed: tuple[int, ...] = ()) -> dict[str, Any]:
     return {
         "valid": True,
         "position": [0.1, 0.2, 0.3],
@@ -94,7 +95,7 @@ def _controller(hand: str, *, pressed: tuple[int, ...] = ()) -> dict[str, object
     }
 
 
-def _frame(seq: int, *, left=(), right=(), timestamp=100.0) -> dict[str, object]:
+def _frame(seq: int, *, left=(), right=(), timestamp=100.0) -> dict[str, Any]:
     return {
         "type": "frame",
         "version": 1,
@@ -234,7 +235,7 @@ def test_node_preserves_b_arm_toggle_event_flow() -> None:
 
 def test_node_output_is_vendor_neutral_and_session_scoped() -> None:
     normalized, face = normalize_browser_frame(_frame(7), session_id="abc")
-    encoded = GripToggleEncoder().encode(normalized, face)
+    encoded: Any = GripToggleEncoder().encode(normalized, face)
 
     assert encoded["protocol"] == "eva.teleop.vr"
     assert encoded["version"] == 3
@@ -257,7 +258,7 @@ def test_grip_long_press_toggles_each_hand_without_changing_absolute_pose() -> N
     encoder = GripToggleEncoder(long_press_ms=1000.0)
 
     first, face = normalize_browser_frame(_frame(0), session_id="session")
-    encoded = encoder.encode(first, face)
+    encoded: Any = encoder.encode(first, face)
     assert encoded["controllers"]["left"]["grip_engaged"] is False
 
     pressed, face = normalize_browser_frame(

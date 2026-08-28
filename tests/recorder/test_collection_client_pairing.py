@@ -213,7 +213,7 @@ def test_collection_image_mode_writes_vectors_and_actual_video_metadata(
     assert logger.end_episode()
     logger.finalize()
 
-    task_dir = tmp_path / "task"
+    task_dir = tmp_path / "task" / "raw"
     table = pq.read_table(task_dir / "data" / "chunk-000" / "episode_000000.parquet")
     assert {
         "observation.qpos",
