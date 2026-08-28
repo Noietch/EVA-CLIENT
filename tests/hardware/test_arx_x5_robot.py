@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from types import SimpleNamespace
 from xml.etree import ElementTree
 
@@ -77,10 +78,29 @@ def _config(**overrides: object) -> SimpleNamespace:
         initial_gripper_scalar=None,
         start_at_zero=False,
         disabled_groups=(),
-        publish_rate_hz=30.0,
+        publish_rate_hz=100.0,
     )
     values.update(overrides)
     return SimpleNamespace(**values)
+
+
+def _build_robot(
+    monkeypatch,
+    *,
+    arm_setup: Callable[[_FakeArm, int], None] | None = None,
+    **config_overrides: object,
+) -> tuple[ArxX5DualArm, list[_FakeArm]]:
+    arms: list[_FakeArm] = []
+
+    def _single_arm(config: dict) -> _FakeArm:
+        arm = _FakeArm(config)
+        if arm_setup is not None:
+            arm_setup(arm, len(arms))
+        arms.append(arm)
+        return arm
+
+    monkeypatch.setattr(arx_x5_sdk, "SingleArm", _single_arm)
+    return ArxX5DualArm(_config(**config_overrides)), arms
 
 
 def test_split_dual_action_clips_each_arx_x5_gripper() -> None:
@@ -134,15 +154,7 @@ def test_arx_x5_action_rejects_nonfinite_values_before_connecting() -> None:
 def test_arx_x5_feedback_keeps_cached_gripper_when_sdk_returns_six_joints(
     monkeypatch,
 ) -> None:
-    arms: list[_FakeArm] = []
-
-    def _single_arm(config: dict) -> _FakeArm:
-        arm = _FakeArm(config)
-        arms.append(arm)
-        return arm
-
-    monkeypatch.setattr(arx_x5_sdk, "SingleArm", _single_arm)
-    robot = ArxX5DualArm(_config(initial_gripper_scalar=0.6))
+    robot, arms = _build_robot(monkeypatch, initial_gripper_scalar=0.6)
 
     first = robot.read_state()
     second = robot.read_state()
@@ -155,15 +167,7 @@ def test_arx_x5_feedback_keeps_cached_gripper_when_sdk_returns_six_joints(
 
 
 def test_arx_x5_status_reports_peak_joint_current(monkeypatch) -> None:
-    arms: list[_FakeArm] = []
-
-    def _single_arm(config: dict) -> _FakeArm:
-        arm = _FakeArm(config)
-        arms.append(arm)
-        return arm
-
-    monkeypatch.setattr(arx_x5_sdk, "SingleArm", _single_arm)
-    robot = ArxX5DualArm(_config())
+    robot, arms = _build_robot(monkeypatch)
     robot.read_state()
     arms[0].currents = np.asarray([0.1, -4.2, 0.3, 0.0, 0.0, 0.0])
     arms[1].currents = np.asarray([0.1, 0.2, 0.3, 1.7, 0.0, 0.0])
@@ -177,15 +181,7 @@ def test_arx_x5_status_reports_peak_joint_current(monkeypatch) -> None:
 
 
 def test_arx_x5_status_prioritizes_fault_and_offline_joints(monkeypatch) -> None:
-    arms: list[_FakeArm] = []
-
-    def _single_arm(config: dict) -> _FakeArm:
-        arm = _FakeArm(config)
-        arms.append(arm)
-        return arm
-
-    monkeypatch.setattr(arx_x5_sdk, "SingleArm", _single_arm)
-    robot = ArxX5DualArm(_config())
+    robot, arms = _build_robot(monkeypatch)
     robot.read_state()
     arms[0].fault = "overcurrent"
     arms[1].offline_joints = (1,)
@@ -197,15 +193,7 @@ def test_arx_x5_status_prioritizes_fault_and_offline_joints(monkeypatch) -> None
 
 
 def test_arx_x5_status_reports_gripper_motor_fault(monkeypatch) -> None:
-    arms: list[_FakeArm] = []
-
-    def _single_arm(config: dict) -> _FakeArm:
-        arm = _FakeArm(config)
-        arms.append(arm)
-        return arm
-
-    monkeypatch.setattr(arx_x5_sdk, "SingleArm", _single_arm)
-    robot = ArxX5DualArm(_config())
+    robot, arms = _build_robot(monkeypatch)
     robot.read_state()
     arms[0].gripper_error = 12
     arms[0].gripper_error_name = "coil overtemperature"
@@ -214,17 +202,11 @@ def test_arx_x5_status_reports_gripper_motor_fault(monkeypatch) -> None:
 
 
 def test_arx_x5_does_not_send_gripper_target_while_motor_has_fault(monkeypatch) -> None:
-    arms: list[_FakeArm] = []
-
-    def _single_arm(config: dict) -> _FakeArm:
-        arm = _FakeArm(config)
+    def configure_faulty_gripper(arm: _FakeArm, _index: int) -> None:
         arm.gripper_error = 12
         arm.gripper_error_name = "coil overtemperature"
-        arms.append(arm)
-        return arm
 
-    monkeypatch.setattr(arx_x5_sdk, "SingleArm", _single_arm)
-    robot = ArxX5DualArm(_config())
+    robot, arms = _build_robot(monkeypatch, arm_setup=configure_faulty_gripper)
     action = np.zeros(14, dtype=np.float32)
     action[[6, 13]] = 1.0
 
@@ -234,17 +216,11 @@ def test_arx_x5_does_not_send_gripper_target_while_motor_has_fault(monkeypatch) 
 
 
 def test_arx_x5_slow_home_refuses_arm_with_offline_joint(monkeypatch) -> None:
-    arms: list[_FakeArm] = []
-
-    def _single_arm(config: dict) -> _FakeArm:
-        arm = _FakeArm(config)
-        arms.append(arm)
-        if len(arms) == 2:
+    def configure_offline_right_arm(arm: _FakeArm, index: int) -> None:
+        if index == 1:
             arm.offline_joints = (1,)
-        return arm
 
-    monkeypatch.setattr(arx_x5_sdk, "SingleArm", _single_arm)
-    robot = ArxX5DualArm(_config())
+    robot, arms = _build_robot(monkeypatch, arm_setup=configure_offline_right_arm)
 
     with pytest.raises(RuntimeError, match=r"right_arm: offline_joints=J2"):
         robot.slow_home()
@@ -258,15 +234,7 @@ def test_arx_x5_slow_home_refuses_arm_with_offline_joint(monkeypatch) -> None:
 def test_arx_x5_action_maps_normalized_gripper_to_physical_open_close_direction(
     monkeypatch,
 ) -> None:
-    arms: list[_FakeArm] = []
-
-    def _single_arm(config: dict) -> _FakeArm:
-        arm = _FakeArm(config)
-        arms.append(arm)
-        return arm
-
-    monkeypatch.setattr(arx_x5_sdk, "SingleArm", _single_arm)
-    robot = ArxX5DualArm(_config())
+    robot, arms = _build_robot(monkeypatch)
     action = np.zeros(14, dtype=np.float32)
     action[6] = 0.5
     action[13] = 1.0
@@ -278,20 +246,11 @@ def test_arx_x5_action_maps_normalized_gripper_to_physical_open_close_direction(
 
 
 def test_arx_x5_2025_action_maps_normalized_gripper_to_physical_range(monkeypatch) -> None:
-    arms: list[_FakeArm] = []
-
-    def _single_arm(config: dict) -> _FakeArm:
-        arm = _FakeArm(config)
-        arms.append(arm)
-        return arm
-
-    monkeypatch.setattr(arx_x5_sdk, "SingleArm", _single_arm)
-    robot = ArxX5DualArm(
-        _config(
-            arm_type=2,
-            gripper_open_pos=-3.4,
-            gripper_close_pos=0.1,
-        )
+    robot, arms = _build_robot(
+        monkeypatch,
+        arm_type=2,
+        gripper_open_pos=-3.4,
+        gripper_close_pos=0.1,
     )
     action = np.zeros(14, dtype=np.float32)
     action[6] = 0.0
@@ -304,16 +263,10 @@ def test_arx_x5_2025_action_maps_normalized_gripper_to_physical_range(monkeypatc
 
 
 def test_arx_x5_retries_gripper_target_after_sdk_rejection(monkeypatch) -> None:
-    arms: list[_FakeArm] = []
-
-    def _single_arm(config: dict) -> _FakeArm:
-        arm = _FakeArm(config)
+    def configure_rejected_gripper(arm: _FakeArm, _index: int) -> None:
         arm.gripper_accepted = False
-        arms.append(arm)
-        return arm
 
-    monkeypatch.setattr(arx_x5_sdk, "SingleArm", _single_arm)
-    robot = ArxX5DualArm(_config())
+    robot, arms = _build_robot(monkeypatch, arm_setup=configure_rejected_gripper)
     action = np.zeros(14, dtype=np.float32)
     action[[6, 13]] = 1.0
 
@@ -326,15 +279,7 @@ def test_arx_x5_retries_gripper_target_after_sdk_rejection(monkeypatch) -> None:
 
 
 def test_arx_x5_action_clips_arm_qpos_before_calling_native_sdk(monkeypatch) -> None:
-    arms: list[_FakeArm] = []
-
-    def _single_arm(config: dict) -> _FakeArm:
-        arm = _FakeArm(config)
-        arms.append(arm)
-        return arm
-
-    monkeypatch.setattr(arx_x5_sdk, "SingleArm", _single_arm)
-    robot = ArxX5DualArm(_config())
+    robot, arms = _build_robot(monkeypatch)
     action = np.asarray([*([-20.0] * 6), 1.0, *([20.0] * 6), 1.0], dtype=np.float32)
 
     robot.apply_action(WireAction(t=0.0, action=action, target="real"))
@@ -343,34 +288,20 @@ def test_arx_x5_action_clips_arm_qpos_before_calling_native_sdk(monkeypatch) -> 
     np.testing.assert_allclose(arms[1].joint_commands[-1], ARX_X5_ARM_JOINT_LIMITS[:, 1])
 
 
-def test_arx_x5_action_uses_one_collection_frame_as_official_sdk_duration(monkeypatch) -> None:
-    arms: list[_FakeArm] = []
-
-    def _single_arm(config: dict) -> _FakeArm:
-        arm = _FakeArm(config)
-        arms.append(arm)
-        return arm
-
-    monkeypatch.setattr(arx_x5_sdk, "SingleArm", _single_arm)
-    robot = ArxX5DualArm(_config(publish_rate_hz=30.0))
+def test_arx_x5_action_uses_one_control_tick_as_official_sdk_duration(monkeypatch) -> None:
+    robot, arms = _build_robot(monkeypatch, publish_rate_hz=100.0)
 
     robot.apply_action(WireAction(t=0.0, action=np.zeros(14), target="real"))
 
     for arm in arms:
-        assert arm.joint_command_durations[-1] == 1.0 / 30.0
+        assert arm.joint_command_durations[-1] == 1.0 / 100.0
 
 
 def test_arx_x5_slow_home_uses_official_synchronized_trajectory(monkeypatch) -> None:
-    arms: list[_FakeArm] = []
-
-    def _single_arm(config: dict) -> _FakeArm:
-        arm = _FakeArm(config)
+    def configure_home_position(arm: _FakeArm, _index: int) -> None:
         arm.positions = np.asarray([0.01, -0.007, 0.003, 0.0, 0.0, 0.0])
-        arms.append(arm)
-        return arm
 
-    monkeypatch.setattr(arx_x5_sdk, "SingleArm", _single_arm)
-    robot = ArxX5DualArm(_config())
+    robot, arms = _build_robot(monkeypatch, arm_setup=configure_home_position)
 
     assert robot.slow_home()
 
@@ -381,15 +312,7 @@ def test_arx_x5_slow_home_uses_official_synchronized_trajectory(monkeypatch) -> 
 
 
 def test_arx_x5_slow_home_can_start_at_all_zero_joint_position(monkeypatch) -> None:
-    arms: list[_FakeArm] = []
-
-    def _single_arm(config: dict) -> _FakeArm:
-        arm = _FakeArm(config)
-        arms.append(arm)
-        return arm
-
-    monkeypatch.setattr(arx_x5_sdk, "SingleArm", _single_arm)
-    robot = ArxX5DualArm(_config(start_at_zero=True))
+    robot, arms = _build_robot(monkeypatch, start_at_zero=True)
 
     assert robot.slow_home()
 

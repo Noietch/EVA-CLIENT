@@ -114,8 +114,9 @@ from transport.base import build_transport
 logger = logging.getLogger(__name__)
 
 # Halt an active run if the frontend hasn't polled /api/status within this window.
-# The poll cadence is ~250ms, so this tolerates dozens of missed polls before tripping.
+# The browser polls every second, leaving two seconds for a delayed retry.
 CLIENT_WATCHDOG_TIMEOUT_S = 3.0
+MAX_DEBUG_TIME_EXCEEDED_ERROR = "Maximum debug time exceeded."
 
 # Headless heartbeat cadence. While RUNNING we log every beat (proof of life); while
 # idle we log far less often so a parked headless process doesn't spam the log.
@@ -338,6 +339,8 @@ def _handle_web_command(
     config: ConfigDict,
     runtime: RuntimeState,
     session: SessionState,
+    *,
+    base_config: ConfigDict | None = None,
 ) -> None:
     """Programmatic command channel for the web server.
 
@@ -347,6 +350,7 @@ def _handle_web_command(
     verb, _, arg = payload.partition(":")
     verb = verb.strip()
     arg = arg.strip()
+    base_config = config if base_config is None else base_config
     logger.info(
         "[CMD] %s%s (phase=%s status=%s)",
         verb,
@@ -907,12 +911,16 @@ def _handle_web_command(
         # whenever the destination isn't the REPLAY tab (clear_replay also reconnects the
         # policy that load_replay_dataset dropped).
         was_rl_active = runtime.rl_active
+        entering_rl = arg == "rl" and not was_rl_active
+        if entering_rl:
+            discard_rollout_episode(runtime)
         if arg != "rl" and was_rl_active:
+            discard_rollout_episode(runtime)
             close_rl_workspace(runtime)
             runtime.active_config = None
             runtime.policy = None
             runtime.policy_metadata = None
-            config = runtime.active_config or config
+            config = base_config
         if arg == "rl":
             runtime.rl_active = True
         if arg != "replay" and runtime.replay_source is not None:
@@ -1148,17 +1156,69 @@ def _dispatch_halt(config: ConfigDict, runtime: RuntimeState, session: SessionSt
         set_status(session, SessionStatus.READY, reason="sim chunk cancelled")
 
 
+def _cancel_expired_debug_run(
+    config: ConfigDict,
+    runtime: RuntimeState,
+    session: SessionState,
+    *,
+    now: float | None = None,
+) -> bool:
+    """Apply the existing Cancel behavior once the configured run limit expires."""
+    if (
+        session.mode not in (SessionMode.REAL, SessionMode.SIM)
+        or session.status is not SessionStatus.RUNNING
+        or session.run_start_time <= 0.0
+    ):
+        return False
+    max_debug_time_s = float(config.inference_cfg.max_debug_time_s)
+    elapsed_s = (time.monotonic() if now is None else now) - session.run_start_time
+    if elapsed_s < max_debug_time_s:
+        return False
+
+    logger.error(
+        "[MAX_DEBUG_TIME] elapsed_s=%.1f limit_s=%.1f; cancelling active run",
+        elapsed_s,
+        max_debug_time_s,
+    )
+    if config.get("eval"):
+        _handle_web_command("web:eval_cancel", config, runtime, session)
+        if session.status is SessionStatus.RUNNING:
+            # An eval without an active recorder still has to stop at the safety limit.
+            _dispatch_halt(config, runtime, session)
+            runtime.needs_pre_start_reset = True
+            runtime.current_clip_id = None
+            runtime.current_cell = None
+            set_phase(runtime, "ready")
+    else:
+        _dispatch_halt(config, runtime, session)
+        if not is_replay(runtime):
+            discard_rollout_episode(runtime)
+            logger_obj = runtime.episode_logger
+            if logger_obj is not None and getattr(logger_obj, "has_active_episode", False):
+                logger_obj.cancel_episode("maximum debug time exceeded")
+    session.last_error = MAX_DEBUG_TIME_EXCEEDED_ERROR
+    return True
+
+
 def handle_command(
     command: str,
     config: ConfigDict,
     runtime: RuntimeState,
     session: SessionState,
+    *,
+    base_config: ConfigDict | None = None,
 ) -> None:
     """Dispatch one queued command. Web verbs (``web:`` prefix) route to the web
     handler; the bare run/halt verbs ``s``/``c`` drive the mode-specific execution.
     """
     if command.startswith("web:"):
-        _handle_web_command(command, config, runtime, session)
+        _handle_web_command(
+            command,
+            config,
+            runtime,
+            session,
+            base_config=base_config,
+        )
         return
     normalized = command.strip().lower()
     if normalized in {"s", "step"}:
@@ -1386,7 +1446,7 @@ def run(
                     cmd = command_queue.get_nowait()
                 except queue.Empty:
                     break
-                handle_command(cmd, effective, runtime, session)
+                handle_command(cmd, effective, runtime, session, base_config=config)
                 effective = runtime.active_config or config
                 prompt_ready.set()
 
@@ -1413,7 +1473,14 @@ def run(
                         session.step_index,
                     )
                 last_running_tick = running_tick
-                # Client-liveness watchdog: the frontend polls /api/status every ~250ms,
+                if _cancel_expired_debug_run(
+                    effective,
+                    runtime,
+                    session,
+                    now=running_tick,
+                ):
+                    continue
+                # Client-liveness watchdog: the frontend polls /api/status every second,
                 # so a stale timestamp means the operator's browser crashed or the network
                 # dropped. Halt the run rather than keep commanding the real robot blind.
                 stale = time.monotonic() - runtime.last_client_poll
@@ -1529,9 +1596,9 @@ def run(
     finally:
         gc.callbacks.remove(log_gc_timing)
         close_teleop(runtime)
+        stop_collection_capture(runtime)
         close_rl_workspace(runtime)
         stop_rollout_intervention(config, runtime, session, required=False)
-        stop_collection_capture(runtime)
         discard_rollout_intervention_segment(runtime)
         end_episode(runtime)
         if runtime.episode_logger is not None:

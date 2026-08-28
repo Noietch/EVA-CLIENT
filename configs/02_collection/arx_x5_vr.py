@@ -9,6 +9,7 @@ console = dict(
 collection = dict(
     storage=dict(
         log_dir="work_dirs/collection/arx_x5_vr",
+        fps=30,
         image_skew_tolerance_sec=0.035,
     ),
     schema=dict(
@@ -64,8 +65,13 @@ collection = dict(
         ),
     ),
     tasks=dict(
-        pick_up_the_mango_and_place_it_in_the_plate=[
-            ("pick up the mango and place it in the plate", 100),
+        ArxKine_PnP_DivObj_Norm_Sngl_Base_v1_scene_1_20260828=[
+            ("pick up the yellow cup and place it on the green plate with left hand.", 1),
+            ("pick up the yellow spoon and place it on the green plate with left hand.", 1),
+            ("pick up the yellow block and place it on the green plate with left hand.", 1),
+            ("pick up the mango and place it on the green plate with left hand.", 1),
+            ("pick up the small tape roll and place it on the green plate with left hand.", 1),
+            ("pick up the gray cup and place it on the green plate with left hand.", 1),
         ],
     ),
 )

@@ -14,12 +14,12 @@ let rlCriticPendingFrame = null;
 let rlCriticGeneration = 0;
 let rlSetupTimer = null;
 let rlSetupRequestPending = false;
-let rlLiveActionSince = 0;
 let rlSelectionChain = Promise.resolve();
 let rlSelectionGeneration = 0;
 let rlPendingTask = null;
 let rlPendingPolicy = null;
 let rlSavedRenderKey = "";
+let rlSavedStatusKey = "";
 let rlSaveSetupPending = false;
 
 function queueRlSelection(path, body) {
@@ -339,6 +339,9 @@ async function submitRlQc(verdict) {
       ? `episode ${episode} marked ${verdict}`
       : `episode ${episode} note saved`;
   }
+  if (S.episodeHistory && S.episodeHistory.rollout) {
+    S.episodeHistory.rollout.lastAttemptAt = 0;
+  }
   S.STATUS = await apiGet("/api/status");
   renderRlStatus(S.STATUS);
 }
@@ -464,7 +467,16 @@ async function replaySelectedEpisode() {
 function renderRlStatus(status) {
   if (!S.CFG || !S.CFG.rl || !S.CFG.rl.enabled) return;
   const rl = status.rl || {};
+  const cachedHistory = S.episodeHistory && S.episodeHistory.rollout;
   const rollout = status.rollout || {};
+  // The heartbeat carries counters/progress; the potentially large saved-episode
+  // rows arrive through collect.js' low-frequency history loader.
+  const historyMatchesStatus = cachedHistory && cachedHistory.loaded &&
+    (!rollout.dataset_dir || cachedHistory.datasetDir === rollout.dataset_dir);
+  const historyEpisodes = historyMatchesStatus
+    ? cachedHistory.episodes : (rollout.episodes || []);
+  const historyQueue = Array.isArray(rollout.queue)
+    ? rollout.queue : (historyMatchesStatus ? cachedHistory.queue : []);
   if (
     rlSaveSetupPending
     && status.is_setup_done
@@ -554,10 +566,12 @@ function renderRlStatus(status) {
   $("rl-run-error").textContent = setupError || rl.critic_error || (teleop.fault ? (teleopStatus.last_fault || teleopStatus.source_error || "") : "");
 
   const progress = Math.max(0, Math.min(1, Number(rollout.progress || 0)));
-  const items = (rollout.episodes || []).concat(rollout.queue || []);
-  $("rl-save-count").textContent = `${(rollout.episodes || []).length}/${items.length}`;
+  const totalItems = historyEpisodes.length + historyQueue.length;
+  const hasSavedEpisode = historyEpisodes.length > 0 ||
+    historyQueue.some((item) => episodeId(item) != null);
+  $("rl-save-count").textContent = `${historyEpisodes.length}/${totalItems}`;
   $("rl-save-eta").textContent = rollout.eta_sec == null ? "—" : `${Number(rollout.eta_sec).toFixed(1)}s`;
-  $("rl-save-hint").style.display = items.some((item) => episodeId(item) != null) ? "" : "none";
+  $("rl-save-hint").style.display = hasSavedEpisode ? "" : "none";
   $("rl-save-progress").style.width = `${progress * 100}%`;
   $("rl-save-pipeline").textContent = String(rollout.pipeline_state || "IDLE").toUpperCase();
   $("rl-save-pipeline").dataset.state = String(rollout.pipeline_state || "idle").toUpperCase();
@@ -573,22 +587,32 @@ function renderRlStatus(status) {
   $("rl-save-error").textContent = rollout.save_blocked_by_intervention
     ? "accept or abandon the active intervention before saving"
     : "";
-  renderSavedData(items);
+  const historySignature = historyMatchesStatus && cachedHistory.summary
+    ? cachedHistory.summary.signature
+    : JSON.stringify(historyEpisodes);
+  const savedStatusKey = [
+    historySignature,
+    JSON.stringify(historyQueue),
+    selectedEpisode == null ? "" : selectedEpisode,
+    S.rlSaveExpanded ? "expanded" : "collapsed",
+  ].join("\n");
+  if (savedStatusKey !== rlSavedStatusKey) {
+    renderSavedData(historyEpisodes.concat(historyQueue), true);
+    rlSavedStatusKey = savedStatusKey;
+  }
   renderRlGripper(setup);
   if (selectionConfirmed && !setup && !setupBusy && !setupError) scheduleRlSetup();
   updateGuide();
 }
 
 async function pollRlSeries() {
-  if (S.ACTIVE_TAB !== "rl" || seriesPolling || rlReplayRequestPending) return;
+  if (S.ACTIVE_TAB !== "rl" || document.hidden || seriesPolling || rlReplayRequestPending) return;
   seriesPolling = true;
   try {
     const criticGeneration = LIVE.criticGeneration;
-    const actionSince = LIVE.replayMode ? 0 : rlLiveActionSince;
     const criticSince = LIVE.criticValue.length;
-    const response = await apiGet(`/api/rl/series?since=${actionSince}&critic_since=${criticSince}`);
+    const response = await apiGet(`/api/rl/series?samples=0&critic_since=${criticSince}`);
     if (criticGeneration !== LIVE.criticGeneration) return;
-    if (!LIVE.replayMode) rlLiveActionSince = Number(response.n || 0);
     const critic = response.critic || {};
     if (Number(critic.n || 0) < LIVE.criticValue.length) {
       LIVE.criticTimestamp = [];
@@ -602,6 +626,8 @@ async function pollRlSeries() {
     )));
     updateScrub();
     drawLiveCharts();
+  } catch {
+    // The shared scheduler starts the next tick only after this promise settles.
   } finally {
     seriesPolling = false;
   }
@@ -637,6 +663,9 @@ $("rl-b-save").onclick = () => {
   rlSaveSetupPending = true;
   renderRlStatus(S.STATUS || {});
   return apiPost("/api/rl/save").then((response) => {
+    if (S.episodeHistory && S.episodeHistory.rollout) {
+      S.episodeHistory.rollout.lastAttemptAt = 0;
+    }
     if (!response || response.ok === false) {
       rlSaveSetupPending = false;
       renderRlStatus(S.STATUS || {});

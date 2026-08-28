@@ -193,10 +193,17 @@ def start_collection_capture(
     """Attach and start one collection capture runner on the runtime."""
     if getattr(runtime, "collection_capture_runner", None) is not None:
         raise RuntimeError("collection capture runner is already active")
+    rollout_logger = getattr(runtime, "rollout_episode_logger", None)
+    logger_obj = (
+        rollout_logger
+        if rollout_logger is not None and rollout_logger.has_active_episode
+        else runtime.episode_logger
+    )
+    prepare_collection_capture(runtime, logger_obj)
     _suspend_cyclic_gc()
-    runner = CollectionCaptureRunner(runtime, fps, max_raw_snapshots_per_tick)
-    runtime.collection_capture_runner = runner
     try:
+        runner = CollectionCaptureRunner(runtime, fps, max_raw_snapshots_per_tick)
+        runtime.collection_capture_runner = runner
         runner.start()
     except BaseException:
         runtime.collection_capture_runner = None
@@ -208,9 +215,27 @@ def stop_collection_capture(runtime: Any) -> None:
     """Stop and detach the active collection capture runner if present."""
     runner = getattr(runtime, "collection_capture_runner", None)
     if runner is None:
+        _finish_transport_capture(runtime)
         return
     try:
         runner.stop()
     finally:
-        runtime.collection_capture_runner = None
-        _resume_cyclic_gc()
+        try:
+            _finish_transport_capture(runtime)
+        finally:
+            runtime.collection_capture_runner = None
+            _resume_cyclic_gc()
+
+
+def prepare_collection_capture(runtime: Any, logger_obj: Any) -> None:
+    """Point transport scratch storage at the active logger's filesystem."""
+    prepare = getattr(runtime.transport, "prepare_collection_capture", None)
+    if prepare is not None:
+        directory = getattr(logger_obj, "_log_dir", None)
+        prepare(None if directory is None else str(directory))
+
+
+def _finish_transport_capture(runtime: Any) -> None:
+    finish = getattr(runtime.transport, "finish_collection_capture", None)
+    if finish is not None:
+        finish()

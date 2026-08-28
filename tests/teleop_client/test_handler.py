@@ -904,8 +904,14 @@ class _CollectionLogger:
     def is_queue_full(self) -> bool:
         return False
 
-    def start_episode(self, *, task, collection_min_capture_time=None) -> None:
-        del task, collection_min_capture_time
+    def start_episode(
+        self,
+        *,
+        task,
+        collection_min_capture_time=None,
+        collection_dataset=None,
+    ) -> None:
+        del task, collection_min_capture_time, collection_dataset
         if self.fail_stage == "start_episode":
             self.has_active_episode = True
             raise RuntimeError("episode open failed")

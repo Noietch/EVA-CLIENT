@@ -160,8 +160,13 @@ function applyStatus(s) {
 
     // active selections
     mark("prompt-list", "prompt", s.selected_task);
-    if (collectTask == null && s.selected_collect_task) collectTask = s.selected_collect_task;
-    mark("collect-prompt-list", "prompt", collectTaskValue());
+    if (collectTask == null && s.selected_collect_task) {
+      collectTask = s.selected_collect_task;
+      collectSet = s.selected_collect_set || null;
+      collectTaskIndex = Number.isInteger(s.selected_collect_task_index)
+        ? s.selected_collect_task_index
+        : null;
+    }
     syncCollectTaskNavigation();
     if (S.ACTIVE_TAB === "replay" || S.ACTIVE_TAB === "eval" || s.replay_loaded || S.CFG.is_replay) {
       const input = $("replay-episode-input");
@@ -390,7 +395,9 @@ function updateGuide() {
       const setup = !!s.is_setup_done && !!s.policy_connected;
       const running = s.session_status === "running";
       const intervention = !!s.rollout_intervention_active;
-      const saved = !!(s.rollout && (s.rollout.episodes || []).length);
+      const rolloutHistory = S.episodeHistory && S.episodeHistory.rollout;
+      const saved = Number(s.rollout && s.rollout.completed_episodes || 0) > 0 ||
+        !!(rolloutHistory && rolloutHistory.loaded && rolloutHistory.episodes.length);
       setPanel("rl-panel-task", hasTask ? "done" : "active");
       setPanel("rl-panel-models", hasPolicy ? "done" : (hasTask ? "active" : "pending"));
       setPanel("rl-panel-data", "done");
@@ -547,6 +554,10 @@ function updateGuide() {
 
 let collectTask = null;
 
+let collectSet = null;
+
+let collectTaskIndex = null;
+
 let replayDefaultKeys = {};
 
 let replayActionCandidates = [];
@@ -601,6 +612,14 @@ function collectTaskValue() {
     return collectTask || "";
   }
 
+function collectSetValue() {
+    return collectSet || "";
+  }
+
+function collectTaskIndexValue() {
+    return Number.isInteger(collectTaskIndex) ? collectTaskIndex : null;
+  }
+
 function collectTaskSets() {
     return Object.entries((S.CFG && S.CFG.collect_tasks) || {}).map(
       ([name, entries]) => {
@@ -613,15 +632,27 @@ function collectTaskSets() {
   }
 
 function collectTaskTarget(prompt = collectTaskValue()) {
-    for (const set of collectTaskSets()) {
-      const task = set.tasks.find((entry) => entry.prompt === prompt);
-      if (task) return task.target;
-    }
-    return null;
+    const { sets, setIndex, taskIndex } = collectTaskLocation(prompt);
+    if (setIndex < 0 || taskIndex < 0) return null;
+    return sets[setIndex].tasks[taskIndex].target;
   }
 
-function collectTaskLocation(prompt = collectTaskValue()) {
+function collectTaskLocation(
+    prompt = collectTaskValue(),
+    setName = collectSet,
+    preferredTaskIndex = collectTaskIndex,
+  ) {
     const sets = collectTaskSets();
+    const selectedSetIndex = sets.findIndex((set) => set.name === setName);
+    if (selectedSetIndex >= 0) {
+      const tasks = sets[selectedSetIndex].tasks;
+      if (Number.isInteger(preferredTaskIndex) &&
+          tasks[preferredTaskIndex] && tasks[preferredTaskIndex].prompt === prompt) {
+        return { sets, setIndex: selectedSetIndex, taskIndex: preferredTaskIndex };
+      }
+      const taskIndex = tasks.findIndex((task) => task.prompt === prompt);
+      if (taskIndex >= 0) return { sets, setIndex: selectedSetIndex, taskIndex };
+    }
     for (let setIndex = 0; setIndex < sets.length; setIndex += 1) {
       const taskIndex = sets[setIndex].prompts.indexOf(prompt);
       if (taskIndex >= 0) return { sets, setIndex, taskIndex };
@@ -629,12 +660,27 @@ function collectTaskLocation(prompt = collectTaskValue()) {
     return { sets, setIndex: -1, taskIndex: -1 };
   }
 
-function selectCollectTask(prompt) {
+function collectTaskSelectionKey() {
+    const { sets, setIndex, taskIndex } = collectTaskLocation();
+    return setIndex < 0 ? "" : `${sets[setIndex].name}:${taskIndex}`;
+  }
+
+function selectCollectTask(prompt, setName = collectSet, taskIndex = null) {
     if (!prompt || (S.STATUS.collect && S.STATUS.collect.collecting)) return;
-    collectTask = prompt;
+    const location = collectTaskLocation(prompt, setName, taskIndex);
+    if (location.setIndex < 0 || location.taskIndex < 0) return;
+    const selectedSet = location.sets[location.setIndex];
+    collectTask = selectedSet.tasks[location.taskIndex].prompt;
+    collectSet = selectedSet.name;
+    collectTaskIndex = location.taskIndex;
     S.STATUS.selected_collect_task = prompt;
-    apiPost("/api/select_collect_task", { task: prompt });
-    mark("collect-prompt-list", "prompt", prompt);
+    S.STATUS.selected_collect_set = collectSet;
+    S.STATUS.selected_collect_task_index = collectTaskIndex;
+    apiPost("/api/select_collect_task", {
+      task: prompt,
+      dataset: collectSet,
+      task_index: collectTaskIndex,
+    });
     syncCollectTaskNavigation();
     renderCollect();
     updateGuide();
@@ -644,16 +690,34 @@ function stepCollectSet(delta) {
     const { sets, setIndex } = collectTaskLocation();
     const nextIndex = setIndex + delta;
     if (nextIndex < 0 || nextIndex >= sets.length) return;
-    selectCollectTask(sets[nextIndex].prompts[0]);
+    selectCollectTask(sets[nextIndex].tasks[0].prompt, sets[nextIndex].name, 0);
   }
 
 function stepCollectTask(delta) {
     const { sets, setIndex, taskIndex } = collectTaskLocation();
     if (setIndex < 0) return;
-    const prompts = sets[setIndex].prompts;
     const nextIndex = taskIndex + delta;
-    if (nextIndex < 0 || nextIndex >= prompts.length) return;
-    selectCollectTask(prompts[nextIndex]);
+    if (nextIndex < 0 || nextIndex >= sets[setIndex].tasks.length) return;
+    selectCollectTask(
+      sets[setIndex].tasks[nextIndex].prompt,
+      sets[setIndex].name,
+      nextIndex,
+    );
+  }
+
+function advanceCollectTask() {
+    const { sets, setIndex, taskIndex } = collectTaskLocation();
+    if (setIndex < 0 || taskIndex < 0) return false;
+    if (taskIndex + 1 < sets[setIndex].tasks.length) {
+      const nextIndex = taskIndex + 1;
+      selectCollectTask(sets[setIndex].tasks[nextIndex].prompt, sets[setIndex].name, nextIndex);
+      return true;
+    }
+    if (setIndex + 1 < sets.length) {
+      selectCollectTask(sets[setIndex + 1].tasks[0].prompt, sets[setIndex + 1].name, 0);
+      return true;
+    }
+    return false;
   }
 
 function syncCollectTaskNavigation() {
@@ -674,7 +738,8 @@ function syncCollectTaskNavigation() {
       if (currentSet) {
         currentSet.prompts.forEach((prompt, index) => {
           const option = document.createElement("option");
-          option.value = prompt;
+          option.value = String(index);
+          option.dataset.prompt = prompt;
           option.dataset.label = prompt;
           option.textContent = `${String(index + 1).padStart(2, "0")} ${prompt}`;
           taskSelect.appendChild(option);
@@ -682,7 +747,8 @@ function syncCollectTaskNavigation() {
       }
       taskSelect.dataset.set = currentSetName;
     }
-    if (taskSelect) taskSelect.value = currentSet ? collectTaskValue() : "";
+    if (taskSelect) taskSelect.value = currentSet ? String(taskIndex) : "";
+    syncChip("collect-prompt-list");
     const controls = {
       "b-collect-prev-set": setIndex <= 0,
       "b-collect-next-set": setIndex < 0 || setIndex >= sets.length - 1,
@@ -717,9 +783,15 @@ function renderCollectTaskButtons() {
     });
     setHost.onchange = () => {
       const selected = collectTaskSets().find((set) => set.name === setHost.value);
-      if (selected) selectCollectTask(selected.prompts[0]);
+      if (selected) selectCollectTask(selected.tasks[0].prompt, selected.name, 0);
     };
-    host.onchange = () => selectCollectTask(host.value);
+    host.onchange = () => {
+      const index = Number(host.value);
+      const selected = collectTaskSets().find((set) => set.name === setHost.value);
+      if (selected && selected.tasks[index]) {
+        selectCollectTask(selected.tasks[index].prompt, selected.name, index);
+      }
+    };
     $("b-collect-prev-set").onclick = () => stepCollectSet(-1);
     $("b-collect-next-set").onclick = () => stepCollectSet(1);
     $("b-collect-prev-task").onclick = () => stepCollectTask(-1);
@@ -1320,7 +1392,9 @@ function renderManualTarget(qpos) {
 export {
   applyRunControlStatus, applyStatus, mark, pauseSetup, replayIsLocalMode, resumeSetup,
   retrySetup, setPanel, startRunFromDebug, syncChip, uiMode, updateGuide,
-  applyTune, applyManualTune, collectTaskTarget, collectTaskValue, renderConfig, renderEvalGripper,
+  advanceCollectTask, applyTune, applyManualTune, collectSetValue, collectTaskIndexValue,
+  collectTaskSelectionKey, collectTaskTarget, collectTaskValue, renderConfig,
+  renderEvalGripper,
   renderRlGripper,
   enterManualSim, manualConnect, manualDisconnect, manualDispatchToggle,
   renderManualConn, renderManualCurrent, renderManualTarget,

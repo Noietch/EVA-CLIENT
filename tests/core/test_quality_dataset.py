@@ -134,7 +134,7 @@ def test_web_red_rule_includes_automatic_and_manual_failures() -> None:
     assert not is_rejected_episode({"quality": "green"})
     assert is_rejected_episode({"quality": "red"})
     assert is_rejected_episode({"quality": "green", "qc_verdict": "fail"})
-    assert is_rejected_episode({"quality": "red", "qc_verdict": "pass"})
+    assert not is_rejected_episode({"quality": "red", "qc_verdict": "pass"})
 
 
 def test_split_dataset_exports_contiguous_accepted_and_rejected_subsets(tmp_path: Path) -> None:
@@ -185,6 +185,10 @@ def test_split_dataset_exports_contiguous_accepted_and_rejected_subsets(tmp_path
     )
     rejected_marker = json.loads((rejected / "meta/quality_split.json").read_text())
     assert rejected_marker["dataset_format"] == "lerobot_v21"
+    assert (
+        rejected_marker["rule"]
+        == "qc_verdict == pass overrides quality == red; qc_verdict == fail rejects"
+    )
     assert [item.episodes_completed for item in progress] == [0, 1, 2, 3]
     assert all(item.episodes_total == 3 for item in progress)
     assert [item.subset for item in progress] == ["", "accepted", "rejected", "rejected"]

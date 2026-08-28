@@ -10,6 +10,7 @@ import enum
 import logging
 import queue
 import threading
+from collections import deque
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -30,6 +31,8 @@ if TYPE_CHECKING:
     from transport.dataset import DatasetTransport
 
 logger = logging.getLogger(__name__)
+
+RL_LIVE_SAMPLE_MAX = 4096
 
 
 class SessionMode(str, enum.Enum):
@@ -90,6 +93,8 @@ class SessionState:
         is_setup_done: True once run_setup has completed for this session.
         selected_task: Operator-selected DEBUG/run task; None until chosen.
         selected_collect_task: Operator-selected COLLECT task; None until chosen.
+        selected_collect_set: Dataset set containing the selected collection task.
+        selected_collect_task_index: Task position within the selected collection set.
         interrupt_requested: True when a motion interrupt has been requested.
         follow_human_gripper: When True, mirror the human teleop gripper state.
         gripper_locks: Per-arm gripper override values keyed by arm name.
@@ -113,6 +118,8 @@ class SessionState:
     is_setup_done: bool = False
     selected_task: str | None = None
     selected_collect_task: str | None = None
+    selected_collect_set: str | None = None
+    selected_collect_task_index: int | None = None
     interrupt_requested: bool = False
     follow_human_gripper: bool = False
     gripper_locks: dict[str, float] = dataclasses.field(default_factory=dict)
@@ -290,9 +297,12 @@ class RuntimeState:
     rl_pending_critic_observation: dict | None = None
     rl_pending_critic_action: np.ndarray | None = None
     rl_pending_critic_timestamp: float | None = None
-    rl_live_samples: list[tuple[float, np.ndarray, np.ndarray, str, int]] = dataclasses.field(
-        default_factory=list
+    rl_live_samples: deque[tuple[float, np.ndarray, np.ndarray, str, int]] = dataclasses.field(
+        default_factory=lambda: deque(maxlen=RL_LIVE_SAMPLE_MAX)
     )
+    rl_live_sample_count: int = 0
+    rl_live_sample_base: int = 0
+    rl_live_lock: threading.Lock = dataclasses.field(default_factory=threading.Lock)
     rl_replay_source: DatasetTransport | None = None
     rl_replay_sources: list[DatasetTransport] = dataclasses.field(default_factory=list)
     rl_replay_lock: threading.Lock = dataclasses.field(default_factory=threading.Lock)

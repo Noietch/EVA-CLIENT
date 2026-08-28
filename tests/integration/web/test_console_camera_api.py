@@ -8,22 +8,22 @@ future edit can't silently regress it:
 - ``/api/frame`` carries only lightweight telemetry (qpos + camera *key list*), never
   image bytes — that's what keeps the 1 Hz status poll cheap.
 - ``/api/camera/<key>`` is a ``multipart/x-mixed-replace`` MJPEG stream of raw JPEG
-  frames (no base64), and a bogus key 404s.
-
-We deliberately do not assert frame rate or byte sizes here — those are perf numbers
-owned by tests/perf/test_mjpeg_stream.py.
+  frames (no base64), capped at 10 FPS, and a bogus key 404s.
 """
 
 from __future__ import annotations
 
 import socket
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler
+from typing import Any
 
 import numpy as np
 import pytest
 from _harness import WebHarness, build_runtime, console_config
 
 from core.app.console.server import (
+    _CAMERA_STREAM_FPS,
     ConsoleContext,
     ConsoleRequestHandler,
     _camera_jpeg_payload,
@@ -34,6 +34,36 @@ from core.app.console.server import (
 from core.app.handlers.teleop import TeleopExecutionState
 from core.config import ConfigDict
 from teleop_client.base import TeleopStatus
+
+
+def _serialize_console_payload(
+    serializer: Callable[[ConsoleContext], dict[str, Any]],
+    *,
+    config: ConfigDict | None = None,
+    obs_reader: Any = None,
+    configure_runtime: Callable[[Any], None] | None = None,
+) -> dict[str, Any]:
+    config = config or console_config()
+    runtime, session = build_runtime(config)
+    if configure_runtime is not None:
+        configure_runtime(runtime)
+    reader = obs_reader if obs_reader is not None else runtime.transport.create_observation_reader()
+
+    try:
+        return serializer(
+            ConsoleContext(
+                config=config,
+                runtime=runtime,
+                session=session,
+                obs_reader=reader,
+            )
+        )
+    finally:
+        runtime.transport.close()
+
+
+def test_camera_stream_is_capped_at_ten_fps():
+    assert _CAMERA_STREAM_FPS == 10.0
 
 
 def test_frame_carries_telemetry_not_image_bytes(console: WebHarness):
@@ -48,9 +78,6 @@ def test_frame_carries_telemetry_not_image_bytes(console: WebHarness):
 
 
 def test_status_reports_image_min_hz_from_observation_reader():
-    config = console_config()
-    runtime, session = build_runtime(config)
-
     class _Reader:
         def get_latest_qpos(self):
             return np.zeros(14, dtype=np.float32)
@@ -61,25 +88,15 @@ def test_status_reports_image_min_hz_from_observation_reader():
         def image_min_hz(self):
             return 14.25
 
-    try:
-        status = _serialize_status(
-            ConsoleContext(
-                config=config,
-                runtime=runtime,
-                session=session,
-                obs_reader=_Reader(),  # type: ignore[reportArgumentType]
-            )
-        )
-    finally:
-        runtime.transport.close()
+    status = _serialize_console_payload(
+        _serialize_status,
+        obs_reader=_Reader(),  # type: ignore[reportArgumentType]
+    )
 
     assert status["image_min_hz"] == 14.25
 
 
 def test_status_consumes_observation_reader_before_checking_live_state():
-    config = console_config()
-    runtime, session = build_runtime(config)
-
     class _Reader:
         consumed = False
 
@@ -94,17 +111,10 @@ def test_status_consumes_observation_reader_before_checking_live_state():
             return 30.0 if self.consumed else None
 
     reader = _Reader()
-    try:
-        status = _serialize_status(
-            ConsoleContext(
-                config=config,
-                runtime=runtime,
-                session=session,
-                obs_reader=reader,  # type: ignore[reportArgumentType]
-            )
-        )
-    finally:
-        runtime.transport.close()
+    status = _serialize_console_payload(
+        _serialize_status,
+        obs_reader=reader,  # type: ignore[reportArgumentType]
+    )
 
     assert reader.consumed
     assert status["transport_connected"] is True
@@ -112,21 +122,11 @@ def test_status_consumes_observation_reader_before_checking_live_state():
 
 
 def test_status_exposes_collection_arm_lifecycle_without_transport_teleop_details():
-    config = console_config()
-    runtime, session = build_runtime(config)
-    runtime.collection_teleop_armed = True
-    runtime.collection_teleop_active = True
-    try:
-        status = _serialize_status(
-            ConsoleContext(
-                config=config,
-                runtime=runtime,
-                session=session,
-                obs_reader=runtime.transport.create_observation_reader(),
-            )
-        )
-    finally:
-        runtime.transport.close()
+    def configure_runtime(runtime: Any) -> None:
+        runtime.collection_teleop_armed = True
+        runtime.collection_teleop_active = True
+
+    status = _serialize_console_payload(_serialize_status, configure_runtime=configure_runtime)
 
     assert status["collection_teleop_armed"] is True
     assert status["collection_teleop_active"] is True
@@ -136,9 +136,6 @@ def test_status_exposes_collection_arm_lifecycle_without_transport_teleop_detail
 
 
 def test_status_exposes_lightweight_client_input_source_health():
-    config = console_config()
-    runtime, session = build_runtime(config)
-
     class _TeleopClient:
         def status(self):
             return TeleopStatus(
@@ -153,23 +150,15 @@ def test_status_exposes_lightweight_client_input_source_health():
                 neutral=True,
             )
 
-    runtime.teleop_execution = TeleopExecutionState(
-        control_source="client",
-        client_type="vr_webxr",
-        active=True,
-    )
-    runtime.teleop_client = _TeleopClient()
-    try:
-        status = _serialize_status(
-            ConsoleContext(
-                config=config,
-                runtime=runtime,
-                session=session,
-                obs_reader=runtime.transport.create_observation_reader(),
-            )
+    def configure_runtime(runtime: Any) -> None:
+        runtime.teleop_execution = TeleopExecutionState(
+            control_source="client",
+            client_type="vr_webxr",
+            active=True,
         )
-    finally:
-        runtime.transport.close()
+        runtime.teleop_client = _TeleopClient()
+
+    status = _serialize_console_payload(_serialize_status, configure_runtime=configure_runtime)
 
     assert status["teleop"] == {
         "control_source": "client",
@@ -242,13 +231,7 @@ def test_config_exposes_client_teleop_identity_for_console_bootstrap():
             ),
         ),
     )
-    runtime, session = build_runtime(config)
-    try:
-        serialized = _serialize_config(
-            ConsoleContext(config=config, runtime=runtime, session=session)
-        )
-    finally:
-        runtime.transport.close()
+    serialized = _serialize_console_payload(_serialize_config, config=config)
 
     assert serialized["collection"]["teleop"] == {
         "control_source": "client",
@@ -290,14 +273,7 @@ def test_config_exposes_client_teleop_identity_for_console_bootstrap():
 
 
 def test_config_exposes_keyboard_collection_controls_by_default():
-    config = console_config()
-    runtime, session = build_runtime(config)
-    try:
-        serialized = _serialize_config(
-            ConsoleContext(config=config, runtime=runtime, session=session)
-        )
-    finally:
-        runtime.transport.close()
+    serialized = _serialize_console_payload(_serialize_config)
 
     controls = serialized["collection"]["controls"]
     assert controls["mode"] == "keyboard"
@@ -310,9 +286,6 @@ def test_config_exposes_keyboard_collection_controls_by_default():
 
 
 def test_frame_uses_live_camera_keys_when_reader_reports_them():
-    config = console_config()
-    runtime, session = build_runtime(config)
-
     class _Reader:
         def get_latest_qpos(self):
             return np.zeros(14, dtype=np.float32)
@@ -320,12 +293,10 @@ def test_frame_uses_live_camera_keys_when_reader_reports_them():
         def get_camera_keys(self):
             return ["cam_high"]
 
-    try:
-        frame = _serialize_frame(
-            ConsoleContext(config=config, runtime=runtime, session=session, obs_reader=_Reader())  # type: ignore[reportArgumentType]
-        )
-    finally:
-        runtime.transport.close()
+    frame = _serialize_console_payload(
+        _serialize_frame,
+        obs_reader=_Reader(),  # type: ignore[reportArgumentType]
+    )
 
     assert frame["cameras"] == ["cam_high"]
 

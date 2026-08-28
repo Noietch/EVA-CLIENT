@@ -41,14 +41,11 @@ class _FakeRospy:
         return False
 
 
-def _subscription_callback(rospy: _FakeRospy, topic: str):
-    for sub_topic, _msg_type, callback, _queue_size, _tcp_nodelay in rospy.subscribers:
-        if sub_topic == topic:
-            return callback
-    raise AssertionError(f"missing subscription for {topic}")
-
-
-def test_ros1_camera_subscriptions_report_minimum_image_hz(monkeypatch):
+def _build_ros1_transport(
+    monkeypatch,
+    config: ConfigDict,
+    robot: Robot,
+):
     fake_rospy = _FakeRospy()
     runtime = types.SimpleNamespace(
         rospy=fake_rospy,
@@ -58,6 +55,17 @@ def test_ros1_camera_subscriptions_report_minimum_image_hz(monkeypatch):
         pose_stamped_type=object,
     )
     monkeypatch.setattr(ros1, "get_ros_runtime", lambda node_name: runtime)
+    return fake_rospy, ros1.Ros1Transport(config, robot)
+
+
+def _subscription_callback(rospy: _FakeRospy, topic: str):
+    for sub_topic, _msg_type, callback, _queue_size, _tcp_nodelay in rospy.subscribers:
+        if sub_topic == topic:
+            return callback
+    raise AssertionError(f"missing subscription for {topic}")
+
+
+def test_ros1_camera_subscriptions_report_minimum_image_hz(monkeypatch):
     now = [0.0]
     monkeypatch.setattr(transport_utils.time, "monotonic", lambda: now[0])
     config = ConfigDict(
@@ -88,7 +96,7 @@ def test_ros1_camera_subscriptions_report_minimum_image_hz(monkeypatch):
             state_composition=("arm",),
         ),
     )
-    transport = ros1.Ros1Transport(config, robot)
+    fake_rospy, transport = _build_ros1_transport(monkeypatch, config, robot)
 
     for topic in ("/cam/front", "/cam/left"):
         now[0] = 0.0
@@ -100,17 +108,18 @@ def test_ros1_camera_subscriptions_report_minimum_image_hz(monkeypatch):
 
     assert transport.image_min_hz() == pytest.approx(10.0)
 
+    decoded = []
+    transport._bridge = types.SimpleNamespace(
+        imgmsg_to_cv2=lambda message, encoding: decoded.append((message, encoding)) or message
+    )
+    latest = object()
+    transport._camera_deques["front"].append(latest)
+    assert transport.get_camera_frame("cam_front") is latest
+    assert decoded == [(latest, "passthrough")]
+    assert len(transport._camera_deques["front"]) == 3
+
 
 def test_ros1_hil_relative_relay_reorders_named_input(monkeypatch):
-    fake_rospy = _FakeRospy()
-    runtime = types.SimpleNamespace(
-        rospy=fake_rospy,
-        cv_bridge=object(),
-        image_type=object,
-        joint_state_type=_FakeJointState,
-        pose_stamped_type=object,
-    )
-    monkeypatch.setattr(ros1, "get_ros_runtime", lambda node_name: runtime)
     config = ConfigDict(
         transport=ConfigDict(
             node_name="test_ros1_hil",
@@ -137,7 +146,7 @@ def test_ros1_hil_relative_relay_reorders_named_input(monkeypatch):
         initial_qpos=np.zeros(2, dtype=np.float32),
         observation_schema=ObservationSchema(cameras=(), state_composition=("arm",)),
     )
-    transport = ros1.Ros1Transport(config, robot)
+    fake_rospy, transport = _build_ros1_transport(monkeypatch, config, robot)
     transport._group_state_deques["arm"].append(types.SimpleNamespace(position=[10.0, 20.0]))
     assert transport.start_hil_control("relative").active is True
     callback = _subscription_callback(fake_rospy, "/hil_input")

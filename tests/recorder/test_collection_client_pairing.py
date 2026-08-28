@@ -12,6 +12,10 @@ from core.recorder.episode import EpisodeLogger
 from core.types import CollectionRawBatch, CollectionRawSample, RawCollectionSnapshot
 from robots.base import ActuatorGroup, CameraSpec, ObservationSchema, Robot
 
+_STATE_QPOS = np.asarray([1.0, 2.0, 3.0, 0.1], dtype=np.float32)
+_REMOTE_ACTION_QPOS = np.asarray([9.0, 9.0, 9.0, 0.9], dtype=np.float32)
+_CLIENT_ACTION_QPOS = np.asarray([4.0, 5.0, 6.0, 0.2], dtype=np.float32)
+
 
 class _FakeFk:
     def __init__(
@@ -98,8 +102,6 @@ def _logger(tmp_path, *, control_source: str = "client"):
 
 
 def _batch(*, include_images: bool = True) -> CollectionRawBatch:
-    state = np.asarray([1.0, 2.0, 3.0, 0.1], dtype=np.float32)
-    remote_action = np.asarray([9.0, 9.0, 9.0, 0.9], dtype=np.float32)
     remote_eef = np.full(8, 99.0, dtype=np.float32)
     return CollectionRawBatch(
         images=(
@@ -114,16 +116,16 @@ def _batch(*, include_images: bool = True) -> CollectionRawBatch:
         ),
         vectors={
             "state_qpos": [
-                CollectionRawSample(1.0, state),
-                CollectionRawSample(1.1, state),
+                CollectionRawSample(1.0, _STATE_QPOS),
+                CollectionRawSample(1.1, _STATE_QPOS),
             ],
             "action_qpos": [
-                CollectionRawSample(1.0, remote_action),
-                CollectionRawSample(1.1, remote_action),
+                CollectionRawSample(1.0, _REMOTE_ACTION_QPOS),
+                CollectionRawSample(1.1, _REMOTE_ACTION_QPOS),
             ],
             "state_eef": [CollectionRawSample(1.0, remote_eef)],
             "action_eef": [CollectionRawSample(1.0, remote_eef)],
-            "action_qpos:arm": [CollectionRawSample(1.0, remote_action)],
+            "action_qpos:arm": [CollectionRawSample(1.0, _REMOTE_ACTION_QPOS)],
             "action_eef:arm": [CollectionRawSample(1.0, remote_eef)],
         },
     )
@@ -132,16 +134,53 @@ def _batch(*, include_images: bool = True) -> CollectionRawBatch:
 def test_client_pairing_replaces_remote_action_stream(tmp_path) -> None:
     logger = _logger(tmp_path)
     logger.start_episode("task")
-    client_action = np.asarray([4.0, 5.0, 6.0, 0.2], dtype=np.float32)
     snapshot = RawCollectionSnapshot(timestamp=1.0, decode_raw=_batch)
 
-    logger.ingest_collection_action_snapshot(snapshot, client_action)
+    logger.ingest_collection_action_snapshot(snapshot, _CLIENT_ACTION_QPOS)
 
     paired = logger._collection_writer._raw_snapshots[0].decode_raw()
     assert set(paired.vectors) == {"state_qpos", "action_qpos"}
     np.testing.assert_allclose(paired.vectors["state_qpos"][0].value, [1, 2, 3, 0.1])
-    np.testing.assert_allclose(paired.vectors["action_qpos"][0].value, client_action)
+    np.testing.assert_allclose(paired.vectors["action_qpos"][0].value, _CLIENT_ACTION_QPOS)
     assert paired.vectors["action_qpos"][0].timestamp == 1.0
+
+
+def test_high_rate_client_actions_are_interpolated_to_collection_fps(tmp_path) -> None:
+    logger = _logger(tmp_path)
+    logger.start_episode("task")
+
+    def raw_observations() -> CollectionRawBatch:
+        return CollectionRawBatch(
+            images={
+                "cam_high": [
+                    CollectionRawSample(t, np.zeros((2, 2, 3), dtype=np.uint8))
+                    for t in (1.0, 1.1, 1.2)
+                ]
+            },
+            vectors={"state_qpos": [CollectionRawSample(t, _STATE_QPOS) for t in (1.0, 1.1, 1.2)]},
+            start_time=1.0,
+            end_time=1.2,
+        )
+
+    logger.ingest_collection_client_snapshot(
+        RawCollectionSnapshot(timestamp=1.0, decode_raw=raw_observations)
+    )
+    for timestamp, value in ((1.0, 0.0), (1.07, 7.0), (1.14, 14.0), (1.2, 20.0)):
+        logger.ingest_collection_action(
+            timestamp,
+            np.asarray([value, value, value, 0.2], dtype=np.float32),
+        )
+    assert logger._collection_writer.frame_counts()["received"] == 1
+
+    assert logger.end_episode()
+    logger.finalize()
+
+    table = pq.read_table(
+        tmp_path / "task" / "raw" / "data" / "chunk-000" / "episode_000000.parquet"
+    )
+    actions = np.asarray(table.column("action.qpos").to_pylist(), dtype=np.float32)
+    np.testing.assert_allclose(actions[:, 0], [0.0, 10.0, 20.0], atol=1e-5)
+    np.testing.assert_allclose(actions[:, 3], [0.2, 0.2, 0.2], atol=1e-5)
 
 
 def test_client_alignment_derives_both_eef_columns_from_aligned_qpos(tmp_path) -> None:
@@ -204,9 +243,8 @@ def test_collection_image_mode_writes_vectors_and_actual_video_metadata(
         timestamp=1.0,
         decode_raw=lambda: _batch(include_images=include_images),
     )
-    client_action = np.asarray([4.0, 5.0, 6.0, 0.2], dtype=np.float32)
     if control_source == "client":
-        logger.ingest_collection_action_snapshot(snapshot, client_action)
+        logger.ingest_collection_action_snapshot(snapshot, _CLIENT_ACTION_QPOS)
     else:
         logger.ingest_collection_snapshot(snapshot)
 

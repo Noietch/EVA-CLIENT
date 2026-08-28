@@ -113,10 +113,12 @@ class _StatsAccumulator:
 
 
 def is_rejected_episode(row: dict[str, Any]) -> bool:
-    return (
-        str(row.get("quality", "green")).lower() == "red"
-        or str(row.get("qc_verdict", "")).lower() == "fail"
-    )
+    qc_verdict = str(row.get("qc_verdict", "")).lower()
+    if qc_verdict == "pass":
+        return False
+    if qc_verdict == "fail":
+        return True
+    return str(row.get("quality", "green")).lower() == "red"
 
 
 def split_dataset_by_quality(
@@ -396,7 +398,7 @@ def _export_subset(
                 "source_dir": str(source_dir),
                 "subset": subset,
                 "dataset_format": "lerobot_v21",
-                "rule": "quality == red OR qc_verdict == fail",
+                "rule": "qc_verdict == pass overrides quality == red; qc_verdict == fail rejects",
                 "source_episode_indices": source_indices,
             },
             indent=2,

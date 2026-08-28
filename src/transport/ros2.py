@@ -305,7 +305,11 @@ class Ros2Transport(_RosTransportBase):
             topic = self._camera_topics.get(camera.name)
             if topic is None:
                 continue
-            deque: collections.deque = collections.deque()
+            # The live reader only ever consumes the newest synchronized window.
+            # Keep this bounded to the DDS history depth so a stalled control loop
+            # cannot retain an unbounded number of full image messages. Collection
+            # uses a separate deque below and keeps its existing capture bound.
+            deque: collections.deque = collections.deque(maxlen=_CAMERA_QOS_DEPTH)
             collection_deque: collections.deque = collections.deque()
             self._camera_deques[camera.name] = deque
             self._collection_camera_deques[camera.name] = collection_deque

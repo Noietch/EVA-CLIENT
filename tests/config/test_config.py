@@ -138,6 +138,8 @@ def test_vr_rl_templates_reuse_client_teleop_and_open_on_rl_tab(filename: str, r
     assert cfg.console.initial_tab == "rl"
     assert cfg.collection.teleop.control_source == "client"
     assert cfg.collection.teleop.client.type == "vr_webxr"
+    assert cfg.inference_cfg.publish_rate == 30
+    assert cfg.collection.storage.fps == 30
     assert cfg.rl.intervention.source == "teleop_client"
     assert cfg.rl.policies[0].config.robot.type == robot_type
 
@@ -260,6 +262,8 @@ def test_arx_x5_vr_collection_opens_on_collect_tab():
     cfg = load_config(_CONFIGS_DIR / "02_collection" / "arx_x5_vr.py")
 
     assert cfg.console.initial_tab == "collect"
+    assert cfg.inference_cfg.publish_rate == 30
+    assert cfg.collection.storage.fps == 30
 
 
 def test_console_initial_tab_rejects_unknown_workspace(tmp_path):
@@ -435,6 +439,21 @@ def test_collection_tasks_are_dataset_to_prompt_target_lists(tmp_path):
     }
 
 
+def test_collection_tasks_allow_prompt_in_multiple_datasets(tmp_path):
+    cfg_path = _write_config(
+        tmp_path / "duplicate_prompts.py",
+        "collection = dict(tasks=dict(\n"
+        "    cup_set_scene_1_20260828=[('pick up cup', 1)],\n"
+        "    cup_set_scene_2_20260828=[('pick up cup', 2)],\n"
+        "))\n",
+    )
+
+    cfg = load_config(cfg_path)
+
+    assert cfg.collection.tasks.cup_set_scene_1_20260828 == [("pick up cup", 1)]
+    assert cfg.collection.tasks.cup_set_scene_2_20260828 == [("pick up cup", 2)]
+
+
 @pytest.mark.parametrize(
     "tasks",
     [
@@ -442,7 +461,6 @@ def test_collection_tasks_are_dataset_to_prompt_target_lists(tmp_path):
         "dict(cup_set=[])",
         "dict(cup_set=['pick up cup'])",
         "dict(cup_set=[('pick up cup',)])",
-        "dict(a=[('pick up cup', 1)], b=[('pick up cup', 2)])",
         "dict(cup_set=[('pick up cup', 0)])",
         "dict(cup_set=[('pick up cup', -2)])",
         "dict(cup_set=[('pick up cup', 1.5)])",
@@ -455,7 +473,7 @@ def test_collection_tasks_reject_invalid_grouping(tmp_path, tasks):
         f"collection = dict(tasks={tasks})\n",
     )
 
-    with pytest.raises(ValueError, match="collection.tasks|collection prompt"):
+    with pytest.raises(ValueError, match="collection.tasks"):
         load_config(cfg_path)
 
 
@@ -500,14 +518,14 @@ def test_all_collection_presets_load_without_error(preset):
     assert isinstance(cfg.collection.tasks, dict)
 
 
-def test_arx_x5_vr_defines_only_mango_with_target():
+def test_arx_x5_vr_defines_scene_task_set():
     cfg = load_config(_CONFIGS_DIR / "02_collection" / "arx_x5_vr.py")
 
-    assert dict(cfg.collection.tasks) == {
-        "pick_up_the_mango_and_place_it_in_the_plate": [
-            ("pick up the mango and place it in the plate", 100),
-        ],
-    }
+    assert list(cfg.collection.tasks) == ["ArxKine_PnP_DivObj_Norm_Sngl_Base_v1_scene_1_20260828"]
+    tasks = cfg.collection.tasks.ArxKine_PnP_DivObj_Norm_Sngl_Base_v1_scene_1_20260828
+    assert len(tasks) == 6
+    assert tasks[0] == ("pick up the yellow cup and place it on the green plate with left hand.", 1)
+    assert tasks[-1] == ("pick up the gray cup and place it on the green plate with left hand.", 1)
 
 
 @pytest.mark.parametrize(

@@ -116,7 +116,7 @@ class ArxX5ZmqConfig:
         start_at_zero: move both X5 arms to the all-zero joint position at startup.
         disabled_groups: arm groups intentionally absent from this deployment.
         realsense_cameras: RealSense D405 cameras mapped to EVA image keys.
-        publish_rate_hz: observation publish rate.
+        publish_rate_hz: action/state loop and observation publish rate.
         left_alicia_port: Alicia-D leader port for the left X5 arm.
         right_alicia_port: Alicia-D leader port for the right X5 arm.
         alicia_port: Legacy Alicia-D leader port alias for right_alicia_port.
@@ -350,11 +350,12 @@ class ArxX5ZmqNode:
         self._last_status_observation_count = 0
         logger.info(
             "ARX X5 ZMQ node ready: obs_pub=%s action_sub=%s can_ports=%s "
-            "realsense_cameras=%d status_log_interval=%.1fs",
+            "realsense_cameras=%d publish_rate=%.1fHz status_log_interval=%.1fs",
             config.observation_endpoint,
             config.action_endpoint,
             config.can_ports,
             len(config.realsense_cameras),
+            config.publish_rate_hz,
             config.status_log_interval_s,
         )
 
@@ -469,6 +470,12 @@ class ArxX5ZmqNode:
     def _publish_observation(self) -> None:
         state = self._robot.read_state()
         seqs, images = self._cameras.snapshot_versioned()
+        images = {
+            key: image
+            for key, image in images.items()
+            if self._last_published_seqs.get(key) != seqs.get(key)
+        }
+        self._last_published_seqs.update(seqs)
         eef = None
         action_qpos = None
         action_eef = None
@@ -493,14 +500,6 @@ class ArxX5ZmqNode:
                         target="real",
                     )
                 )
-            # Gate collection publishes on fresh camera frames: the loop runs at
-            # publish_rate_hz (> camera fps), so without this the same cached frame
-            # would be republished and recorded as a static video. Teleop control
-            # above still runs every tick; only the recorded observation waits for
-            # every camera to advance, which also keeps the views mutually aligned.
-            if seqs and seqs == self._last_published_seqs:
-                return
-            self._last_published_seqs = seqs
         transport_zmq = _transport_zmq()
         obs = transport_zmq.WireObservation(
             t=time.monotonic(),
@@ -665,7 +664,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         metavar="left_arm|right_arm",
         help="Intentionally skip one ARX X5 arm; repeatable.",
     )
-    parser.add_argument("--rate", type=float, default=30.0)
+    parser.add_argument(
+        "--rate",
+        type=float,
+        default=30.0,
+        help="Action/state loop and observation publish rate in Hz.",
+    )
     parser.add_argument(
         "--eva-config",
         default="",

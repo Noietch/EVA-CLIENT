@@ -54,22 +54,8 @@ class CollectionRawImage:
 
     decoder: Callable[[], np.ndarray | None]
     encoded: bytes | None = None
-    encoded_loader: Callable[[], bytes] | None = None
     _decoded: np.ndarray | None = dataclasses.field(default=None, init=False, repr=False)
     _decoded_once: bool = dataclasses.field(default=False, init=False, repr=False)
-
-    @property
-    def has_encoded(self) -> bool:
-        """True when compressed bytes can be streamed without decoding pixels."""
-        return self.encoded is not None or self.encoded_loader is not None
-
-    def load_encoded(self) -> bytes:
-        """Load compressed bytes, including disk-backed collection payloads."""
-        if self.encoded is not None:
-            return self.encoded
-        if self.encoded_loader is None:
-            raise ValueError("collection raw image has no encoded payload")
-        return self.encoded_loader()
 
     def decode(self) -> np.ndarray:
         """Decode the raw image message once and return a contiguous HWC array."""

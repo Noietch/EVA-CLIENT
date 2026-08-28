@@ -243,7 +243,7 @@ ARM_TYPE=0 GRIPPER_OPEN_POS=5.0 bash examples/hardware/arx_r5/run_hardware.sh
 reading its current joint positions and writing them back through
 `set_joint_positions`. `run_hardware.sh` also keeps an optional preflight enable path
 for diagnosis; set `ENABLE_ARX_R5_ARMS=1` to run it before launching the node.
-The launcher filters the repeated SDK banner line `ARX方舟无限` by default; set
+The launcher filters the repeated vendor SDK banner line by default; set
 `ARX_R5_FILTER_SDK_BANNER=0` to keep raw SDK stdout/stderr.
 
 If one arm is intentionally absent or powered off, disable it explicitly so the

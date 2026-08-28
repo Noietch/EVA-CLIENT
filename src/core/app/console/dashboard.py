@@ -4,10 +4,26 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-from collections import defaultdict
+import threading
+from collections import OrderedDict, defaultdict
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
+
+_DATASET_CACHE_MAX = 32
+_DATASET_CACHE_LOCK = threading.RLock()
+_DATASET_CACHE: OrderedDict[
+    tuple[str, str, tuple[tuple[str, int, int, int], ...]],
+    tuple[dict[str, Any], dict[str, int], list[dict[str, Any]]],
+] = OrderedDict()
+
+
+def _file_signature(path: Path) -> tuple[str, int, int, int]:
+    try:
+        stat = path.stat()
+    except OSError:
+        return (str(path), 0, 0, 0)
+    return (str(path), int(stat.st_ino), int(stat.st_mtime_ns), int(stat.st_size))
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -156,6 +172,46 @@ def _episode_record(
     }
 
 
+def _load_dataset_records(
+    raw_dir: Path, mode: str
+) -> tuple[dict[str, Any], dict[str, int], list[dict[str, Any]]]:
+    """Read one dataset's metadata once, invalidating on metadata file changes."""
+    paths = (
+        raw_dir / "meta" / "info.json",
+        raw_dir / "meta" / "tasks.jsonl",
+        raw_dir / "meta" / "episodes.jsonl",
+    )
+    signatures = tuple(_file_signature(path) for path in paths)
+    key = (str(raw_dir.resolve()), mode, signatures)
+    with _DATASET_CACHE_LOCK:
+        cached = _DATASET_CACHE.get(key)
+        if cached is not None:
+            _DATASET_CACHE.move_to_end(key)
+            return cached
+
+    info = _read_json(paths[0])
+    requirements = {
+        str(row.get("task") or ""): int(row.get("required_episodes") or 0)
+        for row in _read_jsonl(paths[1])
+        if row.get("task")
+    }
+    records = []
+    for row in _read_jsonl(paths[2]):
+        record = _episode_record(row, raw_dir, mode, info, requirements)
+        if record is not None:
+            records.append(record)
+    value = (info, requirements, records)
+    with _DATASET_CACHE_LOCK:
+        existing = _DATASET_CACHE.get(key)
+        if existing is not None:
+            _DATASET_CACHE.move_to_end(key)
+            return existing
+        _DATASET_CACHE[key] = value
+        while len(_DATASET_CACHE) > _DATASET_CACHE_MAX:
+            _DATASET_CACHE.popitem(last=False)
+    return value
+
+
 def _summary(episodes: list[dict[str, Any]]) -> dict[str, Any]:
     duration = sum(float(row["duration_seconds"]) for row in episodes)
     valid_rows = [row for row in episodes if row["valid"]]
@@ -249,17 +305,7 @@ def build_dashboard(
     episodes: list[dict[str, Any]] = []
     sources: list[dict[str, Any]] = []
     for raw_dir, mode in discover_raw_datasets(roots):
-        info = _read_json(raw_dir / "meta" / "info.json")
-        requirements = {
-            str(row.get("task") or ""): int(row.get("required_episodes") or 0)
-            for row in _read_jsonl(raw_dir / "meta" / "tasks.jsonl")
-            if row.get("task")
-        }
-        records = []
-        for row in _read_jsonl(raw_dir / "meta" / "episodes.jsonl"):
-            record = _episode_record(row, raw_dir, mode, info, requirements)
-            if record is not None:
-                records.append(record)
+        _, _, records = _load_dataset_records(raw_dir, mode)
         episodes.extend(records)
         sources.append(
             {

@@ -5,11 +5,15 @@ data integrity.
 
 from __future__ import annotations
 
+import gc
 import io
 import json
+import os
 import threading
+import weakref
 
 import numpy as np
+import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
@@ -55,6 +59,7 @@ def _logger(
     async_save: bool = False,
     recording_space: str = "qpos",
     eval_mode: bool = False,
+    save_queue_max: int = 15,
 ) -> EpisodeLogger:
     return EpisodeLogger(
         log_dir,
@@ -67,30 +72,163 @@ def _logger(
             video_keys={},
         ),
         async_save=async_save,
+        save_queue_max=save_queue_max,
         recording_space=recording_space,
         eval_mode=eval_mode,
     )
 
 
+def _write_history_rows(path, rows) -> None:
+    path.parent.mkdir(parents=True)
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+
+def _assert_eval_status(status, *, active: bool) -> None:
+    assert status["active"] is active
+    assert status["saving"] is False
+    assert status["queued_jobs"] == 0
+
+
+def _assert_lightweight_status(status, *, completed_episodes: int) -> None:
+    assert "episodes" not in status
+    assert status["completed_episodes"] == completed_episodes
+    assert status["queue"] == []
+
+
+def _record_single_step(logger: EpisodeLogger, *, timestamp: float) -> None:
+    state = np.zeros(_DIM, dtype=np.float32)
+    logger.start_episode("task")
+    logger.record_step(_obs(state), state, timestamp=timestamp)
+    assert logger.end_episode()
+
+
 def test_eval_status_exposes_activity_fields(tmp_path):
     logger = _logger(tmp_path, eval_mode=True)
 
-    idle = logger.status_snapshot()
-    assert idle["active"] is False
-    assert idle["saving"] is False
-    assert idle["queued_jobs"] == 0
-
+    _assert_eval_status(logger.status_snapshot(), active=False)
     logger.start_episode("task")
-    active = logger.status_snapshot()
-    assert active["active"] is True
-    assert active["saving"] is False
-    assert active["queued_jobs"] == 0
-
+    _assert_eval_status(logger.status_snapshot(), active=True)
     logger.cancel_episode("test")
-    cancelled = logger.status_snapshot()
-    assert cancelled["active"] is False
-    assert cancelled["saving"] is False
-    assert cancelled["queued_jobs"] == 0
+    _assert_eval_status(logger.status_snapshot(), active=False)
+
+
+def test_lightweight_status_snapshot_skips_collection_history_read(tmp_path, monkeypatch):
+    logger = _collection_logger(tmp_path)
+
+    def fail_load(*args, **kwargs):
+        raise AssertionError("lightweight status must not load episodes.jsonl")
+
+    monkeypatch.setattr(logger, "_load_collection_history", fail_load)
+    _assert_lightweight_status(
+        logger.status_snapshot("task", include_history=False),
+        completed_episodes=0,
+    )
+
+
+def test_lightweight_status_snapshot_counts_existing_rollout_history(tmp_path):
+    path = tmp_path / "meta" / "episodes.jsonl"
+    _write_history_rows(
+        path,
+        [{"episode_index": index, "tasks": ["task"], "length": 1} for index in range(3)],
+    )
+    logger = _logger(tmp_path)
+    _assert_lightweight_status(
+        logger.status_snapshot(include_history=False),
+        completed_episodes=3,
+    )
+    assert logger.completed_episode_count == 3
+
+
+def test_lightweight_status_refreshes_count_after_external_append(tmp_path):
+    path = tmp_path / "meta" / "episodes.jsonl"
+    _write_history_rows(path, [{"episode_index": 0, "length": 1}])
+    logger = _logger(tmp_path)
+    assert logger.status_snapshot(include_history=False)["completed_episodes"] == 1
+
+    with path.open("a") as stream:
+        stream.write(json.dumps({"episode_index": 1, "length": 1}) + "\n")
+
+    assert logger.status_snapshot(include_history=False)["completed_episodes"] == 2
+
+
+def test_async_save_does_not_double_count_when_status_sees_row_first(tmp_path, monkeypatch):
+    logger = _logger(tmp_path, async_save=True)
+    row_written = threading.Event()
+    release_save = threading.Event()
+    original_write_info = logger._write_info_json
+
+    def blocked_write_info() -> None:
+        row_written.set()
+        assert release_save.wait(timeout=5.0)
+        original_write_info()
+
+    monkeypatch.setattr(logger, "_write_info_json", blocked_write_info)
+    _record_single_step(logger, timestamp=1.0)
+    assert row_written.wait(timeout=5.0)
+
+    assert logger.status_snapshot(include_history=False)["completed_episodes"] == 1
+    release_save.set()
+    assert logger.wait_for_saves(timeout=5.0)
+    assert logger.status_snapshot(include_history=False)["completed_episodes"] == 1
+
+
+def test_lightweight_collection_status_counts_each_task_dataset(tmp_path, monkeypatch):
+    tasks = {
+        "set_a": [("task a", 2)],
+        "set_b": [("task b", 1)],
+    }
+    for dataset_name, count in (("set_a", 2), ("set_b", 1)):
+        path = tmp_path / dataset_name / "raw" / "meta" / "episodes.jsonl"
+        _write_history_rows(
+            path,
+            [
+                {"episode_index": index, "tasks": [dataset_name], "length": 1}
+                for index in range(count)
+            ],
+        )
+
+    logger = _collection_logger(tmp_path, tasks=tasks)
+
+    def fail_load(*args, **kwargs):
+        raise AssertionError("lightweight status must not project episodes.jsonl")
+
+    monkeypatch.setattr(logger, "_load_collection_history", fail_load)
+
+    _assert_lightweight_status(
+        logger.status_snapshot("task a", include_history=False),
+        completed_episodes=2,
+    )
+    _assert_lightweight_status(
+        logger.status_snapshot("task b", include_history=False),
+        completed_episodes=1,
+    )
+
+
+def test_failed_async_save_does_not_consume_queue_capacity(tmp_path, monkeypatch):
+    logger = _logger(tmp_path, async_save=True, save_queue_max=1)
+    monkeypatch.setattr(logger, "_start_save_worker", lambda: None)
+    _record_single_step(logger, timestamp=1.0)
+    monkeypatch.setattr(
+        logger,
+        "_write_job",
+        lambda _job: (_ for _ in ()).throw(OSError("broken save")),
+    )
+    logger._save_queue_worker()
+
+    status = logger.status_snapshot()
+    assert status["pipeline_state"] == "IDLE"
+    assert status["save_queue_size"] == 0
+    assert status["queue"][0]["status"] == "failed"
+    assert status["queue"][0]["error"] == "broken save"
+    assert logger.wait_for_saves()
+    assert not logger.is_queue_full()
+
+    _record_single_step(logger, timestamp=2.0)
+    assert logger.is_queue_full()
+    status = logger.status_snapshot()
+    assert status["pipeline_state"] == "QUEUE_FULL"
+    assert status["save_queue_size"] == 1
+    assert [item["status"] for item in status["queue"]] == ["failed", "queued"]
 
 
 def _rollout_logger(
@@ -435,6 +573,40 @@ def test_episode_logger_start_stop_start_lifecycle(tmp_path):
     resumed.end_episode()
     assert (data_dir / "episode_000002.parquet").exists()
     assert (data_dir / "episode_000000.parquet").exists()
+
+
+def test_episode_logger_resume_skips_gaps_without_reusing_persisted_indices(tmp_path):
+    logger = _logger(tmp_path)
+    state = np.zeros(_DIM, dtype=np.float32)
+    logger.start_episode("a")
+    logger.record_step(_obs(state), state)
+    logger.end_episode()
+
+    episodes_path = tmp_path / "meta" / "episodes.jsonl"
+    episodes = _read_jsonl(episodes_path)
+    episodes.append({"episode_index": 7, "tasks": ["a"], "length": 1})
+    episodes_path.write_text("".join(json.dumps(row) + "\n" for row in episodes))
+
+    original = pq.read_table(tmp_path / "data/chunk-000/episode_000000.parquet")
+    orphan = original.set_column(
+        original.schema.get_field_index("episode_index"),
+        "episode_index",
+        pa.array([9], type=pa.int64()),
+    ).set_column(
+        original.schema.get_field_index("index"),
+        "index",
+        pa.array([99], type=pa.int64()),
+    )
+    pq.write_table(orphan, tmp_path / "data/chunk-000/episode_000009.parquet")
+
+    resumed = _logger(tmp_path)
+    assert resumed.current_episode_index == 10
+    resumed.start_episode("b")
+    resumed.record_step(_obs(state), state)
+    resumed.end_episode()
+
+    saved = pq.read_table(tmp_path / "data/chunk-000/episode_000010.parquet")
+    assert saved.column("index").to_pylist() == [100]
 
 
 def test_episode_logger_copies_inputs_and_skips_empty_episode(tmp_path):
@@ -964,49 +1136,6 @@ def test_encoded_video_writer_pipes_jpegs_directly_to_ffmpeg(tmp_path, monkeypat
     assert command[command.index("-g") + 1] == "15"
 
 
-def test_encoded_video_writer_streams_disk_backed_jpegs(tmp_path, monkeypatch):
-    written = []
-    loaded = []
-
-    class _Input:
-        def write(self, payload: bytes) -> None:
-            written.append(payload)
-
-        def close(self) -> None:
-            pass
-
-    class _Process:
-        stdin = _Input()
-        stderr = io.BytesIO()
-
-        def wait(self) -> int:
-            return 0
-
-    monkeypatch.setattr(
-        episode_module.subprocess,
-        "Popen",
-        lambda *args, **kwargs: _Process(),
-    )
-    frames = [
-        CollectionRawImage(
-            decoder=lambda: None,
-            encoded_loader=lambda index=index: loaded.append(index) or f"jpeg-{index}".encode(),
-        )
-        for index in range(3)
-    ]
-    logger = _logger(tmp_path, fps=15)
-
-    logger._write_encoded_sample_video(
-        tmp_path / "episode.mp4",
-        frames,
-        15.0,
-        None,
-    )
-
-    assert loaded == [0, 1, 2]
-    assert written == [b"jpeg-0", b"jpeg-1", b"jpeg-2"]
-
-
 def test_collection_raw_end_episode_defers_alignment_and_video_preprocess(tmp_path, monkeypatch):
     logger = _collection_logger(
         tmp_path,
@@ -1048,6 +1177,45 @@ def test_collection_raw_end_episode_defers_alignment_and_video_preprocess(tmp_pa
     assert len(logger._save_jobs) == 1
     assert logger._save_jobs[0].collection_columns is None
     assert decode_calls == []
+
+
+def test_failed_wire_decode_releases_capture_journal(tmp_path, monkeypatch):
+    from transport.zmq import _WireCaptureJournal
+
+    logger = _collection_logger(tmp_path, async_save=True)
+    monkeypatch.setattr(logger, "_start_save_worker", lambda: None)
+    monkeypatch.setattr(episode_module.logger, "exception", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(episode_module, "_trim_process_allocator", lambda: None)
+
+    journal = _WireCaptureJournal(tmp_path)
+    entry = journal.append(b"wire payload")
+    journal_ref = weakref.ref(journal)
+    file_ref = weakref.ref(journal._file)
+    file_descriptor = journal._file.fileno()
+
+    def decode_raw(entry=entry) -> CollectionRawBatch:
+        entry.read()
+        try:
+            raise ValueError("invalid msgpack")
+        except ValueError as cause:
+            raise OSError("wire decode failed") from cause
+
+    snapshot = RawCollectionSnapshot(timestamp=0.1, decode_raw=decode_raw)
+    logger.start_episode("t")
+    logger.ingest_collection_snapshot(snapshot)
+    assert logger.end_episode()
+
+    del decode_raw, entry, journal, snapshot
+    logger._save_queue_worker()
+    gc.collect()
+
+    job = logger._save_jobs[0]
+    assert job.status == "failed"
+    assert job.error == "wire decode failed"
+    assert journal_ref() is None
+    assert file_ref() is None
+    with pytest.raises(OSError):
+        os.fstat(file_descriptor)
 
 
 def test_collection_raw_save_worker_aligns_and_prepares_video(tmp_path, monkeypatch):
@@ -1422,6 +1590,47 @@ def test_collection_saves_multiple_prompts_in_one_dataset_set(tmp_path):
     assert logger.status_snapshot("pick up cup")["episodes"][0]["episode_index"] == 0
     assert logger.status_snapshot("place cup")["dataset_dir"] == str(dataset_dir)
     assert logger.status_snapshot("place cup")["episodes"][1]["episode_index"] == 1
+
+
+def test_collection_duplicate_prompt_uses_explicit_dataset_set(tmp_path):
+    scene_1 = "ArxKine_PnP_DivObj_Norm_Sngl_Base_v1_scene_1_20260828"
+    scene_3 = "ArxKine_PnP_DivObj_Norm_Sngl_Base_v1_scene_3_20260828"
+    prompt = "pick up the yellow cup and place it on the green plate with left hand."
+    logger = _collection_logger(
+        tmp_path,
+        tasks={
+            scene_1: [(prompt, 1)],
+            scene_3: [(prompt, 7)],
+        },
+    )
+    qpos = np.zeros(_DIM, dtype=np.float32)
+    image = np.zeros((8, 8, 3), dtype=np.uint8)
+
+    logger.start_episode(prompt, collection_dataset=scene_3)
+    logger.ingest_collection_snapshot(
+        _collection_raw_snapshot(0.0, image=image, state=qpos, action=qpos)
+    )
+    assert logger.end_episode()
+
+    scene_3_dir = tmp_path / scene_3 / "raw"
+    assert (scene_3_dir / "data" / "chunk-000" / "episode_000000.parquet").exists()
+    assert not (tmp_path / scene_1 / "raw").exists()
+    assert _read_jsonl(scene_3_dir / "meta" / "tasks.jsonl") == [
+        {"task_index": 0, "task": prompt, "required_episodes": 7}
+    ]
+    assert logger.status_snapshot(prompt, collection_dataset=scene_3)["dataset_dir"] == str(
+        scene_3_dir
+    )
+
+
+def test_collection_rejects_invalid_dataset_before_activating_episode(tmp_path):
+    prompt = "pick up cup"
+    logger = _collection_logger(tmp_path, tasks={"scene_1": [(prompt, 1)]})
+
+    with pytest.raises(ValueError, match="is not configured in dataset"):
+        logger.start_episode(prompt, collection_dataset="missing")
+
+    assert logger.has_active_episode is False
 
 
 def test_collection_status_queue_is_shared_by_prompts_in_one_set(tmp_path, monkeypatch):

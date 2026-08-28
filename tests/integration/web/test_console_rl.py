@@ -13,13 +13,29 @@ import pytest
 from core.app import run as app
 from core.app.console import server as console_server
 from core.app.handlers import teleop
-from core.app.handlers.recording import record_client_rollout_intervention_step
+from core.app.handlers.recording import (
+    begin_rollout_save_episode,
+    maybe_build_rollout_episode_logger,
+    record_client_rollout_intervention_step,
+)
 from core.app.operator_control import handle_teleop_operator_event
-from core.app.rl import build_rl_critic_observation, record_rl_sample, submit_rl_critic
-from core.app.state import SessionStatus
+from core.app.rl import (
+    build_rl_critic_observation,
+    record_rl_sample,
+    rl_live_series,
+    submit_rl_critic,
+)
+from core.app.state import RL_LIVE_SAMPLE_MAX, SessionMode, SessionStatus
 from core.config import ConfigDict
 from core.types import Observation
 from teleop_client.base import QposCommand, TeleopOperatorEvent, TeleopResult, TeleopStatus
+
+
+def _wait_until(predicate, *, timeout_s: float = 2.0, interval_s: float = 0.01) -> None:
+    deadline = time.monotonic() + timeout_s
+    while not predicate():
+        assert time.monotonic() < deadline
+        time.sleep(interval_s)
 
 
 def _configure_rl(console, tmp_path) -> None:
@@ -108,6 +124,23 @@ def _select_rl_policy(
         console.do("/api/rl/setup")
 
 
+def _setup_rl(console, tmp_path) -> None:
+    _configure_rl(console, tmp_path)
+    _select_rl_policy(console, setup=True)
+
+
+def _publish_until_step_advances(console) -> None:
+    def advanced() -> bool:
+        app.publish_next_action(
+            console.runtime.active_config,
+            console.runtime,
+            console.session,
+        )
+        return console.session.step_index > 0
+
+    _wait_until(advanced, timeout_s=2.0, interval_s=0.005)
+
+
 def test_rl_routes_setup_policy_then_select_optional_critic(console, tmp_path):
     _configure_rl(console, tmp_path)
 
@@ -145,10 +178,75 @@ def test_rl_saved_data_path_uses_rl_storage_before_setup(console, tmp_path):
     assert console.status()["rollout"]["dataset_dir"] == str(tmp_path / "rl")
 
 
-def test_rl_setup_and_rollout_do_not_require_a_critic(console, tmp_path):
-    _configure_rl(console, tmp_path)
+def test_rl_replaces_rollout_logger_from_another_dataset(console, tmp_path):
+    normal_dir = tmp_path / "normal"
+    history_path = normal_dir / "meta" / "episodes.jsonl"
+    history_path.parent.mkdir(parents=True)
+    history_path.write_text(json.dumps({"episode_index": 0, "length": 1}) + "\n")
+    console.config.rollout.storage.enabled = True
+    console.config.rollout.storage.log_dir = str(normal_dir)
+    maybe_build_rollout_episode_logger(console.config, console.runtime)
+    ordinary_logger = console.runtime.rollout_episode_logger
+    assert ordinary_logger is not None
 
+    _configure_rl(console, tmp_path)
+    _open_rl_tab(console)
+    assert console.status()["rollout"]["completed_episodes"] == 0
     _select_rl_policy(console, setup=True)
+    active = console.runtime.active_config
+    assert active is not None
+
+    maybe_build_rollout_episode_logger(active, console.runtime)
+
+    assert console.runtime.rollout_episode_logger is not ordinary_logger
+    assert console.runtime.rollout_episode_logger._log_dir == tmp_path / "rl"
+
+
+def test_entering_rl_discards_an_active_ordinary_rollout(console, tmp_path):
+    normal_dir = tmp_path / "normal"
+    console.config.rollout.storage.enabled = True
+    console.config.rollout.storage.log_dir = str(normal_dir)
+    begin_rollout_save_episode(console.config, console.runtime, console.session)
+    ordinary_logger = console.runtime.rollout_episode_logger
+    assert ordinary_logger is not None
+    assert ordinary_logger.has_active_episode
+    assert console.runtime.collection_capture_runner is not None
+
+    _configure_rl(console, tmp_path)
+    _open_rl_tab(console)
+
+    assert not ordinary_logger.has_active_episode
+    assert console.runtime.rollout_episode_logger is ordinary_logger
+    assert console.runtime.collection_capture_runner is None
+
+
+def test_leaving_rl_releases_its_rollout_logger(console, tmp_path):
+    _setup_rl(console, tmp_path)
+    active = console.runtime.active_config
+    assert active is not None
+    begin_rollout_save_episode(active, console.runtime, console.session)
+    assert console.runtime.rollout_episode_logger is not None
+    assert console.runtime.collection_capture_runner is not None
+
+    console.do("/api/tab_switch", {"tab": "debug"})
+
+    assert console.runtime.rollout_episode_logger is None
+    assert console.runtime.collection_capture_runner is None
+
+
+def test_leaving_rl_uses_base_config_for_eval_mode(console, tmp_path):
+    console.config.eval = ConfigDict(cli_mode="sim")
+    _setup_rl(console, tmp_path)
+    assert console.session.mode is SessionMode.REAL
+
+    console.do("/api/tab_switch", {"tab": "eval"})
+
+    assert console.runtime.active_config is None
+    assert console.session.mode is SessionMode.SIM
+
+
+def test_rl_setup_and_rollout_do_not_require_a_critic(console, tmp_path):
+    _setup_rl(console, tmp_path)
 
     status = console.status()
     assert status["policy_connected"] is True
@@ -176,9 +274,7 @@ def test_rl_duplicate_setup_does_not_repeat_robot_setup(console, tmp_path, monke
 
 
 def test_rl_critic_can_connect_after_policy_setup_without_robot_reset(console, tmp_path):
-    _configure_rl(console, tmp_path)
-
-    _select_rl_policy(console, setup=True)
+    _setup_rl(console, tmp_path)
     assert console.status()["is_setup_done"] is True
 
     console.do("/api/rl/select_critic", {"slot": 0})
@@ -186,9 +282,7 @@ def test_rl_critic_can_connect_after_policy_setup_without_robot_reset(console, t
     assert status["is_setup_done"] is True
     assert status["rl"]["selected_critic_slot"] == 0
     assert status["rl"]["critic_connected"] is True
-    deadline = time.monotonic() + 2.0
-    while console.runtime.rl_critic_runner.series()["n"] < 1 and time.monotonic() < deadline:
-        time.sleep(0.01)
+    _wait_until(lambda: console.runtime.rl_critic_runner.series()["n"] >= 1)
     assert console.runtime.rl_critic_runner.series()["n"] == 1
 
 
@@ -208,8 +302,7 @@ def test_rl_critic_selected_during_setup_is_rejected(console, tmp_path):
 
 
 def test_rl_reset_route_clears_setup_and_critic_series(console, tmp_path):
-    _configure_rl(console, tmp_path)
-    _select_rl_policy(console, setup=True)
+    _setup_rl(console, tmp_path)
     console.do("/api/rl/select_critic", {"slot": 0})
     assert console.status()["is_setup_done"] is True
 
@@ -234,14 +327,7 @@ def test_rl_async_reset_auto_setup_then_start_publishes_action(console, tmp_path
 
     _select_rl_policy(console, setup=True)
     console.do("/api/rl/run")
-    deadline = time.monotonic() + 2.0
-    while console.session.step_index == 0 and time.monotonic() < deadline:
-        app.publish_next_action(
-            console.runtime.active_config,
-            console.runtime,
-            console.session,
-        )
-        time.sleep(0.005)
+    _publish_until_step_advances(console)
     assert console.session.step_index > 0
 
     console.do("/api/rl/reset")
@@ -252,14 +338,7 @@ def test_rl_async_reset_auto_setup_then_start_publishes_action(console, tmp_path
     assert status["rl"]["selected_policy_slot"] == 0
 
     console.do("/api/rl/run")
-    deadline = time.monotonic() + 2.0
-    while console.session.step_index == 0 and time.monotonic() < deadline:
-        app.publish_next_action(
-            console.runtime.active_config,
-            console.runtime,
-            console.session,
-        )
-        time.sleep(0.005)
+    _publish_until_step_advances(console)
 
     assert console.session.status is SessionStatus.RUNNING
     assert console.runtime.infer_strategy.is_loop_running()
@@ -393,11 +472,7 @@ def test_rl_critic_without_action_horizon_keeps_original_chunk(console):
 
 
 def test_rl_series_streams_control_source_and_critic_incrementally(console, tmp_path):
-    _configure_rl(console, tmp_path)
-    console.do("/api/tab_switch", {"tab": "rl"})
-    console.do("/api/rl/select_task", {"task": "pack the phone"})
-    console.do("/api/rl/select_policy", {"slot": 0})
-    console.do("/api/rl/setup")
+    _setup_rl(console, tmp_path)
     console.do("/api/rl/select_critic", {"slot": 0})
     runner = console.runtime.rl_critic_runner
     assert runner is not None
@@ -413,9 +488,7 @@ def test_rl_series_streams_control_source_and_critic_incrementally(console, tmp_
         "intervention",
         2.5,
     )
-    deadline = time.monotonic() + 2.0
-    while runner.series()["n"] < 1 and time.monotonic() < deadline:
-        time.sleep(0.01)
+    _wait_until(lambda: runner.series()["n"] >= 1)
 
     series = console.get("/api/rl/series?since=0&critic_since=0").json
 
@@ -429,9 +502,33 @@ def test_rl_series_streams_control_source_and_critic_incrementally(console, tmp_
     assert series["critic"]["n"] == 1
     assert series["critic"]["source"] == ["intervention"]
 
+    lightweight = console.get("/api/rl/series?samples=0&critic_since=0").json
+    assert lightweight["n"] == 1
+    assert lightweight["critic"]["n"] == 1
+    assert "timestamp" not in lightweight
+    assert "state" not in lightweight
+    assert "action" not in lightweight
+
     console.do("/api/tab_switch", {"tab": "replay"})
     assert console.runtime.rl_active is False
     assert console.runtime.rl_critic_runner is None
+
+
+def test_rl_live_series_keeps_only_the_latest_sample_window(console):
+    runtime = console.runtime
+    runtime.rl_active = True
+    sample = np.array([0.1, 0.2], dtype=np.float32)
+    total = RL_LIVE_SAMPLE_MAX + 3
+
+    for index in range(total):
+        record_rl_sample(runtime, sample, sample, "policy", float(index))
+
+    series = rl_live_series(runtime, 0, 0)
+
+    assert series["n"] == total
+    assert series["base"] == 3
+    assert len(series["timestamp"]) == RL_LIVE_SAMPLE_MAX
+    assert series["timestamp"][0] == 3.0
 
 
 def test_rl_replay_switch_closes_previous_source(console, tmp_path, monkeypatch):

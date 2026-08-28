@@ -80,8 +80,16 @@ def _handle_command(runtime: RuntimeState, message: dict) -> dict:
     # select_collect_task: pure session mutation, mirror console/server.py exactly.
     if verb == "select_collect_task":
         task = str(message.get("task", arg))
+        dataset = str(message.get("dataset", "")).strip() or None
+        task_index_value = message.get("task_index")
+        task_index = int(task_index_value) if task_index_value is not None else None
         ctx.session.selected_collect_task = task
-        return {"ok": True, "selected_collect_task": task}
+        ctx.session.selected_collect_set = dataset
+        ctx.session.selected_collect_task_index = task_index
+        response = {"ok": True, "selected_collect_task": task}
+        if dataset is not None:
+            response.update(dataset=dataset, task_index=task_index)
+        return response
 
     if verb == "tab_switch":
         tab = arg or "debug"
