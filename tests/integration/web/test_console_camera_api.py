@@ -426,3 +426,28 @@ def test_camera_jpeg_payload_prefers_reader_jpeg(monkeypatch):
 
     assert jpeg == payload
     assert sig is not None
+
+
+def test_camera_jpeg_payload_distinguishes_frames_with_equal_sampled_sum(monkeypatch):
+    first = np.zeros((64, 64, 3), dtype=np.uint8)
+    second = np.zeros_like(first)
+    first[0, 0, 0] = 10
+    second[0, 0, 1] = 10
+    assert first[::32, ::32].sum() == second[::32, ::32].sum()
+
+    class _Reader:
+        frame = first
+
+        def get_camera_frame(self, _key: str):
+            return self.frame
+
+    monkeypatch.setattr(
+        "core.app.console.server._encode_jpeg",
+        lambda image, _convert: np.asarray(image).tobytes(),
+    )
+    reader = _Reader()
+    _, first_sig = _camera_jpeg_payload(reader, "cam_right_wrist", False)
+    reader.frame = second
+    _, second_sig = _camera_jpeg_payload(reader, "cam_right_wrist", False)
+
+    assert first_sig != second_sig

@@ -81,6 +81,8 @@ class WireObservation:
     hil_supported: bool = False
     hil_active: bool = False
     hil_error: str = ""
+    operator_event: str = ""
+    operator_event_id: int = 0
 
 
 @dataclasses.dataclass
@@ -128,6 +130,9 @@ def pack_observation(obs: WireObservation) -> bytes:
     payload["hil_active"] = bool(obs.hil_active)
     if obs.hil_error:
         payload["hil_error"] = str(obs.hil_error)
+    if obs.operator_event:
+        payload["operator_event"] = str(obs.operator_event)
+        payload["operator_event_id"] = int(obs.operator_event_id)
     return _PACKER.pack(payload)
 
 
@@ -157,6 +162,8 @@ def unpack_observation(payload: bytes) -> WireObservation:
         hil_supported=bool(raw.get("hil_supported", False)),
         hil_active=bool(raw.get("hil_active", False)),
         hil_error=str(raw.get("hil_error", "")),
+        operator_event=str(raw.get("operator_event", "")),
+        operator_event_id=int(raw.get("operator_event_id", 0)),
     )
 
 
@@ -270,6 +277,8 @@ class _ObservationReader:
         self._lock = threading.Lock()
         self._closed = False
         self._collection_image_spool: _CollectionImageSpool | None = None
+        self._operator_event_initialized = False
+        self._last_operator_event_id = 0
 
         self._disabled_cameras = set(config.transport.disabled_cameras)
         self._disabled_groups = set(config.transport.disabled_groups)
@@ -358,6 +367,26 @@ class _ObservationReader:
             active=observation.hil_active,
             error=observation.hil_error,
         )
+
+    def poll_operator_event(self) -> str | None:
+        """Return one new edge-triggered hardware event, never a stale replay."""
+        observation = self._drain_latest()
+        if observation is None:
+            return None
+        event_id = observation.operator_event_id
+        if not self._operator_event_initialized:
+            self._operator_event_initialized = True
+            self._last_operator_event_id = event_id
+            return None
+        if event_id < self._last_operator_event_id:
+            # Execution node restarted and reset its sequence. Establish a fresh
+            # baseline so an event retained in the newest frame cannot fire late.
+            self._last_operator_event_id = event_id
+            return None
+        if event_id == self._last_operator_event_id or not observation.operator_event:
+            return None
+        self._last_operator_event_id = event_id
+        return observation.operator_event
 
     def clear_collection_backlog(self) -> float | None:
         """Drain the socket and drop queued collection frames captured pre-recording."""
@@ -527,7 +556,7 @@ class _ObservationReader:
         freshest snapshot, and converts it to an Observation (images plus the
         state_qpos/state_eef and action_qpos/action_eef carried on the wire).
         """
-        if self._preserve_collection_backlog:
+        if getattr(self, "_preserve_collection_backlog", False):
             wire_obs = self._drain_collection_queue()
         else:
             wire_obs = self._drain_latest()
@@ -536,26 +565,30 @@ class _ObservationReader:
         return self._wire_to_observation(wire_obs)
 
     def _drain_raw_collection(self) -> bytes | None:
-        """Drain a bounded socket batch and return only its newest raw payload.
-
-        The capture clock defines the stored frame rate, so retaining older full
-        observations would create latency and pin duplicate image payloads. Decoding
-        still happens later through the snapshot's raw-batch closure.
-        """
+        """Return one raw payload while honoring the collection backlog mode."""
         with self._lock:
-            got_message = False
-            latest = self._raw_collection_queue[-1] if self._raw_collection_queue else None
-            self._raw_collection_queue.clear()
-            for _ in range(COLLECTION_SOCKET_DRAIN_MAX):
-                try:
-                    payload = self._sub.recv(self._zmq.NOBLOCK)
-                except self._zmq.Again:
-                    break
-                got_message = True
-                latest = payload
-            if got_message:
-                self._freshness.mark()
-            return latest
+            if getattr(self, "_preserve_collection_backlog", False):
+                if self._raw_collection_queue:
+                    payload = self._raw_collection_queue.popleft()
+                else:
+                    try:
+                        payload = self._sub.recv(self._zmq.NOBLOCK)
+                    except self._zmq.Again:
+                        return None
+            else:
+                payload = self._raw_collection_queue.pop() if self._raw_collection_queue else None
+                self._raw_collection_queue.clear()
+                got_message = payload is not None
+                while True:
+                    try:
+                        payload = self._sub.recv(self._zmq.NOBLOCK)
+                    except self._zmq.Again:
+                        break
+                    got_message = True
+                if not got_message or payload is None:
+                    return None
+            self._freshness.mark()
+            return payload
 
     def acquire_collection_raw(self) -> RawCollectionSnapshot | None:
         """Capture one collection payload into memory-bounded timestamped streams.
@@ -655,7 +688,13 @@ class ZmqTransport(TransportBridge):
         self._zmq = zmq
 
         self._reader = _ObservationReader(config, robot, zmq)
-        self._collection_reader = _ObservationReader(config, robot, zmq, conflate=True)
+        self._collection_reader = _ObservationReader(
+            config,
+            robot,
+            zmq,
+            preserve_collection_backlog=True,
+            conflate=True,
+        )
         self._qpos_reader = _ObservationReader(config, robot, zmq)
         self._extra_readers: list[_ObservationReader] = []
 
@@ -693,6 +732,10 @@ class ZmqTransport(TransportBridge):
     def hil_status(self) -> HilStatus:
         """Return the latest HIL capability reported by the execution node."""
         return self._qpos_reader.hil_status()
+
+    def poll_operator_event(self) -> str | None:
+        """Poll the dedicated qpos/status reader for a hardware button edge."""
+        return self._qpos_reader.poll_operator_event()
 
     def _send_hil_control(self, target: str, mode: str | None = None) -> None:
         action = np.zeros(self._robot.total_action_dim, dtype=np.float32)

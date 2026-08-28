@@ -292,6 +292,15 @@
           <div class="panel-h"><span class="step-badge">5</span>QUALITY EXPORT <span class="n" id="collect-quality-progress-label">0%</span></div>
           <div class="card">
             <div class="quality-export-actions">
+              <label class="quality-export-format">
+                <span>EXPORT FORMAT</span>
+                <select id="collect-export-format" aria-label="Dataset export format">
+                  <option value="lerobot_v21">LeRobot v2.1</option>
+                  <option value="lerobot_v3">LeRobot v3</option>
+                  <option value="hdf5">HDF5</option>
+                  <option value="mcap">MCAP</option>
+                </select>
+              </label>
               <button class="btn full" id="b-collect-quality-export">EXPORT DATASET</button>
               <button class="btn primary full" id="b-collect-quality-upload">UPLOAD ACCEPTED</button>
             </div>
@@ -301,7 +310,7 @@
               <i id="collect-quality-progress-fill"></i>
             </div>
             <div class="kv"><span class="k">progress</span><span class="v tnum" id="collect-quality-progress-detail">0/0 episodes</span></div>
-            <div class="qc-status" id="collect-quality-status"></div>
+            <div class="qc-status" id="collect-quality-status" role="status" aria-live="polite"></div>
           </div>
         </div>
       </div>
@@ -616,8 +625,9 @@
         </div>
 
         <div class="panel">
-          <div class="panel-h">TARGET QPOS</div>
+          <div class="panel-h">TARGET / CURRENT QPOS</div>
           <div class="card">
+            <div class="manual-pose-legend">target / current</div>
             <div class="manual-sliders" id="manual-sliders-m"></div>
           </div>
         </div>

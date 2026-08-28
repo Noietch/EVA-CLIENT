@@ -3,7 +3,7 @@
 import { $, LIVE, S, apiGet, apiPost, setCommandMetadata } from "./core.js";
 import { closeChartModal, drawLiveCharts, liveDimsAll, onScrubInput, openChartModal, resetLiveSeries } from "./charts.js";
 import { applyTune, applyManualTune, renderConfig, manualConnect, manualDisconnect, manualDispatchToggle, enterManualSim, applyStatus, pauseSetup, replayIsLocalMode, resumeSetup, retrySetup, startRunFromDebug, updateGuide } from "./run.js";
-import { collectConfigured, exportCollectionQuality, installCollectKeyboardControls, renderCollect, renderRolloutSave, returnReviewToLive, startCollectFromTab, saveAnnotation, submitEpisodeNote, submitEpisodeQc, submitQc, uploadCollectionQuality, clearReviewPlayback, reviewActiveInCurrentTab } from "./collect.js";
+import { changeCollectionExportFormat, clearReviewPlayback, collectConfigured, exportCollectionQuality, installCollectKeyboardControls, renderCollect, renderRolloutSave, returnReviewToLive, reviewActiveInCurrentTab, saveAnnotation, startCollectFromTab, submitEpisodeNote, submitEpisodeQc, submitQc, uploadCollectionQuality } from "./collect.js";
 import { evalReset, evalSetup, evalRunToggle, evalResumeOnEnter, submitEvalScore, loadEvalResults, renderEvalSelectors, loadResultsAll, tpSeek, tpToggle, trialPopClose } from "./eval.js";
 import { replayPlay, replayStop, replayToggle, seekReplay, loop, pollFrame, pollScene, refreshCameraStreams, exitReplayMode } from "./replay.js";
 import { pollRlSeries, renderRlConfig, renderRlStatus } from "./rl.js";
@@ -364,6 +364,7 @@ $("b-goto-qc").onclick = () => submitEpisodeQc("collect", "fail");
 $("b-collect-note-save").onclick = () => submitEpisodeNote("collect");
 $("b-collect-quality-export").onclick = exportCollectionQuality;
 $("b-collect-quality-upload").onclick = uploadCollectionQuality;
+$("collect-export-format").onchange = changeCollectionExportFormat;
 $("review-return-live").onclick = returnReviewToLive;
 $("replay-b-qc-pass").onclick = () => submitQc("pass");
 $("replay-b-qc-fail").onclick = () => submitQc("fail");

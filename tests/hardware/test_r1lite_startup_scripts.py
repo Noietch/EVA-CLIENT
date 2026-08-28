@@ -11,9 +11,11 @@ ALLOWED_FILES = {
     "cat_operator_button.py",
     "fake_node.py",
     "kill_hardware.sh",
+    "pyproject.toml",
     "reset_torso.py",
     "run_fake_node.sh",
     "run_hardware.sh",
+    "setup_env.sh",
 }
 
 REMOVED_HELPERS = {
@@ -28,7 +30,9 @@ REMOVED_HELPERS = {
 def test_r1lite_directory_keeps_only_current_entrypoints():
     files = {path.name for path in R1_LITE_DIR.iterdir() if path.is_file()}
     dirs = {
-        path.name for path in R1_LITE_DIR.iterdir() if path.is_dir() and path.name != "__pycache__"
+        path.name
+        for path in R1_LITE_DIR.iterdir()
+        if path.is_dir() and not path.name.startswith(".") and path.name != "__pycache__"
     }
 
     assert files == ALLOWED_FILES
@@ -211,17 +215,29 @@ def test_kill_hardware_runs_remote_vendor_kill_scripts():
 def test_run_fake_node_forces_local_ros2_discovery():
     script = (R1_LITE_DIR / "run_fake_node.sh").read_text()
 
-    assert "source .venv/bin/activate" in script
+    assert "examples/hardware/r1_lite/.venv" in script
+    assert 'R1_LITE_PYTHON_BIN="${R1_LITE_VENV_DIR}/bin/python"' in script
     assert "unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY" in script
     assert "unset FASTRTPS_DEFAULT_PROFILES_FILE ROS_DISCOVERY_SERVER RMW_IMPLEMENTATION" in script
     assert "export ROS_LOCALHOST_ONLY=1" in script
-    assert "python examples/hardware/r1_lite/fake_node.py" in script
+    assert (
+        '"${R1_LITE_PYTHON_BIN}" -X faulthandler '
+        "examples/hardware/r1_lite/fake_node.py"
+    ) in script
     assert "--role cameras" in script
-    assert "--role robot" in script
-    assert "wait -n" in script
-    assert '--rate "${PUBLISH_RATE:-30}"' in script
-    assert "--obs-endpoint" not in script
-    assert "--action-endpoint" not in script
+
+
+def test_r1lite_setup_script_builds_the_local_helper_environment():
+    setup = (R1_LITE_DIR / "setup_env.sh").read_text()
+    project = (R1_LITE_DIR / "pyproject.toml").read_text()
+
+    assert 'name = "eva-r1-lite-hardware"' in project
+    assert 'requires-python = ">=3.10,<3.13"' in project
+    assert 'eva-client = { path = "../../..", editable = true }' in project
+    assert 'R1_LITE_DIR="$REPO_ROOT/examples/hardware/r1_lite"' in setup
+    assert 'R1_LITE_VENV_DIR="${R1_LITE_VENV_DIR:-$R1_LITE_DIR/.venv}"' in setup
+    assert 'UV_PROJECT_ENVIRONMENT="$R1_LITE_VENV_DIR" uv sync --project "$R1_LITE_DIR"' in setup
+    assert "source /opt/ros/humble/setup.bash" in setup
 
 
 def test_run_hardware_keeps_real_r1lite_fastdds_environment_external():

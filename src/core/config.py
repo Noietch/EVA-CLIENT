@@ -220,6 +220,13 @@ def _validate(cfg: ConfigDict) -> None:
             raise ValueError("collection.schema.cameras must define at least one camera")
         if not (schema.get("arms") or {}):
             raise ValueError("collection.schema.arms must define at least one arm")
+        storage = coll.get("storage") or {}
+        image_skew_tolerance = storage.get("image_skew_tolerance_sec")
+        if image_skew_tolerance is not None:
+            _positive_finite(
+                image_skew_tolerance,
+                "collection.storage.image_skew_tolerance_sec",
+            )
 
     if rl_cfg and str(rl_cfg.data.format) != "lerobot":
         raise ValueError("rl.data.format must be 'lerobot' in this version")

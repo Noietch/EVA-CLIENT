@@ -5,9 +5,9 @@ The node builds any registered robot, applies full-robot joint-position targets 
 directly or through independent second-order qpos systems, and publishes the resulting
 state with deterministic animated camera frames over EVA's ZMQ wire protocol.
 
-The plant runs for the lifetime of this process. EVA collection, HIL, and simulator
-control messages do not affect it. In an interactive terminal, enter ``r`` to reset the
-plant to the robot's initial qpos or ``q`` to stop the process.
+The plant runs for the lifetime of this process. Real actions drive its target,
+collection controls expose aligned actions, and supported robots provide a software
+HIL source. In an interactive terminal, enter ``r`` to reset the plant or ``q`` to stop.
 """
 
 from __future__ import annotations
@@ -23,7 +23,15 @@ import numpy as np
 
 import robots  # noqa: F401  # registers every zoo robot on import
 from core.registry import ROBOT_REGISTRY
-from transport.zmq import WireObservation, pack_observation, unpack_action
+from transport.zmq import (
+    COLLECTION_START_TARGET,
+    COLLECTION_STOP_TARGET,
+    HIL_START_TARGET,
+    HIL_STOP_TARGET,
+    WireObservation,
+    pack_observation,
+    unpack_action,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +43,9 @@ _DEFAULT_DAMPING_RATIO = 1.0
 _DEFAULT_DYNAMICS_MODE = "second-order"
 _DYNAMICS_MODES = ("second-order", "direct")
 _MAX_DYNAMICS_CATCHUP_STEPS = 20
+_HIL_SUPPORTED_ROBOTS = frozenset(
+    {"r1_lite", "ur5e", "arx_r5", "agilex_piper", "dual_yam"}
+)
 
 
 def _positive(value: float, name: str) -> float:
@@ -125,6 +136,15 @@ class FakeRobotNode:
         self._qpos = self._initial_qpos.copy()
         self._qvel = np.zeros(self._action_dim, dtype=np.float64)
         self._target_qpos = self._initial_qpos.copy()
+
+        self._hil_supported = robot_name in _HIL_SUPPORTED_ROBOTS
+        self._collection_active = False
+        self._hil_active = False
+        self._hil_mode = "relative"
+        self._hil_error = ""
+        self._hil_input = self._qpos.copy()
+        self._hil_input_anchor = self._qpos.copy()
+        self._hil_robot_anchor = self._qpos.copy()
 
         self._frame_index = 0
         self._started_at = time.monotonic()
@@ -223,6 +243,18 @@ class FakeRobotNode:
             except Exception as error:
                 logger.warning("[FAKE] ignored malformed action payload: %s", error)
                 continue
+            if action.target == COLLECTION_START_TARGET:
+                self._collection_active = True
+                continue
+            if action.target == COLLECTION_STOP_TARGET:
+                self._collection_active = False
+                continue
+            if action.target == HIL_START_TARGET:
+                self.start_hil(action.mode or "relative")
+                continue
+            if action.target == HIL_STOP_TARGET:
+                self.stop_hil()
+                continue
             if action.target != "real":
                 continue
             candidate = np.asarray(action.action, dtype=np.float64).reshape(-1)
@@ -234,8 +266,78 @@ class FakeRobotNode:
                 )
                 continue
             newest = candidate
-        if apply and newest is not None:
+        if apply and newest is not None and not self._hil_active:
             self._apply_target_qpos(newest)
+
+    def start_hil(self, mode: str) -> None:
+        if not self._hil_supported:
+            self._hil_active = False
+            self._hil_error = f"{self._robot.name} has no HIL leader adapter"
+            return
+        if mode not in {"absolute", "relative"}:
+            self._hil_error = f"Unsupported HIL control mode: {mode}"
+            return
+        self._hil_mode = mode
+        self._hil_input = self._qpos.copy()
+        self._hil_input_anchor = self._qpos.copy()
+        self._hil_robot_anchor = self._qpos.copy()
+        self._hil_error = ""
+        self._hil_active = True
+
+    def stop_hil(self) -> None:
+        self._hil_active = False
+        self._hil_error = ""
+
+    def hil_snapshot(self) -> dict[str, object]:
+        return {
+            "robot": self._robot.name,
+            "supported": self._hil_supported,
+            "active": self._hil_active,
+            "mode": self._hil_mode,
+            "error": self._hil_error,
+            "feedback": {
+                name: value.astype(float).tolist()
+                for name, value in self._split_by_group(self._qpos).items()
+            },
+            "hil": {
+                name: value.astype(float).tolist()
+                for name, value in self._split_by_group(self._hil_input).items()
+            },
+            "groups": [
+                {
+                    "name": group.name,
+                    "joint_names": list(group.joint_names),
+                    "dof": group.dof,
+                    "gripper_index": group.gripper_index,
+                }
+                for group in self._groups
+            ],
+        }
+
+    def adjust_hil_joint(self, group_name: str, joint_index: int, delta: float) -> np.ndarray:
+        return self._set_hil_joint(group_name, joint_index, delta, relative=True)
+
+    def set_hil_joint(self, group_name: str, joint_index: int, value: float) -> np.ndarray:
+        return self._set_hil_joint(group_name, joint_index, value, relative=False)
+
+    def _set_hil_joint(
+        self, group_name: str, joint_index: int, value: float, *, relative: bool
+    ) -> np.ndarray:
+        offset = 0
+        for group in self._groups:
+            if group.name == group_name:
+                if not 0 <= joint_index < group.dof:
+                    raise ValueError(f"joint_index must be in [0, {group.dof - 1}]")
+                target_index = offset + joint_index
+                if relative:
+                    self._hil_input[target_index] += float(value)
+                else:
+                    self._hil_input[target_index] = float(value)
+                return self._hil_input[offset : offset + group.dof].astype(
+                    np.float32, copy=True
+                )
+            offset += group.dof
+        raise ValueError(f"Unknown actuator group: {group_name}")
 
     def step_dynamics(self, dt: float | None = None) -> None:
         """Advance second-order qpos systems by one semi-implicit Euler step when enabled."""
@@ -250,11 +352,33 @@ class FakeRobotNode:
 
     def _publish_observation(self) -> None:
         timestamp = time.monotonic()
+        action_qpos = None
+        action_eef = None
+        if self._hil_active:
+            if self._hil_mode == "relative":
+                self._qpos = self._hil_robot_anchor + (
+                    self._hil_input - self._hil_input_anchor
+                )
+            else:
+                self._qpos = self._hil_input.copy()
+            self._target_qpos = self._qpos.copy()
+            self._qvel.fill(0.0)
+            action_qpos = self._qpos.astype(np.float32, copy=True)
+        elif self._collection_active:
+            action_qpos = self._qpos.astype(np.float32, copy=True)
+        if action_qpos is not None:
+            action_eef = np.zeros(_EEF_DOF * len(self._robot.arm_groups), dtype=np.float32)
+
         observation = WireObservation(
             t=timestamp,
             images=self._read_images(timestamp),
             state=self._split_by_group(self._qpos),
             eef=self._zero_eef_by_group(),
+            action=action_qpos,
+            action_eef=action_eef,
+            hil_supported=self._hil_supported,
+            hil_active=self._hil_active,
+            hil_error=self._hil_error,
         )
         self._obs_pub.send(pack_observation(observation))
         self._frame_index += 1

@@ -64,7 +64,11 @@ from core.utils.dataset_upload import (
     upload_dataset_directory,
 )
 from core.utils.lerobot import LeRobotDatasetIO
-from core.utils.quality_dataset import QualityExportProgress, split_dataset_by_quality
+from tools.conversion import (
+    DATASET_EXPORT_FORMATS,
+    DatasetExportProgress,
+    export_dataset_by_quality,
+)
 from transport.base import HilStatus, ObservationSource
 from transport.dataset import DatasetTransport
 
@@ -137,6 +141,7 @@ class _QualityExportJob:
     source_dir: str
     accepted_dir: str
     rejected_dir: str
+    dataset_format: str
     state: str = "queued"
     episodes_completed: int = 0
     episodes_total: int = 0
@@ -627,13 +632,14 @@ def _run_quality_upload(
             job.destination = result.destination
 
 
-def _quality_export_paths(dataset_dir: Path) -> tuple[Path, Path]:
+def _quality_export_paths(dataset_dir: Path, dataset_format: str) -> tuple[Path, Path]:
     export_root = (
         dataset_dir.parent / "export"
         if dataset_dir.name == "raw"
         else dataset_dir.with_name(f"{dataset_dir.name}_export")
     )
-    return export_root / "accepted", export_root / "rejected"
+    format_root = export_root / dataset_format
+    return format_root / "accepted", format_root / "rejected"
 
 
 def _run_quality_export(
@@ -642,12 +648,13 @@ def _run_quality_export(
     source_dir: Path,
     accepted_dir: Path,
     rejected_dir: Path,
+    dataset_format: str,
 ) -> None:
     with ctx.quality_upload_lock:
         job = ctx.quality_export_jobs[job_id]
         job.state = "running"
 
-    def update_progress(progress: QualityExportProgress) -> None:
+    def update_progress(progress: DatasetExportProgress) -> None:
         with ctx.quality_upload_lock:
             active_job = ctx.quality_export_jobs.get(job_id)
             if active_job is None:
@@ -658,10 +665,11 @@ def _run_quality_export(
             active_job.source_episode_index = progress.source_episode_index
 
     try:
-        summary = split_dataset_by_quality(
+        summary = export_dataset_by_quality(
             source_dir,
             accepted_dir,
             rejected_dir,
+            dataset_format=dataset_format,
             replace_existing=True,
             progress_callback=update_progress,
         )
@@ -1113,7 +1121,7 @@ def _camera_jpeg_payload(
     if get_jpeg is not None:
         jpeg = get_jpeg(key)
         if jpeg is not None:
-            return jpeg, ("jpeg", len(jpeg), jpeg[:64], jpeg[-64:])
+            return jpeg, ("jpeg", hashlib.blake2s(jpeg, digest_size=8).digest())
 
     get_one = getattr(reader, "get_camera_frame", None)
     if get_one is not None:
@@ -1124,8 +1132,11 @@ def _camera_jpeg_payload(
     if image is None:
         return None, None
     arr = np.asarray(image)
-    sig = ("array", arr.shape, int(arr[::32, ::32].sum(dtype=np.int64)))
-    return _encode_jpeg(image, convert_bgr_to_rgb), sig
+    jpeg = _encode_jpeg(image, convert_bgr_to_rgb)
+    if jpeg is None:
+        return None, None
+    sig = ("array", arr.shape, hashlib.blake2s(jpeg, digest_size=8).digest())
+    return jpeg, sig
 
 
 def _list_camera_keys(ctx: ConsoleContext) -> list[str]:
@@ -2651,11 +2662,24 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             return None
         return dataset_dir
 
+    def _requested_dataset_format(self, body: dict) -> str | None:
+        dataset_format = body.get("dataset_format")
+        if not isinstance(dataset_format, str) or not dataset_format:
+            self._send_json(400, {"ok": False, "error": "dataset_format is required"})
+            return None
+        if dataset_format not in DATASET_EXPORT_FORMATS:
+            self._send_json(400, {"ok": False, "error": "unsupported dataset export format"})
+            return None
+        return dataset_format
+
     def _post_collect_quality_export(self, body: dict) -> None:
         dataset_dir = self._active_collection_dataset(body)
         if dataset_dir is None:
             return
-        accepted_dir, rejected_dir = _quality_export_paths(dataset_dir)
+        dataset_format = self._requested_dataset_format(body)
+        if dataset_format is None:
+            return
+        accepted_dir, rejected_dir = _quality_export_paths(dataset_dir, dataset_format)
         with self.ctx.quality_upload_lock:
             if any(
                 existing.local_dir == str(accepted_dir) and existing.state in {"queued", "running"}
@@ -2667,10 +2691,11 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                 )
                 return
             for existing in self.ctx.quality_export_jobs.values():
-                if existing.source_dir == str(dataset_dir) and existing.state in {
-                    "queued",
-                    "running",
-                }:
+                if (
+                    existing.source_dir == str(dataset_dir)
+                    and existing.dataset_format == dataset_format
+                    and existing.state in {"queued", "running"}
+                ):
                     self._send_json(
                         409,
                         {"ok": False, "error": "dataset export is already running"},
@@ -2687,12 +2712,20 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                 source_dir=str(dataset_dir),
                 accepted_dir=str(accepted_dir),
                 rejected_dir=str(rejected_dir),
+                dataset_format=dataset_format,
             )
             self.ctx.quality_export_jobs[job_id] = job
 
         threading.Thread(
             target=_run_quality_export,
-            args=(self.ctx, job_id, dataset_dir, accepted_dir, rejected_dir),
+            args=(
+                self.ctx,
+                job_id,
+                dataset_dir,
+                accepted_dir,
+                rejected_dir,
+                dataset_format,
+            ),
             name=f"quality-export-{job_id[:8]}",
             daemon=True,
         ).start()
@@ -2703,12 +2736,15 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         dataset_dir = self._active_collection_dataset(body)
         if dataset_dir is None:
             return
-        local_dir, _ = _quality_export_paths(dataset_dir)
+        dataset_format = self._requested_dataset_format(body)
+        if dataset_format is None:
+            return
+        local_dir, _ = _quality_export_paths(dataset_dir, dataset_format)
         with self.ctx.quality_upload_lock:
             exports = [
                 job
                 for job in self.ctx.quality_export_jobs.values()
-                if job.source_dir == str(dataset_dir)
+                if job.source_dir == str(dataset_dir) and job.dataset_format == dataset_format
             ]
             latest_export = exports[-1] if exports else None
             if (
@@ -2729,6 +2765,9 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             return
         if marker.get("subset") != "accepted":
             self._send_json(400, {"ok": False, "error": "only accepted exports can be uploaded"})
+            return
+        if marker.get("dataset_format") != dataset_format:
+            self._send_json(400, {"ok": False, "error": "accepted export format mismatch"})
             return
         try:
             marker_source = Path(str(marker.get("source_dir", ""))).resolve()

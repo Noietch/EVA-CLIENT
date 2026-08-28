@@ -73,6 +73,13 @@ def test_replay_and_review_cells_show_real_video_poster_before_video_canplay():
     assert ".cam-cell.video-ready .cam-video" in html
 
 
+def test_replay_and_review_accept_any_nonempty_camera_set():
+    html = console_source()
+
+    assert "return videos.length > 0 && videos.every((v) => !v.error && v.readyState >= 3);" in html
+    assert "return videos.length > 0 && videos.every((v) => !v.error);" in html
+
+
 def test_video_loading_overlay_does_not_cover_loaded_poster():
     html = console_source()
     start = html.index("function setVideosLoading(videos, on, text)")
@@ -119,11 +126,45 @@ def test_console_post_requests_are_serialized():
 
 def test_quality_export_and_upload_do_not_block_collection_controls():
     html = console_source()
+    source = (STATIC_DIR / "js" / "collect.js").read_text()
 
     assert 'apiPost("/api/collect_quality_export", {' in html
     assert 'apiPost("/api/collect_quality_upload", {' in html
     assert html.count("}, { concurrent: true });") >= 2
     assert "/api/collect_quality_export?job_id=" in html
+    assert 'id="collect-export-format"' in html
+    assert 'exportFormatSelect.onchange = changeCollectionExportFormat;' in source
+    assert "function changeCollectionExportFormat()" in html
+    assert 'qualityTransfer.acceptedDir = "";' in html
+    assert 'value="lerobot_v3"' in html
+    assert 'value="hdf5"' in html
+    assert 'value="mcap"' in html
+    assert "episodes · ${formatLabel}" in html
+    assert "accepted upload complete · ${job.files_total || 0} files" in html
+
+
+def test_quality_export_format_controls_requests_and_upload_readiness():
+    source = (STATIC_DIR / "js" / "collect.js").read_text()
+
+    assert 'const datasetFormat = $("collect-export-format").value;' in source
+    assert source.count("dataset_format: datasetFormat,") == 2
+    assert 'qualityTransfer.datasetFormat === selectedFormat' in source
+    assert 'datasetFormat !== selectedFormat' in source
+    assert 'exportFormat.disabled = qualityTransfer.exporting || qualityTransfer.uploading;' in source
+    assert 'exportButton.disabled = !enabled || !episodes.length ||' in source
+    assert 'uploadButton.disabled = !upload.configured || !selectedExportReady ||' in source
+
+
+def test_quality_export_progress_and_outcomes_include_selected_format():
+    html = console_source()
+
+    assert 'id="collect-quality-status" role="status" aria-live="polite"' in html
+    assert '`${formatLabel} ${showingExport ? "export" : "upload"} progress`' in html
+    assert "export required before upload" in html
+    assert "export complete ·" in html
+    assert "accepted upload complete ·" in html
+    assert '`✗ ${formatLabel} export · ${message}`' in html
+    assert '`✗ ${formatLabel} upload · ${message}`' in html
 
 
 def test_console_boots_into_the_configured_tab():
@@ -275,6 +316,17 @@ def test_manual_target_qpos_renders_from_status_without_frame_qpos():
         "renderManualTarget(S.STATUS.manual_qpos || "
         "(S._manualSlidersBuilt ? null : f.qpos));" in html
     )
+
+
+def test_manual_joint_rows_show_target_and_live_current_qpos():
+    html = console_source()
+
+    assert "TARGET / CURRENT QPOS" in html
+    assert 'class="manual-pose-legend">target / current' in html
+    assert 'id="ms-target-${i}"' in html
+    assert 'id="ms-current-${i}"' in html
+    assert "function renderManualCurrent(qpos)" in html
+    assert "renderManualCurrent(f.qpos);" in html
 
 
 def test_manual_sliders_use_configured_qpos_limits():

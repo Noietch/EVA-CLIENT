@@ -2,7 +2,7 @@
 // polling loop for frame/scene/camera refresh (poll).
 import { $, LIVE, RUN_CONTROLS, S, apiGet, clientTrace, replaceCamStripContent } from "./core.js";
 import { buildLiveDims, drawLiveCharts, resetLiveSeries, updateScrub } from "./charts.js";
-import { applyRunControlStatus, renderManualTarget, uiMode } from "./run.js";
+import { applyRunControlStatus, renderManualCurrent, renderManualTarget, uiMode } from "./run.js";
 
 window.__evaReplaySync = LIVE.replaySync;
 
@@ -703,7 +703,7 @@ async function waitForStageVideosReady() {
       errors: videos.filter((v) => !!v.error).length,
       states: videos.map((v) => ({ camera: v.dataset.key || "", ready_state: v.readyState })),
     });
-    return videos.length >= 3 && videos.every((v) => !v.error && v.readyState >= 3);
+    return videos.length > 0 && videos.every((v) => !v.error && v.readyState >= 3);
   }
 
 async function waitForStageVideosPainted() {
@@ -715,7 +715,7 @@ async function waitForStageVideosPainted() {
     if (signal && signal.aborted) return;
     await waitForBrowserPaint();
     setVideosLoading(videos, false, "");
-    return videos.length >= 3 && videos.every((v) => !v.error);
+    return videos.length > 0 && videos.every((v) => !v.error);
   }
 
 function playStageVideos() {
@@ -1003,6 +1003,7 @@ async function pollFrame() {
       // real-robot position back into the sliders or they snap backward mid-drag.
       if (S.manualActive && uiMode(S.STATUS.cli_mode) === "manual") {
         renderManualTarget(S.STATUS.manual_qpos || (S._manualSlidersBuilt ? null : f.qpos));
+        renderManualCurrent(f.qpos);
       } else if (S._manualSlidersBuilt) {
         S._manualSlidersBuilt = false;
         $("manual-sliders-m").innerHTML = "";

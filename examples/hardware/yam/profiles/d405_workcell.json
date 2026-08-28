@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "cameras": {
+    "cam_high": {
+      "serial": "260422275306",
+      "auto_exposure_limit_us": 33000,
+      "auto_gain_limit": 64,
+      "warmup_frames": 90
+    },
+    "cam_left_wrist": {
+      "serial": "260422273576",
+      "auto_exposure_limit_us": 33000,
+      "auto_gain_limit": 64,
+      "warmup_frames": 90
+    },
+    "cam_right_wrist": {
+      "serial": "260322279472",
+      "auto_exposure_limit_us": 33000,
+      "auto_gain_limit": 64,
+      "warmup_frames": 90
+    }
+  }
+}

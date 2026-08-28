@@ -21,10 +21,18 @@ const qualityTransfer = {
   acceptedDir: "",
   uploadJobId: "",
   uploadState: "idle",
+  datasetFormat: "",
   filesCompleted: 0,
   filesTotal: 0,
   bytesCompleted: 0,
   bytesTotal: 0,
+};
+
+const DATASET_FORMAT_LABELS = {
+  lerobot_v21: "LeRobot v2.1",
+  lerobot_v3: "LeRobot v3",
+  hdf5: "HDF5",
+  mcap: "MCAP",
 };
 
 function formatTransferBytes(value) {
@@ -39,6 +47,38 @@ function formatTransferBytes(value) {
     }
     return `${scaled.toFixed(scaled >= 10 ? 1 : 2)} ${unit}`;
   }
+
+function qualityTransferFormatLabel(value) {
+  return DATASET_FORMAT_LABELS[value] || String(value || "dataset");
+}
+
+function changeCollectionExportFormat() {
+  const select = $("collect-export-format");
+  if (!select || qualityTransfer.exporting || qualityTransfer.uploading) return;
+  if (qualityTransfer.datasetFormat === select.value && !qualityTransfer.acceptedDir) return;
+
+  qualityTransfer.phase = "export";
+  qualityTransfer.exportState = "idle";
+  qualityTransfer.uploadState = "idle";
+  qualityTransfer.acceptedDir = "";
+  qualityTransfer.exportJobId = "";
+  qualityTransfer.uploadJobId = "";
+  qualityTransfer.episodesCompleted = 0;
+  qualityTransfer.episodesTotal = 0;
+  qualityTransfer.filesCompleted = 0;
+  qualityTransfer.filesTotal = 0;
+  qualityTransfer.bytesCompleted = 0;
+  qualityTransfer.bytesTotal = 0;
+  qualityTransfer.datasetFormat = select.value;
+  const status = $("collect-quality-status");
+  if (status) {
+    status.textContent = `${qualityTransferFormatLabel(select.value)} selected · export required before upload`;
+  }
+  renderCollect();
+}
+
+const exportFormatSelect = $("collect-export-format");
+if (exportFormatSelect) exportFormatSelect.onchange = changeCollectionExportFormat;
 
 const keyboardControlState = {
   active: new Map(),
@@ -658,24 +698,34 @@ function renderCollect() {
     $("b-collect-note-save").disabled = S.collectReplayEpisode == null;
     const exportButton = $("b-collect-quality-export");
     const uploadButton = $("b-collect-quality-upload");
+    const exportFormat = $("collect-export-format");
+    const selectedFormat = exportFormat ? exportFormat.value : "";
+    const selectedExportReady = !!qualityTransfer.acceptedDir &&
+      qualityTransfer.datasetFormat === selectedFormat;
     const upload = (S.CFG && S.CFG.collection && S.CFG.collection.upload) || {};
     if (exportButton) {
       exportButton.disabled = !enabled || !episodes.length ||
         qualityTransfer.exporting || qualityTransfer.uploading;
     }
     if (uploadButton) {
-      uploadButton.disabled = !upload.configured || !qualityTransfer.acceptedDir ||
+      uploadButton.disabled = !upload.configured || !selectedExportReady ||
         qualityTransfer.exporting || qualityTransfer.uploading;
       const backendLabel = (upload.backends || []).map((value) => String(value).toUpperCase());
       uploadButton.textContent = backendLabel.length
         ? `UPLOAD ${backendLabel.join(" + ")}`
         : "UPLOAD ACCEPTED";
     }
+    if (exportFormat) {
+      exportFormat.disabled = qualityTransfer.exporting || qualityTransfer.uploading;
+    }
     const transferProgressBar = $("collect-quality-progress-bar");
     const transferProgressFill = $("collect-quality-progress-fill");
     const transferProgressLabel = $("collect-quality-progress-label");
     const transferProgressDetail = $("collect-quality-progress-detail");
-    const showingExport = qualityTransfer.phase === "export";
+    const showingExport = qualityTransfer.phase !== "upload";
+    const formatLabel = qualityTransferFormatLabel(
+      qualityTransfer.datasetFormat || selectedFormat
+    );
     const transferFraction = showingExport
       ? (qualityTransfer.episodesTotal > 0
           ? qualityTransfer.episodesCompleted / qualityTransfer.episodesTotal
@@ -689,17 +739,17 @@ function renderCollect() {
     if (transferProgressBar) {
       transferProgressBar.setAttribute("aria-valuenow", String(transferPercent));
       transferProgressBar.setAttribute(
-        "aria-label", showingExport ? "Dataset export progress" : "Dataset upload progress"
+        "aria-label", `${formatLabel} ${showingExport ? "export" : "upload"} progress`
       );
     }
     if (transferProgressFill) transferProgressFill.style.width = `${transferPercent}%`;
     if (transferProgressLabel) transferProgressLabel.textContent = `${transferPercent}%`;
     if (transferProgressDetail) {
       transferProgressDetail.textContent = showingExport
-        ? `${qualityTransfer.episodesCompleted}/${qualityTransfer.episodesTotal} episodes`
+        ? `${qualityTransfer.episodesCompleted}/${qualityTransfer.episodesTotal} episodes · ${formatLabel}`
         : (`${qualityTransfer.filesCompleted}/${qualityTransfer.filesTotal} files · ` +
           `${formatTransferBytes(qualityTransfer.bytesCompleted)}/` +
-          `${formatTransferBytes(qualityTransfer.bytesTotal)}`);
+          `${formatTransferBytes(qualityTransfer.bytesTotal)} · ${formatLabel}`);
     }
 
     const recordState = collecting || (hasPrompt && !S.collectArmEnabled)
@@ -735,6 +785,8 @@ function renderCollect() {
 async function exportCollectionQuality() {
     if (qualityTransfer.exporting || qualityTransfer.uploading) return;
     const status = $("collect-quality-status");
+    const datasetFormat = $("collect-export-format").value;
+    const formatLabel = qualityTransferFormatLabel(datasetFormat);
     qualityTransfer.phase = "export";
     qualityTransfer.exporting = true;
     qualityTransfer.exportJobId = "";
@@ -742,15 +794,17 @@ async function exportCollectionQuality() {
     qualityTransfer.episodesCompleted = 0;
     qualityTransfer.episodesTotal = 0;
     qualityTransfer.acceptedDir = "";
-    if (status) status.textContent = "exporting…";
+    qualityTransfer.datasetFormat = datasetFormat;
+    if (status) status.textContent = `exporting ${formatLabel}…`;
     renderCollect();
     try {
       const result = await apiPost("/api/collect_quality_export", {
         task: collectTaskValue(),
+        dataset_format: datasetFormat,
       }, { concurrent: true });
       if (!result.ok) {
         qualityTransfer.exportState = "failed";
-        if (status) status.textContent = `✗ ${result.error || "export failed"}`;
+        if (status) status.textContent = `✗ ${formatLabel} export · ${result.error || "request failed"}`;
         return;
       }
       qualityTransfer.exportJobId = result.job_id || "";
@@ -765,21 +819,24 @@ async function exportCollectionQuality() {
         renderCollect();
         if (job.state === "completed") {
           qualityTransfer.acceptedDir = job.accepted_dir || "";
+          qualityTransfer.datasetFormat = job.dataset_format || datasetFormat;
           if (status) {
-            status.textContent = `${job.accepted_episodes} accepted · ` +
-              `${job.rejected_episodes} rejected`;
+            const completedFormat = qualityTransferFormatLabel(qualityTransfer.datasetFormat);
+            status.textContent = `${completedFormat} export complete · ` +
+              `${job.accepted_episodes || 0} accepted · ${job.rejected_episodes || 0} rejected`;
           }
           return;
         }
         if (job.state === "failed") {
-          if (status) status.textContent = `✗ ${job.error || "export failed"}`;
+          if (status) status.textContent = `✗ ${formatLabel} export · ${job.error || "job failed"}`;
           return;
         }
         await new Promise((resolve) => setTimeout(resolve, 300));
       }
     } catch (error) {
       qualityTransfer.exportState = "failed";
-      if (status) status.textContent = `✗ ${error instanceof Error ? error.message : String(error)}`;
+      const message = error instanceof Error ? error.message : String(error);
+      if (status) status.textContent = `✗ ${formatLabel} export · ${message}`;
     } finally {
       qualityTransfer.exporting = false;
       renderCollect();
@@ -787,10 +844,18 @@ async function exportCollectionQuality() {
   }
 
 async function uploadCollectionQuality() {
-    if (!qualityTransfer.acceptedDir || qualityTransfer.exporting || qualityTransfer.uploading) {
+    if (qualityTransfer.exporting || qualityTransfer.uploading) return;
+    const status = $("collect-quality-status");
+    const selectedFormat = $("collect-export-format").value;
+    const datasetFormat = qualityTransfer.datasetFormat;
+    if (!qualityTransfer.acceptedDir || datasetFormat !== selectedFormat) {
+      if (status) {
+        status.textContent = `${qualityTransferFormatLabel(selectedFormat)} export required before upload`;
+      }
+      renderCollect();
       return;
     }
-    const status = $("collect-quality-status");
+    const formatLabel = qualityTransferFormatLabel(datasetFormat);
     qualityTransfer.phase = "upload";
     qualityTransfer.uploading = true;
     qualityTransfer.uploadJobId = "";
@@ -799,15 +864,18 @@ async function uploadCollectionQuality() {
     qualityTransfer.filesTotal = 0;
     qualityTransfer.bytesCompleted = 0;
     qualityTransfer.bytesTotal = 0;
-    if (status) status.textContent = "uploading…";
+    if (status) {
+      status.textContent = `uploading ${formatLabel} accepted export…`;
+    }
     renderCollect();
     try {
       const result = await apiPost("/api/collect_quality_upload", {
         task: collectTaskValue(),
+        dataset_format: datasetFormat,
       }, { concurrent: true });
       if (!result.ok) {
         qualityTransfer.uploadState = "failed";
-        if (status) status.textContent = `✗ ${result.error || "upload failed"}`;
+        if (status) status.textContent = `✗ ${formatLabel} upload · ${result.error || "request failed"}`;
         return;
       }
       qualityTransfer.uploadJobId = result.job_id || "";
@@ -823,18 +891,21 @@ async function uploadCollectionQuality() {
         qualityTransfer.bytesTotal = Number(job.bytes_total || 0);
         renderCollect();
         if (job.state === "completed") {
-          if (status) status.textContent = `uploaded ${job.files_total} files`;
+          if (status) {
+            status.textContent = `${formatLabel} accepted upload complete · ${job.files_total || 0} files`;
+          }
           return;
         }
         if (job.state === "failed") {
-          if (status) status.textContent = `✗ ${job.error || "upload failed"}`;
+          if (status) status.textContent = `✗ ${formatLabel} upload · ${job.error || "job failed"}`;
           return;
         }
         await new Promise((resolve) => setTimeout(resolve, 300));
       }
     } catch (error) {
       qualityTransfer.uploadState = "failed";
-      if (status) status.textContent = `✗ ${error instanceof Error ? error.message : String(error)}`;
+      const message = error instanceof Error ? error.message : String(error);
+      if (status) status.textContent = `✗ ${formatLabel} upload · ${message}`;
     } finally {
       qualityTransfer.uploading = false;
       renderCollect();
@@ -1096,4 +1167,5 @@ export {
   clearReviewPlayback, loadAnnotation, reviewActiveInCurrentTab, reviewEpisode,
   exportCollectionQuality, saveAnnotation, submitEpisodeNote, submitEpisodeQc, submitQc,
   installCollectKeyboardControls, renderCollectControls, uploadCollectionQuality,
+  changeCollectionExportFormat,
 };
