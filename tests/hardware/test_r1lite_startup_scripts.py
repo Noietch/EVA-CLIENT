@@ -221,8 +221,7 @@ def test_run_fake_node_forces_local_ros2_discovery():
     assert "unset FASTRTPS_DEFAULT_PROFILES_FILE ROS_DISCOVERY_SERVER RMW_IMPLEMENTATION" in script
     assert "export ROS_LOCALHOST_ONLY=1" in script
     assert (
-        '"${R1_LITE_PYTHON_BIN}" -X faulthandler '
-        "examples/hardware/r1_lite/fake_node.py"
+        '"${R1_LITE_PYTHON_BIN}" -X faulthandler examples/hardware/r1_lite/fake_node.py'
     ) in script
     assert "--role cameras" in script
 

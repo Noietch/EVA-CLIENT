@@ -369,9 +369,7 @@ def _export_subset(
             "total_videos": total_videos,
             "total_tasks": len(subset_tasks),
             "total_chunks": (
-                0
-                if not output_rows
-                else (len(output_rows) + chunks_size - 1) // chunks_size
+                0 if not output_rows else (len(output_rows) + chunks_size - 1) // chunks_size
             ),
             "splits": {"train": f"0:{len(output_rows)}"},
         }

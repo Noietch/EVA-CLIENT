@@ -110,13 +110,7 @@ class _LeRobotV3Writer:
         writer = self.video_writers.get(key)
         if writer is not None:
             return writer
-        path = (
-            self.output_dir
-            / "videos"
-            / key
-            / "chunk-000"
-            / f"file-{self.shard_index:03d}.mp4"
-        )
+        path = self.output_dir / "videos" / key / "chunk-000" / f"file-{self.shard_index:03d}.mp4"
         path.parent.mkdir(parents=True, exist_ok=True)
         writer = imageio.get_writer(
             str(path),

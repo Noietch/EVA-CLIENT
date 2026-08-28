@@ -171,9 +171,7 @@ def test_split_dataset_exports_contiguous_accepted_and_rejected_subsets(tmp_path
     assert second_rejected["index"].to_pylist() == [3, 4, 5]
     assert first_rejected["task_index"].to_pylist() == [0, 0, 0]
     assert second_rejected["task_index"].to_pylist() == [1, 1, 1]
-    assert _read_jsonl(accepted / "meta/tasks.jsonl") == [
-        {"task_index": 0, "task": "task one"}
-    ]
+    assert _read_jsonl(accepted / "meta/tasks.jsonl") == [{"task_index": 0, "task": "task one"}]
     assert _read_jsonl(rejected / "meta/tasks.jsonl") == [
         {"task_index": 0, "task": "task two"},
         {"task_index": 1, "task": "task one"},

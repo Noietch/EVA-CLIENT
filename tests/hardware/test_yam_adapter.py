@@ -844,9 +844,9 @@ def test_run_hardware_defaults_to_dual_leaders_and_gripper_calibration(
     fake_python = fake_bin / "python"
     fake_python.write_text(
         "#!/usr/bin/env bash\n"
-        "printf '%s\\n' \"$@\" > \"$YAM_TEST_ARGS_PATH\"\n"
-        "printf '%s\\n' \"${PYTHONPATH-}\" \"${VIRTUAL_ENV-}\" \"${PATH-}\" "
-        "\"${PYTHONHOME-}\" \"${PYTHONNOUSERSITE-}\" > \"$YAM_TEST_ENV_PATH\"\n"
+        'printf \'%s\\n\' "$@" > "$YAM_TEST_ARGS_PATH"\n'
+        'printf \'%s\\n\' "${PYTHONPATH-}" "${VIRTUAL_ENV-}" "${PATH-}" '
+        '"${PYTHONHOME-}" "${PYTHONNOUSERSITE-}" > "$YAM_TEST_ENV_PATH"\n'
     )
     fake_python.chmod(0o755)
 

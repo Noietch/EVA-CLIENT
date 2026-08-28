@@ -43,9 +43,7 @@ _DEFAULT_DAMPING_RATIO = 1.0
 _DEFAULT_DYNAMICS_MODE = "second-order"
 _DYNAMICS_MODES = ("second-order", "direct")
 _MAX_DYNAMICS_CATCHUP_STEPS = 20
-_HIL_SUPPORTED_ROBOTS = frozenset(
-    {"r1_lite", "ur5e", "arx_r5", "agilex_piper", "dual_yam"}
-)
+_HIL_SUPPORTED_ROBOTS = frozenset({"r1_lite", "ur5e", "arx_r5", "agilex_piper", "dual_yam"})
 
 
 def _positive(value: float, name: str) -> float:
@@ -333,9 +331,7 @@ class FakeRobotNode:
                     self._hil_input[target_index] += float(value)
                 else:
                     self._hil_input[target_index] = float(value)
-                return self._hil_input[offset : offset + group.dof].astype(
-                    np.float32, copy=True
-                )
+                return self._hil_input[offset : offset + group.dof].astype(np.float32, copy=True)
             offset += group.dof
         raise ValueError(f"Unknown actuator group: {group_name}")
 
@@ -356,9 +352,7 @@ class FakeRobotNode:
         action_eef = None
         if self._hil_active:
             if self._hil_mode == "relative":
-                self._qpos = self._hil_robot_anchor + (
-                    self._hil_input - self._hil_input_anchor
-                )
+                self._qpos = self._hil_robot_anchor + (self._hil_input - self._hil_input_anchor)
             else:
                 self._qpos = self._hil_input.copy()
             self._target_qpos = self._qpos.copy()

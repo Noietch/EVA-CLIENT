@@ -381,9 +381,7 @@ def _run_orbbec_capture_loop(
         spec.warmup_frames,
     )
     remaining_warmup = spec.warmup_frames
-    shared_image = np.frombuffer(frame_buffer, dtype=np.uint8).reshape(
-        (spec.height, spec.width, 3)
-    )
+    shared_image = np.frombuffer(frame_buffer, dtype=np.uint8).reshape((spec.height, spec.width, 3))
     try:
         while not stop.is_set():
             frameset = pipeline.wait_for_frames(spec.timeout_ms)
@@ -447,6 +445,7 @@ class _OrbbecCameraWorker:
         ):
             state = "stale"
         return f"{state}(age={age:.1f}s)"
+
 
 class OrbbecCameraCache:
     """Background multi-camera cache using the Orbbec Python SDK."""

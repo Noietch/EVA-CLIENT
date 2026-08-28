@@ -72,7 +72,9 @@ def initial_qpos(
     initial_gripper_scalar: float | None = None,
     arm_qpos: np.ndarray | None = None,
 ) -> np.ndarray:
-    arm_target = ARX_X5_INITIAL_ARM_QPOS if arm_qpos is None else np.asarray(arm_qpos, dtype=np.float64)
+    arm_target = (
+        ARX_X5_INITIAL_ARM_QPOS if arm_qpos is None else np.asarray(arm_qpos, dtype=np.float64)
+    )
     if arm_target.shape != (ARM_DOF,) or not np.all(np.isfinite(arm_target)):
         raise ValueError(f"Expected finite ARX X5 arm qpos shaped ({ARM_DOF},), got {arm_target}")
     qpos = np.zeros(TOTAL_DOF, dtype=np.float32)

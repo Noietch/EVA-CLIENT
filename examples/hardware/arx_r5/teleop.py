@@ -296,7 +296,9 @@ def read_arx_r5_joints(arm: Any) -> np.ndarray:
     return positions[:6]
 
 
-def calibrate_arx_r5_joint_offset(alicia_joints: np.ndarray, arx_r5_joints: np.ndarray) -> np.ndarray:
+def calibrate_arx_r5_joint_offset(
+    alicia_joints: np.ndarray, arx_r5_joints: np.ndarray
+) -> np.ndarray:
     """Compute the startup offset from Alicia leader joints to ARX follower joints.
 
     Args:
@@ -563,7 +565,8 @@ def run_teleop(args: argparse.Namespace) -> None:
                         raise
 
                 arx_r5_joints[group_name] = np.clip(
-                    map_alicia_to_arx_r5_joints(alicia_joints[group_name]) + joint_offsets[group_name],
+                    map_alicia_to_arx_r5_joints(alicia_joints[group_name])
+                    + joint_offsets[group_name],
                     ARX_R5_JOINT_LIMITS[:, 0],
                     ARX_R5_JOINT_LIMITS[:, 1],
                 )

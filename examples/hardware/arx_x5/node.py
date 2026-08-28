@@ -90,8 +90,7 @@ def build_arx_x5_fk_solver(
         groups = [np.zeros(GROUP_DOF, dtype=np.float32) for _ in GROUP_NAMES]
     else:
         groups = [
-            np.asarray(group, dtype=np.float32).reshape(-1).copy()
-            for group in initial_qpos_groups
+            np.asarray(group, dtype=np.float32).reshape(-1).copy() for group in initial_qpos_groups
         ]
         if len(groups) != len(GROUP_NAMES) or any(
             group.shape != (GROUP_DOF,) or not np.all(np.isfinite(group)) for group in groups
@@ -373,9 +372,7 @@ class ArxX5ZmqNode:
 
     def start_collection(self, control_source: str = COLLECTION_CONTROL_TRANSPORT) -> None:
         if control_source not in COLLECTION_CONTROL_SOURCES:
-            raise ValueError(
-                f"Unsupported ARX X5 collection control source: {control_source!r}"
-            )
+            raise ValueError(f"Unsupported ARX X5 collection control source: {control_source!r}")
         if self._collection_active:
             if control_source != self._collection_control_source:
                 logger.warning(
@@ -628,8 +625,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         dest="passive_collection",
         action="store_true",
         help=(
-            "Only observe ARX X5 arms/cameras during collection; "
-            "do not drive ARX X5 from Alicia-D."
+            "Only observe ARX X5 arms/cameras during collection; do not drive ARX X5 from Alicia-D."
         ),
     )
     parser.set_defaults(passive_collection=False)
