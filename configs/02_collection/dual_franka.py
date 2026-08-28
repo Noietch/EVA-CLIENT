@@ -2,6 +2,8 @@
 
 _base_ = ["../01_deploy/dual_franka/_base.py"]
 
+console = dict(initial_tab="collect")
+
 collection = dict(
     storage=dict(
         log_dir="work_dirs/collection/dual_franka",

@@ -40,6 +40,7 @@ _STOP_TIMEOUT_S = 5.0
 _ACK_SEND_TIMEOUT_MS = 50
 _ACK_QUEUE_MAXSIZE = 64
 _EVENT_BUFFER_MAXSIZE = 64
+_NEUTRAL_TRIGGER_EPSILON = 0.05
 _HANDS = ("left", "right")
 _EVENT_INTENTS = frozenset(
     {
@@ -76,6 +77,7 @@ class VrPoseFrame:
 class _ArmBinding:
     group_name: str
     hand: str
+    gripper_threshold: float
     retargeter: ArmRetargeter
 
 
@@ -276,6 +278,7 @@ def _binding(value: Mapping[str, object]) -> _ArmBinding:
     return _ArmBinding(
         group_name=group_name,
         hand=hand,
+        gripper_threshold=float(cast(float, gripper_raw.get("threshold", 0.5))),
         retargeter=ArmRetargeter(
             base_from_xr_rotation=np.asarray(value.get("base_from_xr_rotation"), dtype=np.float64),
             position_scale=float(cast(float, value.get("position_scale", 1.0))),
@@ -342,6 +345,7 @@ class VrTeleopClient:
         self._rejection_reason = ""
         self._engaged_groups: tuple[str, ...] = ()
         self._held_groups = tuple(item.group_name for item in bindings)
+        self._awaiting_neutral = False
 
     def start(self) -> None:
         existing = self._thread
@@ -402,7 +406,9 @@ class VrTeleopClient:
             except queue.Empty:
                 return
 
-    def _clear_protocol_state_locked(self, *, source_error: str = "") -> None:
+    def _clear_protocol_state_locked(
+        self, *, source_error: str = "", require_neutral: bool = True
+    ) -> None:
         """Clear input/session state without touching the bounded ACK queue."""
         self._generation += 1
         for binding in self._bindings:
@@ -418,6 +424,7 @@ class VrTeleopClient:
         self._event_cursor.clear()
         self._engaged_groups = ()
         self._held_groups = tuple(item.group_name for item in self._bindings)
+        self._awaiting_neutral = bool(require_neutral)
 
     def _fail_closed_locked(self, source_error: str) -> None:
         """Drop all motion/input state after a worker or protocol safety failure."""
@@ -537,6 +544,7 @@ class VrTeleopClient:
                 previous_connected = self._browser_connected
                 previous_error = self._source_error
                 if frame.session_id != self._session_id:
+                    previous_session_id = self._session_id
                     self._generation += 1
                     for binding in self._bindings:
                         binding.retargeter.reset()
@@ -548,6 +556,8 @@ class VrTeleopClient:
                     self._event_cursor.clear()
                     self._engaged_groups = ()
                     self._held_groups = tuple(item.group_name for item in self._bindings)
+                    if previous_session_id:
+                        self._awaiting_neutral = True
                 if frame.seq <= self._last_seq:
                     return
                 self._last_seq = frame.seq
@@ -598,11 +608,22 @@ class VrTeleopClient:
         self.reset()
         with self._lock:
             self._startup_error = None
-            self._clear_protocol_state_locked()
+            self._clear_protocol_state_locked(require_neutral=False)
         self._clear_ack_queue()
 
+    def _frame_is_neutral(self, frame: VrPoseFrame) -> bool:
+        if frame.pressed_controls:
+            return False
+        return all(
+            frame.controllers[binding.hand].valid
+            and frame.controllers[binding.hand].pose is not None
+            and not frame.controllers[binding.hand].grip_engaged
+            and frame.controllers[binding.hand].trigger
+            <= min(binding.gripper_threshold, _NEUTRAL_TRIGGER_EPSILON)
+            for binding in self._bindings
+        )
+
     def reset(self, *, require_neutral: bool = False) -> None:
-        _ = require_neutral
         with self._lock:
             self._generation += 1
             for binding in self._bindings:
@@ -610,6 +631,7 @@ class VrTeleopClient:
             self._rejection_reason = ""
             self._engaged_groups = ()
             self._held_groups = tuple(item.group_name for item in self._bindings)
+            self._awaiting_neutral = bool(require_neutral)
 
     def poll(self, context: TeleopContext) -> TeleopResult:
         with self._lock:
@@ -638,6 +660,15 @@ class VrTeleopClient:
         targets: list[np.ndarray] = []
         active_arms: list[bool] = []
         with self._lock:
+            if self._awaiting_neutral:
+                self._engaged_groups = ()
+                self._held_groups = tuple(item.group_name for item in self._bindings)
+                if not self._frame_is_neutral(frame):
+                    return TeleopResult.idle(source_token=source_token)
+                self._awaiting_neutral = False
+                return TeleopResult.idle(source_token=source_token)
+
+            # Convert one fresh frame into canonical EEF targets
             for index, binding in enumerate(self._bindings):
                 arm_measured = measured[index * 8 : (index + 1) * 8]
                 try:
@@ -728,7 +759,10 @@ class VrTeleopClient:
             )
             input_age_ms = None if frame is None else frame.age(current) * 1000.0
             neutral = bool(
-                connected and frame is not None and frame.age(current) <= self._input_timeout_s
+                connected
+                and frame is not None
+                and frame.age(current) <= self._input_timeout_s
+                and self._frame_is_neutral(frame)
             )
             authorized_groups = tuple(
                 binding.group_name

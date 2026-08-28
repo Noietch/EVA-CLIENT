@@ -2,6 +2,8 @@
 
 _base_ = ["../01_deploy/ur5e/_base.py"]
 
+console = dict(initial_tab="collect")
+
 collection = dict(
     storage=dict(
         log_dir="work_dirs/collection/ur5e",

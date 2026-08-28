@@ -254,7 +254,12 @@ def activate_teleop(config: ConfigDict, runtime: RuntimeState, session: SessionS
             if client is None:
                 raise TeleopExecutionError("Configured teleop client is unavailable")
             client.start()
-            client.reset()
+            status = client.status()
+            if not status.connected:
+                raise TeleopExecutionError(status.source_error or "Teleop client is not connected")
+            if not status.neutral:
+                raise TeleopExecutionError("Teleop client must be neutral before activation")
+            client.reset(require_neutral=True)
         runtime.transport.reset_hil_control()
         _set_hil_relay_enabled(
             runtime,
@@ -490,16 +495,6 @@ def _freeze_inactive_arm_joints(
     return result
 
 
-def _reject_eef_target(
-    runtime: RuntimeState,
-    state: TeleopExecutionState,
-    message: str,
-) -> None:
-    _ = runtime
-    state.condition = TeleopExecutionCondition.REJECTED
-    state.last_fault = message
-
-
 def _solve_eef_command(
     config: ConfigDict,
     runtime: RuntimeState,
@@ -537,18 +532,12 @@ def _solve_eef_command(
             target[offset + 3 : offset + 7], tracked[offset + 3 : offset + 7]
         )
         if position_error > state.max_position_error_m:
-            _reject_eef_target(
-                runtime,
-                state,
-                f"arm {arm_index} IK position error {position_error:.4f} m",
-            )
+            state.condition = TeleopExecutionCondition.REJECTED
+            state.last_fault = f"arm {arm_index} IK position error {position_error:.4f} m"
             return None
         if orientation_error > state.max_orientation_error_rad:
-            _reject_eef_target(
-                runtime,
-                state,
-                f"arm {arm_index} IK orientation error {orientation_error:.4f} rad",
-            )
+            state.condition = TeleopExecutionCondition.REJECTED
+            state.last_fault = f"arm {arm_index} IK orientation error {orientation_error:.4f} rad"
             return None
     limited = _limit_qpos(runtime, state, solved, previous)
     return _freeze_inactive_arm_joints(runtime, limited, previous, active)
@@ -634,36 +623,22 @@ def step_teleop(
     now: float | None = None,
 ) -> PublishedTeleopAction | None:
     """Poll one client command and publish at most one robot action."""
-    state = _execution(runtime)
-    client = getattr(runtime, "teleop_client", None)
-    if (
-        state.control_source != TELEOP_CONTROL_SOURCE_CLIENT
-        or client is None
-        or not state.active
-        or not runtime.collection_teleop_armed
-        or not runtime.collection_teleop_active
-        or session.mode is not SessionMode.COLLECT
-    ):
-        return None
-    current_time = time.monotonic() if now is None else float(now)
-    try:
-        return _step_active_teleop(
-            config,
-            runtime,
-            state,
-            client,
-            current_time,
-            still_active=lambda: (
-                runtime.collection_teleop_armed
-                and runtime.collection_teleop_active
-                and session.mode is SessionMode.COLLECT
-            ),
-        )
-    except Exception as error:
-        state.condition = TeleopExecutionCondition.REJECTED
-        state.last_fault = str(error)
-        logger.warning("Dropped teleop tick: %s", error)
-        return None
+    return _step_client_teleop(
+        config,
+        runtime,
+        active=(
+            runtime.collection_teleop_armed
+            and runtime.collection_teleop_active
+            and session.mode is SessionMode.COLLECT
+        ),
+        still_active=lambda: (
+            runtime.collection_teleop_armed
+            and runtime.collection_teleop_active
+            and session.mode is SessionMode.COLLECT
+        ),
+        dropped_label="teleop",
+        now=now,
+    )
 
 
 def activate_rollout_teleop(
@@ -685,6 +660,8 @@ def activate_rollout_teleop(
         status = client.status()
         if not status.connected:
             raise TeleopExecutionError(status.source_error or "Teleop client is not connected")
+        if not status.neutral:
+            raise TeleopExecutionError("Teleop client must be neutral before activation")
         client.reset(require_neutral=True)
     except Exception as error:
         session.last_error = f"Cannot activate rollout teleop: {error}"
@@ -720,14 +697,34 @@ def step_rollout_teleop(
     now: float | None = None,
 ) -> PublishedTeleopAction | None:
     """Poll one client command and publish at most one RL intervention action."""
+    return _step_client_teleop(
+        config,
+        runtime,
+        active=runtime.rollout_intervention_active and session.mode is SessionMode.REAL,
+        still_active=lambda: (
+            runtime.rollout_intervention_active and session.mode is SessionMode.REAL
+        ),
+        dropped_label="rollout teleop",
+        now=now,
+    )
+
+
+def _step_client_teleop(
+    config: ConfigDict,
+    runtime: RuntimeState,
+    *,
+    active: bool,
+    still_active: Callable[[], bool],
+    dropped_label: str,
+    now: float | None,
+) -> PublishedTeleopAction | None:
     state = _execution(runtime)
     client = getattr(runtime, "teleop_client", None)
     if (
         state.control_source != TELEOP_CONTROL_SOURCE_CLIENT
         or client is None
         or not state.active
-        or not runtime.rollout_intervention_active
-        or session.mode is not SessionMode.REAL
+        or not active
     ):
         return None
     current_time = time.monotonic() if now is None else float(now)
@@ -738,14 +735,12 @@ def step_rollout_teleop(
             state,
             client,
             current_time,
-            still_active=lambda: (
-                runtime.rollout_intervention_active and session.mode is SessionMode.REAL
-            ),
+            still_active=still_active,
         )
     except Exception as error:
         state.condition = TeleopExecutionCondition.REJECTED
         state.last_fault = str(error)
-        logger.warning("Dropped rollout teleop tick: %s", error)
+        logger.warning("Dropped %s tick: %s", dropped_label, error)
         return None
 
 

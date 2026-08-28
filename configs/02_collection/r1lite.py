@@ -2,6 +2,8 @@
 
 _base_ = ["../01_deploy/r1lite/_base.py"]
 
+console = dict(initial_tab="collect")
+
 transport = dict(
     resize_pad=False,
     image_layout="hwc",

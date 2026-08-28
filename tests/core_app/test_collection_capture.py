@@ -11,7 +11,7 @@ from core.app.collection_capture import CollectionCaptureRunner
 
 
 def test_collection_capture_stop_drains_available_raw_snapshots():
-    snapshots = [object(), object(), object()]
+    snapshots = [SimpleNamespace(timestamp=float(index)) for index in range(3)]
     ingested = []
 
     class _Transport:
@@ -49,7 +49,7 @@ def test_collection_capture_stop_does_not_drain_forever_when_source_keeps_publis
             calls += 1
             if calls > 6:
                 raise AssertionError("stop drain must be bounded")
-            return object()
+            return SimpleNamespace(timestamp=float(calls))
 
     class _Logger:
         is_collection_enabled = True
@@ -71,7 +71,7 @@ def test_collection_capture_stop_does_not_drain_forever_when_source_keeps_publis
 
 
 def test_rollout_capture_buffers_raw_snapshots_for_action_pairing():
-    snapshots = [object(), object()]
+    snapshots = [SimpleNamespace(timestamp=float(index)) for index in range(2)]
 
     class _Transport:
         def acquire_collection_raw(self):
@@ -97,7 +97,7 @@ def test_rollout_capture_buffers_raw_snapshots_for_action_pairing():
 
 
 def test_active_rollout_capture_is_not_routed_to_collection_logger():
-    snapshot = object()
+    snapshot = SimpleNamespace(timestamp=1.0)
     ingested = []
 
     class _Transport:

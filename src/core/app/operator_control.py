@@ -185,6 +185,24 @@ def maybe_start_operator_action_listener(
     logger.info("[OPERATOR] listening for semantic actions on %s", topic)
 
 
+def _dispatch_teleop_command(
+    command: str,
+    config: ConfigDict,
+    runtime: RuntimeState,
+    session: SessionState,
+    dispatch: Callable[[str, ConfigDict, RuntimeState, SessionState], None],
+    *,
+    error_log: str,
+) -> str | None:
+    session.last_error = ""
+    try:
+        dispatch(command, config, runtime, session)
+    except Exception as error:
+        logger.exception(error_log)
+        return f"Operator dispatch failed: {error}"
+    return None
+
+
 def handle_teleop_operator_event(
     event: TeleopOperatorEvent,
     config: ConfigDict,
@@ -211,27 +229,31 @@ def handle_teleop_operator_event(
         message = "Collection VR controls are unavailable in the RL workspace"
     elif event.intent == "arm_toggle":
         enabled = not bool(runtime.collection_teleop_armed)
-        try:
-            session.last_error = ""
-            dispatch(
-                f"web:collect_arm:{'on' if enabled else 'off'}",
-                config,
-                runtime,
-                session,
-            )
+        message = _dispatch_teleop_command(
+            f"web:collect_arm:{'on' if enabled else 'off'}",
+            config,
+            runtime,
+            session,
+            dispatch,
+            error_log="Teleop ARM dispatch failed",
+        )
+        if message is None:
             accepted = bool(runtime.collection_teleop_armed) is enabled
             message = (
                 f"Collection ARM {'enabled' if enabled else 'disabled'}"
                 if accepted
                 else (session.last_error or "Collection ARM state did not change")
             )
-        except Exception as error:
-            message = f"Operator dispatch failed: {error}"
-            logger.exception("Teleop ARM dispatch failed")
     elif event.intent == "home":
-        try:
-            session.last_error = ""
-            dispatch("web:collect_home", config, runtime, session)
+        message = _dispatch_teleop_command(
+            "web:collect_home",
+            config,
+            runtime,
+            session,
+            dispatch,
+            error_log="Teleop HOME dispatch failed",
+        )
+        if message is None:
             accepted = (
                 not bool(runtime.collection_teleop_armed)
                 and not bool(runtime.collection_teleop_active)
@@ -242,9 +264,6 @@ def handle_teleop_operator_event(
                 if accepted
                 else (session.last_error or "Collection HOME requires ARM OFF")
             )
-        except Exception as error:
-            message = f"Operator dispatch failed: {error}"
-            logger.exception("Teleop HOME dispatch failed")
     elif event.intent == "intervention_toggle":
         intervention_active = bool(runtime.rollout_intervention_active)
         if not bool(runtime.rl_active):
@@ -277,9 +296,15 @@ def handle_teleop_operator_event(
             if command is None:
                 message = session.last_error or "RL intervention is invalid in the current state"
             else:
-                try:
-                    session.last_error = ""
-                    dispatch(command, config, runtime, session)
+                message = _dispatch_teleop_command(
+                    command,
+                    config,
+                    runtime,
+                    session,
+                    dispatch,
+                    error_log="Teleop RL intervention dispatch failed",
+                )
+                if message is None:
                     now_active = bool(runtime.rollout_intervention_active)
                     accepted = now_active is not intervention_active and not bool(
                         session.last_error
@@ -293,9 +318,6 @@ def handle_teleop_operator_event(
                             else (session.last_error or "RL intervention state did not change")
                         )
                     )
-                except Exception as error:
-                    message = f"Operator dispatch failed: {error}"
-                    logger.exception("Teleop RL intervention dispatch failed")
     elif (
         not execution.active
         or not runtime.collection_teleop_armed
@@ -314,9 +336,15 @@ def handle_teleop_operator_event(
         if command is None:
             message = session.last_error or "Operator intent is invalid in the current state"
         else:
-            try:
-                session.last_error = ""
-                dispatch(command, config, runtime, session)
+            message = _dispatch_teleop_command(
+                command,
+                config,
+                runtime,
+                session,
+                dispatch,
+                error_log=f"Teleop operator dispatch failed for {event.intent}",
+            )
+            if message is None:
                 now_recording = _collection_recording(runtime, session)
                 expected_recording = action == "start"
                 accepted = (now_recording == expected_recording) and not bool(session.last_error)
@@ -328,9 +356,5 @@ def handle_teleop_operator_event(
                     }[action]
                 else:
                     message = session.last_error or "Collection recording state did not change"
-            except Exception as error:
-                accepted = False
-                message = f"Operator dispatch failed: {error}"
-                logger.exception("Teleop operator dispatch failed for %s", event.intent)
     session.last_error = "" if accepted else message
     acknowledge_teleop_event(runtime, event, accepted=accepted, message=message)
