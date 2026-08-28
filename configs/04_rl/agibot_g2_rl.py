@@ -1,6 +1,10 @@
 """AgiBot G2 RL workspace with independent policy and critic selection."""
 
-_base_ = ["../01_deploy/agibot_g2/openpi_qpos.py"]
+_base_ = ["../02_collection/agibot_g2_vr.py"]
+
+console = dict(
+    initial_tab="rl",
+)
 
 rl_cfg = dict(
     cli_mode="real",
@@ -32,5 +36,5 @@ rl_cfg = dict(
             async_save=True,
         ),
     ),
-    intervention=dict(control_mode="relative"),
+    intervention=dict(control_mode="relative", source="teleop_client"),
 )

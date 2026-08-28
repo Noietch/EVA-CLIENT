@@ -24,6 +24,7 @@ import re
 import subprocess
 import threading
 import time
+import uuid
 from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -36,13 +37,18 @@ import numpy as np
 from tqdm import tqdm
 
 from core.app.command_catalog import control_command_catalog
+from core.app.console.dashboard import build_dashboard
 from core.app.console.transform_worker import build_transform_blob
 from core.app.handlers import (
     _resolve_runtime_path,
     build_policy_observation,
     eval_episode_dir,
     eval_model_name,
+    load_episode_history,
+    rollout_hil_status,
+    rollout_intervention_source,
     rollout_save_status,
+    teleop_status,
 )
 from core.app.handlers.io import load_replay_dataset
 from core.app.rl import build_rl_critic_observation, rl_live_series
@@ -54,8 +60,19 @@ from core.app.state import (
     resolve_inference_strategy_label,
 )
 from core.config import ConfigDict
+from core.utils.dataset_upload import (
+    DatasetUploadProgress,
+    DatasetUploadSpec,
+    resolve_dataset_uploads,
+    upload_dataset_directory,
+)
 from core.utils.lerobot import LeRobotDatasetIO
-from transport.base import HilStatus, ObservationSource
+from tools.conversion import (
+    DATASET_EXPORT_FORMATS,
+    DatasetExportProgress,
+    export_dataset_by_quality,
+)
+from transport.base import ObservationSource
 from transport.dataset import DatasetTransport
 
 logger = logging.getLogger(__name__)
@@ -66,6 +83,9 @@ STATIC_DIR = Path(__file__).parent / "static"
 # frontend scene poll drains the reader ~12 Hz, so a live stream refreshes it well
 # inside the window while a dead publisher lets it lapse.
 _TRANSPORT_ONLINE_WINDOW_SECONDS = 2.0
+_CAMERA_STREAM_FPS = 10.0
+_EPISODE_HISTORY_DEFAULT_LIMIT = 128
+_EPISODE_HISTORY_MAX_LIMIT = 512
 
 # Transports that talk to a real arm: they track receipt freshness, so "no message
 # yet" means offline (not merely "configured"). debug/dataset are not in this set.
@@ -74,6 +94,8 @@ _VIDEO_CACHE_CONTROL = "public, max-age=3600"
 _VIDEO_FASTSTART_CACHE_ENV = "EVA_VIDEO_CACHE_DIR"
 _VIDEO_FASTSTART_LOCK = threading.Lock()
 _VIDEO_POSTER_LOCK = threading.Lock()
+_QUALITY_JOB_LIMIT = 16
+_QUALITY_UPLOAD_FAILED_ERROR = "dataset upload failed"
 _TRANSFORM_EXECUTOR: concurrent.futures.ProcessPoolExecutor | None = None
 _TRANSFORM_EXECUTOR_LOCK = threading.Lock()
 _TRACE_EVENT_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,96}$")
@@ -91,6 +113,64 @@ class _CachedReviewEpisode:
 
 
 _REVIEW_DATA_CACHE: OrderedDict[tuple[str, int], _CachedReviewEpisode] = OrderedDict()
+
+
+@dataclasses.dataclass
+class _QualityUploadJob:
+    job_id: str
+    local_dir: str
+    remote_dir: str
+    backends: tuple[str, ...] = ()
+    state: str = "queued"
+    files_completed: int = 0
+    files_total: int = 0
+    bytes_completed: int = 0
+    bytes_total: int = 0
+    current_file: str = ""
+    destination: str = ""
+    error: str = ""
+
+    def payload(self) -> dict[str, Any]:
+        if self.bytes_total > 0:
+            progress = self.bytes_completed / self.bytes_total
+        elif self.files_total > 0:
+            progress = self.files_completed / self.files_total
+        else:
+            progress = 1.0 if self.state == "completed" else 0.0
+        return {
+            **dataclasses.asdict(self),
+            "progress": max(0.0, min(1.0, progress)),
+        }
+
+
+@dataclasses.dataclass
+class _QualityExportJob:
+    job_id: str
+    source_dir: str
+    accepted_dir: str
+    rejected_dir: str
+    dataset_format: str
+    state: str = "queued"
+    episodes_completed: int = 0
+    episodes_total: int = 0
+    subset: str = ""
+    source_episode_index: int | None = None
+    accepted_episodes: int = 0
+    rejected_episodes: int = 0
+    accepted_frames: int = 0
+    rejected_frames: int = 0
+    error: str = ""
+
+    def payload(self) -> dict[str, Any]:
+        progress = (
+            self.episodes_completed / self.episodes_total
+            if self.episodes_total > 0
+            else (1.0 if self.state == "completed" else 0.0)
+        )
+        return {
+            **dataclasses.asdict(self),
+            "progress": max(0.0, min(1.0, progress)),
+        }
 
 
 def _trace_json(value: Any, limit: int = 1600) -> str:
@@ -471,6 +551,13 @@ def _ensure_ckpt_order(config: ConfigDict, runtime: RuntimeState) -> None:
         rng.shuffle(runtime.ckpt_order)
 
 
+def _resolve_initial_tab(config: ConfigDict) -> str:
+    configured = str((config.get("console") or {}).get("initial_tab", "auto"))
+    if configured != "auto":
+        return configured
+    return "eval" if config.eval else "debug"
+
+
 @dataclasses.dataclass
 class ConsoleContext:
     """Shared state for the console request handler."""
@@ -488,6 +575,13 @@ class ConsoleContext:
     active_tab: str = "debug"
     output_dir: str = ""  # results root; debug results land in <output_dir>/console/
     preview: Any = None  # EpisodePreview for RESULT-tab playback (lazily set)
+    quality_upload_lock: threading.RLock = dataclasses.field(default_factory=threading.RLock)
+    quality_upload_jobs: OrderedDict[str, _QualityUploadJob] = dataclasses.field(
+        default_factory=OrderedDict
+    )
+    quality_export_jobs: OrderedDict[str, _QualityExportJob] = dataclasses.field(
+        default_factory=OrderedDict
+    )
 
     def ckpt_label(self, slot: int | None) -> str | None:
         """Anonymized operator label for a blind ckpt slot (0 -> "Model A"); None when slot None."""
@@ -496,6 +590,119 @@ class ConsoleContext:
     def active_model_name(self) -> str:
         """Folder name of the active model's eval dataset (matches the recorder's rooting)."""
         return eval_model_name(self.config, self.runtime)
+
+
+def _run_quality_upload(
+    ctx: ConsoleContext,
+    job_id: str,
+    local_dir: Path,
+    upload_specs: tuple[DatasetUploadSpec, ...],
+) -> None:
+    with ctx.quality_upload_lock:
+        job = ctx.quality_upload_jobs[job_id]
+        job.state = "running"
+
+    def update_progress(progress: DatasetUploadProgress) -> None:
+        with ctx.quality_upload_lock:
+            active_job = ctx.quality_upload_jobs.get(job_id)
+            if active_job is None:
+                return
+            active_job.files_completed = progress.files_completed
+            active_job.files_total = progress.files_total
+            active_job.bytes_completed = progress.bytes_completed
+            active_job.bytes_total = progress.bytes_total
+            active_job.current_file = progress.current_file
+
+    try:
+        result = upload_dataset_directory(
+            local_dir,
+            upload_specs,
+            progress_callback=update_progress,
+        )
+    except Exception:
+        logger.exception("Failed to upload accepted collection dataset")
+        with ctx.quality_upload_lock:
+            job = ctx.quality_upload_jobs.get(job_id)
+            if job is not None:
+                job.state = "failed"
+                job.error = _QUALITY_UPLOAD_FAILED_ERROR
+        return
+
+    with ctx.quality_upload_lock:
+        job = ctx.quality_upload_jobs.get(job_id)
+        if job is not None:
+            job.state = "completed"
+            job.files_completed = result.files
+            job.files_total = result.files
+            job.bytes_completed = result.bytes
+            job.bytes_total = result.bytes
+            job.current_file = ""
+            job.destination = result.destination
+            job.remote_dir = result.remote_dir
+
+
+def _quality_export_paths(dataset_dir: Path, dataset_format: str) -> tuple[Path, Path]:
+    export_root = (
+        dataset_dir.parent / "export"
+        if dataset_dir.name == "raw"
+        else dataset_dir.with_name(f"{dataset_dir.name}_export")
+    )
+    format_root = export_root / dataset_format
+    return format_root / "accepted", format_root / "rejected"
+
+
+def _run_quality_export(
+    ctx: ConsoleContext,
+    job_id: str,
+    source_dir: Path,
+    accepted_dir: Path,
+    rejected_dir: Path,
+    dataset_format: str,
+) -> None:
+    with ctx.quality_upload_lock:
+        job = ctx.quality_export_jobs[job_id]
+        job.state = "running"
+
+    def update_progress(progress: DatasetExportProgress) -> None:
+        with ctx.quality_upload_lock:
+            active_job = ctx.quality_export_jobs.get(job_id)
+            if active_job is None:
+                return
+            active_job.episodes_completed = progress.episodes_completed
+            active_job.episodes_total = progress.episodes_total
+            active_job.subset = progress.subset
+            active_job.source_episode_index = progress.source_episode_index
+
+    try:
+        summary = export_dataset_by_quality(
+            source_dir,
+            accepted_dir,
+            rejected_dir,
+            dataset_format=dataset_format,
+            replace_existing=True,
+            progress_callback=update_progress,
+        )
+    except Exception as error:
+        logger.exception("Failed to export collection quality split")
+        with ctx.quality_upload_lock:
+            job = ctx.quality_export_jobs.get(job_id)
+            if job is not None:
+                job.state = "failed"
+                job.error = str(error)
+        return
+
+    with ctx.quality_upload_lock:
+        job = ctx.quality_export_jobs.get(job_id)
+        if job is not None:
+            job.state = "completed"
+            job.episodes_completed = summary.source_episodes
+            job.episodes_total = summary.source_episodes
+            job.subset = ""
+            job.source_episode_index = None
+            job.accepted_episodes = summary.accepted_episodes
+            job.rejected_episodes = summary.rejected_episodes
+            job.accepted_frames = summary.accepted_frames
+            job.rejected_frames = summary.rejected_frames
 
 
 def _serialize_prompt_config(prompt: Any) -> dict:
@@ -507,6 +714,26 @@ def _serialize_prompt_config(prompt: Any) -> dict:
         "prompt_zh": prompt.get("prompt_zh"),
         "milestones": [{"id": mid, "label": label} for mid, label in milestones],
     }
+
+
+def _collection_set_for_prompt(config: ConfigDict, prompt: str) -> str | None:
+    for dataset_name, entries in config.collection.tasks.items():
+        if prompt in {str(entry[0]) for entry in entries}:
+            return str(dataset_name)
+    return None
+
+
+def _trim_finished_jobs(jobs: OrderedDict[str, Any], limit: int = _QUALITY_JOB_LIMIT) -> None:
+    while len(jobs) >= limit:
+        oldest_id, oldest = next(iter(jobs.items()))
+        if oldest.state in {"queued", "running"}:
+            break
+        jobs.pop(oldest_id)
+
+
+def _quality_job_payload(jobs: OrderedDict[str, Any], job_id: str) -> dict[str, Any] | None:
+    job = jobs.get(job_id)
+    return None if job is None else job.payload()
 
 
 def _serialize_eval(ctx: ConsoleContext) -> dict:
@@ -558,6 +785,9 @@ def _serialize_rl(ctx: ConsoleContext) -> dict:
         "backend_ready": True,
         "cli_mode": str(rl_cfg.cli_mode),
         "inference_strategy": str(rl_cfg.inference_strategy),
+        "rollout_intervention_source": str(
+            (rl_cfg.get("intervention") or {}).get("source", "transport")
+        ),
         "tasks": [str(task) for task in rl_cfg.tasks],
         "policies": [
             {"slot": slot, "name": str(model.name)} for slot, model in enumerate(rl_cfg.policies)
@@ -629,7 +859,36 @@ def _serialize_config(ctx: ConsoleContext) -> dict:
     n_episodes = ctx.runtime.replay_n_episodes
     if n_episodes == 0 and hasattr(ctx.runtime.transport, "n_episodes"):
         n_episodes = ctx.runtime.transport.n_episodes  # type: ignore[attr-defined]
+    teleop_config = config.collection.get("teleop") or {}
+    teleop_client_config = teleop_config.get("client") or {}
+    controls_config = config.collection.get("controls") or {}
+    is_vr = str(teleop_client_config.get("type", "")) == "vr_webxr"
+    control_mode = "vr" if is_vr else "keyboard"
+    controls = {
+        str(action): dict(binding)
+        for action, binding in (controls_config.get(control_mode) or {}).items()
+    }
+    control_groups = []
+    if is_vr:
+        for group_name, binding in (teleop_client_config.get("arms") or {}).items():
+            hand = str((binding or {}).get("controller", ""))
+            if hand not in {"left", "right"}:
+                continue
+            control_groups.append(
+                {
+                    "id": str(group_name),
+                    "label": str((binding or {}).get("label") or group_name)
+                    .replace("_", " ")
+                    .upper(),
+                    "control": f"{hand}.grip",
+                    "binding": f"{hand}_arm_toggle",
+                }
+            )
+    collection_storage = config.collection.storage
+    collection_uploads = resolve_dataset_uploads(collection_storage)
+    collection_sftp = collection_storage.get("sftp") or {}
     return {
+        "initial_tab": _resolve_initial_tab(ctx.config),
         "robot_type": config.robot.type,
         "transport_type": config.transport.type,
         "policy": {
@@ -638,7 +897,10 @@ def _serialize_config(ctx: ConsoleContext) -> dict:
             "port": config.policy.port,
         },
         "tasks": list(config.inference_cfg.debug_tasks),
-        "collect_tasks": list(config.collection.tasks),
+        "collect_tasks": {
+            str(dataset_name): [[str(prompt), int(target)] for prompt, target in entries]
+            for dataset_name, entries in config.collection.tasks.items()
+        },
         "is_replay": is_replay,
         "manual_capable": config.transport.type in _LIVE_TRANSPORT_TYPES,
         "n_episodes": n_episodes,
@@ -666,11 +928,50 @@ def _serialize_config(ctx: ConsoleContext) -> dict:
             "dataset_dir": _resolve_dataset_dir(
                 config.collection.storage.log_dir if config.collection.schema.columns else ""
             ),
+            "teleop": {
+                "control_source": str(teleop_config.get("control_source", "transport")),
+                "client_type": str(teleop_client_config.get("type", "")),
+            },
+            "controls": {
+                "mode": control_mode,
+                "bindings": controls,
+                "groups": control_groups,
+            },
+            "upload": {
+                "configured": bool(collection_uploads),
+                "backends": [spec.backend for spec in collection_uploads],
+                "targets": [spec.display_root for spec in collection_uploads],
+            },
+            "sftp": {
+                "configured": bool(
+                    collection_sftp.get("host") and collection_sftp.get("remote_dir")
+                ),
+                "host": str(collection_sftp.get("host", "")),
+                "port": int(collection_sftp.get("port", 22)),
+                "remote_dir": str(collection_sftp.get("remote_dir", "")),
+            },
         },
         "eval": _serialize_eval(ctx),
         "rl": _serialize_rl(ctx),
         "run_id": Path(ctx.output_dir).name,
     }
+
+
+def _status_snapshot_for_poll(
+    logger_obj: Any,
+    task: str | None = None,
+    collection_dataset: str | None = None,
+) -> dict[str, Any]:
+    """Request a recorder snapshot without disk-backed history."""
+    snapshot = dict(
+        logger_obj.status_snapshot(
+            task,
+            include_history=False,
+            collection_dataset=collection_dataset,
+        )
+    )
+    snapshot.pop("episodes", None)
+    return snapshot
 
 
 def _serialize_status(ctx: ConsoleContext) -> dict:
@@ -679,11 +980,7 @@ def _serialize_status(ctx: ConsoleContext) -> dict:
     s = ctx.session
     r = ctx.runtime
     config = r.active_config or ctx.config
-    hil_status = (
-        r.transport.hil_status()
-        if hasattr(r.transport, "hil_status")
-        else HilStatus(supported=False, error="Transport does not support HIL")
-    )
+    hil_status = rollout_hil_status(config, r)
     elapsed_ms = 0
     if s.status.value == "running" and s.run_start_time > 0:
         elapsed_ms = int((time.monotonic() - s.run_start_time) * 1000)
@@ -714,6 +1011,12 @@ def _serialize_status(ctx: ConsoleContext) -> dict:
     # not "configured". Only sources that never track freshness (replay/synthetic)
     # fall back to the configured flag.
     reader = ctx.obs_reader or r.transport
+    # Dedicated ZMQ visualization readers only update their freshness when consumed.
+    # The status poll must therefore drain pending state even before camera/frame
+    # streams have opened, otherwise MANUAL can wait forever despite live hardware.
+    refresh_qpos = getattr(reader, "get_latest_qpos", None)
+    if refresh_qpos is not None:
+        refresh_qpos()
     since_recv = reader.seconds_since_last_recv()
     if since_recv is not None:
         transport_connected = since_recv <= _TRANSPORT_ONLINE_WINDOW_SECONDS
@@ -734,8 +1037,10 @@ def _serialize_status(ctx: ConsoleContext) -> dict:
             "samples": 0,
         }
     )
-    policy_samples = sum(1 for sample in r.rl_live_samples if sample[3] == "policy")
-    intervention_samples = len(r.rl_live_samples) - policy_samples
+    with r.rl_live_lock:
+        policy_samples = sum(1 for sample in r.rl_live_samples if sample[3] == "policy")
+        live_sample_count = len(r.rl_live_samples)
+    intervention_samples = live_sample_count - policy_samples
     return {
         "robot_type": config.robot.type,
         "transport_type": config.transport.type,
@@ -747,6 +1052,8 @@ def _serialize_status(ctx: ConsoleContext) -> dict:
         "session_status": s.status.value,
         "selected_task": s.selected_task,
         "selected_collect_task": s.selected_collect_task,
+        "selected_collect_set": s.selected_collect_set,
+        "selected_collect_task_index": s.selected_collect_task_index,
         "selected_strategy": (
             resolve_inference_strategy_label(config, r.selected_inference_strategy_key)
             if r.selected_inference_strategy_key is not None
@@ -788,8 +1095,10 @@ def _serialize_status(ctx: ConsoleContext) -> dict:
         },
         "collection_teleop_armed": r.collection_teleop_armed,
         "collection_teleop_active": r.collection_teleop_active,
+        "teleop": teleop_status(r),
         "rollout_intervention_active": r.rollout_intervention_active,
         "rollout_intervention_enabled": r.rollout_intervention_enabled,
+        "rollout_intervention_source": rollout_intervention_source(config),
         "hil_supported": hil_status.supported,
         "hil_active": hil_status.active,
         "hil_error": hil_status.error,
@@ -799,9 +1108,18 @@ def _serialize_status(ctx: ConsoleContext) -> dict:
             else len(r.rollout_intervention_active_segment.frames)
         ),
         "rollout_intervention_segments": len(r.rollout_intervention_segments),
-        "rollout": rollout_save_status(config, r),
+        "rollout": rollout_save_status(config, r, include_history=False),
+        "eval_recorder": (
+            _status_snapshot_for_poll(r.episode_logger, format_task_label(s.selected_task))
+            if config.eval and r.episode_logger is not None
+            else None
+        ),
         "collect": (
-            r.episode_logger.status_snapshot(format_task_label(s.selected_collect_task))
+            _status_snapshot_for_poll(
+                r.episode_logger,
+                format_task_label(s.selected_collect_task),
+                s.selected_collect_set,
+            )
             if r.episode_logger is not None
             else None
         ),
@@ -844,13 +1162,16 @@ def _encode_jpeg(image: np.ndarray, convert_bgr_to_rgb: bool, quality: int = 60)
 
 
 def _camera_jpeg_payload(
-    reader: ObservationSource, key: str, convert_bgr_to_rgb: bool
+    reader: ObservationSource,
+    key: str,
+    convert_bgr_to_rgb: bool,
+    previous_signature: tuple[Any, ...] | None = None,
 ) -> tuple[bytes | None, tuple[Any, ...] | None]:
     get_jpeg = getattr(reader, "get_camera_jpeg", None)
     if get_jpeg is not None:
         jpeg = get_jpeg(key)
         if jpeg is not None:
-            return jpeg, ("jpeg", len(jpeg), jpeg[:64], jpeg[-64:])
+            return jpeg, ("jpeg", hashlib.blake2s(jpeg, digest_size=8).digest())
 
     get_one = getattr(reader, "get_camera_frame", None)
     if get_one is not None:
@@ -861,8 +1182,11 @@ def _camera_jpeg_payload(
     if image is None:
         return None, None
     arr = np.asarray(image)
-    sig = ("array", arr.shape, int(arr[::32, ::32].sum(dtype=np.int64)))
-    return _encode_jpeg(image, convert_bgr_to_rgb), sig
+    jpeg = _encode_jpeg(image, convert_bgr_to_rgb)
+    if jpeg is None:
+        return None, None
+    sig = ("array", arr.shape, hashlib.blake2s(jpeg, digest_size=8).digest())
+    return jpeg, sig
 
 
 def _list_camera_keys(ctx: ConsoleContext) -> list[str]:
@@ -894,7 +1218,7 @@ def _uses_replay_observation(ctx: ConsoleContext) -> bool:
 def _observation_reader(ctx: ConsoleContext) -> ObservationSource:
     if _uses_replay_observation(ctx):
         return ctx.runtime.replay_source  # type: ignore[return-value]
-    return ctx.obs_reader or ctx.runtime.transport
+    return ctx.obs_reader or ctx.runtime.transport  # type: ignore[return-value]
 
 
 def _active_collection_replay_qpos(runtime: RuntimeState) -> tuple[np.ndarray | None, int | None]:
@@ -1229,14 +1553,23 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             return
         episode_index = int(body.get("episode", 0))
         task = format_task_label(self.ctx.session.selected_collect_task)
-        qpos = episode_logger.load_collection_replay_qpos(episode_index, task)
+        collection_dataset = self.ctx.session.selected_collect_set
+        qpos = episode_logger.load_collection_replay_qpos(
+            episode_index,
+            task,
+            collection_dataset=collection_dataset,
+        )
         if qpos is None or len(qpos) == 0:
             self._send_json(404, {"ok": False, "error": "collection episode unavailable"})
             return
         runtime.collection_replay_qpos = qpos
         runtime.collection_replay_episode = episode_index
         runtime.collection_replay_started = time.monotonic()
-        replay_fps = episode_logger.load_collection_episode_fps(episode_index, task)
+        replay_fps = episode_logger.load_collection_episode_fps(
+            episode_index,
+            task,
+            collection_dataset=collection_dataset,
+        )
         runtime.collection_replay_fps = max(
             1, int(round(replay_fps or self.ctx.config.inference_cfg.publish_rate))
         )
@@ -1351,13 +1684,12 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Connection", "close")
         self.send_header("Content-Type", f"multipart/x-mixed-replace; boundary={boundary}")
         self.end_headers()
-        period = 1.0 / 30.0
+        period = 1.0 / _CAMERA_STREAM_FPS
         # The profiled bottleneck is bandwidth, not CPU: pushing 30 fps of a 720p +
         # a 480p JPEG is ~17 MB/s, and a paused/replay view re-sends one *static*
-        # frame forever. Encode + transmit only when the pixels actually change
-        # (cheap subsampled signature), with a slow heartbeat so idle proxies and
-        # late-joining <img> tags still get a frame. Live cameras keep streaming at
-        # full rate because sensor noise changes the signature every frame.
+        # frame forever. Cap the stream at 10 FPS and encode + transmit only when
+        # the pixels actually change (cheap subsampled signature), with a slow
+        # heartbeat so idle proxies and late-joining <img> tags still get a frame.
         heartbeat = 2.0
         last_sig = None
         last_jpeg: bytes | None = None
@@ -1369,7 +1701,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                 # swaps the feed without the client reopening the <img> connection.
                 reader = _observation_reader(ctx)
                 jpeg = None
-                payload, sig = _camera_jpeg_payload(reader, key, convert)
+                payload, sig = _camera_jpeg_payload(reader, key, convert, last_sig)
                 if payload is not None and sig != last_sig:
                     jpeg = payload
                     last_sig = sig
@@ -1442,6 +1774,147 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         self.ctx.runtime.last_client_poll = time.monotonic()
         self._send_json(200, _serialize_status(self.ctx))
 
+    def _get_episodes(self) -> None:
+        """Serve saved episode rows separately from the watchdog status poll.
+
+        ``since`` is an offset into the history list and ``limit`` bounds one
+        response. The frontend and API clients use ``next_since`` plus ``cursor``
+        for incremental pages; a prefix rewrite requests a reset in the same response.
+        ``queue`` remains in this response because queued/in-flight rows are live
+        status and are not present in ``episodes.jsonl`` yet.
+        """
+        scope = self._query_str("scope", "rollout").strip().lower()
+        if scope not in {"collect", "rollout", "eval"}:
+            self._send_json(400, {"ok": False, "error": "invalid episode history scope"})
+            return
+        try:
+            since = max(0, self._query_int("since", 0))
+            limit_value = self._query_int("limit", _EPISODE_HISTORY_DEFAULT_LIMIT)
+        except ValueError:
+            self._send_json(400, {"ok": False, "error": "invalid episode history cursor"})
+            return
+        limit = min(_EPISODE_HISTORY_MAX_LIMIT, max(0, limit_value))
+        cursor = self._query_str("cursor").strip() or None
+
+        runtime = self.ctx.runtime
+        config = runtime.active_config or self.ctx.config
+        queue: list[dict[str, Any]] = []
+        dataset_dir: str = ""
+        task_filter = None
+        collection_set = None
+        if scope == "rollout":
+            status = rollout_save_status(config, runtime, include_history=False)
+            dataset_dir = str(status.get("dataset_dir", ""))
+            queue = list(status.get("queue") or [])
+        else:
+            logger_obj = runtime.episode_logger
+            task_filter = (
+                self._query_str("task")
+                if scope == "collect"
+                else format_task_label(self.ctx.session.selected_task)
+            ) or None
+            collection_set = self._query_str("set").strip() or None
+            if logger_obj is not None:
+                status = _status_snapshot_for_poll(
+                    logger_obj,
+                    task_filter,
+                    collection_set if scope == "collect" else None,
+                )
+                dataset_dir = str(status.get("dataset_dir", ""))
+                queue = list(status.get("queue") or [])
+                if scope == "collect" and task_filter:
+                    queue = [
+                        row
+                        for row in queue
+                        if str(row.get("task") or row.get("prompt") or "") == task_filter
+                    ]
+
+        explicit_dir = self._query_str("dataset_dir")
+        if explicit_dir:
+            active_dataset_dir = dataset_dir
+            dataset_dir = _resolve_dataset_dir(explicit_dir)
+            if (
+                not active_dataset_dir
+                or Path(active_dataset_dir).resolve() != Path(dataset_dir).resolve()
+            ):
+                queue = []
+        if not dataset_dir:
+            self._send_json(
+                200,
+                {
+                    "ok": True,
+                    "scope": scope,
+                    **({"set": collection_set, "task": task_filter} if scope == "collect" else {}),
+                    "episodes": [],
+                    "queue": [],
+                    "total": 0,
+                    "since": since,
+                    "next_since": since,
+                    "has_more": False,
+                    "version": "",
+                    "cursor": "",
+                    "reset": bool(cursor or since),
+                },
+            )
+            return
+
+        history = load_episode_history(
+            Path(dataset_dir),
+            task=task_filter,
+            since=since,
+            limit=limit,
+            cursor=cursor,
+            exclude_episode_indices={
+                int(row["episode_index"]) for row in queue if row.get("episode_index") is not None
+            },
+        )
+        self._send_json(
+            200,
+            {
+                "ok": True,
+                "scope": scope,
+                "dataset_dir": dataset_dir,
+                **({"set": collection_set, "task": task_filter} if scope == "collect" else {}),
+                "queue": queue,
+                **history,
+            },
+        )
+
+    def _get_dashboard(self) -> None:
+        config = self.ctx.runtime.active_config or self.ctx.config
+        work_root = Path(_resolve_dataset_dir(str(config.get("work_dir") or "work_dirs")))
+        roots = [work_root]
+        if self.ctx.output_dir:
+            roots.append(Path(self.ctx.output_dir))
+        self._send_json(
+            200,
+            build_dashboard(
+                roots,
+                start_date=self._query_str("from"),
+                end_date=self._query_str("to"),
+            ),
+        )
+
+    def _get_collect_quality_upload(self) -> None:
+        query = parse_qs(urlparse(self.path).query)
+        job_id = str((query.get("job_id") or [""])[0])
+        with self.ctx.quality_upload_lock:
+            payload = _quality_job_payload(self.ctx.quality_upload_jobs, job_id)
+        if payload is None:
+            self._send_json(404, {"ok": False, "error": "upload job not found"})
+            return
+        self._send_json(200, {"ok": True, **payload})
+
+    def _get_collect_quality_export(self) -> None:
+        query = parse_qs(urlparse(self.path).query)
+        job_id = str((query.get("job_id") or [""])[0])
+        with self.ctx.quality_upload_lock:
+            payload = _quality_job_payload(self.ctx.quality_export_jobs, job_id)
+        if payload is None:
+            self._send_json(404, {"ok": False, "error": "export job not found"})
+            return
+        self._send_json(200, {"ok": True, **payload})
+
     def _get_frame(self) -> None:
         self._send_json(200, _serialize_frame(self.ctx))
 
@@ -1481,9 +1954,15 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             return
         since = self._query_int("since", 0)
         critic_since = self._query_int("critic_since", 0)
+        include_samples = self._query_str("samples", "1") != "0"
         self._send_json(
             200,
-            rl_live_series(self.ctx.runtime, max(since, 0), max(critic_since, 0)),
+            rl_live_series(
+                self.ctx.runtime,
+                max(since, 0),
+                max(critic_since, 0),
+                include_samples=include_samples,
+            ),
         )
 
     def _sync_preview_to_active_model(self) -> None:
@@ -1507,7 +1986,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
     def _get_results_all(self) -> None:
         # Cross-model aggregation for the RESULT browser: one record list per model
         # discovered under the eval run root, plus the eval prompt/milestone config.
-        # Each model's dataset lives at <output_dir>/<model>/episodes; scan every subdir
+        # Each model's raw dataset lives at <output_dir>/<model>/episodes/raw.
         # whose meta/episodes.jsonl exists so prior evals auto-load.
         from core.app.console.episode_preview import read_result_rows
         from core.recorder.episode import sanitize_path_component
@@ -1523,14 +2002,14 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         models: list[dict] = []
         for name in configured:
             seen.add(sanitize_path_component(name))
-            rows = read_result_rows(root / sanitize_path_component(name) / "episodes")
+            rows = read_result_rows(eval_episode_dir(str(root), name))
             models.append({"model_name": name, "records": rows})
         # Pick up any other recorded model dirs (e.g. a renamed ckpt from a prior run).
         if root.exists():
             for sub in sorted(p for p in root.iterdir() if p.is_dir()):
                 if sub.name in seen or sub.name == "console":
                     continue
-                rows = read_result_rows(sub / "episodes")
+                rows = read_result_rows(sub / "episodes" / "raw")
                 if rows:
                     models.append({"model_name": sub.name, "records": rows})
         tasks = []
@@ -2121,8 +2600,49 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         self._enqueue_ok(f"web:switch_task:{body.get('task', '')}")
 
     def _post_select_collect_task(self, body: dict) -> None:
-        self.ctx.session.selected_collect_task = str(body.get("task", ""))
-        self._send_json(200, {"ok": True})
+        task = str(body.get("task", "")).strip()
+        dataset = str(body.get("dataset", "")).strip()
+        task_index_value = body.get("task_index")
+        config = self.ctx.runtime.active_config or self.ctx.config
+        locations = [
+            (str(dataset_name), index)
+            for dataset_name, entries in config.collection.tasks.items()
+            for index, entry in enumerate(entries)
+            if str(entry[0]) == task
+        ]
+        if not locations:
+            self._send_json(400, {"ok": False, "error": "unknown collection task"})
+            return
+        if not dataset:
+            dataset, task_index = locations[0]
+        else:
+            task_index = task_index_value
+            entries = config.collection.tasks.get(dataset)
+            if entries is None:
+                self._send_json(400, {"ok": False, "error": "unknown collection dataset"})
+                return
+            valid_index = (
+                isinstance(task_index, int)
+                and not isinstance(task_index, bool)
+                and 0 <= task_index < len(entries)
+            )
+            if not valid_index or str(entries[task_index][0]) != task:
+                self._send_json(
+                    400,
+                    {"ok": False, "error": "collection task index does not match task"},
+                )
+                return
+        logger_obj = self.ctx.runtime.episode_logger
+        if logger_obj is not None and bool(getattr(logger_obj, "has_active_episode", False)):
+            self._send_json(409, {"ok": False, "error": "cannot switch task while recording"})
+            return
+        self.ctx.session.selected_collect_task = task
+        self.ctx.session.selected_collect_set = dataset
+        self.ctx.session.selected_collect_task_index = task_index
+        self._send_json(
+            200,
+            {"ok": True, "task": task, "dataset": dataset, "task_index": task_index},
+        )
 
     def _post_select_episode(self, body: dict) -> None:
         self._enqueue_ok(f"web:select_episode:{int(body.get('episode', 0))}")
@@ -2130,12 +2650,15 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
     def _post_tab_switch(self, body: dict) -> None:
         self._clear_collection_replay()
         tab = str(body.get("tab", "") or "debug")
-        armed = tab == "collect" and bool(body.get("collect_teleop_armed", False))
         self.ctx.active_tab = tab
-        self.ctx.runtime.collection_teleop_armed = armed
         self.ctx.session.last_error = ""
-        command_tab = "collect" if armed else ("debug" if tab == "collect" else tab)
-        self._enqueue_ok(f"web:tab_switch:{command_tab}")
+        self._enqueue_ok(f"web:tab_switch:{tab}")
+
+    def _post_collect_arm(self, body: dict) -> None:
+        enabled = bool(body.get("enabled", False))
+        if enabled:
+            self.ctx.active_tab = "collect"
+        self._enqueue_ok(f"web:collect_arm:{'on' if enabled else 'off'}")
 
     def _post_load_replay_dataset(self, body: dict) -> None:
         self._clear_collection_replay()
@@ -2292,8 +2815,10 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             )
             return
         task = str(body.get("task", ""))
+        collection_dataset = str(body.get("dataset", "")).strip() or None
         active_task = format_task_label(self.ctx.session.selected_collect_task)
-        if task != active_task:
+        active_set = self.ctx.session.selected_collect_set
+        if task != active_task or collection_dataset != active_set:
             self._send_json(
                 409,
                 {"ok": False, "error": "collection review task is no longer active"},
@@ -2304,6 +2829,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             episode,
             verdict,
             str(body.get("note", "")),
+            collection_dataset=collection_dataset,
         )
         if not ok:
             self._send_json(
@@ -2312,6 +2838,174 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             )
             return
         self._send_json(200, {"ok": True, "episode": episode, "verdict": verdict})
+
+    def _active_collection_dataset(self, body: dict) -> Path | None:
+        logger_obj = self.ctx.runtime.episode_logger
+        if logger_obj is None:
+            self._send_json(409, {"ok": False, "error": "collection recording is unavailable"})
+            return None
+        task = str(body.get("task", ""))
+        active_task = format_task_label(self.ctx.session.selected_collect_task)
+        collection_dataset = str(body.get("dataset", "")).strip() or None
+        active_set = self.ctx.session.selected_collect_set
+        if task != active_task or collection_dataset not in {None, active_set}:
+            self._send_json(
+                409,
+                {"ok": False, "error": "collection task is no longer active"},
+            )
+            return None
+        snapshot = _status_snapshot_for_poll(logger_obj, task, active_set)
+        dataset_dir = Path(str(snapshot.get("dataset_dir", ""))).resolve()
+        if not dataset_dir.is_dir():
+            self._send_json(404, {"ok": False, "error": "collection dataset is unavailable"})
+            return None
+        return dataset_dir
+
+    def _requested_dataset_format(self, body: dict) -> str | None:
+        dataset_format = body.get("dataset_format")
+        if not isinstance(dataset_format, str) or not dataset_format:
+            self._send_json(400, {"ok": False, "error": "dataset_format is required"})
+            return None
+        if dataset_format not in DATASET_EXPORT_FORMATS:
+            self._send_json(400, {"ok": False, "error": "unsupported dataset export format"})
+            return None
+        return dataset_format
+
+    def _post_collect_quality_export(self, body: dict) -> None:
+        dataset_dir = self._active_collection_dataset(body)
+        if dataset_dir is None:
+            return
+        dataset_format = self._requested_dataset_format(body)
+        if dataset_format is None:
+            return
+        accepted_dir, rejected_dir = _quality_export_paths(dataset_dir, dataset_format)
+        with self.ctx.quality_upload_lock:
+            if any(
+                existing.local_dir == str(accepted_dir) and existing.state in {"queued", "running"}
+                for existing in self.ctx.quality_upload_jobs.values()
+            ):
+                self._send_json(
+                    409,
+                    {"ok": False, "error": "dataset upload is already running"},
+                )
+                return
+            for existing in self.ctx.quality_export_jobs.values():
+                if (
+                    existing.source_dir == str(dataset_dir)
+                    and existing.dataset_format == dataset_format
+                    and existing.state in {"queued", "running"}
+                ):
+                    self._send_json(
+                        409,
+                        {"ok": False, "error": "dataset export is already running"},
+                    )
+                    return
+            _trim_finished_jobs(self.ctx.quality_export_jobs)
+            job_id = uuid.uuid4().hex
+            job = _QualityExportJob(
+                job_id=job_id,
+                source_dir=str(dataset_dir),
+                accepted_dir=str(accepted_dir),
+                rejected_dir=str(rejected_dir),
+                dataset_format=dataset_format,
+            )
+            self.ctx.quality_export_jobs[job_id] = job
+
+        threading.Thread(
+            target=_run_quality_export,
+            args=(
+                self.ctx,
+                job_id,
+                dataset_dir,
+                accepted_dir,
+                rejected_dir,
+                dataset_format,
+            ),
+            name=f"quality-export-{job_id[:8]}",
+            daemon=True,
+        ).start()
+        self._send_json(202, {"ok": True, **job.payload()})
+
+    def _post_collect_quality_upload(self, body: dict) -> None:
+        config = self.ctx.runtime.active_config or self.ctx.config
+        dataset_dir = self._active_collection_dataset(body)
+        if dataset_dir is None:
+            return
+        dataset_format = self._requested_dataset_format(body)
+        if dataset_format is None:
+            return
+        local_dir, _ = _quality_export_paths(dataset_dir, dataset_format)
+        with self.ctx.quality_upload_lock:
+            exports = [
+                job
+                for job in self.ctx.quality_export_jobs.values()
+                if job.source_dir == str(dataset_dir) and job.dataset_format == dataset_format
+            ]
+            latest_export = exports[-1] if exports else None
+            if (
+                latest_export is None
+                or latest_export.state != "completed"
+                or latest_export.accepted_dir != str(local_dir)
+            ):
+                self._send_json(
+                    409,
+                    {"ok": False, "error": "export the current dataset before upload"},
+                )
+                return
+        marker_path = local_dir / "meta" / "quality_split.json"
+        try:
+            marker = json.loads(marker_path.read_text())
+        except (OSError, ValueError):
+            logger.warning("Invalid accepted collection export marker", exc_info=True)
+            self._send_json(400, {"ok": False, "error": "invalid accepted export"})
+            return
+        if marker.get("subset") != "accepted":
+            self._send_json(400, {"ok": False, "error": "only accepted exports can be uploaded"})
+            return
+        if marker.get("dataset_format") != dataset_format:
+            self._send_json(400, {"ok": False, "error": "accepted export format mismatch"})
+            return
+        try:
+            marker_source = Path(str(marker.get("source_dir", ""))).resolve()
+        except (OSError, ValueError):
+            marker_source = Path()
+        if marker_source != dataset_dir:
+            self._send_json(400, {"ok": False, "error": "accepted export source mismatch"})
+            return
+
+        dataset_name = self.ctx.session.selected_collect_set or (
+            dataset_dir.parent.name if dataset_dir.name == "raw" else dataset_dir.name
+        )
+        upload_specs = resolve_dataset_uploads(config.collection.storage, dataset_name)
+        if not upload_specs:
+            self._send_json(409, {"ok": False, "error": "dataset upload is not configured"})
+            return
+        remote_dir = ", ".join(spec.target for spec in upload_specs)
+        with self.ctx.quality_upload_lock:
+            for existing in self.ctx.quality_upload_jobs.values():
+                if existing.local_dir == str(local_dir) and existing.state in {"queued", "running"}:
+                    self._send_json(
+                        409,
+                        {"ok": False, "error": "dataset upload is already running"},
+                    )
+                    return
+            _trim_finished_jobs(self.ctx.quality_upload_jobs)
+            job_id = uuid.uuid4().hex
+            job = _QualityUploadJob(
+                job_id=job_id,
+                local_dir=str(local_dir),
+                remote_dir=remote_dir,
+                backends=tuple(spec.backend for spec in upload_specs),
+            )
+            self.ctx.quality_upload_jobs[job_id] = job
+
+        threading.Thread(
+            target=_run_quality_upload,
+            args=(self.ctx, job_id, local_dir, upload_specs),
+            name=f"quality-upload-{job_id[:8]}",
+            daemon=True,
+        ).start()
+        self._send_json(202, {"ok": True, **job.payload()})
 
     def _post_annotate(self, body: dict) -> None:
         # Write/overwrite an episode's language annotation directly into the lerobot
@@ -2354,6 +3048,10 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
 _GET_ROUTES = {
     "/api/config": ConsoleRequestHandler._get_config,
     "/api/status": ConsoleRequestHandler._get_status,
+    "/api/episodes": ConsoleRequestHandler._get_episodes,
+    "/api/dashboard": ConsoleRequestHandler._get_dashboard,
+    "/api/collect_quality_export": ConsoleRequestHandler._get_collect_quality_export,
+    "/api/collect_quality_upload": ConsoleRequestHandler._get_collect_quality_upload,
     "/api/frame": ConsoleRequestHandler._get_frame,
     "/api/scene": ConsoleRequestHandler._get_scene,
     "/api/manual_scene": ConsoleRequestHandler._get_manual_scene,
@@ -2388,6 +3086,7 @@ _POST_COMMANDS = {
     "/api/step_commit": "web:step_commit",
     "/api/step_cancel": "web:step_cancel",
     "/api/manual_home": "web:manual_home",
+    "/api/collect_home": "web:collect_home",
     "/api/collect_stop": "web:collect_stop",
     "/api/collect_cancel": "web:collect_cancel",
     "/api/rollout_stop": "web:rollout_stop",
@@ -2423,9 +3122,12 @@ _POST_ROUTES = {
     "/api/select_collect_task": ConsoleRequestHandler._post_select_collect_task,
     "/api/select_episode": ConsoleRequestHandler._post_select_episode,
     "/api/tab_switch": ConsoleRequestHandler._post_tab_switch,
+    "/api/collect_arm": ConsoleRequestHandler._post_collect_arm,
     "/api/inspect_dataset": ConsoleRequestHandler._post_inspect_dataset,
     "/api/qc_mark": ConsoleRequestHandler._post_qc_mark,
     "/api/collect_qc_mark": ConsoleRequestHandler._post_collect_qc_mark,
+    "/api/collect_quality_export": ConsoleRequestHandler._post_collect_quality_export,
+    "/api/collect_quality_upload": ConsoleRequestHandler._post_collect_quality_upload,
     "/api/annotate": ConsoleRequestHandler._post_annotate,
     "/api/episode_annotation": ConsoleRequestHandler._post_episode_annotation,
     "/api/load_replay_dataset": ConsoleRequestHandler._post_load_replay_dataset,
@@ -2485,6 +3187,7 @@ def build_console_context(
         session=session,
         obs_reader=runtime.transport.create_observation_reader() if with_obs_reader else None,
         scene=scene,
+        active_tab=_resolve_initial_tab(config),
         output_dir=output_dir,
     )
     # RESULT-tab playback reads recorded episodes under <output_dir>/episodes.

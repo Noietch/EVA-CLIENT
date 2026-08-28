@@ -1,0 +1,4 @@
+interface:
+  display_name: "Calibrate Cameras"
+  short_description: "Tune exposure and white balance interactively"
+  default_prompt: "Use $calibrate-cameras to evaluate and tune these robot cameras with confirmed live access."

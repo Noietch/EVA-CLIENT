@@ -3,17 +3,32 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import logging
 import queue
+import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
-from core.app.collection_capture import start_collection_capture, stop_collection_capture
+from core.app.collection_capture import (
+    prepare_collection_capture,
+    start_collection_capture,
+    stop_collection_capture,
+)
 from core.app.handlers.imaging import prepare_image
+from core.app.handlers.teleop import (
+    TELEOP_CONTROL_SOURCE_CLIENT,
+    PublishedTeleopAction,
+    activate_rollout_teleop,
+    activate_teleop,
+    deactivate_rollout_teleop,
+    deactivate_teleop,
+)
 from core.app.handlers.utils import _resolve_runtime_path
 from core.app.rl import record_rl_sample
 from core.app.state import (
@@ -27,12 +42,195 @@ from core.config import ConfigDict
 from core.recorder.episode import EpisodeLogger, sanitize_path_component
 from core.recorder.lerobot_meta import history_row
 from core.types import Observation, RolloutInterventionSegment
+from transport.base import HilStatus
 
 logger = logging.getLogger(__name__)
 
 
 COLLECT_STEP_MAX_RAW_SNAPSHOTS = 16
 ROLLOUT_STEP_MAX_RAW_SNAPSHOTS = 1
+ROLLOUT_INTERVENTION_SOURCE_TRANSPORT = "transport"
+ROLLOUT_INTERVENTION_SOURCE_CLIENT = "teleop_client"
+
+
+# ``episodes.jsonl`` is append-only for normal saves, but it is also rewritten by
+# QC/annotation updates. Cache the projected rows by file signature so the history
+# endpoint can serve repeated reads without reparsing the whole dataset. The cache
+# is deliberately process-local: the console server and the recorder share this
+# process, while a changed mtime/size invalidates an entry automatically.
+_EPISODE_HISTORY_CACHE_MAX = 32
+_EPISODE_HISTORY_CACHE_LOCK = threading.RLock()
+
+
+@dataclass
+class _EpisodeHistoryCacheEntry:
+    signature: tuple[int, int, int]
+    version: str
+    rows: list[dict[str, Any]]
+    views: dict[str | None, tuple[list[dict[str, Any]], list[str]]]
+
+
+_EPISODE_HISTORY_CACHE: dict[Path, _EpisodeHistoryCacheEntry] = {}
+_EPISODE_HISTORY_COUNT_CACHE: dict[Path, tuple[tuple[int, int, int], str, int]] = {}
+
+
+def _episode_history_signature(path: Path) -> tuple[int, int, int]:
+    try:
+        stat = path.stat()
+    except OSError:
+        return (0, 0, 0)
+    return (int(stat.st_ino), int(stat.st_mtime_ns), int(stat.st_size))
+
+
+def _episode_history_version(signature: tuple[int, int, int]) -> str:
+    return "-".join(f"{value:x}" for value in signature)
+
+
+def _json_object(line: str) -> dict[str, Any] | None:
+    line = line.strip()
+    if not line:
+        return None
+    try:
+        value = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _iter_json_objects(path: Path):
+    try:
+        stream = path.open()
+    except OSError:
+        return
+    with stream:
+        for line in stream:
+            row = _json_object(line)
+            if row is not None:
+                yield row
+
+
+def _read_episode_history_rows(path: Path) -> list[dict[str, Any]]:
+    """Read and project one dataset history, tolerating a partial append line."""
+    return [history_row(row, index) for index, row in enumerate(_iter_json_objects(path))]
+
+
+def _episode_history_cursors(rows: list[dict[str, Any]]) -> list[str]:
+    """Build stable cursors for every visible prefix in one pass."""
+    digest = hashlib.blake2s(digest_size=12)
+    cursors = [digest.hexdigest()]
+    for row in rows:
+        payload = json.dumps(
+            row, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode()
+        digest.update(payload)
+        digest.update(b"\n")
+        cursors.append(digest.hexdigest())
+    return cursors
+
+
+def _count_episode_history(dataset_dir: Path) -> tuple[int, str]:
+    """Count valid metadata rows without allocating the web history projection."""
+    resolved = Path(dataset_dir).resolve()
+    path = resolved / "meta" / "episodes.jsonl"
+    signature = _episode_history_signature(path)
+    with _EPISODE_HISTORY_CACHE_LOCK:
+        cached_rows = _EPISODE_HISTORY_CACHE.get(resolved)
+        if cached_rows is not None and cached_rows.signature == signature:
+            return len(cached_rows.rows), cached_rows.version
+        cached_count = _EPISODE_HISTORY_COUNT_CACHE.get(resolved)
+        if cached_count is not None and cached_count[0] == signature:
+            return cached_count[2], cached_count[1]
+        count = sum(1 for _ in _iter_json_objects(path))
+        version = _episode_history_version(signature)
+        _EPISODE_HISTORY_COUNT_CACHE[resolved] = (signature, version, count)
+        while len(_EPISODE_HISTORY_COUNT_CACHE) > _EPISODE_HISTORY_CACHE_MAX:
+            _EPISODE_HISTORY_COUNT_CACHE.pop(next(iter(_EPISODE_HISTORY_COUNT_CACHE)))
+        return count, version
+
+
+def load_episode_history(
+    dataset_dir: Path,
+    *,
+    task: str | None = None,
+    since: int = 0,
+    limit: int | None = None,
+    cursor: str | None = None,
+    exclude_episode_indices: set[int] | None = None,
+) -> dict[str, Any]:
+    """Return a cached, offset-paginated episode history projection.
+
+    ``task`` is applied before pagination, so ``since`` is the number of matching
+    rows already held by the caller (an offset, not an episode id). This remains
+    correct when episode ids have gaps or a QC update rewrites an existing row.
+    The returned ``version`` lets a client reset the cursor when an old row was edited.
+    """
+    resolved = Path(dataset_dir).resolve()
+    path = resolved / "meta" / "episodes.jsonl"
+    signature = _episode_history_signature(path)
+    if limit == 0 and task is None and not cursor and not exclude_episode_indices:
+        total, version = _count_episode_history(resolved)
+        offset = min(max(0, int(since)), total)
+        return {
+            "episodes": [],
+            "total": total,
+            "since": offset,
+            "next_since": offset,
+            "has_more": offset < total,
+            "version": version,
+            "cursor": "",
+            "reset": False,
+        }
+    with _EPISODE_HISTORY_CACHE_LOCK:
+        cached = _EPISODE_HISTORY_CACHE.get(resolved)
+        if cached is None or cached.signature != signature:
+            rows = _read_episode_history_rows(path)
+            cached = _EpisodeHistoryCacheEntry(
+                signature,
+                _episode_history_version(signature),
+                rows,
+                {None: (rows, _episode_history_cursors(rows))},
+            )
+            _EPISODE_HISTORY_CACHE[resolved] = cached
+            _EPISODE_HISTORY_COUNT_CACHE[resolved] = (
+                signature,
+                cached.version,
+                len(rows),
+            )
+            while len(_EPISODE_HISTORY_CACHE) > _EPISODE_HISTORY_CACHE_MAX:
+                _EPISODE_HISTORY_CACHE.pop(next(iter(_EPISODE_HISTORY_CACHE)))
+            while len(_EPISODE_HISTORY_COUNT_CACHE) > _EPISODE_HISTORY_CACHE_MAX:
+                _EPISODE_HISTORY_COUNT_CACHE.pop(next(iter(_EPISODE_HISTORY_COUNT_CACHE)))
+        view = cached.views.get(task)
+        if view is None:
+            filtered_rows = [row for row in cached.rows if str(row.get("task", "")) == task]
+            view = (filtered_rows, _episode_history_cursors(filtered_rows))
+            cached.views[task] = view
+
+    filtered_rows, cursors = view
+    if exclude_episode_indices:
+        filtered_rows = [
+            row for row in filtered_rows if row.get("episode_index") not in exclude_episode_indices
+        ]
+        cursors = _episode_history_cursors(filtered_rows)
+    total = len(filtered_rows)
+    offset = min(max(0, int(since)), total)
+    reset = bool(cursor) and cursor != cursors[offset]
+    if reset:
+        offset = 0
+    if limit is None:
+        end = total
+    else:
+        end = min(total, offset + max(0, int(limit)))
+    return {
+        "episodes": filtered_rows[offset:end],
+        "total": total,
+        "since": offset,
+        "next_since": end,
+        "has_more": end < total,
+        "version": cached.version,
+        "cursor": cursors[end],
+        "reset": reset,
+    }
 
 
 def state_to_eef(config: ConfigDict, runtime: RuntimeState, qpos_state: np.ndarray) -> np.ndarray:
@@ -170,6 +368,45 @@ def _gripper_recording_config(
     )
 
 
+def rollout_intervention_source(config: ConfigDict) -> str:
+    teleop_cfg = (config.get("collection") or {}).get("teleop") or {}
+    if str(teleop_cfg.get("control_source", "")) == TELEOP_CONTROL_SOURCE_CLIENT:
+        return ROLLOUT_INTERVENTION_SOURCE_CLIENT
+    rl_cfg = config.get("rl")
+    if rl_cfg is not None:
+        rl_intervention = rl_cfg.get("intervention") or {}
+        source = rl_intervention.get("source")
+        if source:
+            return str(source)
+    rollout_cfg = config.get("rollout") or {}
+    rollout_intervention = rollout_cfg.get("intervention") or {}
+    source = rollout_intervention.get("source")
+    if source:
+        return str(source)
+    return ROLLOUT_INTERVENTION_SOURCE_TRANSPORT
+
+
+def rollout_hil_status(config: ConfigDict, runtime: RuntimeState) -> HilStatus:
+    source = rollout_intervention_source(config)
+    if source != ROLLOUT_INTERVENTION_SOURCE_CLIENT:
+        return runtime.transport.hil_status()
+    execution = getattr(runtime, "teleop_execution", None)
+    client = getattr(runtime, "teleop_client", None)
+    if execution is None or execution.control_source != TELEOP_CONTROL_SOURCE_CLIENT:
+        return HilStatus(supported=False, error="Teleop client control is not configured")
+    if client is None:
+        return HilStatus(supported=False, error="Teleop client is unavailable")
+    status = client.status()
+    error = status.source_error
+    if not status.connected and not error:
+        error = "Teleop client is not connected"
+    return HilStatus(
+        supported=True,
+        active=bool(runtime.rollout_intervention_active and execution.active and status.connected),
+        error=error,
+    )
+
+
 def resolve_storage(config: ConfigDict) -> ConfigDict | None:
     """Return the active recording storage block: ``eval.storage`` for eval configs,
     else ``collection.storage`` for collection configs, else None (no recording).
@@ -212,6 +449,7 @@ def maybe_build_episode_logger(config: ConfigDict, runtime: RuntimeState) -> Non
         gripper_open=gripper_open,
         gripper_close=gripper_close,
         gripper_threshold=gripper_threshold,
+        eef_reference_frame=config.robot.eef_reference_frame,
     )
 
 
@@ -233,18 +471,32 @@ def rollout_save_log_dir(config: ConfigDict, runtime: RuntimeState | None = None
 
 def maybe_build_rollout_episode_logger(config: ConfigDict, runtime: RuntimeState) -> None:
     """Construct the rollout EpisodeLogger when explicit rollout saving is enabled."""
-    storage = config.rollout.storage
-    if not storage.enabled or runtime.rollout_episode_logger is not None:
+    storage = _rollout_storage(config, runtime)
+    if not bool(storage.get("enabled", True)):
+        logger_obj = runtime.rollout_episode_logger
+        runtime.rollout_episode_logger = None
+        if logger_obj is not None:
+            if logger_obj.has_active_episode:
+                logger_obj.cancel_episode("rollout storage disabled")
+            logger_obj.finalize()
         return
+    dataset_path = rollout_save_log_dir(config, runtime)
+    logger_obj = runtime.rollout_episode_logger
+    if logger_obj is not None and Path(logger_obj._log_dir).resolve() == dataset_path.resolve():
+        return
+    if logger_obj is not None:
+        if logger_obj.has_active_episode:
+            logger_obj.cancel_episode("rollout dataset changed")
+        logger_obj.finalize()
     gripper_open, gripper_close, gripper_threshold = _gripper_recording_config(config)
     runtime.rollout_episode_logger = EpisodeLogger(
-        log_dir=rollout_save_log_dir(config),
+        log_dir=dataset_path,
         robot=runtime.robot,
         fps=storage.fps,
         dataset_keys=config.transport.dataset_keys,
         convert_bgr_to_rgb=config.transport.convert_bgr_to_rgb,
         collection=None,
-        async_save=True,
+        async_save=bool(storage.get("async_save", True)),
         save_queue_max=storage.save_queue_max,
         save_image_height=storage.get("image_height"),
         save_image_width=storage.get("image_width"),
@@ -276,7 +528,7 @@ def begin_rollout_save_episode(
     runtime.rollout_exclusions = []
     runtime.rollout_raw_snapshots = queue.Queue()
     runtime.rollout_policy_actions = []
-    runtime.transport.start_collection()
+    runtime.transport.start_policy_collection()
     runtime.transport.clear_collection_backlog()
     logger_obj.start_episode(task=format_task_label(session.selected_task))
     start_collection_capture(
@@ -340,7 +592,9 @@ def save_rollout_episode(runtime: RuntimeState, session: SessionState) -> bool:
         session.last_error = "Stop or reset before saving the rollout"
         return False
     stop_collection_capture(runtime)
-    logger_obj.release_unused_memory()
+    release_memory = getattr(logger_obj, "release_unused_memory", None)
+    if release_memory is not None:
+        release_memory()
     runtime.transport.stop_collection()
     _close_rollout_exclusion(runtime, time.time())
     intervention_ranges = []
@@ -445,18 +699,8 @@ def discard_rollout_episode(runtime: RuntimeState) -> None:
 
 
 def _load_saved_episode_history(dataset_dir: Path) -> list[dict[str, Any]]:
-    history = []
-    path = dataset_dir / "meta" / "episodes.jsonl"
-    if not path.exists():
-        return history
-    with path.open() as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            row = json.loads(line)
-            history.append(history_row(row, len(history)))
-    return history
+    """Return the complete projected history, cached by ``episodes.jsonl`` signature."""
+    return load_episode_history(dataset_dir)["episodes"]
 
 
 def _rollout_intervention_save_status(runtime: RuntimeState) -> dict[str, Any]:
@@ -469,64 +713,69 @@ def _rollout_intervention_save_status(runtime: RuntimeState) -> dict[str, Any]:
     }
 
 
-def rollout_save_status(config: ConfigDict, runtime: RuntimeState) -> dict[str, Any]:
-    """Return queue/progress state for the rollout save panel."""
+def rollout_save_status(
+    config: ConfigDict,
+    runtime: RuntimeState,
+    *,
+    include_history: bool = True,
+) -> dict[str, Any]:
+    """Return queue/progress state for the rollout save panel.
+
+    The high-frequency console status poll passes ``include_history=False`` so
+    serializing the live pipeline never reads or embeds the complete history. The
+    default remains the original full snapshot for direct callers and tests.
+    """
     dataset_path = rollout_save_log_dir(config, runtime)
-    dataset_dir = str(dataset_path)
-    saved_history = _load_saved_episode_history(dataset_path)
+    if include_history:
+        saved_history = _load_saved_episode_history(dataset_path)
+        completed_episodes = len(saved_history)
+    else:
+        saved_history = []
+        completed_episodes = load_episode_history(dataset_path, limit=0)["total"]
     logger_obj = runtime.rollout_episode_logger
+    if logger_obj is not None and Path(logger_obj._log_dir).resolve() != dataset_path.resolve():
+        logger_obj = None
     storage = _rollout_storage(config, runtime)
-    if not bool(storage.get("enabled", True)):
-        return {
-            "enabled": False,
-            "dataset_dir": dataset_dir,
-            "pipeline_state": "DISABLED",
-            "collecting": False,
-            "current_episode_frames": 0,
-            "completed_episodes": 0,
-            "save_queue_size": 0,
-            "save_queue_max": storage.save_queue_max,
-            "progress": 0.0,
-            "eta_sec": None,
-            "episodes": saved_history,
-            "queue": [],
-            "save_ready": False,
-            "reason": "",
-            **_rollout_intervention_save_status(runtime),
-        }
-    if logger_obj is None:
-        return {
-            "enabled": True,
-            "dataset_dir": dataset_dir,
-            "pipeline_state": "IDLE",
-            "collecting": False,
-            "current_episode_frames": 0,
-            "completed_episodes": len(saved_history),
-            "save_queue_size": 0,
-            "save_queue_max": storage.save_queue_max,
-            "progress": 1.0 if saved_history else 0.0,
-            "eta_sec": None,
-            "episodes": saved_history,
-            "queue": [],
-            "save_ready": False,
-            "reason": "",
-            **_rollout_intervention_save_status(runtime),
-        }
-    snapshot = logger_obj.status_snapshot()
-    snapshot["enabled"] = True
-    snapshot["dataset_dir"] = dataset_dir
-    snapshot["episodes"] = saved_history
-    snapshot["completed_episodes"] = len(saved_history)
-    buffered_frames = (
-        logger_obj.active_frame_count
-        + len(runtime.rollout_policy_actions)
-        + runtime.rollout_raw_snapshots.qsize()
-    )
-    snapshot["save_ready"] = bool(runtime.rollout_save_ready and buffered_frames > 0)
-    snapshot["reason"] = runtime.rollout_save_reason
-    if snapshot["save_ready"]:
-        snapshot["pipeline_state"] = "READY_TO_SAVE"
-        snapshot["collecting"] = False
+    snapshot = {
+        "enabled": bool(storage.get("enabled", True)),
+        "dataset_dir": str(dataset_path),
+        "pipeline_state": "IDLE",
+        "collecting": False,
+        "current_episode_frames": 0,
+        "completed_episodes": completed_episodes,
+        "save_queue_size": 0,
+        "save_queue_max": storage.save_queue_max,
+        "progress": 1.0 if completed_episodes else 0.0,
+        "eta_sec": None,
+        "queue": [],
+        "save_ready": False,
+        "reason": "",
+    }
+    if include_history:
+        snapshot["episodes"] = saved_history
+    if not snapshot["enabled"]:
+        snapshot["pipeline_state"] = "DISABLED"
+        snapshot["completed_episodes"] = 0
+        snapshot["progress"] = 0.0
+    elif logger_obj is not None:
+        snapshot = logger_obj.status_snapshot(include_history=include_history)
+        snapshot["enabled"] = True
+        snapshot["dataset_dir"] = str(dataset_path)
+        snapshot["completed_episodes"] = completed_episodes
+        if include_history:
+            snapshot["episodes"] = saved_history
+        else:
+            snapshot.pop("episodes", None)
+        buffered_frames = (
+            logger_obj.active_frame_count
+            + len(runtime.rollout_policy_actions)
+            + runtime.rollout_raw_snapshots.qsize()
+        )
+        snapshot["save_ready"] = bool(runtime.rollout_save_ready and buffered_frames > 0)
+        snapshot["reason"] = runtime.rollout_save_reason
+        if snapshot["save_ready"]:
+            snapshot["pipeline_state"] = "READY_TO_SAVE"
+            snapshot["collecting"] = False
     snapshot.update(_rollout_intervention_save_status(runtime))
     return snapshot
 
@@ -572,8 +821,8 @@ def eval_model_name(config: ConfigDict, runtime: RuntimeState | None) -> str:
 
 
 def eval_episode_dir(output_dir: str, model_name: str) -> Path:
-    """<output_dir>/<model_name>/episodes — the per-model eval lerobot dataset root."""
-    return Path(output_dir) / sanitize_path_component(model_name) / "episodes"
+    """Return the raw per-model eval dataset, isolated from future exports."""
+    return Path(output_dir) / sanitize_path_component(model_name) / "episodes" / "raw"
 
 
 def rebuild_eval_episode_logger(config: ConfigDict, runtime: RuntimeState) -> None:
@@ -619,11 +868,13 @@ def rebuild_eval_episode_logger(config: ConfigDict, runtime: RuntimeState) -> No
 def start_episode(runtime: RuntimeState, session: SessionState) -> None:
     """Begin one episode = one inference run (status -> RUNNING)."""
     if runtime.episode_logger is not None:
+        prepare_collection_capture(runtime, runtime.episode_logger)
         runtime.episode_logger.start_episode(task=format_task_label(session.selected_task))
 
 
 def end_episode(runtime: RuntimeState) -> None:
     """Close the current episode, flushing parquet + mp4 to the dataset."""
+    stop_collection_capture(runtime)
     if runtime.episode_logger is not None:
         runtime.episode_logger.end_episode()
 
@@ -637,9 +888,14 @@ def start_rollout_intervention(
     if not runtime.rollout_intervention_enabled:
         session.last_error = "Rollout HIL is off"
         return False
-    hil_status = runtime.transport.hil_status()
-    if not hil_status.supported:
-        session.last_error = hil_status.error or "Transport does not support HIL"
+    source = rollout_intervention_source(config)
+    hil_status = rollout_hil_status(config, runtime)
+    if not hil_status.supported or hil_status.error:
+        session.last_error = hil_status.error or (
+            "Teleop client is unavailable"
+            if source == ROLLOUT_INTERVENTION_SOURCE_CLIENT
+            else "Transport does not support HIL"
+        )
         return False
     pre_qpos = runtime.transport.get_latest_qpos()
     if pre_qpos is None:
@@ -648,10 +904,14 @@ def start_rollout_intervention(
     # Keep the raw capture runner active through HIL so camera streams remain continuous.
     if runtime.infer_strategy is not None:
         runtime.infer_strategy.reset()
-    started = runtime.transport.start_hil_control(runtime.hil_control_mode)
-    if not started.supported or not started.active or started.error:
-        session.last_error = started.error or "HIL takeover did not activate"
-        return False
+    if source == ROLLOUT_INTERVENTION_SOURCE_CLIENT:
+        if not activate_rollout_teleop(config, runtime, session):
+            return False
+    else:
+        started = runtime.transport.start_hil_control(runtime.hil_control_mode)
+        if not started.supported or not started.active or started.error:
+            session.last_error = started.error or "HIL takeover did not activate"
+            return False
     intervention_start_time = time.time()
     _close_rollout_exclusion(runtime, intervention_start_time)
     runtime.rollout_intervention_pre_qpos = np.asarray(pre_qpos, dtype=np.float32).copy()
@@ -682,10 +942,20 @@ def stop_rollout_intervention(
     """Disable rollout teleop takeover before policy resume or cleanup."""
     if not runtime.rollout_intervention_active:
         return True
-    stopped = runtime.transport.stop_hil_control()
-    if required and (stopped.active or stopped.error):
-        session.last_error = stopped.error or "HIL takeover did not stop"
-        return False
+    if rollout_intervention_source(config) == ROLLOUT_INTERVENTION_SOURCE_CLIENT:
+        try:
+            deactivate_rollout_teleop(runtime)
+        except Exception as error:
+            session.last_error = f"Teleop takeover did not stop: {error}"
+            if required:
+                return False
+            logger.warning("Rollout teleop cleanup failed during optional stop: %s", error)
+            return False
+    else:
+        stopped = runtime.transport.stop_hil_control()
+        if required and (stopped.active or stopped.error):
+            session.last_error = stopped.error or "HIL takeover did not stop"
+            return False
     runtime.rollout_intervention_active = False
     logger.info(
         "Rollout teleop intervention stopped queued_raw_snapshots=%d",
@@ -754,6 +1024,38 @@ def record_rollout_intervention_step(runtime: RuntimeState, session: SessionStat
     if frame is None:
         return False
     return _record_rollout_intervention_frame(runtime, session, frame)
+
+
+def record_client_rollout_intervention_step(
+    config: ConfigDict,
+    runtime: RuntimeState,
+    session: SessionState,
+    published: PublishedTeleopAction,
+) -> bool:
+    """Record one client-driven RL intervention step into the active rollout segment."""
+    if not runtime.rollout_intervention_active:
+        return False
+    segment = runtime.rollout_intervention_active_segment
+    if segment is None or segment.invalid_reason:
+        return False
+    frame = runtime.transport.get_frame()
+    if frame is None:
+        return False
+    recorded = _copy_observation(frame)
+    if recorded.timestamp is None or recorded.timestamp <= 0.0:
+        recorded.timestamp = time.time()
+    recorded.action_qpos = published.qpos.copy()
+    if recorded.state_qpos is None:
+        latest_qpos = runtime.transport.get_latest_qpos()
+        if latest_qpos is not None:
+            recorded.state_qpos = np.asarray(latest_qpos, dtype=np.float32).copy()
+    try:
+        _fill_record_eef(config, runtime, recorded, published.qpos)
+    except Exception as error:
+        segment.invalid_reason = f"Intervention frame EEF derivation failed: {error}"
+        session.last_error = segment.invalid_reason
+        return False
+    return _record_rollout_intervention_frame(runtime, session, recorded)
 
 
 def accept_rollout_intervention_segment(runtime: RuntimeState, session: SessionState) -> bool:
@@ -852,15 +1154,7 @@ def collect_start_teleop(config: ConfigDict, runtime: RuntimeState, session: Ses
 
 def collect_stop_teleop(config: ConfigDict, runtime: RuntimeState, session: SessionState) -> None:
     """Leave collect teleoperation; callers close any active recording episode first."""
-    stop_collection_capture(runtime)
-    runtime.transport.set_hil_relay_enabled(False)
-    runtime.transport.stop_collection()
-    runtime.collection_teleop_active = False
-    runtime.last_collection_timestamp = None
-    if session.mode is SessionMode.COLLECT and session.status is not SessionStatus.RUNNING:
-        session.status = SessionStatus.UNSET
-    logger.info("Collection teleop stopped")
-    _ = config
+    deactivate_teleop(config, runtime, session)
 
 
 def collect_start(config: ConfigDict, runtime: RuntimeState, session: SessionState) -> bool:
@@ -877,18 +1171,59 @@ def collect_start(config: ConfigDict, runtime: RuntimeState, session: SessionSta
     runtime.collection_replay_qpos = None
     runtime.collection_replay_episode = None
     if runtime.episode_logger.is_collection_enabled:
-        if not collect_start_teleop(config, runtime, session):
+        if not activate_teleop(config, runtime, session):
             return False
-        collection_min_capture_time = runtime.transport.clear_collection_backlog()
-        runtime.episode_logger.start_episode(
-            task=format_task_label(session.selected_collect_task),
-            collection_min_capture_time=collection_min_capture_time,
-        )
-        start_collection_capture(
-            runtime,
-            fps=config.inference_cfg.publish_rate,
-            max_raw_snapshots_per_tick=COLLECT_STEP_MAX_RAW_SNAPSHOTS,
-        )
+        logger_obj = runtime.episode_logger
+        try:
+            collection_min_capture_time = runtime.transport.clear_collection_backlog()
+            logger_obj.start_episode(
+                task=format_task_label(session.selected_collect_task),
+                collection_min_capture_time=collection_min_capture_time,
+                collection_dataset=session.selected_collect_set,
+            )
+            control_source = str(
+                (config.collection.teleop or {}).get("control_source", "transport")
+            )
+            if control_source == "transport":
+                start_collection_capture(
+                    runtime,
+                    fps=config.inference_cfg.publish_rate,
+                    max_raw_snapshots_per_tick=COLLECT_STEP_MAX_RAW_SNAPSHOTS,
+                )
+        except Exception as error:
+            # The episode may have been opened before capture startup failed. Cancel it
+            # first, then use the same idempotent teleop shutdown as normal deactivation.
+            cleanup_errors: list[Exception] = []
+            try:
+                episode_active = bool(getattr(logger_obj, "has_active_episode", False))
+            except Exception as active_error:
+                episode_active = False
+                cleanup_errors.append(active_error)
+            if episode_active:
+                try:
+                    logger_obj.cancel_episode("collection start failed")
+                except Exception as cancel_error:
+                    cleanup_errors.append(cancel_error)
+                    logger.error(
+                        "Failed to cancel collection episode after start failure: %s",
+                        cancel_error,
+                        exc_info=True,
+                    )
+            try:
+                # This single path stops capture (if it started), disables the relay,
+                # and stops transport collection. The input worker remains available
+                # for a later ARM command.
+                deactivate_teleop(config, runtime, session)
+            except Exception as deactivate_error:
+                cleanup_errors.append(deactivate_error)
+            message = f"Collection start failed: {error}"
+            if cleanup_errors:
+                message += "; cleanup failed: " + "; ".join(
+                    str(cleanup_error) for cleanup_error in cleanup_errors
+                )
+            session.last_error = message
+            logger.exception("Collection start failed")
+            return False
     else:
         runtime.episode_logger.start_episode(task=format_task_label(session.selected_collect_task))
     session.step_index = 0
@@ -918,6 +1253,34 @@ def collect_step(config: ConfigDict, runtime: RuntimeState) -> bool:
         return False
     _fill_record_eef(config, runtime, frame, action)
     runtime.episode_logger.record_step(frame, action)
+    return True
+
+
+def ingest_client_teleop_action(
+    config: ConfigDict,
+    runtime: RuntimeState,
+    published: PublishedTeleopAction,
+) -> bool:
+    """Capture one high-rate client action and at most one raw observation snapshot.
+
+    Actions retain their control-loop timestamps as an independent stream. Raw
+    state/camera snapshots remain at the execution endpoint's observation rate; the
+    collection aligner later interpolates both streams onto collection.storage.fps.
+    The call is intentionally single-shot and non-blocking.
+    """
+    del config
+    logger_obj = runtime.episode_logger
+    if (
+        logger_obj is None
+        or not logger_obj.is_collection_enabled
+        or not logger_obj.has_active_episode
+    ):
+        return False
+    logger_obj.ingest_collection_action(published.timestamp, published.qpos)
+    snapshot = runtime.transport.acquire_collection_raw()
+    if snapshot is None:
+        return False
+    logger_obj.ingest_collection_client_snapshot(snapshot)
     return True
 
 
@@ -992,7 +1355,9 @@ def record_executed_action(
     runner = getattr(runtime, "collection_capture_runner", None)
     rollout_timestamp = None
     if rollout_logger in loggers:
-        rollout_timestamp = time.time()
+        rollout_timestamp = runtime.last_collection_timestamp
+        if rollout_timestamp is None:
+            rollout_timestamp = time.time()
         _close_rollout_exclusion(runtime, rollout_timestamp)
     if rollout_logger in loggers and runner is None:
         assert rollout_logger is not None
@@ -1048,6 +1413,7 @@ __all__ = [
     "_fill_record_eef",
     "build_policy_observation",
     "resolve_storage",
+    "load_episode_history",
     "maybe_build_episode_logger",
     "rollout_save_log_dir",
     "maybe_build_rollout_episode_logger",
@@ -1065,7 +1431,10 @@ __all__ = [
     "end_episode",
     "start_rollout_intervention",
     "stop_rollout_intervention",
+    "rollout_hil_status",
+    "rollout_intervention_source",
     "record_rollout_intervention_step",
+    "record_client_rollout_intervention_step",
     "accept_rollout_intervention_segment",
     "discard_rollout_intervention_segment",
     "rollback_rollout_intervention",
@@ -1073,6 +1442,7 @@ __all__ = [
     "collect_stop_teleop",
     "collect_start",
     "collect_step",
+    "ingest_client_teleop_action",
     "collect_stop",
     "collect_cancel",
     "_active_loggers",

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Debug Robot SDK"
+  short_description: "Validate robot SDKs with explicit safety gates"
+  default_prompt: "Use $debug-robot-sdk to validate this robot SDK from offline import to a confirmed bounded motion probe."

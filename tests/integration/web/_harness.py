@@ -192,7 +192,13 @@ class WebHarness:
             except queue.Empty:
                 break
             effective = self.runtime.active_config or self.config
-            app.handle_command(cmd, effective, self.runtime, self.session)
+            app.handle_command(
+                cmd,
+                effective,
+                self.runtime,
+                self.session,
+                base_config=self.config,
+            )
             if self.runtime.prompt_ready is not None:
                 self.runtime.prompt_ready.set()
 
@@ -257,6 +263,10 @@ def console_config(**overrides: Any) -> ConfigDict:
     cfg.policy.backend_options = ConfigDict(dict(chunk_size=8))
     cfg.inference_cfg.publish_rate = 1000
     cfg.inference_cfg.debug_tasks = ("pick up the cup", "pour soybean")
+    cfg.collection.tasks = ConfigDict(
+        cup_set=[("pick up cup", 10), ("place cup", -1)],
+        pouring_set=[("pour soybean", 20)],
+    )
     cfg.inference_strategies = ConfigDict(SYNC_STRATEGY)
 
     if "supported_inference_strategies" in overrides:

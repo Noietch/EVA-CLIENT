@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from functools import cache
 from pathlib import Path
 
 STATIC_DIR = Path(__file__).resolve().parents[3] / "src" / "core" / "app" / "console" / "static"
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
+@cache
 def console_source() -> str:
     """Concatenate the console markup, styles, and all ES modules into one string.
 
@@ -19,6 +21,16 @@ def console_source() -> str:
     parts += [p.read_text() for p in sorted(STATIC_DIR.glob("js/*.js"))]
     parts += [p.read_text() for p in sorted(STATIC_DIR.glob("css/*.css"))]
     return "\n".join(parts)
+
+
+def _assert_contains_all(source: str, *snippets: str) -> None:
+    for snippet in snippets:
+        assert snippet in source
+
+
+def _assert_contains_none(source: str, *snippets: str) -> None:
+    for snippet in snippets:
+        assert snippet not in source
 
 
 def test_replay_perf_probe_measures_from_user_click_to_visible_videos():
@@ -73,6 +85,13 @@ def test_replay_and_review_cells_show_real_video_poster_before_video_canplay():
     assert ".cam-cell.video-ready .cam-video" in html
 
 
+def test_replay_and_review_accept_any_nonempty_camera_set():
+    html = console_source()
+
+    assert "return videos.length > 0 && videos.every((v) => !v.error && v.readyState >= 3);" in html
+    assert "return videos.length > 0 && videos.every((v) => !v.error);" in html
+
+
 def test_video_loading_overlay_does_not_cover_loaded_poster():
     html = console_source()
     start = html.index("function setVideosLoading(videos, on, text)")
@@ -108,12 +127,119 @@ def test_live_camera_streams_do_not_block_page_load_or_reload():
     assert 'video.removeAttribute("src");' in html
 
 
+def test_status_heartbeat_is_slow_bounded_and_single_flight():
+    html = console_source()
+
+    assert "const STATUS_POLL_MS = 1000;" in html
+    assert "const STATUS_REQUEST_TIMEOUT_MS = 1500;" in html
+    assert 'apiGet("/api/status", { timeoutMs: STATUS_REQUEST_TIMEOUT_MS })' in html
+    assert "const tick = async () => { await fn(); setTimeout(tick, delay); };" in html
+    assert "const API_GET_TIMEOUT_MS = 5000;" in html
+    assert "new AbortController()" in html
+
+
+def test_live_camera_streams_only_run_for_visible_stage_tabs():
+    html = console_source()
+
+    assert 'const LIVE_STAGE_TABS = new Set(["debug", "manual", "collect", "eval", "rl"]);' in html
+    assert "return !document.hidden && LIVE_STAGE_TABS.has(S.ACTIVE_TAB);" in html
+    assert "if (!liveStageActive())" in html
+    assert 'document.addEventListener("visibilitychange", handleVisibilityChange);' in html
+    assert "handleVisibilityChange, liveStageActive" in html
+
+
+def test_episode_history_is_loaded_outside_the_status_heartbeat():
+    html = console_source()
+
+    _assert_contains_all(
+        html,
+        "episodeHistory:",
+        "const EPISODE_HISTORY_POLL_MS = 5000;",
+        "const EPISODE_HISTORY_PAGE_SIZE = 128;",
+        "new URLSearchParams({",
+        "scope,",
+        "since: String(Math.max(0, Number(since) || 0))",
+        "limit: String(EPISODE_HISTORY_PAGE_SIZE)",
+        'params.set("cursor", cursor)',
+        "while (hasMore)",
+        'throw new Error("episode history cursor stalled")',
+        'if (scope !== "collect" && currentStatusDir !== statusDir) return;',
+        "addedEpisodes.push(...payload.episodes);",
+        "cache.summary = appendEpisodeItemsSummary(cache.summary, addedEpisodes);",
+        "cache.cursor = nextCursor;",
+        "cache.loaded = true;",
+        "cache.summary = episodeItemsSummary(addedEpisodes);",
+        "history.summary.signature",
+        "const queueSummary = episodeItemsSummary(queue);",
+        "const cachedHistory = S.episodeHistory && S.episodeHistory.rollout;",
+    )
+
+
+def test_episode_history_keeps_live_queue_and_rl_poll_lightweight():
+    html = console_source()
+
+    _assert_contains_all(
+        html,
+        "const statusQueueMatches = Array.isArray(status && status.queue)",
+        "const queue = statusQueueMatches ? status.queue : (cache.queue || []);",
+        "const historyMatchesStatus =",
+        "apiGet(`/api/rl/series?samples=0&critic_since=${criticSince}`)",
+        "completed_episodes",
+    )
+    _assert_contains_none(html, "rlLiveActionSince")
+
+
 def test_console_post_requests_are_serialized():
     html = console_source()
 
     assert "let postQueue = Promise.resolve();" in html
+    assert "if (concurrent) return request();" in html
     assert "const result = postQueue.catch(() => {}).then(request);" in html
     assert "postQueue = result.then(() => undefined, () => undefined);" in html
+
+
+def test_quality_export_and_upload_ui_wiring_supports_format_switch_and_remote_dir_status():
+    html = console_source()
+    source = (STATIC_DIR / "js" / "collect.js").read_text()
+
+    assert 'apiPost("/api/collect_quality_export", {' in html
+    assert 'apiPost("/api/collect_quality_upload", {' in html
+    assert html.count("}, { concurrent: true });") >= 2
+    assert "/api/collect_quality_export?job_id=" in html
+    assert "/api/collect_quality_upload?job_id=" in html
+    assert 'id="collect-export-format"' in html
+    assert "exportFormatSelect.onchange = changeCollectionExportFormat;" in source
+    assert "function changeCollectionExportFormat()" in html
+    assert 'qualityTransfer.acceptedDir = "";' in html
+    assert 'const datasetFormat = $("collect-export-format").value;' in source
+    assert source.count("dataset_format: datasetFormat,") == 2
+    assert "qualityTransfer.datasetFormat === selectedFormat" in source
+    assert "datasetFormat !== selectedFormat" in source
+    assert "overwrite:" not in source
+    assert 'const remoteDir = job.remote_dir || "remote target";' in source
+    assert 'value="lerobot_v3"' in html
+    assert 'value="hdf5"' in html
+    assert 'value="mcap"' in html
+    assert "episodes · ${formatLabel}" in html
+    assert 'id="collect-quality-status" role="status" aria-live="polite"' in html
+    assert '`${formatLabel} ${showingExport ? "export" : "upload"} progress`' in html
+    assert "export required before upload" in html
+    assert "export complete ·" in html
+    assert "accepted upload complete ·" in html
+    assert "`✗ ${formatLabel} export · ${message}`" in html
+    assert "`✗ ${formatLabel} upload · ${message}`" in html
+    assert (
+        "exportFormat.disabled = qualityTransfer.exporting || qualityTransfer.uploading;" in source
+    )
+    assert "exportButton.disabled = !enabled || !episodes.length ||" in source
+    assert "uploadButton.disabled = !upload.configured || !selectedExportReady ||" in source
+
+
+def test_console_boots_into_the_configured_tab():
+    html = console_source()
+
+    assert 'const initialTab = S.CFG.initial_tab || "debug";' in html
+    assert "setActiveTab(initialTab);" in html
 
 
 def test_console_controls_expose_shared_command_templates():
@@ -151,10 +277,18 @@ def test_rl_saved_data_render_is_keyed_instead_of_rebuilt_on_every_status_poll()
     html = console_source()
 
     assert 'let rlSavedRenderKey = "";' in html
+    assert 'let rlSavedStatusKey = "";' in html
     assert "function renderSavedData(items, force = false)" in html
     assert "if (!force && key === rlSavedRenderKey) return;" in html
     assert "quality_issue_count: item.quality_issue_count" in html
-    assert "renderSavedData(items);" in html
+    assert "historyMatchesStatus && cachedHistory.summary" in html
+    assert "if (savedStatusKey !== rlSavedStatusKey)" in html
+    assert "renderSavedData(historyEpisodes.concat(historyQueue), true);" in html
+    assert 'S.ACTIVE_TAB !== "rl" || document.hidden || seriesPolling' in html
+    start = html.index("async function pollRlSeries()")
+    body = html[start : html.index("function queueReplayCritic", start)]
+    assert "} catch {" in body
+    assert "} finally {\n    seriesPolling = false;" in body
 
 
 def test_rl_save_gives_immediate_feedback_and_blocks_duplicate_actions_until_setup():
@@ -175,6 +309,86 @@ def test_telemetry_bar_renders_image_hz_metric():
     assert '$("t-image-hz").textContent = formatImageHz(s.image_min_hz);' in html
 
 
+def test_collect_omits_detailed_teleop_status_panel():
+    html = console_source()
+
+    assert "function renderTeleopStatus" not in html
+    assert "collect-teleop-status" not in html
+    assert "teleop_collection_metrics" not in html
+
+
+def test_collect_control_panel_renders_configured_input_hints_and_motion_states():
+    html = console_source()
+
+    assert 'id="collect-hint-motion"' in html
+    assert 'id="collect-control-groups"' in html
+    assert 'id="collect-hint-record-toggle"' in html
+    assert 'id="collect-hint-record-cancel"' in html
+    assert 'id="collect-hint-home"' in html
+    assert 'armLabel.textContent = S.collectArmEnabled ? "ENABLED" : "LOCKED";' in html
+    assert 'state = "unavailable"' in html
+    assert 'state = "disabled"' in html
+    assert 'state = "active"' in html
+    assert 'state = "ready"' in html
+
+
+def test_collect_controls_use_svg_progress_and_keyboard_shortcuts():
+    html = console_source()
+
+    assert 'createElementNS("http://www.w3.org/2000/svg"' in html
+    assert 'class: "control-key-fill"' in html
+    assert 'class: "control-key-progress"' in html
+    assert '"clip-path": `url(#${clipId})`' in html
+    assert "stroke-dashoffset: calc(100 - var(--control-progress))" in html
+    assert "transform: scaleX(calc(var(--control-progress) / 100))" in html
+    assert 'host.style.setProperty("--control-fill-width", `${progress * 100}%`);' in html
+    assert 'const display = pressed && binding.gesture === "hold"' in html
+    assert "label.dataset.label = display;" in html
+    assert "clip-path: inset(0 calc(100% - var(--control-fill-width)) 0 0)" in html
+    assert 'window.addEventListener("keydown"' in html
+    assert 'window.addEventListener("keyup"' in html
+    assert "requestAnimationFrame(() => animateKeyboardHold(entry))" in html
+    assert "@keyframes controlConfirm" in html
+    assert '.control-hint.gamepad[data-key="A"]' in html
+    assert '.control-hint.gamepad[data-key="B"]' in html
+    assert '.control-hint.gamepad[data-key="X"]' in html
+    assert '.control-hint.gamepad[data-key="Y"]' in html
+    assert ".control-hint.pressed .control-key-fill { transform: scaleX(1); }" in html
+    assert ".control-hint.pressed .control-key-progress { stroke: var(--paper); }" in html
+    assert (
+        '.collect-control-state[data-state="disabled"] .collect-state-value { color: var(--ink-faint); }'
+        in html
+    )
+    assert "min-height: 40px; padding: 5px 10px" in html
+    assert "fill: var(--paper); stroke: var(--control-color)" in html
+    assert "@media (prefers-reduced-motion: reduce)" in html
+
+
+def test_collect_requirement_renderer_imports_its_task_target_helper():
+    collect_source = (STATIC_DIR / "js" / "collect.js").read_text()
+    run_source = (STATIC_DIR / "js" / "run.js").read_text()
+
+    assert 'from "./run.js";' in collect_source
+    assert "collectTaskTarget, collectTaskValue" in collect_source
+    assert "function collectTaskTarget(prompt = collectTaskValue())" in run_source
+    assert "collectTaskTarget, collectTaskValue, renderConfig" in run_source
+
+
+def test_collect_guide_appends_client_input_source_health():
+    html = console_source()
+
+    assert 'const TELEOP_CLIENT_LABELS = { vr_webxr: "VR" };' in html
+    assert 'teleopCfg.control_source !== "client"' in html
+    assert (
+        'const state = faulted ? "ERROR" : (teleop && teleop.connected ? "LINKED" : "DOWN");'
+        in html
+    )
+    assert 'state === "DOWN" ? "down" : "error"' in html
+    assert 'class="vr-input-status ${stateClass}"' in html
+    assert "vr-hand-status" not in html
+    assert '$("gb-msg").innerHTML = message + collectInputSourceSuffix(s);' in html
+
+
 def test_manual_target_qpos_renders_from_status_without_frame_qpos():
     html = console_source()
 
@@ -184,6 +398,17 @@ def test_manual_target_qpos_renders_from_status_without_frame_qpos():
         "renderManualTarget(S.STATUS.manual_qpos || "
         "(S._manualSlidersBuilt ? null : f.qpos));" in html
     )
+
+
+def test_manual_joint_rows_show_target_and_live_current_qpos():
+    html = console_source()
+
+    assert "TARGET / CURRENT QPOS" in html
+    assert 'class="manual-pose-legend">target / current' in html
+    assert 'id="ms-target-${i}"' in html
+    assert 'id="ms-current-${i}"' in html
+    assert "function renderManualCurrent(qpos)" in html
+    assert "renderManualCurrent(f.qpos);" in html
 
 
 def test_manual_sliders_use_configured_qpos_limits():
@@ -223,6 +448,8 @@ def test_manual_dispatch_uses_single_send_stop_toggle():
     assert 'send.textContent = S.manualDispatching ? "STOP ■" : "SEND TO REAL ▶";' in html
     assert "syncManualDispatchState(s);" in html
     assert "const active = !!status.manual_publish_active;" in html
+    assert "async function flushManualQpos()" in html
+    assert "await flushManualQpos();" in html
     assert 'return apiPost("/api/manual_send");' in html
     assert 'return apiPost("/api/halt");' in html
 
@@ -711,7 +938,8 @@ def test_batch_qc_requires_selected_episode():
     html = console_source()
 
     assert '"b-goto-qc").disabled =' in html
-    assert "collectReplayEpisode == null" in html
+    assert "$(" + '"b-goto-qc").disabled = !enabled || !selectedEpisodeSaved;' in html
+    assert "$(" + '"b-collect-note-save").disabled = !selectedEpisodeSaved;' in html
 
 
 def test_collection_qc_gates_on_selected_saved_episode_not_global_queue():
@@ -728,7 +956,8 @@ def test_collection_qc_gates_on_selected_saved_episode_not_global_queue():
 
     selected_start = html.index("function selectedCollectEpisodeItem()")
     selected_body = html[selected_start : html.index("function renderCollectTiles", selected_start)]
-    assert "if (reviewTask !== collectTaskValue()) return null;" in selected_body
+    assert "if (!collectReviewMatchesSelection()) return null;" in selected_body
+    assert "reviewCollectionSet === collectSetValue()" in html
     assert "return items.find((item) => savedEpisodeId(item) === episode) || null;" in selected_body
     assert '{ status: "saved", episode_index: episode }' not in selected_body
 
@@ -742,6 +971,8 @@ def test_collection_qc_uses_collection_endpoint_without_changing_other_qc_paths(
     assert 'let reviewTask = "";' in html
     assert "reviewTask = collectTaskValue();" in html
     assert "task: reviewTask," in html
+    assert "reviewCollectionSet = collectSetValue();" in html
+    assert 'dataset: kind === "collect" ? reviewCollectionSet : "",' in html
     assert 'apiPost("/api/qc_mark", {' in html
 
 
@@ -770,27 +1001,56 @@ def test_rl_manual_qc_pass_overrides_automatic_quality_tone():
     assert body.index('item.qc_verdict === "pass"') < body.index('item.quality === "red"')
 
 
-def test_saved_collect_episode_is_gray_until_manual_qc():
+def test_saved_collect_episode_tone_and_summary_follow_quality():
     html = console_source()
     start = html.index("function collectTone(item)")
-    body = html[start : html.index("function collectIssueText", start)]
+    body = html[start : html.index("function threeDigitCount", start)]
 
-    assert 'if (item.qc_verdict === "pass") return "cq-ok";' in body
-    assert 'if (item.qc_verdict === "fail") return "cq-fail";' in body
-    assert 'item.quality === "green"' not in body
-    assert 'if (item.quality === "red") return "cq-fail";' in body
-    assert "if (savedEpisodeId(item) != null" not in body
+    assert 'if (outcome === "usable") return "cq-ok";' in body
+    assert 'if (outcome === "rejected") return "cq-fail";' in body
+    assert 'item.quality === "green"' in html
+    assert 'item.quality === "red"' in html
     assert body.rstrip().endswith('return "cq-queued";\n  }')
-    assert "Green means saved" not in html
-    assert "Pass green / fail red" in html
+    assert 'id="collect-usable-count"' in html
+    assert 'id="collect-rejected-count"' in html
+    assert 'id="collect-pending-count"' in html
+    assert 'String(episodeIndex).padStart(3, "0")' in html
 
 
 def test_selected_batch_qc_episode_is_highlighted():
     html = console_source()
 
     assert ".collect-tile.selected" in html
-    assert 'if (episode === S.collectReplayEpisode) tile.classList.add("selected");' in html
-    assert 'episode === S.collectReplayEpisode ? " selected" : ""' in html
+    assert "collectReviewMatchesSelection() && episode === S.collectReplayEpisode" in html
+    assert 'selected ? " selected" : ""' in html
+
+
+def test_collection_quality_display_is_scoped_to_current_set_and_prompt():
+    html = console_source()
+    start = html.index("function renderCollect()")
+    body = html[start : html.index("async function exportCollectionQuality", start)]
+
+    assert "const collectionSet = collectSetValue();" in body
+    assert "// historyFor is the collection view's set+prompt scope boundary." in body
+    assert "const episodes = history.episodes;" in body
+    assert "const queue = history.queue;" in body
+    assert "const totalItems = episodes.length + queue.length;" in body
+    assert "const items = episodes.concat(queue);" in body
+    assert '$("collect-count").textContent = `${episodes.length}/${totalItems}`;' in body
+    assert "const usableCollected = history.summary.usable;" in body
+    assert "const queueSummary = episodeItemsSummary(queue);" in body
+    assert "history.summary.signature," in body
+    assert "const outcomes = items.map(collectOutcome);" not in body
+    assert "episodes.filter(" not in body
+    assert "collectionSet," in body
+    assert "prompt," in body
+
+    assert 'params.set("set", selection.collectionSet);' in html
+    assert 'params.set("task", selection.task);' in html
+    assert "itemsForPrompt(cache.episodes, selection.task)" not in html
+    assert "itemsForPrompt(queue, selection.task)" in html
+    assert "cache.collectionSet === selection.collectionSet" in html
+    assert "cache.task === selection.task" in html
 
 
 def test_collect_queue_click_reviews_selected_episode_immediately():
@@ -809,7 +1069,7 @@ def test_rollout_saved_episode_list_stays_visible_for_debug_review_in_sim():
     body = html[start : html.index("function renderCollect()", start)]
 
     assert "const hideRolloutSave =" in body
-    assert 'items.length === 0 && S.reviewKind !== "rollout"' in body
+    assert 'totalItems === 0 && S.reviewKind !== "rollout"' in body
     assert 'panel.style.display = hideRolloutSave ? "none" : "";' in body
 
 
@@ -891,8 +1151,27 @@ def test_hil_toggle_is_wired_only_in_rl_workspace():
 
     assert 'id="hil-intervention-enable"' not in html
     assert 'aria-label="Enable RL HIL intervention"' in html
+    assert 'id="rl-teleop-status"' in html
+    assert 'data-state="off">VR N/A</span>' in html
     assert 'id="rl-hil-enable" disabled aria-label="Enable RL HIL intervention"' in html
     assert 'apiPost("/api/rl/hil_enabled"' in html
+    assert "function resolveRlInterventionSource(status) {" in html
+    assert "const rolloutSource = status && status.rollout_intervention_source;" in html
+    assert "const rlCfg = (S.CFG && S.CFG.rl && S.CFG.rl.intervention) || {};" in html
+    assert (
+        "const rolloutCfg = (S.CFG && S.CFG.rollout && S.CFG.rollout.intervention) || {};" in html
+    )
+    assert html.index(
+        "const rlCfg = (S.CFG && S.CFG.rl && S.CFG.rl.intervention) || {};"
+    ) < html.index(
+        "const rolloutCfg = (S.CFG && S.CFG.rollout && S.CFG.rollout.intervention) || {};"
+    )
+    assert "const source = resolveRlInterventionSource(status);" in html
+    assert 'const vrClient = source === "teleop_client";' in html
+    assert "badge.dataset.state = state;" in html
+    assert "badge.textContent = text;" in html
+    assert 'rl-hil-enable").disabled = !setup || !hilSupported || intervention;' in html
+    assert 'rl-b-intervene").disabled = !running;' in html
     assert 'class="rl-preview-banner"' not in html
 
 
@@ -958,6 +1237,9 @@ def test_task_and_strategy_controls_are_dropdown_selects():
         '<select class="choice-select strategy-select" id="strategy-list" aria-label="Strategy"></select>'
         in html
     )
+    assert 'aria-label="Previous dataset set">&#8592;</button>' in html
+    assert 'aria-label="Next task in this set">&#8594;</button>' in html
+    assert "grid-template-columns: 36px minmax(0, 1fr) 36px" in html
 
 
 def test_eval_model_selector_is_dropdown():
@@ -975,7 +1257,8 @@ def test_eval_model_selector_is_dropdown():
     assert 'background-image: url("data:image/svg+xml' in html
     assert 'placeholder.textContent = "SELECT TASK";' in html
     assert 'apiPost("/api/select_task", { task });' in html
-    assert 'apiPost("/api/select_collect_task", { task });' in html
+    assert "dataset: collectSet," in html
+    assert "task_index: collectTaskIndex," in html
     assert 'const opt = document.createElement("option");' in html
     assert "sl.onchange = () => {" in html
     assert 'apiPost("/api/select_strategy", { strategy: key });' in html
@@ -992,27 +1275,53 @@ def test_collect_start_requires_motion_switch():
     assert "|| !S.collectArmEnabled" in html
     assert "function disarmCollectArm()" in html
     assert 'if (tab !== "collect") disarmCollectArm();' in html
-    assert 'collect_teleop_armed: tab === "collect" && S.collectArmEnabled' in html
-    assert 'collect_teleop_armed: S.ACTIVE_TAB === "collect" && S.collectArmEnabled' in html
     assert 'apiPost("/api/tab_switch", {' in html
     assert 'S.collectArmEnabled = enabled && S.ACTIVE_TAB === "collect";' in html
+    assert 'apiPost("/api/collect_arm", { enabled: S.collectArmEnabled });' in html
+    assert "S.collectArmEnabled = !!s.collection_teleop_armed;" in html
 
 
 def test_collect_task_selection_refreshes_record_gate_immediately():
     html = console_source()
 
+    assert "function selectCollectTask(prompt, setName = collectSet, taskIndex = null)" in html
+    assert "S.STATUS.selected_collect_task = prompt;" in html
+    assert "dataset: collectSet," in html
+    assert "task_index: collectTaskIndex," in html
+    assert "option.value = String(index);" in html
+    assert "option.dataset.prompt = prompt;" in html
+    assert "function stepCollectSet(delta)" in html
+    assert "function stepCollectTask(delta)" in html
+    assert 'id="collect-set-list"' in html
+    assert '<div class="collect-task-field-label">DATASET NAME</div>' in html
+    assert '<div class="collect-task-field-label">TASK / PROMPT</div>' in html
+    assert 'id="b-collect-prev-set" title="Previous dataset set"' in html
+    assert 'id="b-collect-next-set" title="Next dataset set"' in html
+    assert 'id="b-collect-prev-task" title="Previous task in this set"' in html
+    assert 'id="b-collect-next-task" title="Next task in this set"' in html
+
+
+def test_collect_auto_advance_uses_new_completion_edge_and_stops_at_final_task():
+    html = console_source()
+    advance_start = html.index("function advanceCollectTask()")
+    advance_body = html[
+        advance_start : html.index("function syncCollectTaskNavigation", advance_start)
+    ]
+
+    assert "function maybeAutoAdvanceCollectTask(" in html
+    assert "if (collectAutoAdvanceState.usableCollected === null)" in html
     assert (
-        "S.STATUS.selected_collect_task = task;\n"
-        '        apiPost("/api/select_collect_task", { task });\n'
-        '        mark("collect-prompt-list", "prompt", task);\n'
-        "        renderCollect();"
-    ) in html
-    assert (
-        "S.STATUS.selected_collect_task = p;\n"
-        '        apiPost("/api/select_collect_task", { task: p });\n'
-        '        mark("collect-prompt-list", "prompt", p);\n'
-        "        renderCollect();"
-    ) in html
+        "collectAutoAdvanceState.usableCollected < required && usableCollected >= required" in html
+    )
+    assert "!collectAutoAdvanceState.completionPending || collecting" in html
+    assert "collectTaskSelectionKey() !== selectionKey || stillCollecting" in html
+    assert "queueMicrotask(() =>" in html
+    assert "advanceCollectTask();" in html
+    assert advance_body.index("taskIndex + 1 < sets[setIndex].tasks.length") < advance_body.index(
+        "setIndex + 1 < sets.length"
+    )
+    assert "sets[setIndex + 1].tasks[0].prompt" in advance_body
+    assert advance_body.rstrip().endswith("return false;\n  }")
 
 
 def test_collect_queue_unlocks_after_end_save_click():
@@ -1276,3 +1585,50 @@ def test_replay_and_review_defer_video_network_until_playback_needs_it():
     assert 'data-src="/api/replay_video?${params.toString()}"' in media_body
     assert "function ensureVideoSource(v)" in html
     assert "ensureVideoSource(v);" in ready_body
+
+
+def test_dashboard_uses_animated_multi_month_calendar_heatmaps():
+    html = console_source()
+
+    assert "Dataset overview" in html
+    assert "Evaluation overview" in html
+    assert "while (weeks < 24)" in html
+    assert 'class="dashboard-calendar-cell level-${level}"' in html
+    assert 'class="dashboard-calendar-tooltip"' in html
+    assert 'cell.addEventListener("pointerenter", show);' in html
+    assert "@keyframes dashboard-cell-in" in html
+    assert "#9BE9A8" in html
+    assert "#216E39" in html
+    assert 'rx="2.5"' in html
+    assert '<div class="dashboard-calendar-legend" aria-label="Episode volume scale">' in html
+    assert ">LESS</span>" in html
+    assert ">MORE</span>" in html
+    assert '</svg></div><div class="dashboard-calendar-legend"' in html
+    assert ".dashboard-calendar-legend-cell.level-4 { background: #216E39; }" in html
+    assert (
+        "scrollHost.scrollLeft = Math.max(0, peak.x * scale - scrollHost.clientWidth / 2);" in html
+    )
+    assert "dashboard-trend-track" not in html
+
+
+def test_collection_target_is_explicit_and_unset_targets_stay_blank():
+    html = console_source()
+
+    assert 'id="collect-requirement-count"' in html
+    assert 'id="collect-requirement-status"' in html
+    task_panel = html[
+        html.index('id="collect-panel-task"') : html.index('id="collect-panel-record"')
+    ]
+    queue_panel = html[
+        html.index('id="collect-panel-queue"') : html.index('id="collect-panel-replay"')
+    ]
+    assert 'id="collect-requirement"' not in task_panel
+    assert 'id="collect-requirement"' in queue_panel
+    assert "COLLECTION TARGET · USABLE ONLY" in queue_panel
+    assert "const required = collectTaskTarget(prompt);" in html
+    assert "const usableCollected = history.summary.usable;" in html
+    assert 'unlimited ? "∞" : (hasRequirement ? required : "--")' in html
+    assert '? "NO LIMIT"' in html
+    assert ".collect-requirement.complete { border-left-color: var(--ok); }" in html
+    assert ".collect-requirement.complete strong { color: var(--ok); }" in html
+    assert ': "TARGET NOT SET";' in html

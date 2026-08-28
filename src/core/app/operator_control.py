@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 
 from core.app.state import RuntimeState, SessionMode, SessionState, SessionStatus
 from core.config import ConfigDict
+from teleop_client.base import TeleopOperatorEvent
 
 logger = logging.getLogger(__name__)
 
@@ -181,3 +183,178 @@ def maybe_start_operator_action_listener(
 
     ros_runtime.node.create_subscription(String, topic, on_action, 10)
     logger.info("[OPERATOR] listening for semantic actions on %s", topic)
+
+
+def _dispatch_teleop_command(
+    command: str,
+    config: ConfigDict,
+    runtime: RuntimeState,
+    session: SessionState,
+    dispatch: Callable[[str, ConfigDict, RuntimeState, SessionState], None],
+    *,
+    error_log: str,
+) -> str | None:
+    session.last_error = ""
+    try:
+        dispatch(command, config, runtime, session)
+    except Exception as error:
+        logger.exception(error_log)
+        return f"Operator dispatch failed: {error}"
+    return None
+
+
+def handle_teleop_operator_event(
+    event: TeleopOperatorEvent,
+    config: ConfigDict,
+    runtime: RuntimeState,
+    session: SessionState,
+    *,
+    dispatch: Callable[[str, ConfigDict, RuntimeState, SessionState], None],
+) -> None:
+    """Route validated VR intents through the same commands used by the Console."""
+    from core.app.handlers.teleop import acknowledge_teleop_event
+
+    client = getattr(runtime, "teleop_client", None)
+    execution = getattr(runtime, "teleop_execution", None)
+    accepted = False
+    message = ""
+    if client is None or execution is None:
+        message = "Teleop client is unavailable"
+    elif runtime.rl_active and event.intent in {
+        "arm_toggle",
+        "home",
+        "record_toggle",
+        "record_cancel",
+    }:
+        message = "Collection VR controls are unavailable in the RL workspace"
+    elif event.intent == "arm_toggle":
+        enabled = not bool(runtime.collection_teleop_armed)
+        message = _dispatch_teleop_command(
+            f"web:collect_arm:{'on' if enabled else 'off'}",
+            config,
+            runtime,
+            session,
+            dispatch,
+            error_log="Teleop ARM dispatch failed",
+        )
+        if message is None:
+            accepted = bool(runtime.collection_teleop_armed) is enabled
+            message = (
+                f"Collection ARM {'enabled' if enabled else 'disabled'}"
+                if accepted
+                else (session.last_error or "Collection ARM state did not change")
+            )
+    elif event.intent == "home":
+        message = _dispatch_teleop_command(
+            "web:collect_home",
+            config,
+            runtime,
+            session,
+            dispatch,
+            error_log="Teleop HOME dispatch failed",
+        )
+        if message is None:
+            accepted = (
+                not bool(runtime.collection_teleop_armed)
+                and not bool(runtime.collection_teleop_active)
+                and not bool(getattr(execution, "active", False))
+            )
+            message = (
+                "Collection HOME requested"
+                if accepted
+                else (session.last_error or "Collection HOME requires ARM OFF")
+            )
+    elif event.intent == "intervention_toggle":
+        intervention_active = bool(runtime.rollout_intervention_active)
+        if not bool(runtime.rl_active):
+            message = "VR intervention requires the active RL workspace"
+        elif session.mode is not SessionMode.REAL:
+            message = "VR intervention requires RL REAL mode"
+        elif not session.is_setup_done:
+            message = "Complete RL setup before using the VR intervention control"
+        elif not intervention_active and not bool(runtime.rollout_intervention_enabled):
+            message = "Enable RL HIL before using the VR intervention control"
+        elif not intervention_active:
+            from core.app.handlers.recording import rollout_hil_status
+
+            hil_status = rollout_hil_status(config, runtime)
+            if not hil_status.supported or hil_status.error:
+                message = hil_status.error or "Transport does not support RL HIL"
+            elif session.status is not SessionStatus.RUNNING:
+                message = "VR intervention requires a running RL policy"
+            else:
+                message = ""
+        else:
+            message = ""
+        if not message:
+            command = resolve_operator_action(
+                runtime,
+                session,
+                event.intent,
+                source="teleop_client",
+            )
+            if command is None:
+                message = session.last_error or "RL intervention is invalid in the current state"
+            else:
+                message = _dispatch_teleop_command(
+                    command,
+                    config,
+                    runtime,
+                    session,
+                    dispatch,
+                    error_log="Teleop RL intervention dispatch failed",
+                )
+                if message is None:
+                    now_active = bool(runtime.rollout_intervention_active)
+                    accepted = now_active is not intervention_active and not bool(
+                        session.last_error
+                    )
+                    message = (
+                        "RL intervention abandoned"
+                        if intervention_active and accepted
+                        else (
+                            "RL intervention started"
+                            if accepted
+                            else (session.last_error or "RL intervention state did not change")
+                        )
+                    )
+    elif (
+        not execution.active
+        or not runtime.collection_teleop_armed
+        or not runtime.collection_teleop_active
+        or session.mode is not SessionMode.COLLECT
+    ):
+        message = "Teleop command requires COLLECT with ARM ON"
+    elif event.intent not in {"record_toggle", "record_cancel"}:
+        message = f"Unsupported V1 teleop operator intent: {event.intent!r}"
+    else:
+        recording = _collection_recording(runtime, session)
+        action = (
+            "cancel" if event.intent == "record_cancel" else ("accept" if recording else "start")
+        )
+        command = resolve_operator_action(runtime, session, action, source="teleop_client")
+        if command is None:
+            message = session.last_error or "Operator intent is invalid in the current state"
+        else:
+            message = _dispatch_teleop_command(
+                command,
+                config,
+                runtime,
+                session,
+                dispatch,
+                error_log=f"Teleop operator dispatch failed for {event.intent}",
+            )
+            if message is None:
+                now_recording = _collection_recording(runtime, session)
+                expected_recording = action == "start"
+                accepted = (now_recording == expected_recording) and not bool(session.last_error)
+                if accepted:
+                    message = {
+                        "start": "Collection recording started",
+                        "accept": "Collection episode saved",
+                        "cancel": "Collection recording cancelled",
+                    }[action]
+                else:
+                    message = session.last_error or "Collection recording state did not change"
+    session.last_error = "" if accepted else message
+    acknowledge_teleop_event(runtime, event, accepted=accepted, message=message)

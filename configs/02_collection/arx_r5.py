@@ -2,6 +2,8 @@
 
 _base_ = ["../01_deploy/arx_r5/_base.py"]
 
+console = dict(initial_tab="collect")
+
 collection = dict(
     storage=dict(
         log_dir="work_dirs/collection/arx_r5/",
@@ -26,5 +28,11 @@ collection = dict(
             action_eef="action.eef",
         ),
     ),
-    tasks=["pick up the apple", "pick up the orange"],
+    teleop=dict(
+        control_source="transport",
+    ),
+    tasks=dict(
+        pick_up_the_apple=[("pick up the apple", -1)],
+        pick_up_the_orange=[("pick up the orange", -1)],
+    ),
 )

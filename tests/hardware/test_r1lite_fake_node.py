@@ -15,7 +15,10 @@ R1_LITE_DIR = REPO_ROOT / "examples" / "hardware" / "r1_lite"
 def test_run_fake_node_launches_ros2_fake_without_zmq_endpoints():
     text = (R1_LITE_DIR / "run_fake_node.sh").read_text()
 
-    assert "python examples/hardware/r1_lite/fake_node.py" in text
+    assert "examples/hardware/r1_lite/.venv" in text
+    assert 'R1_LITE_PYTHON_BIN="${R1_LITE_VENV_DIR}/bin/python"' in text
+    assert '"${R1_LITE_PYTHON_BIN}" -X faulthandler examples/hardware/r1_lite/fake_node.py' in text
+    assert "source .venv/bin/activate" not in text
     assert "--role cameras" in text
     assert "--role robot" in text
     assert "--ui-host" in text

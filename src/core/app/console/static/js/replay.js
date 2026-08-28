@@ -2,7 +2,7 @@
 // polling loop for frame/scene/camera refresh (poll).
 import { $, LIVE, RUN_CONTROLS, S, apiGet, clientTrace, replaceCamStripContent } from "./core.js";
 import { buildLiveDims, drawLiveCharts, resetLiveSeries, updateScrub } from "./charts.js";
-import { applyRunControlStatus, renderManualTarget, uiMode } from "./run.js";
+import { applyRunControlStatus, renderManualCurrent, renderManualTarget, uiMode } from "./run.js";
 
 window.__evaReplaySync = LIVE.replaySync;
 
@@ -24,6 +24,15 @@ let replayTransformLoads = new Map();
 let _lastReplayChartDraw = 0;
 
 const REPLAY_DEFAULT_FPS = 10;
+
+// These tabs host the shared live stage. RESULT and DASHBOARD deliberately park
+// that stage off-screen; keeping their MJPEG streams alive only consumes one
+// browser connection and a camera-feed worker per view.
+const LIVE_STAGE_TABS = new Set(["debug", "manual", "collect", "eval", "rl"]);
+
+function liveStageActive() {
+    return !document.hidden && LIVE_STAGE_TABS.has(S.ACTIVE_TAB);
+  }
 
 let replayVideoFps = REPLAY_DEFAULT_FPS;
 
@@ -703,7 +712,7 @@ async function waitForStageVideosReady() {
       errors: videos.filter((v) => !!v.error).length,
       states: videos.map((v) => ({ camera: v.dataset.key || "", ready_state: v.readyState })),
     });
-    return videos.length >= 3 && videos.every((v) => !v.error && v.readyState >= 3);
+    return videos.length > 0 && videos.every((v) => !v.error && v.readyState >= 3);
   }
 
 async function waitForStageVideosPainted() {
@@ -715,7 +724,7 @@ async function waitForStageVideosPainted() {
     if (signal && signal.aborted) return;
     await waitForBrowserPaint();
     setVideosLoading(videos, false, "");
-    return videos.length >= 3 && videos.every((v) => !v.error);
+    return videos.length > 0 && videos.every((v) => !v.error);
   }
 
 function playStageVideos() {
@@ -965,19 +974,42 @@ function drawReplayCharts(force = false) {
 let framePolling = false;
 
 function refreshCameraStreams() {
-    // Clear the strip outright (not just re-poke src): the <img> may be mid-stream on
-    // the previous tab's source, painting a stale replay frame. Dropping the elements
-    // makes that frame vanish immediately; pollFrame rebuilds fresh streams on the next
-    // tick, by which time the backend's active_tab has settled to the new tab.
+    // Never replace replay <video> elements while their owner is active. On a tab
+    // switch away from replay, exitReplayMode() has already dropped them. For live
+    // views, clear the strip outright (not just re-poke src): the <img> may be
+    // mid-stream on the previous tab's source, painting a stale frame. Dropping the
+    // elements closes the multipart response; pollFrame rebuilds fresh streams on
+    // the next tick after the backend's active_tab has settled.
+    if (LIVE.replayMode || S.ACTIVE_TAB === "replay") {
+      const strip = $("cam-strip");
+      if (strip && strip.querySelector("img.cam")) {
+        replaceCamStripContent('<div class="cam-empty">awaiting frame…</div>');
+      }
+      return;
+    }
     replaceCamStripContent('<div class="cam-empty">awaiting frame…</div>');
   }
 
 async function pollFrame() {
     if (framePolling) return;
     if (S.ACTIVE_TAB === "replay") return;
+    if (!liveStageActive()) {
+      // Stop live streams while the browser is hidden or the stage is parked on a
+      // non-live tab. This is also what bounds camera bandwidth when the operator
+      // browses RESULT/DASHBOARD for a while.
+      const strip = $("cam-strip");
+      if (strip && strip.querySelector("img.cam")) {
+        replaceCamStripContent('<div class="cam-empty">awaiting frame…</div>');
+      }
+      return;
+    }
     framePolling = true;
     try {
       const f = await apiGet("/api/frame");
+      // A tab switch or visibility change can happen while the request is in
+      // flight. Do not resurrect camera streams after the visibility handler has
+      // already released them.
+      if (!liveStageActive() || S.ACTIVE_TAB === "replay" || LIVE.replayMode) return;
       const strip = $("cam-strip");
       const keys = f.cameras || [];
       // REPLAY owns the cam strip with native <video> elements driven by the scrub
@@ -1003,12 +1035,13 @@ async function pollFrame() {
       // real-robot position back into the sliders or they snap backward mid-drag.
       if (S.manualActive && uiMode(S.STATUS.cli_mode) === "manual") {
         renderManualTarget(S.STATUS.manual_qpos || (S._manualSlidersBuilt ? null : f.qpos));
+        renderManualCurrent(f.qpos);
       } else if (S._manualSlidersBuilt) {
         S._manualSlidersBuilt = false;
         $("manual-sliders-m").innerHTML = "";
       }
     } catch (e) { /* transient */ }
-    framePolling = false;
+    finally { framePolling = false; }
   }
 
 let liveSeriesPolling = false;
@@ -1017,6 +1050,7 @@ async function pollLiveSeries() {
     // The only visible stage charts are REPLAY charts, and they are driven from the
     // one-shot loaded series + scrub clock instead of the live buffer.
     if (LIVE.replayMode || S.ACTIVE_TAB !== "replay" || liveSeriesPolling) return;
+    if (document.hidden) return;
     liveSeriesPolling = true;
     try {
       const r = await apiGet("/api/live_series?since=" + LIVE.n);
@@ -1054,6 +1088,7 @@ async function pollScene() {
     // REPLAY drives the URDF per-frame off the scrub clock (replaySetUrdfFrame); don't
     // let the live /api/scene poll fight it for the shared Scene3D canvas.
     if (S.ACTIVE_TAB === "replay" || LIVE.replayMode) return;
+    if (!liveStageActive()) return;
     const now = performance.now();
     const minInterval = scenePollMinIntervalMs();
     if (minInterval && now - lastScenePollAt < minInterval) return;
@@ -1076,10 +1111,28 @@ function loop(fn, delay) {
     tick();
   }
 
+function handleVisibilityChange() {
+    if (document.hidden) {
+      // Pausing recorded videos avoids continuing decode/buffer work while the tab
+      // is backgrounded. Keep the nodes so returning to REPLAY does not restart a
+      // load or lose the selected frame.
+      if (LIVE.replayMode) replayStop();
+      else refreshCameraStreams();
+      return;
+    }
+    if (!LIVE.replayMode && LIVE_STAGE_TABS.has(S.ACTIVE_TAB)) {
+      // Reconnect once, then let the normal single-flight loops take over. Calling
+      // pollFrame directly avoids waiting for a hidden-tab timer to wake up.
+      refreshCameraStreams();
+      pollFrame();
+      pollScene();
+    }
+  }
+
 export {
   exitReplayMode, loadMountedReplaySeries, loadReviewPlayback, maybeSyncReplayPlayer,
   mountEpisodeVideos, playStageVideos, replayPlay, replayStop, replayToggle,
   replayVideos, seekReplay, waitForStageVideosPainted,
   waitForStageVideosReady,
-  loop, pollFrame, pollScene, refreshCameraStreams,
+  handleVisibilityChange, liveStageActive, loop, pollFrame, pollScene, refreshCameraStreams,
 };

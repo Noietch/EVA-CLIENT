@@ -1,0 +1,58 @@
+[project]
+name = "eva-arx-x5-hardware"
+version = "0.1.0"
+description = "Isolated runtime for the EVA ARX X5 hardware node."
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "addict>=2.4.0",
+    "av>=17.1.0",
+    "h5py==3.13.0",
+    "imageio==2.37.3",
+    "imageio-ffmpeg==0.6.0",
+    "jax==0.6.2",
+    "jaxlib==0.6.2",
+    "msgpack==1.1.2",
+    "msgpack-numpy==0.4.8",
+    "numpy==1.26.4",
+    "opencv-python==4.10.0.84",
+    "openpi-client==0.1.2",
+    "pillow==12.2.0",
+    "pin==2.7.0",
+    "psutil==7.1.0",
+    "pyarrow==23.0.0",
+    "pycollada==0.9.3",
+    "pybind11==3.0.4",
+    "pyrealsense2==2.58.3.10794",
+    "pydantic==2.11.7",
+    "pyroki @ git+https://github.com/chungmin99/pyroki.git@388e43e1fc0d0ee382968d3dd72970fd62a0450c",
+    "pyserial==3.5",
+    "python-can>=4.0",
+    "pyyaml==6.0.3",
+    "pyzmq>=25.0.0",
+    "rospkg==1.6.1",
+    "ruckig>=0.14.0",
+    "scipy==1.15.3",
+    "tqdm==4.67.3",
+    "trimesh==4.11.5",
+    "viser==1.0.26",
+    "websockets==13.1",
+    "yourdfpy==0.0.60",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==8.3.5",
+    "ruff==0.15.9",
+]
+
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = []
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["SDK"]

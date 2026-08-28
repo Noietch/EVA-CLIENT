@@ -14,12 +14,12 @@ let rlCriticPendingFrame = null;
 let rlCriticGeneration = 0;
 let rlSetupTimer = null;
 let rlSetupRequestPending = false;
-let rlLiveActionSince = 0;
 let rlSelectionChain = Promise.resolve();
 let rlSelectionGeneration = 0;
 let rlPendingTask = null;
 let rlPendingPolicy = null;
 let rlSavedRenderKey = "";
+let rlSavedStatusKey = "";
 let rlSaveSetupPending = false;
 
 function queueRlSelection(path, body) {
@@ -102,6 +102,36 @@ function syncModelLink(id, selected, connected, error, optional = false) {
   else link.textContent = optional ? "OPTIONAL · NOT CONNECTED" : "SELECTED · NOT CONNECTED";
   link.classList.toggle("selected", !!selected);
   link.title = error || "";
+}
+
+function resolveRlInterventionSource(status) {
+  const rolloutSource = status && status.rollout_intervention_source;
+  if (rolloutSource) return String(rolloutSource);
+  const rlSource = status && status.rl && status.rl.rollout_intervention_source;
+  if (rlSource) return String(rlSource);
+  const rlCfg = (S.CFG && S.CFG.rl && S.CFG.rl.intervention) || {};
+  if (rlCfg.source) return String(rlCfg.source);
+  const rolloutCfg = (S.CFG && S.CFG.rollout && S.CFG.rollout.intervention) || {};
+  if (rolloutCfg.source) return String(rolloutCfg.source);
+  return "transport";
+}
+
+function syncRlTeleopStatus(status) {
+  const badge = $("rl-teleop-status");
+  if (!badge) return { ready: true, state: "off" };
+  const source = resolveRlInterventionSource(status);
+  const teleop = status && status.teleop;
+  const vrClient = source === "teleop_client";
+  const fault = vrClient && !!(teleop && (teleop.last_fault || teleop.source_error));
+  const linked = !!(teleop && teleop.connected && !fault);
+  const state = !vrClient ? "off" : (fault ? "warn" : (linked ? "ok" : "warn"));
+  const text = !vrClient ? "VR N/A" : (fault ? "VR ERROR" : (linked ? "VR LINKED" : "VR DOWN"));
+  badge.dataset.state = state;
+  badge.textContent = text;
+  badge.title = !vrClient
+    ? "Rollout HIL is using transport teleop"
+    : (fault ? (teleop.last_fault || teleop.source_error || "VR input error") : "VR controller connection for rollout HIL");
+  return { source, ready: linked, vrClient, fault };
 }
 
 function syncRlStageCharts(status) {
@@ -309,6 +339,9 @@ async function submitRlQc(verdict) {
       ? `episode ${episode} marked ${verdict}`
       : `episode ${episode} note saved`;
   }
+  if (S.episodeHistory && S.episodeHistory.rollout) {
+    S.episodeHistory.rollout.lastAttemptAt = 0;
+  }
   S.STATUS = await apiGet("/api/status");
   renderRlStatus(S.STATUS);
 }
@@ -434,7 +467,16 @@ async function replaySelectedEpisode() {
 function renderRlStatus(status) {
   if (!S.CFG || !S.CFG.rl || !S.CFG.rl.enabled) return;
   const rl = status.rl || {};
+  const cachedHistory = S.episodeHistory && S.episodeHistory.rollout;
   const rollout = status.rollout || {};
+  // The heartbeat carries counters/progress; the potentially large saved-episode
+  // rows arrive through collect.js' low-frequency history loader.
+  const historyMatchesStatus = cachedHistory && cachedHistory.loaded &&
+    (!rollout.dataset_dir || cachedHistory.datasetDir === rollout.dataset_dir);
+  const historyEpisodes = historyMatchesStatus
+    ? cachedHistory.episodes : (rollout.episodes || []);
+  const historyQueue = Array.isArray(rollout.queue)
+    ? rollout.queue : (historyMatchesStatus ? cachedHistory.queue : []);
   if (
     rlSaveSetupPending
     && status.is_setup_done
@@ -484,6 +526,7 @@ function renderRlStatus(status) {
   if (criticChoice) criticChoice.style.display = setup ? "" : "none";
   syncRlStageCharts(status);
   updateScrub();
+  const teleop = syncRlTeleopStatus(status);
   const retry = $("rl-b-setup");
   retry.disabled = !selected || setupBusy || status.session_status === "running";
   retry.style.display = setupError && !setup ? "" : "none";
@@ -506,6 +549,7 @@ function renderRlStatus(status) {
   const intervention = !!status.rollout_intervention_active;
   const hilSupported = !!status.hil_supported;
   const hilEnabled = !!status.rollout_intervention_enabled;
+  const teleopStatus = status.teleop || {};
   $("rl-hil-enable").checked = hilEnabled;
   $("rl-hil-enable").disabled = !setup || !hilSupported || intervention;
   $("rl-hil-label").textContent = hilSupported ? (hilEnabled ? "HIL ON" : "HIL OFF") : "HIL N/A";
@@ -519,13 +563,15 @@ function renderRlStatus(status) {
   $("rl-b-intervene").textContent = hilEnabled ? "INTERVENE ■" : "STOP ■";
   $("rl-b-accept").disabled = !intervention;
   $("rl-b-abandon").disabled = !intervention;
-  $("rl-run-error").textContent = setupError || rl.critic_error || "";
+  $("rl-run-error").textContent = setupError || rl.critic_error || (teleop.fault ? (teleopStatus.last_fault || teleopStatus.source_error || "") : "");
 
   const progress = Math.max(0, Math.min(1, Number(rollout.progress || 0)));
-  const items = (rollout.episodes || []).concat(rollout.queue || []);
-  $("rl-save-count").textContent = `${(rollout.episodes || []).length}/${items.length}`;
+  const totalItems = historyEpisodes.length + historyQueue.length;
+  const hasSavedEpisode = historyEpisodes.length > 0 ||
+    historyQueue.some((item) => episodeId(item) != null);
+  $("rl-save-count").textContent = `${historyEpisodes.length}/${totalItems}`;
   $("rl-save-eta").textContent = rollout.eta_sec == null ? "—" : `${Number(rollout.eta_sec).toFixed(1)}s`;
-  $("rl-save-hint").style.display = items.some((item) => episodeId(item) != null) ? "" : "none";
+  $("rl-save-hint").style.display = hasSavedEpisode ? "" : "none";
   $("rl-save-progress").style.width = `${progress * 100}%`;
   $("rl-save-pipeline").textContent = String(rollout.pipeline_state || "IDLE").toUpperCase();
   $("rl-save-pipeline").dataset.state = String(rollout.pipeline_state || "idle").toUpperCase();
@@ -541,22 +587,32 @@ function renderRlStatus(status) {
   $("rl-save-error").textContent = rollout.save_blocked_by_intervention
     ? "accept or abandon the active intervention before saving"
     : "";
-  renderSavedData(items);
+  const historySignature = historyMatchesStatus && cachedHistory.summary
+    ? cachedHistory.summary.signature
+    : JSON.stringify(historyEpisodes);
+  const savedStatusKey = [
+    historySignature,
+    JSON.stringify(historyQueue),
+    selectedEpisode == null ? "" : selectedEpisode,
+    S.rlSaveExpanded ? "expanded" : "collapsed",
+  ].join("\n");
+  if (savedStatusKey !== rlSavedStatusKey) {
+    renderSavedData(historyEpisodes.concat(historyQueue), true);
+    rlSavedStatusKey = savedStatusKey;
+  }
   renderRlGripper(setup);
   if (selectionConfirmed && !setup && !setupBusy && !setupError) scheduleRlSetup();
   updateGuide();
 }
 
 async function pollRlSeries() {
-  if (S.ACTIVE_TAB !== "rl" || seriesPolling || rlReplayRequestPending) return;
+  if (S.ACTIVE_TAB !== "rl" || document.hidden || seriesPolling || rlReplayRequestPending) return;
   seriesPolling = true;
   try {
     const criticGeneration = LIVE.criticGeneration;
-    const actionSince = LIVE.replayMode ? 0 : rlLiveActionSince;
     const criticSince = LIVE.criticValue.length;
-    const response = await apiGet(`/api/rl/series?since=${actionSince}&critic_since=${criticSince}`);
+    const response = await apiGet(`/api/rl/series?samples=0&critic_since=${criticSince}`);
     if (criticGeneration !== LIVE.criticGeneration) return;
-    if (!LIVE.replayMode) rlLiveActionSince = Number(response.n || 0);
     const critic = response.critic || {};
     if (Number(critic.n || 0) < LIVE.criticValue.length) {
       LIVE.criticTimestamp = [];
@@ -570,6 +626,8 @@ async function pollRlSeries() {
     )));
     updateScrub();
     drawLiveCharts();
+  } catch {
+    // The shared scheduler starts the next tick only after this promise settles.
   } finally {
     seriesPolling = false;
   }
@@ -605,6 +663,9 @@ $("rl-b-save").onclick = () => {
   rlSaveSetupPending = true;
   renderRlStatus(S.STATUS || {});
   return apiPost("/api/rl/save").then((response) => {
+    if (S.episodeHistory && S.episodeHistory.rollout) {
+      S.episodeHistory.rollout.lastAttemptAt = 0;
+    }
     if (!response || response.ok === false) {
       rlSaveSetupPending = false;
       renderRlStatus(S.STATUS || {});
