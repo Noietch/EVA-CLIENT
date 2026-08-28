@@ -343,7 +343,7 @@ def test_collect_controls_use_svg_progress_and_keyboard_shortcuts():
     assert "transform: scaleX(calc(var(--control-progress) / 100))" in html
     assert 'host.style.setProperty("--control-fill-width", `${progress * 100}%`);' in html
     assert 'const display = pressed && binding.gesture === "hold"' in html
-    assert 'label.dataset.label = display;' in html
+    assert "label.dataset.label = display;" in html
     assert "clip-path: inset(0 calc(100% - var(--control-fill-width)) 0 0)" in html
     assert 'window.addEventListener("keydown"' in html
     assert 'window.addEventListener("keyup"' in html
@@ -355,7 +355,10 @@ def test_collect_controls_use_svg_progress_and_keyboard_shortcuts():
     assert '.control-hint.gamepad[data-key="Y"]' in html
     assert ".control-hint.pressed .control-key-fill { transform: scaleX(1); }" in html
     assert ".control-hint.pressed .control-key-progress { stroke: var(--paper); }" in html
-    assert '.collect-control-state[data-state="disabled"] .collect-state-value { color: var(--ink-faint); }' in html
+    assert (
+        '.collect-control-state[data-state="disabled"] .collect-state-value { color: var(--ink-faint); }'
+        in html
+    )
     assert "min-height: 40px; padding: 5px 10px" in html
     assert "fill: var(--paper); stroke: var(--control-color)" in html
     assert "@media (prefers-reduced-motion: reduce)" in html
@@ -1600,8 +1603,8 @@ def test_dashboard_uses_animated_multi_month_calendar_heatmaps():
     assert '<div class="dashboard-calendar-legend" aria-label="Episode volume scale">' in html
     assert ">LESS</span>" in html
     assert ">MORE</span>" in html
-    assert "</svg></div><div class=\"dashboard-calendar-legend\"" in html
-    assert '.dashboard-calendar-legend-cell.level-4 { background: #216E39; }' in html
+    assert '</svg></div><div class="dashboard-calendar-legend"' in html
+    assert ".dashboard-calendar-legend-cell.level-4 { background: #216E39; }" in html
     assert (
         "scrollHost.scrollLeft = Math.max(0, peak.x * scale - scrollHost.clientWidth / 2);" in html
     )
