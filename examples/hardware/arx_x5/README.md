@@ -1,24 +1,26 @@
-# ARX X5 双臂真机启动
+# ARX X5 Dual-Arm Hardware Startup
 
-该目录用于启动双臂 X5、电机 CAN、三台 Intel RealSense D405 和 EVA ZMQ
-硬件节点。X5 与 R5 使用相同的状态、动作和 VR 控制流程；差异仅为 X5 SDK
-和 X5A URDF。
+This directory starts the dual-arm X5, motor CAN, three Intel RealSense D405
+cameras, and the EVA ZMQ hardware node. X5 and R5 use the same state, action,
+and VR control flow; only the X5 SDK and X5A URDF differ.
 
-## 固定配置
+## Fixed Configuration
 
-启动脚本已经按当前机器写死以下配置，不需要设置环境变量：
+The launcher has the following values configured for the current machine; no
+environment variables are required:
 
 ```text
-左臂:       /dev/arxcan1 -> can1
-右臂:       /dev/arxcan3 -> can3
-X5 类型:    2（2025 双轨夹爪）
-状态端口:   tcp://127.0.0.1:5555
-动作端口:   tcp://127.0.0.1:5556
-相机:       640x480 BGR8, 30 FPS
-网页端口:   8080
+left_arm:       /dev/arxcan1 -> can1
+right_arm:      /dev/arxcan3 -> can3
+X5 type:        2 (2025 dual-track gripper)
+state endpoint: tcp://127.0.0.1:5555
+action endpoint: tcp://127.0.0.1:5556
+cameras:        640x480 BGR8, 30 FPS
+web port:       8080
 ```
 
-D405 使用固定序列号，不依赖 SDK 枚举顺序：
+D405 cameras use fixed serial numbers and do not depend on SDK enumeration
+order:
 
 ```text
 cam_high:        409122271504
@@ -26,67 +28,79 @@ cam_left_wrist:  352122272510
 cam_right_wrist: 352122271326
 ```
 
-三台 D405 每次启动都会自动加载 `d405_profile.yaml`。启动脚本默认使用 `day`
-profile：关闭自动曝光，high/left/right 分别固定曝光 `6000/8000/7000 us`；
-`--realsense-profile night` 可切回夜间的 `12000/14000/14000 us`。两套 profile
-都使用画板白色标定得到的白平衡 high `4390 K`、left `4450 K`、right `4410 K`，
-并加载各相机的小幅 BGR 校正增益。
+All three D405 cameras automatically load `d405_profile.yaml` at startup. The
+launcher uses the `day` profile by default: auto exposure is disabled and the
+high/left/right cameras use fixed exposures of `6000/8000/7000 us`. Use
+`--realsense-profile night` to switch to the night values
+`12000/14000/14000 us`. Both profiles use white-balance values calibrated with
+the whiteboard: high `4390 K`, left `4450 K`, and right `4410 K`. Each camera
+also loads its small BGR correction gain.
 
-D405 的自动白平衡可以工作，但当前白桌面/画板占据画面较大时，自动曝光会把
-约 68%～86% 的像素推到饱和区，因此 X5 默认不使用自动曝光，避免白板和桌面
-过曝。采集环境改变时应在 `d405_profile.yaml` 中重新标定对应的昼/夜值。
+The D405 auto white-balance mode works, but when the white desk or whiteboard
+covers much of the frame, auto exposure pushes about 68%-86% of pixels into
+the saturated region. X5 therefore disables auto exposure by default to avoid
+overexposing the board and desk. Recalibrate the corresponding day/night
+values in `d405_profile.yaml` when the collection environment changes.
 
-## 首次安装
+## Initial Installation
 
-X5 使用独立的 Python 3.12 项目和虚拟环境，不修改仓库根环境或 R5。执行：
+X5 uses an independent Python 3.12 project and virtual environment without
+modifying the repository root environment or R5. Run:
 
 ```bash
 git submodule update --init --recursive
 bash examples/hardware/arx_x5/setup_env.sh
 ```
 
-`run_hardware.sh` 和 `run_fake.sh` 都只使用
-`examples/hardware/arx_x5/.venv/bin/python`，不会激活或读取仓库根目录的
-`.venv`。如果 `python3.12` 不在 `PATH` 中，可在安装时显式指定解释器：
+`run_hardware.sh` and `run_fake.sh` use only
+`examples/hardware/arx_x5/.venv/bin/python`; they neither activate nor read the
+repository root `.venv`. If `python3.12` is not in `PATH`, specify the
+interpreter during installation:
 
 ```bash
 ARX_X5_PYTHON=/path/to/python3.12 bash examples/hardware/arx_x5/setup_env.sh
 ```
 
-脚本会自动完成以下操作：
+The script performs the following steps:
 
-1. 创建 `examples/hardware/arx_x5/.venv`。
-2. 安装 `pyrealsense2` 和 X5 硬件节点依赖。
-3. 使用仓库内置的官方
-   [ARARX_X5_beta SDK-V2](https://github.com/ARXroboticsX/ARARX_X5_beta)，当前同步到
-   `1aa8a7d2ddefced2229f953feffc248be1c0b44d`，路径为
-   `examples/hardware/arx_x5/SDK/X5`。
-4. 校验官方 CPython 3.12 二进制和 `SingleArm` 接口，并安装 `pin`、
-   `python-can`、`ruckig` 等 vendor import 所需依赖。安装过程不执行 FK/IK
-   计算，也不连接机器人。
+1. Create `examples/hardware/arx_x5/.venv`.
+2. Install `pyrealsense2` and the X5 hardware-node dependencies.
+3. Use the official bundled
+   [ARARX_X5_beta SDK-V2](https://github.com/ARXroboticsX/ARARX_X5_beta),
+   currently pinned to `1aa8a7d2ddefced2229f953feffc248be1c0b44d` at
+   `examples/hardware/arx_x5/SDK/X5`.
+4. Validate the official CPython 3.12 binary and `SingleArm` interface, then
+   install dependencies required by vendor imports, including `pin`,
+   `python-can`, and `ruckig`. Installation does not run FK/IK calculations or
+   connect to the robot.
 
-EVA Client 中新增的 X5 集成代码遵循仓库根目录的 Apache-2.0 许可证。
-`ARARX_X5_beta` 是独立的第三方 submodule，不在 EVA Client 的 Apache-2.0
-授权范围内；固定版本目前未包含许可证文件，公开使用或分发前需向上游确认授权。
+The new X5 integration code in EVA Client follows the repository root's
+Apache-2.0 license. `ARARX_X5_beta` is an independent third-party submodule
+outside EVA Client's Apache-2.0 license scope. The pinned version currently
+does not include a license file; confirm upstream licensing before public use
+or redistribution.
 
-SDK-V2 直接使用 SocketCAN 和自己的 200 Hz 控制线程，不再依赖旧版 ROS/KDL
-pybind 扩展。X5 FK、IK 和 VR 重定向仍使用仓库自己的
-`src/robots/kinematics/pyroki.py` 和 X5A URDF。
+SDK-V2 uses SocketCAN and its own 200 Hz control thread directly, without the
+legacy ROS/KDL pybind extensions. X5 FK, IK, and VR retargeting still use the
+repository's `src/robots/kinematics/pyroki.py` and X5A URDF.
 
-## 启动 X5 hardware
+## Start X5 Hardware
 
-首次安装完成后只需一个命令：
+After initial installation, run one command:
 
 ```bash
 bash examples/hardware/arx_x5/run_hardware.sh
 ```
 
-脚本只启动双臂电机、三台 D405 和硬件 ZMQ 节点。按 `Ctrl-C` 时机械臂进入
-保护模式并释放相机和 ZMQ 端口。WebXR 与 EVA 需要在另外两个终端单独启动：
+The script starts only the dual-arm motors, three D405 cameras, and the
+hardware ZMQ node. On `Ctrl-C`, the arms enter protective mode and camera and
+ZMQ ports are released. Start WebXR and EVA separately in two other terminals:
 
-每次启动会先使用 SDK-V2 的 CAN 总线，只向 X5-2025 夹爪电机 ID 8 发送厂商
-`clear error` 帧并校验故障码为 0；不会改夹爪零点，也不会在这个步骤向六轴电机
-发送位置命令。若夹爪故障仍存在或没有反馈，hardware node 不会继续启动。
+At each startup, the SDK-V2 CAN bus first sends a vendor `clear error` frame
+only to X5-2025 gripper motor ID 8 and verifies that the fault code is 0. It
+does not change the gripper zero or send position commands to the six-axis
+motors at this stage. If the gripper fault remains or no feedback is received,
+the hardware node does not continue startup.
 
 ```bash
 python examples/input_sources/vr_webxr/node.py \
@@ -100,83 +114,96 @@ python examples/input_sources/vr_webxr/node.py \
 eva --config configs/02_collection/arx_x5_vr.py
 ```
 
-浏览器打开 `http://127.0.0.1:8080`。头显通过本机或 ADB 转发访问：
+Open `http://127.0.0.1:8080` in a browser. The headset accesses the WebXR page
+through the local host or ADB forwarding:
 
 ```text
 http://127.0.0.1:43876/?token=<TOKEN_FROM_NODE_LOG>&mode=ar
 ```
 
-## 无硬件 Fake X5
+## Hardware-Free Fake X5
 
-Fake X5 使用与真机相同的 EVA ZMQ action/state 协议，不需要 X5 SDK、CAN 或
-RealSense。它默认将收到的 action qpos 直接设置为 state，并为三路相机发送周期
-颜色图像。
+Fake X5 uses the same EVA ZMQ action/state protocol as the real hardware and
+does not require the X5 SDK, CAN, or RealSense. By default, it sets state
+directly to each received action qpos and sends periodic color images for all
+three cameras.
 
-在仓库根目录启动 fake node：
+Start the fake node from the repository root:
 
 ```bash
 bash examples/hardware/arx_x5/run_fake.sh
 ```
 
-需要模拟较平滑的机械响应时，可以切换回每个 qpos 独立的二阶系统：
+To simulate smoother mechanical response, switch to an independent second-order
+system for each qpos:
 
 ```bash
 bash examples/hardware/arx_x5/run_fake.sh --dynamics-mode second-order
 ```
 
-终端输入 `r` 后回车可将 qpos、速度和 action target 重置到 X5 初始值；输入 `q`
-后回车退出。Fake plant 的迭代生命周期不受 EVA 的 ARM、Collect 或录制状态控制。
+Enter `r` followed by Return to reset qpos, velocity, and the action target to
+the X5 initial values; enter `q` followed by Return to exit. The fake-plant
+iteration lifecycle is independent of EVA ARM, Collect, and recording states.
 
-另一个终端按上文方式启动 WebXR node，然后启动 EVA：
+In another terminal, start the WebXR node as described above, then start EVA:
 
 ```bash
 eva --config configs/02_collection/arx_x5_vr.py
 ```
 
-该配置保留全部三路 camera，采集结果写入
-`work_dirs/collection/arx_x5_vr`。
+This configuration keeps all three camera streams, and collection output is
+written to `work_dirs/collection/arx_x5_vr`.
 
-## 启动行为
+## Startup Behavior
 
-X5 `_connect` 连接后先读取当前 6 轴位置，再原样回写当前值进入位置控制。随后
-硬件节点通过 SDK-V2 的轨迹接口，用 `5 s` 让两臂同步到达初始位。实时动作以约 `33 ms`
-duration 交给官方 Ruckig/200 Hz 控制线程插值；EVA 仍以 30 Hz 发布并记录 qpos
-动作目标。J2/J3 的下限使用官方物理范围 `0°`，不会再把 IK
-负裕量持续压在机械零位。默认初始位是官方 X5 home 位；需要全 0 初始位时，使用下方的
-`--start-at-zero` 参数。
+After X5 `_connect` reads the current six-axis position, it writes the same
+values back to enter position control. The hardware node then uses the SDK-V2
+trajectory interface to bring both arms synchronously to their initial poses
+in `5 s`. EVA policy and dataset sampling remain at 30 Hz. The hardware node
+uses `--rate 100` for action/state communication and passes approximately
+`10 ms` durations to the official Ruckig/200 Hz control thread for
+interpolation. Each new 30 FPS camera frame is attached once, while the saver
+aligns samples to a 30 FPS fixed time grid using `collection.storage.fps`.
+J2/J3 lower limits use
+the official physical range starting at `0°`, so IK negative margin is not
+continuously pushed against the mechanical zero. The default initial pose is
+the official X5 home pose; use `--start-at-zero` below when all-zero startup is
+needed.
 
-停止时按 `Ctrl-C`，节点会进入保护模式并释放相机。需要临时跳过某只机械臂时
-可使用：
+Press `Ctrl-C` to stop; the node enters protective mode and releases the
+cameras. To temporarily skip one arm, use:
 
 ```bash
 bash examples/hardware/arx_x5/run_hardware.sh --disabled-arm left_arm
 ```
 
-若启动时有单关节不上电，执行故障恢复启动：
+If a single joint does not power on at startup, run the fault-recovery startup:
 
 ```bash
 bash examples/hardware/arx_x5/reset_hardware.sh
 ```
 
-该脚本会先停止残留的 hardware node，重建左右臂 `slcand`/CAN 接口，并分别执行
-SDK 使能检查和完整 `disable`/`close`。右臂还会用 `0.01 rad` 微动验证 J2
-确实响应。默认最多重试 3 次；只有两臂的 `offline_joints` 为空、`fault` 为
-`None`，且右 J2 微动通过，才会继续启动和回零。可用 `ARX_X5_RESET_ATTEMPTS`
-调整次数：
+The script first stops any leftover hardware node, rebuilds the left and right
+`slcand`/CAN interfaces, and performs SDK enable checks plus complete
+`disable`/`close` operations for each arm. It also moves right-arm J2 by
+`0.01 rad` to verify that it responds. It retries at most three times by
+default. Startup and homing continue only when both arms have empty
+`offline_joints`, `fault` is `None`, and the right J2 micro-motion succeeds.
+Set `ARX_X5_RESET_ATTEMPTS` to change the retry count:
 
 ```bash
 ARX_X5_RESET_ATTEMPTS=5 bash examples/hardware/arx_x5/reset_hardware.sh
 ```
 
-如果需要让双臂在节点启动时移动到六轴全 0 的位置，可使用：
+To move both arms to all-zero six-axis positions when the node starts, use:
 
 ```bash
 bash examples/hardware/arx_x5/run_hardware.sh --start-at-zero
 ```
 
-默认启动仍移动到官方 X5 home 位。
+The default startup still moves to the official X5 home pose.
 
-查看参数不会连接电机或初始化 CAN：
+Viewing the parameters does not connect to the motors or initialize CAN:
 
 ```bash
 bash examples/hardware/arx_x5/run_hardware.sh --help

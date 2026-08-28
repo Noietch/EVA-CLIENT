@@ -284,6 +284,7 @@ class _OrbbecCameraWorker:
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._latest: np.ndarray | None = None
+        self._frame_seq = 0
         self._state = "starting"
         self._last_frame_time: float | None = None
         self._thread = threading.Thread(
@@ -296,6 +297,12 @@ class _OrbbecCameraWorker:
     def snapshot(self) -> np.ndarray | None:
         with self._lock:
             return None if self._latest is None else self._latest.copy()
+
+    def snapshot_versioned(self) -> tuple[int, np.ndarray] | None:
+        with self._lock:
+            if self._latest is None:
+                return None
+            return self._frame_seq, self._latest.copy()
 
     def status(self) -> str:
         with self._lock:
@@ -366,6 +373,7 @@ class _OrbbecCameraWorker:
                 image = frame_to_bgr_image(color_frame, sdk)
                 with self._lock:
                     self._latest = image
+                    self._frame_seq += 1
                     self._last_frame_time = time.monotonic()
         finally:
             pipeline.stop()
@@ -412,6 +420,17 @@ class OrbbecCameraCache:
             if image is not None:
                 images[worker.spec.image_key] = image
         return images
+
+    def snapshot_versioned(self) -> tuple[dict[str, int], dict[str, np.ndarray]]:
+        seqs: dict[str, int] = {}
+        images: dict[str, np.ndarray] = {}
+        for worker in self._workers:
+            versioned = worker.snapshot_versioned()
+            if versioned is not None:
+                seq, image = versioned
+                seqs[worker.spec.image_key] = seq
+                images[worker.spec.image_key] = image
+        return seqs, images
 
     def hardware_status(self) -> dict[str, str]:
         return {worker.spec.image_key: worker.status() for worker in self._workers}

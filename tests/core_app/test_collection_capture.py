@@ -10,6 +10,12 @@ from core.app import collection_capture
 from core.app.collection_capture import CollectionCaptureRunner
 
 
+def _wait_until(predicate, *, timeout_s: float = 1.0) -> None:
+    deadline = time.monotonic() + timeout_s
+    while not predicate() and time.monotonic() < deadline:
+        time.sleep(0.005)
+
+
 def test_collection_capture_stop_drains_available_raw_snapshots():
     snapshots = [SimpleNamespace(timestamp=float(index)) for index in range(3)]
     ingested = []
@@ -30,9 +36,7 @@ def test_collection_capture_stop_drains_available_raw_snapshots():
     runtime = SimpleNamespace(episode_logger=_Logger(), transport=_Transport())
     runner = CollectionCaptureRunner(runtime, fps=0.1, max_raw_snapshots_per_tick=16)
     runner.start()
-    deadline = time.monotonic() + 1.0
-    while len(ingested) < 1 and time.monotonic() < deadline:
-        time.sleep(0.005)
+    _wait_until(lambda: len(ingested) >= 1)
 
     runner.stop()
 
@@ -61,9 +65,7 @@ def test_collection_capture_stop_does_not_drain_forever_when_source_keeps_publis
     runtime = SimpleNamespace(episode_logger=_Logger(), transport=_Transport())
     runner = CollectionCaptureRunner(runtime, fps=0.1, max_raw_snapshots_per_tick=3)
     runner.start()
-    deadline = time.monotonic() + 1.0
-    while len(ingested) < 1 and time.monotonic() < deadline:
-        time.sleep(0.005)
+    _wait_until(lambda: len(ingested) >= 1)
 
     runner.stop()
 
@@ -88,9 +90,7 @@ def test_rollout_capture_buffers_raw_snapshots_for_action_pairing():
     )
     runner = CollectionCaptureRunner(runtime, fps=100.0, max_raw_snapshots_per_tick=2)
     runner.start()
-    deadline = time.monotonic() + 1.0
-    while runtime.rollout_raw_snapshots.qsize() < 2 and time.monotonic() < deadline:
-        time.sleep(0.005)
+    _wait_until(lambda: runtime.rollout_raw_snapshots.qsize() >= 2)
     runner.stop()
 
     assert runtime.rollout_raw_snapshots.qsize() == 2
@@ -124,9 +124,7 @@ def test_active_rollout_capture_is_not_routed_to_collection_logger():
     )
     runner = CollectionCaptureRunner(runtime, fps=100.0, max_raw_snapshots_per_tick=1)
     runner.start()
-    deadline = time.monotonic() + 1.0
-    while runtime.rollout_raw_snapshots.empty() and time.monotonic() < deadline:
-        time.sleep(0.005)
+    _wait_until(lambda: not runtime.rollout_raw_snapshots.empty())
     runner.stop()
 
     assert runtime.rollout_raw_snapshots.qsize() == 1
@@ -184,7 +182,17 @@ def test_capture_lifecycle_suspends_gc_until_capture_stops(monkeypatch):
         def join(self):
             pass
 
-    runtime = SimpleNamespace(collection_capture_runner=None)
+    runtime = SimpleNamespace(
+        collection_capture_runner=None,
+        episode_logger=SimpleNamespace(_log_dir="/data/collect"),
+        rollout_episode_logger=None,
+        transport=SimpleNamespace(
+            prepare_collection_capture=lambda directory: events.append(
+                ("capture_prepare", directory)
+            ),
+            finish_collection_capture=lambda: events.append("capture_finish"),
+        ),
+    )
     monkeypatch.setattr(collection_capture, "CollectionCaptureRunner", _Runner)
     monkeypatch.setattr(collection_capture.threading, "Thread", _Thread)
     monkeypatch.setattr(collection_capture.gc, "collect", lambda: events.append("collect") or 0)
@@ -196,10 +204,63 @@ def test_capture_lifecycle_suspends_gc_until_capture_stops(monkeypatch):
     collection_capture.stop_collection_capture(runtime)
 
     assert events == [
+        ("capture_prepare", "/data/collect"),
         "collect",
         "disable",
         "runner_start",
         "runner_stop",
+        "capture_finish",
         "enable",
         "collect",
     ]
+
+
+def test_capture_constructor_failure_restores_gc(monkeypatch):
+    events = []
+    runtime = SimpleNamespace(
+        collection_capture_runner=None,
+        episode_logger=SimpleNamespace(_log_dir="/data/collect"),
+        rollout_episode_logger=None,
+        transport=SimpleNamespace(prepare_collection_capture=lambda _directory: None),
+    )
+    monkeypatch.setattr(collection_capture, "_suspend_cyclic_gc", lambda: events.append("suspend"))
+    monkeypatch.setattr(collection_capture, "_resume_cyclic_gc", lambda: events.append("resume"))
+    monkeypatch.setattr(
+        collection_capture,
+        "CollectionCaptureRunner",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("invalid capture rate")),
+    )
+
+    with pytest.raises(ValueError, match="invalid capture rate"):
+        collection_capture.start_collection_capture(
+            runtime,
+            fps=0,
+            max_raw_snapshots_per_tick=1,
+        )
+
+    assert runtime.collection_capture_runner is None
+    assert events == ["suspend", "resume"]
+
+
+def test_capture_stop_restores_gc_when_transport_finish_fails(monkeypatch):
+    events = []
+
+    class _Runner:
+        def stop(self):
+            events.append("runner_stop")
+
+    def finish_capture():
+        events.append("capture_finish")
+        raise OSError("journal release failed")
+
+    runtime = SimpleNamespace(
+        collection_capture_runner=_Runner(),
+        transport=SimpleNamespace(finish_collection_capture=finish_capture),
+    )
+    monkeypatch.setattr(collection_capture, "_resume_cyclic_gc", lambda: events.append("gc_resume"))
+
+    with pytest.raises(OSError, match="journal release failed"):
+        collection_capture.stop_collection_capture(runtime)
+
+    assert runtime.collection_capture_runner is None
+    assert events == ["runner_stop", "capture_finish", "gc_resume"]

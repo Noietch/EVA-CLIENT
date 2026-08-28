@@ -3,16 +3,23 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import logging
 import queue
+import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
-from core.app.collection_capture import start_collection_capture, stop_collection_capture
+from core.app.collection_capture import (
+    prepare_collection_capture,
+    start_collection_capture,
+    stop_collection_capture,
+)
 from core.app.handlers.imaging import prepare_image
 from core.app.handlers.teleop import (
     TELEOP_CONTROL_SOURCE_CLIENT,
@@ -44,6 +51,186 @@ COLLECT_STEP_MAX_RAW_SNAPSHOTS = 16
 ROLLOUT_STEP_MAX_RAW_SNAPSHOTS = 1
 ROLLOUT_INTERVENTION_SOURCE_TRANSPORT = "transport"
 ROLLOUT_INTERVENTION_SOURCE_CLIENT = "teleop_client"
+
+
+# ``episodes.jsonl`` is append-only for normal saves, but it is also rewritten by
+# QC/annotation updates. Cache the projected rows by file signature so the history
+# endpoint can serve repeated reads without reparsing the whole dataset. The cache
+# is deliberately process-local: the console server and the recorder share this
+# process, while a changed mtime/size invalidates an entry automatically.
+_EPISODE_HISTORY_CACHE_MAX = 32
+_EPISODE_HISTORY_CACHE_LOCK = threading.RLock()
+
+
+@dataclass
+class _EpisodeHistoryCacheEntry:
+    signature: tuple[int, int, int]
+    version: str
+    rows: list[dict[str, Any]]
+    views: dict[str | None, tuple[list[dict[str, Any]], list[str]]]
+
+
+_EPISODE_HISTORY_CACHE: dict[Path, _EpisodeHistoryCacheEntry] = {}
+_EPISODE_HISTORY_COUNT_CACHE: dict[Path, tuple[tuple[int, int, int], str, int]] = {}
+
+
+def _episode_history_signature(path: Path) -> tuple[int, int, int]:
+    try:
+        stat = path.stat()
+    except OSError:
+        return (0, 0, 0)
+    return (int(stat.st_ino), int(stat.st_mtime_ns), int(stat.st_size))
+
+
+def _episode_history_version(signature: tuple[int, int, int]) -> str:
+    return "-".join(f"{value:x}" for value in signature)
+
+
+def _json_object(line: str) -> dict[str, Any] | None:
+    line = line.strip()
+    if not line:
+        return None
+    try:
+        value = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _iter_json_objects(path: Path):
+    try:
+        stream = path.open()
+    except OSError:
+        return
+    with stream:
+        for line in stream:
+            row = _json_object(line)
+            if row is not None:
+                yield row
+
+
+def _read_episode_history_rows(path: Path) -> list[dict[str, Any]]:
+    """Read and project one dataset history, tolerating a partial append line."""
+    return [history_row(row, index) for index, row in enumerate(_iter_json_objects(path))]
+
+
+def _episode_history_cursors(rows: list[dict[str, Any]]) -> list[str]:
+    """Build stable cursors for every visible prefix in one pass."""
+    digest = hashlib.blake2s(digest_size=12)
+    cursors = [digest.hexdigest()]
+    for row in rows:
+        payload = json.dumps(
+            row, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode()
+        digest.update(payload)
+        digest.update(b"\n")
+        cursors.append(digest.hexdigest())
+    return cursors
+
+
+def _count_episode_history(dataset_dir: Path) -> tuple[int, str]:
+    """Count valid metadata rows without allocating the web history projection."""
+    resolved = Path(dataset_dir).resolve()
+    path = resolved / "meta" / "episodes.jsonl"
+    signature = _episode_history_signature(path)
+    with _EPISODE_HISTORY_CACHE_LOCK:
+        cached_rows = _EPISODE_HISTORY_CACHE.get(resolved)
+        if cached_rows is not None and cached_rows.signature == signature:
+            return len(cached_rows.rows), cached_rows.version
+        cached_count = _EPISODE_HISTORY_COUNT_CACHE.get(resolved)
+        if cached_count is not None and cached_count[0] == signature:
+            return cached_count[2], cached_count[1]
+        count = sum(1 for _ in _iter_json_objects(path))
+        version = _episode_history_version(signature)
+        _EPISODE_HISTORY_COUNT_CACHE[resolved] = (signature, version, count)
+        while len(_EPISODE_HISTORY_COUNT_CACHE) > _EPISODE_HISTORY_CACHE_MAX:
+            _EPISODE_HISTORY_COUNT_CACHE.pop(next(iter(_EPISODE_HISTORY_COUNT_CACHE)))
+        return count, version
+
+
+def load_episode_history(
+    dataset_dir: Path,
+    *,
+    task: str | None = None,
+    since: int = 0,
+    limit: int | None = None,
+    cursor: str | None = None,
+    exclude_episode_indices: set[int] | None = None,
+) -> dict[str, Any]:
+    """Return a cached, offset-paginated episode history projection.
+
+    ``task`` is applied before pagination, so ``since`` is the number of matching
+    rows already held by the caller (an offset, not an episode id). This remains
+    correct when episode ids have gaps or a QC update rewrites an existing row.
+    The returned ``version`` lets a client reset the cursor when an old row was edited.
+    """
+    resolved = Path(dataset_dir).resolve()
+    path = resolved / "meta" / "episodes.jsonl"
+    signature = _episode_history_signature(path)
+    if limit == 0 and task is None and not cursor and not exclude_episode_indices:
+        total, version = _count_episode_history(resolved)
+        offset = min(max(0, int(since)), total)
+        return {
+            "episodes": [],
+            "total": total,
+            "since": offset,
+            "next_since": offset,
+            "has_more": offset < total,
+            "version": version,
+            "cursor": "",
+            "reset": False,
+        }
+    with _EPISODE_HISTORY_CACHE_LOCK:
+        cached = _EPISODE_HISTORY_CACHE.get(resolved)
+        if cached is None or cached.signature != signature:
+            rows = _read_episode_history_rows(path)
+            cached = _EpisodeHistoryCacheEntry(
+                signature,
+                _episode_history_version(signature),
+                rows,
+                {None: (rows, _episode_history_cursors(rows))},
+            )
+            _EPISODE_HISTORY_CACHE[resolved] = cached
+            _EPISODE_HISTORY_COUNT_CACHE[resolved] = (
+                signature,
+                cached.version,
+                len(rows),
+            )
+            while len(_EPISODE_HISTORY_CACHE) > _EPISODE_HISTORY_CACHE_MAX:
+                _EPISODE_HISTORY_CACHE.pop(next(iter(_EPISODE_HISTORY_CACHE)))
+            while len(_EPISODE_HISTORY_COUNT_CACHE) > _EPISODE_HISTORY_CACHE_MAX:
+                _EPISODE_HISTORY_COUNT_CACHE.pop(next(iter(_EPISODE_HISTORY_COUNT_CACHE)))
+        view = cached.views.get(task)
+        if view is None:
+            filtered_rows = [row for row in cached.rows if str(row.get("task", "")) == task]
+            view = (filtered_rows, _episode_history_cursors(filtered_rows))
+            cached.views[task] = view
+
+    filtered_rows, cursors = view
+    if exclude_episode_indices:
+        filtered_rows = [
+            row for row in filtered_rows if row.get("episode_index") not in exclude_episode_indices
+        ]
+        cursors = _episode_history_cursors(filtered_rows)
+    total = len(filtered_rows)
+    offset = min(max(0, int(since)), total)
+    reset = bool(cursor) and cursor != cursors[offset]
+    if reset:
+        offset = 0
+    if limit is None:
+        end = total
+    else:
+        end = min(total, offset + max(0, int(limit)))
+    return {
+        "episodes": filtered_rows[offset:end],
+        "total": total,
+        "since": offset,
+        "next_since": end,
+        "has_more": end < total,
+        "version": cached.version,
+        "cursor": cursors[end],
+        "reset": reset,
+    }
 
 
 def state_to_eef(config: ConfigDict, runtime: RuntimeState, qpos_state: np.ndarray) -> np.ndarray:
@@ -285,11 +472,25 @@ def rollout_save_log_dir(config: ConfigDict, runtime: RuntimeState | None = None
 def maybe_build_rollout_episode_logger(config: ConfigDict, runtime: RuntimeState) -> None:
     """Construct the rollout EpisodeLogger when explicit rollout saving is enabled."""
     storage = _rollout_storage(config, runtime)
-    if not bool(storage.get("enabled", True)) or runtime.rollout_episode_logger is not None:
+    if not bool(storage.get("enabled", True)):
+        logger_obj = runtime.rollout_episode_logger
+        runtime.rollout_episode_logger = None
+        if logger_obj is not None:
+            if logger_obj.has_active_episode:
+                logger_obj.cancel_episode("rollout storage disabled")
+            logger_obj.finalize()
         return
+    dataset_path = rollout_save_log_dir(config, runtime)
+    logger_obj = runtime.rollout_episode_logger
+    if logger_obj is not None and Path(logger_obj._log_dir).resolve() == dataset_path.resolve():
+        return
+    if logger_obj is not None:
+        if logger_obj.has_active_episode:
+            logger_obj.cancel_episode("rollout dataset changed")
+        logger_obj.finalize()
     gripper_open, gripper_close, gripper_threshold = _gripper_recording_config(config)
     runtime.rollout_episode_logger = EpisodeLogger(
-        log_dir=rollout_save_log_dir(config),
+        log_dir=dataset_path,
         robot=runtime.robot,
         fps=storage.fps,
         dataset_keys=config.transport.dataset_keys,
@@ -498,18 +699,8 @@ def discard_rollout_episode(runtime: RuntimeState) -> None:
 
 
 def _load_saved_episode_history(dataset_dir: Path) -> list[dict[str, Any]]:
-    history = []
-    path = dataset_dir / "meta" / "episodes.jsonl"
-    if not path.exists():
-        return history
-    with path.open() as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            row = json.loads(line)
-            history.append(history_row(row, len(history)))
-    return history
+    """Return the complete projected history, cached by ``episodes.jsonl`` signature."""
+    return load_episode_history(dataset_dir)["episodes"]
 
 
 def _rollout_intervention_save_status(runtime: RuntimeState) -> dict[str, Any]:
@@ -522,11 +713,28 @@ def _rollout_intervention_save_status(runtime: RuntimeState) -> dict[str, Any]:
     }
 
 
-def rollout_save_status(config: ConfigDict, runtime: RuntimeState) -> dict[str, Any]:
-    """Return queue/progress state for the rollout save panel."""
+def rollout_save_status(
+    config: ConfigDict,
+    runtime: RuntimeState,
+    *,
+    include_history: bool = True,
+) -> dict[str, Any]:
+    """Return queue/progress state for the rollout save panel.
+
+    The high-frequency console status poll passes ``include_history=False`` so
+    serializing the live pipeline never reads or embeds the complete history. The
+    default remains the original full snapshot for direct callers and tests.
+    """
     dataset_path = rollout_save_log_dir(config, runtime)
-    saved_history = _load_saved_episode_history(dataset_path)
+    if include_history:
+        saved_history = _load_saved_episode_history(dataset_path)
+        completed_episodes = len(saved_history)
+    else:
+        saved_history = []
+        completed_episodes = load_episode_history(dataset_path, limit=0)["total"]
     logger_obj = runtime.rollout_episode_logger
+    if logger_obj is not None and Path(logger_obj._log_dir).resolve() != dataset_path.resolve():
+        logger_obj = None
     storage = _rollout_storage(config, runtime)
     snapshot = {
         "enabled": bool(storage.get("enabled", True)),
@@ -534,26 +742,30 @@ def rollout_save_status(config: ConfigDict, runtime: RuntimeState) -> dict[str, 
         "pipeline_state": "IDLE",
         "collecting": False,
         "current_episode_frames": 0,
-        "completed_episodes": len(saved_history),
+        "completed_episodes": completed_episodes,
         "save_queue_size": 0,
         "save_queue_max": storage.save_queue_max,
-        "progress": 1.0 if saved_history else 0.0,
+        "progress": 1.0 if completed_episodes else 0.0,
         "eta_sec": None,
-        "episodes": saved_history,
         "queue": [],
         "save_ready": False,
         "reason": "",
     }
+    if include_history:
+        snapshot["episodes"] = saved_history
     if not snapshot["enabled"]:
         snapshot["pipeline_state"] = "DISABLED"
         snapshot["completed_episodes"] = 0
         snapshot["progress"] = 0.0
     elif logger_obj is not None:
-        snapshot = logger_obj.status_snapshot()
+        snapshot = logger_obj.status_snapshot(include_history=include_history)
         snapshot["enabled"] = True
         snapshot["dataset_dir"] = str(dataset_path)
-        snapshot["episodes"] = saved_history
-        snapshot["completed_episodes"] = len(saved_history)
+        snapshot["completed_episodes"] = completed_episodes
+        if include_history:
+            snapshot["episodes"] = saved_history
+        else:
+            snapshot.pop("episodes", None)
         buffered_frames = (
             logger_obj.active_frame_count
             + len(runtime.rollout_policy_actions)
@@ -656,11 +868,13 @@ def rebuild_eval_episode_logger(config: ConfigDict, runtime: RuntimeState) -> No
 def start_episode(runtime: RuntimeState, session: SessionState) -> None:
     """Begin one episode = one inference run (status -> RUNNING)."""
     if runtime.episode_logger is not None:
+        prepare_collection_capture(runtime, runtime.episode_logger)
         runtime.episode_logger.start_episode(task=format_task_label(session.selected_task))
 
 
 def end_episode(runtime: RuntimeState) -> None:
     """Close the current episode, flushing parquet + mp4 to the dataset."""
+    stop_collection_capture(runtime)
     if runtime.episode_logger is not None:
         runtime.episode_logger.end_episode()
 
@@ -828,7 +1042,7 @@ def record_client_rollout_intervention_step(
     if frame is None:
         return False
     recorded = _copy_observation(frame)
-    if recorded.timestamp <= 0.0:
+    if recorded.timestamp is None or recorded.timestamp <= 0.0:
         recorded.timestamp = time.time()
     recorded.action_qpos = published.qpos.copy()
     if recorded.state_qpos is None:
@@ -965,6 +1179,7 @@ def collect_start(config: ConfigDict, runtime: RuntimeState, session: SessionSta
             logger_obj.start_episode(
                 task=format_task_label(session.selected_collect_task),
                 collection_min_capture_time=collection_min_capture_time,
+                collection_dataset=session.selected_collect_set,
             )
             control_source = str(
                 (config.collection.teleop or {}).get("control_source", "transport")
@@ -1046,10 +1261,12 @@ def ingest_client_teleop_action(
     runtime: RuntimeState,
     published: PublishedTeleopAction,
 ) -> bool:
-    """Pair one successfully published client action with at most one raw snapshot.
+    """Capture one high-rate client action and at most one raw observation snapshot.
 
-    The call is intentionally single-shot and non-blocking. When no observation is
-    ready, the control loop keeps running and the action is omitted from the dataset.
+    Actions retain their control-loop timestamps as an independent stream. Raw
+    state/camera snapshots remain at the execution endpoint's observation rate; the
+    collection aligner later interpolates both streams onto collection.storage.fps.
+    The call is intentionally single-shot and non-blocking.
     """
     del config
     logger_obj = runtime.episode_logger
@@ -1059,10 +1276,11 @@ def ingest_client_teleop_action(
         or not logger_obj.has_active_episode
     ):
         return False
+    logger_obj.ingest_collection_action(published.timestamp, published.qpos)
     snapshot = runtime.transport.acquire_collection_raw()
     if snapshot is None:
         return False
-    logger_obj.ingest_collection_action_snapshot(snapshot, published.qpos)
+    logger_obj.ingest_collection_client_snapshot(snapshot)
     return True
 
 
@@ -1195,6 +1413,7 @@ __all__ = [
     "_fill_record_eef",
     "build_policy_observation",
     "resolve_storage",
+    "load_episode_history",
     "maybe_build_episode_logger",
     "rollout_save_log_dir",
     "maybe_build_rollout_episode_logger",

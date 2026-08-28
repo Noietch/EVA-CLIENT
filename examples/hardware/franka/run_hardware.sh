@@ -29,7 +29,7 @@ exec "${FRANKA_PYTHON_BIN}" -X faulthandler examples/hardware/franka/node.py \
   --left-gripper-ip "${LEFT_GRIPPER_IP:-}" \
   --right-gripper-ip "${RIGHT_GRIPPER_IP:-}" \
   --eva-config "${EVA_CONFIG:-configs/01_deploy/dual_franka/openpi_qpos.py}" \
-  --rate "${PUBLISH_RATE:-30}" \
+  --rate "${PUBLISH_RATE:-100}" \
   --status-log-interval "${STATUS_LOG_INTERVAL:-5}" \
   --log-file "${LOG_FILE:-Log/franka_node.log}" \
   "${disabled_args[@]}" \

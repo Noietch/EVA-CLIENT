@@ -5,8 +5,9 @@ config (`configs/01_deploy/dual_franka/openpi_qpos.py`). This config uses
 `transport.type: zmq`, so EVA talks to this node over ZMQ.
 
 The real node connects to a dual Franka pair through `franky`, reads one or more
-Orbbec cameras through the Orbbec Python SDK, publishes EVA ZMQ `WireObservation`
-frames, and consumes EVA `WireAction` commands.
+Orbbec cameras through the Orbbec Python SDK, publishes action/state observations
+at 100 Hz, attaches each new camera frame once at 30 FPS, and consumes EVA
+`WireAction` commands.
 
 ## Files
 
@@ -181,19 +182,17 @@ transport:
 
 ## Teleop Collection
 
-Not yet implemented (还在整理). `node.py` currently handles only deploy —
-publishing observations and executing actions — and does not respond to EVA's
-collection start/stop control actions or read any leader device.
-`configs/02_collection/dual_franka.py` defines the recording schema (cameras,
-columns, `action.qpos` / `action.eef`), but the teleop source that would
-populate those action fields is not wired in this directory yet.
+Use `configs/02_collection/dual_franka_vr.py` for WebXR collection. EVA owns the
+collection lifecycle and pairs each client teleop action with the raw ZMQ state
+stream; the hardware node only needs to execute `target="real"` actions and keep
+publishing state and fresh camera samples.
 
 ## Status
 
 The node prints hardware status periodically:
 
 ```text
-Hardware status: arms=[left_arm=online right_arm=disabled] cameras=[cam_high=online(age=0.0s)] rates=[obs=30.0Hz actions=2.0Hz]
+Hardware status: arms=[left_arm=online right_arm=disabled] cameras=[cam_high=online(age=0.0s)] rates=[obs=100.0Hz actions=30.0Hz]
 ```
 
 Use `--status-log-interval 10` to change the interval, or set it to `0` to

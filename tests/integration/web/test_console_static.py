@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from functools import cache
 from pathlib import Path
 
 STATIC_DIR = Path(__file__).resolve().parents[3] / "src" / "core" / "app" / "console" / "static"
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
+@cache
 def console_source() -> str:
     """Concatenate the console markup, styles, and all ES modules into one string.
 
@@ -19,6 +21,16 @@ def console_source() -> str:
     parts += [p.read_text() for p in sorted(STATIC_DIR.glob("js/*.js"))]
     parts += [p.read_text() for p in sorted(STATIC_DIR.glob("css/*.css"))]
     return "\n".join(parts)
+
+
+def _assert_contains_all(source: str, *snippets: str) -> None:
+    for snippet in snippets:
+        assert snippet in source
+
+
+def _assert_contains_none(source: str, *snippets: str) -> None:
+    for snippet in snippets:
+        assert snippet not in source
 
 
 def test_replay_perf_probe_measures_from_user_click_to_visible_videos():
@@ -115,6 +127,68 @@ def test_live_camera_streams_do_not_block_page_load_or_reload():
     assert 'video.removeAttribute("src");' in html
 
 
+def test_status_heartbeat_is_slow_bounded_and_single_flight():
+    html = console_source()
+
+    assert "const STATUS_POLL_MS = 1000;" in html
+    assert "const STATUS_REQUEST_TIMEOUT_MS = 1500;" in html
+    assert 'apiGet("/api/status", { timeoutMs: STATUS_REQUEST_TIMEOUT_MS })' in html
+    assert "const tick = async () => { await fn(); setTimeout(tick, delay); };" in html
+    assert "const API_GET_TIMEOUT_MS = 5000;" in html
+    assert "new AbortController()" in html
+
+
+def test_live_camera_streams_only_run_for_visible_stage_tabs():
+    html = console_source()
+
+    assert 'const LIVE_STAGE_TABS = new Set(["debug", "manual", "collect", "eval", "rl"]);' in html
+    assert "return !document.hidden && LIVE_STAGE_TABS.has(S.ACTIVE_TAB);" in html
+    assert "if (!liveStageActive())" in html
+    assert 'document.addEventListener("visibilitychange", handleVisibilityChange);' in html
+    assert "handleVisibilityChange, liveStageActive" in html
+
+
+def test_episode_history_is_loaded_outside_the_status_heartbeat():
+    html = console_source()
+
+    _assert_contains_all(
+        html,
+        "episodeHistory:",
+        "const EPISODE_HISTORY_POLL_MS = 5000;",
+        "const EPISODE_HISTORY_PAGE_SIZE = 128;",
+        "new URLSearchParams({",
+        "scope,",
+        "since: String(Math.max(0, Number(since) || 0))",
+        "limit: String(EPISODE_HISTORY_PAGE_SIZE)",
+        'params.set("cursor", cursor)',
+        "while (hasMore)",
+        'throw new Error("episode history cursor stalled")',
+        'if (scope !== "collect" && currentStatusDir !== statusDir) return;',
+        "addedEpisodes.push(...payload.episodes);",
+        "cache.summary = appendEpisodeItemsSummary(cache.summary, addedEpisodes);",
+        "cache.cursor = nextCursor;",
+        "cache.loaded = true;",
+        "cache.summary = episodeItemsSummary(addedEpisodes);",
+        "history.summary.signature",
+        "const queueSummary = episodeItemsSummary(queue);",
+        "const cachedHistory = S.episodeHistory && S.episodeHistory.rollout;",
+    )
+
+
+def test_episode_history_keeps_live_queue_and_rl_poll_lightweight():
+    html = console_source()
+
+    _assert_contains_all(
+        html,
+        "const statusQueueMatches = Array.isArray(status && status.queue)",
+        "const queue = statusQueueMatches ? status.queue : (cache.queue || []);",
+        "const historyMatchesStatus =",
+        "apiGet(`/api/rl/series?samples=0&critic_since=${criticSince}`)",
+        "completed_episodes",
+    )
+    _assert_contains_none(html, "rlLiveActionSince")
+
+
 def test_console_post_requests_are_serialized():
     html = console_source()
 
@@ -203,10 +277,18 @@ def test_rl_saved_data_render_is_keyed_instead_of_rebuilt_on_every_status_poll()
     html = console_source()
 
     assert 'let rlSavedRenderKey = "";' in html
+    assert 'let rlSavedStatusKey = "";' in html
     assert "function renderSavedData(items, force = false)" in html
     assert "if (!force && key === rlSavedRenderKey) return;" in html
     assert "quality_issue_count: item.quality_issue_count" in html
-    assert "renderSavedData(items);" in html
+    assert "historyMatchesStatus && cachedHistory.summary" in html
+    assert "if (savedStatusKey !== rlSavedStatusKey)" in html
+    assert "renderSavedData(historyEpisodes.concat(historyQueue), true);" in html
+    assert 'S.ACTIVE_TAB !== "rl" || document.hidden || seriesPolling' in html
+    start = html.index("async function pollRlSeries()")
+    body = html[start : html.index("function queueReplayCritic", start)]
+    assert "} catch {" in body
+    assert "} finally {\n    seriesPolling = false;" in body
 
 
 def test_rl_save_gives_immediate_feedback_and_blocks_duplicate_actions_until_setup():
@@ -276,14 +358,13 @@ def test_collect_controls_use_svg_progress_and_keyboard_shortcuts():
 
 
 def test_collect_requirement_renderer_imports_its_task_target_helper():
-    html = console_source()
+    collect_source = (STATIC_DIR / "js" / "collect.js").read_text()
+    run_source = (STATIC_DIR / "js" / "run.js").read_text()
 
-    assert (
-        'import { collectTaskTarget, collectTaskValue, setPanel, applyStatus, uiMode } from "./run.js";'
-        in html
-    )
-    assert "function collectTaskTarget(prompt = collectTaskValue())" in html
-    assert "applyTune, applyManualTune, collectTaskTarget, collectTaskValue" in html
+    assert 'from "./run.js";' in collect_source
+    assert "collectTaskTarget, collectTaskValue" in collect_source
+    assert "function collectTaskTarget(prompt = collectTaskValue())" in run_source
+    assert "collectTaskTarget, collectTaskValue, renderConfig" in run_source
 
 
 def test_collect_guide_appends_client_input_source_health():
@@ -850,7 +931,8 @@ def test_batch_qc_requires_selected_episode():
     html = console_source()
 
     assert '"b-goto-qc").disabled =' in html
-    assert "collectReplayEpisode == null" in html
+    assert "$(" + '"b-goto-qc").disabled = !enabled || !selectedEpisodeSaved;' in html
+    assert "$(" + '"b-collect-note-save").disabled = !selectedEpisodeSaved;' in html
 
 
 def test_collection_qc_gates_on_selected_saved_episode_not_global_queue():
@@ -867,7 +949,8 @@ def test_collection_qc_gates_on_selected_saved_episode_not_global_queue():
 
     selected_start = html.index("function selectedCollectEpisodeItem()")
     selected_body = html[selected_start : html.index("function renderCollectTiles", selected_start)]
-    assert "if (reviewTask !== collectTaskValue()) return null;" in selected_body
+    assert "if (!collectReviewMatchesSelection()) return null;" in selected_body
+    assert "reviewCollectionSet === collectSetValue()" in html
     assert "return items.find((item) => savedEpisodeId(item) === episode) || null;" in selected_body
     assert '{ status: "saved", episode_index: episode }' not in selected_body
 
@@ -881,6 +964,8 @@ def test_collection_qc_uses_collection_endpoint_without_changing_other_qc_paths(
     assert 'let reviewTask = "";' in html
     assert "reviewTask = collectTaskValue();" in html
     assert "task: reviewTask," in html
+    assert "reviewCollectionSet = collectSetValue();" in html
+    assert 'dataset: kind === "collect" ? reviewCollectionSet : "",' in html
     assert 'apiPost("/api/qc_mark", {' in html
 
 
@@ -929,8 +1014,36 @@ def test_selected_batch_qc_episode_is_highlighted():
     html = console_source()
 
     assert ".collect-tile.selected" in html
-    assert 'if (episode === S.collectReplayEpisode) tile.classList.add("selected");' in html
-    assert 'episode === S.collectReplayEpisode ? " selected" : ""' in html
+    assert "collectReviewMatchesSelection() && episode === S.collectReplayEpisode" in html
+    assert 'selected ? " selected" : ""' in html
+
+
+def test_collection_quality_display_is_scoped_to_current_set_and_prompt():
+    html = console_source()
+    start = html.index("function renderCollect()")
+    body = html[start : html.index("async function exportCollectionQuality", start)]
+
+    assert "const collectionSet = collectSetValue();" in body
+    assert "// historyFor is the collection view's set+prompt scope boundary." in body
+    assert "const episodes = history.episodes;" in body
+    assert "const queue = history.queue;" in body
+    assert "const totalItems = episodes.length + queue.length;" in body
+    assert "const items = episodes.concat(queue);" in body
+    assert '$("collect-count").textContent = `${episodes.length}/${totalItems}`;' in body
+    assert "const usableCollected = history.summary.usable;" in body
+    assert "const queueSummary = episodeItemsSummary(queue);" in body
+    assert "history.summary.signature," in body
+    assert "const outcomes = items.map(collectOutcome);" not in body
+    assert "episodes.filter(" not in body
+    assert "collectionSet," in body
+    assert "prompt," in body
+
+    assert 'params.set("set", selection.collectionSet);' in html
+    assert 'params.set("task", selection.task);' in html
+    assert "itemsForPrompt(cache.episodes, selection.task)" not in html
+    assert "itemsForPrompt(queue, selection.task)" in html
+    assert "cache.collectionSet === selection.collectionSet" in html
+    assert "cache.task === selection.task" in html
 
 
 def test_collect_queue_click_reviews_selected_episode_immediately():
@@ -949,7 +1062,7 @@ def test_rollout_saved_episode_list_stays_visible_for_debug_review_in_sim():
     body = html[start : html.index("function renderCollect()", start)]
 
     assert "const hideRolloutSave =" in body
-    assert 'items.length === 0 && S.reviewKind !== "rollout"' in body
+    assert 'totalItems === 0 && S.reviewKind !== "rollout"' in body
     assert 'panel.style.display = hideRolloutSave ? "none" : "";' in body
 
 
@@ -1137,7 +1250,8 @@ def test_eval_model_selector_is_dropdown():
     assert 'background-image: url("data:image/svg+xml' in html
     assert 'placeholder.textContent = "SELECT TASK";' in html
     assert 'apiPost("/api/select_task", { task });' in html
-    assert 'apiPost("/api/select_collect_task", { task: prompt });' in html
+    assert "dataset: collectSet," in html
+    assert "task_index: collectTaskIndex," in html
     assert 'const opt = document.createElement("option");' in html
     assert "sl.onchange = () => {" in html
     assert 'apiPost("/api/select_strategy", { strategy: key });' in html
@@ -1163,9 +1277,12 @@ def test_collect_start_requires_motion_switch():
 def test_collect_task_selection_refreshes_record_gate_immediately():
     html = console_source()
 
-    assert "function selectCollectTask(prompt)" in html
+    assert "function selectCollectTask(prompt, setName = collectSet, taskIndex = null)" in html
     assert "S.STATUS.selected_collect_task = prompt;" in html
-    assert 'apiPost("/api/select_collect_task", { task: prompt });' in html
+    assert "dataset: collectSet," in html
+    assert "task_index: collectTaskIndex," in html
+    assert "option.value = String(index);" in html
+    assert "option.dataset.prompt = prompt;" in html
     assert "function stepCollectSet(delta)" in html
     assert "function stepCollectTask(delta)" in html
     assert 'id="collect-set-list"' in html
@@ -1175,6 +1292,29 @@ def test_collect_task_selection_refreshes_record_gate_immediately():
     assert 'id="b-collect-next-set" title="Next dataset set"' in html
     assert 'id="b-collect-prev-task" title="Previous task in this set"' in html
     assert 'id="b-collect-next-task" title="Next task in this set"' in html
+
+
+def test_collect_auto_advance_uses_new_completion_edge_and_stops_at_final_task():
+    html = console_source()
+    advance_start = html.index("function advanceCollectTask()")
+    advance_body = html[
+        advance_start : html.index("function syncCollectTaskNavigation", advance_start)
+    ]
+
+    assert "function maybeAutoAdvanceCollectTask(" in html
+    assert "if (collectAutoAdvanceState.usableCollected === null)" in html
+    assert (
+        "collectAutoAdvanceState.usableCollected < required && usableCollected >= required" in html
+    )
+    assert "!collectAutoAdvanceState.completionPending || collecting" in html
+    assert "collectTaskSelectionKey() !== selectionKey || stillCollecting" in html
+    assert "queueMicrotask(() =>" in html
+    assert "advanceCollectTask();" in html
+    assert advance_body.index("taskIndex + 1 < sets[setIndex].tasks.length") < advance_body.index(
+        "setIndex + 1 < sets.length"
+    )
+    assert "sets[setIndex + 1].tasks[0].prompt" in advance_body
+    assert advance_body.rstrip().endswith("return false;\n  }")
 
 
 def test_collect_queue_unlocks_after_end_save_click():
@@ -1476,7 +1616,7 @@ def test_collection_target_is_explicit_and_unset_targets_stay_blank():
     assert 'id="collect-requirement"' in queue_panel
     assert "COLLECTION TARGET · USABLE ONLY" in queue_panel
     assert "const required = collectTaskTarget(prompt);" in html
-    assert 'collectOutcome(item) === "usable"' in html
+    assert "const usableCollected = history.summary.usable;" in html
     assert 'unlimited ? "∞" : (hasRequirement ? required : "--")' in html
     assert '? "NO LIMIT"' in html
     assert ".collect-requirement.complete { border-left-color: var(--ok); }" in html

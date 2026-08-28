@@ -192,7 +192,13 @@ class WebHarness:
             except queue.Empty:
                 break
             effective = self.runtime.active_config or self.config
-            app.handle_command(cmd, effective, self.runtime, self.session)
+            app.handle_command(
+                cmd,
+                effective,
+                self.runtime,
+                self.session,
+                base_config=self.config,
+            )
             if self.runtime.prompt_ready is not None:
                 self.runtime.prompt_ready.set()
 

@@ -65,12 +65,17 @@ class PublishedTeleopAction:
     """The exact qpos successfully handed to the execution transport."""
 
     qpos: np.ndarray
+    timestamp: float = dataclasses.field(default_factory=time.monotonic)
 
     def __post_init__(self) -> None:
         value = np.asarray(self.qpos, dtype=np.float32).reshape(-1)
         if value.size == 0 or not np.all(np.isfinite(value)):
             raise ValueError("published teleop action must be finite and non-empty")
+        timestamp = float(self.timestamp)
+        if not np.isfinite(timestamp) or timestamp < 0.0:
+            raise ValueError("published teleop action timestamp must be finite and non-negative")
         object.__setattr__(self, "qpos", value.copy())
+        object.__setattr__(self, "timestamp", timestamp)
 
 
 def teleop_control_source(config: ConfigDict) -> str:

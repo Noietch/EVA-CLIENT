@@ -40,9 +40,14 @@ DEFAULT_INITIAL_GRIPPER = 1.0
 
 
 class FrankaArmConfig(Protocol):
-    robot_ips: dict[str, str]
-    gripper_ips: dict[str, str]
-    disabled_groups: tuple[str, ...]
+    @property
+    def robot_ips(self) -> dict[str, str]: ...
+
+    @property
+    def gripper_ips(self) -> dict[str, str]: ...
+
+    @property
+    def disabled_groups(self) -> tuple[str, ...]: ...
 
 
 def initial_qpos() -> np.ndarray:

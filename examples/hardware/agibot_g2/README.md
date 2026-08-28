@@ -166,12 +166,10 @@ The collection config (`configs/02_collection/agibot_g2.py`) records these under
 
 ## Teleop Collection
 
-Not yet implemented (还在整理). `node.py` currently handles only deploy — its
-30 Hz observation thread and 100 Hz servo loop — and does not respond to EVA's
-collection start/stop control actions or read any leader device.
-`configs/02_collection/agibot_g2.py` defines the recording schema (cameras,
-columns, `action.qpos` / `action.eef`), but the teleop source that would
-populate those action fields is not wired in this directory yet.
+Use `configs/02_collection/agibot_g2_vr.py` for WebXR collection. EVA owns the
+collection lifecycle and pairs client teleop actions with the raw 30 Hz
+observation stream. The hardware node drains the latest `target="real"` action
+and keeps the GDK servo loop running at 100 Hz.
 
 ## Shutdown
 

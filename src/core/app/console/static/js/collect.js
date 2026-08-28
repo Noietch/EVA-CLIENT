@@ -2,7 +2,10 @@
 // stage-video playback control (review).
 import { $, LIVE, S, apiGet, apiPost, clientTrace } from "./core.js";
 import { updateScrub } from "./charts.js";
-import { collectTaskTarget, collectTaskValue, setPanel, applyStatus, uiMode } from "./run.js";
+import {
+  advanceCollectTask, collectTaskIndexValue, collectSetValue, collectTaskSelectionKey,
+  collectTaskTarget, collectTaskValue, setPanel, applyStatus, uiMode,
+} from "./run.js";
 import {
   exitReplayMode, loadReviewPlayback, refreshCameraStreams, replayStop,
 } from "./replay.js";
@@ -27,6 +30,203 @@ const qualityTransfer = {
   bytesCompleted: 0,
   bytesTotal: 0,
 };
+
+// Saved episode history is review data, not heartbeat data. Fetch only the
+// visible collection/RL scope and retain the last complete snapshot locally.
+const EPISODE_HISTORY_POLL_MS = 5000;
+const EPISODE_HISTORY_PAGE_SIZE = 128;
+let episodeHistoryPolling = false;
+let collectItemsRenderKey = "";
+let rolloutItemsRenderKey = "";
+const collectAutoAdvanceState = {
+  selectionKey: "",
+  historyReady: false,
+  usableCollected: null,
+  completionPending: false,
+  scheduledKey: "",
+};
+
+function itemsForPrompt(items, prompt) {
+  return (items || []).filter(
+    (item) => String((item && (item.task || item.prompt)) || "") === prompt
+  );
+}
+
+function collectHistorySelection() {
+  return { collectionSet: collectSetValue(), task: collectTaskValue() };
+}
+
+function historyFor(scope, status) {
+  const cache = S.episodeHistory && S.episodeHistory[scope];
+  const statusDir = String((status && status.dataset_dir) || "");
+  const selection = scope === "collect" ? collectHistorySelection() : null;
+  const cacheMatchesScope = scope === "collect"
+    ? cache && cache.collectionSet === selection.collectionSet && cache.task === selection.task
+    : cache && (!statusDir || cache.datasetDir === statusDir);
+  if (cache && cache.loaded && cacheMatchesScope) {
+    const statusQueueMatches = Array.isArray(status && status.queue) &&
+      (!statusDir || cache.datasetDir === statusDir);
+    const queue = statusQueueMatches ? status.queue : (cache.queue || []);
+    return {
+      episodes: cache.episodes || [],
+      queue: scope === "collect" ? itemsForPrompt(queue, selection.task) : queue,
+      summary: cache.summary || episodeItemsSummary(cache.episodes),
+    };
+  }
+  const episodes = scope === "collect"
+    ? itemsForPrompt(status && status.episodes, selection.task)
+    : (Array.isArray(status && status.episodes) ? status.episodes : []);
+  return {
+    episodes,
+    queue: scope === "collect"
+      ? itemsForPrompt(status && status.queue, selection.task)
+      : (Array.isArray(status && status.queue) ? status.queue : []),
+    summary: episodeItemsSummary(episodes),
+  };
+}
+
+function episodeItemsSummary(items) {
+  const summary = { usable: 0, rejected: 0, pending: 0, signature: "" };
+  const signatures = [];
+  (items || []).forEach((item) => {
+    const outcome = collectOutcome(item);
+    if (outcome === "usable") summary.usable += 1;
+    else if (outcome === "rejected") summary.rejected += 1;
+    else summary.pending += 1;
+    signatures.push([
+      item && item.episode_index,
+      item && item.status,
+      item && item.quality,
+      item && item.qc_verdict,
+      item && item.length,
+      item && item.error,
+      item && item.quality_issue_count,
+      JSON.stringify(((item && item.quality_issues) || []).map((issue) => [
+        issue && issue.code,
+        issue && issue.count,
+      ])),
+    ].map((value) => String(value == null ? "" : value)).join(":"));
+  });
+  summary.signature = signatures.join("|");
+  return summary;
+}
+
+function appendEpisodeItemsSummary(summary, items) {
+  const tail = episodeItemsSummary(items);
+  return {
+    usable: summary.usable + tail.usable,
+    rejected: summary.rejected + tail.rejected,
+    pending: summary.pending + tail.pending,
+    signature: [summary.signature, tail.signature].filter(Boolean).join("|"),
+  };
+}
+
+function episodeItemsSignature(items) {
+  return episodeItemsSummary(items).signature;
+}
+
+function invalidateEpisodeHistory(scope) {
+  const cache = S.episodeHistory && S.episodeHistory[scope];
+  if (cache) cache.lastAttemptAt = 0;
+}
+
+async function fetchEpisodeHistory(scope, since, selection = null, cursor = "") {
+  const params = new URLSearchParams({
+    scope,
+    since: String(Math.max(0, Number(since) || 0)),
+    limit: String(EPISODE_HISTORY_PAGE_SIZE),
+  });
+  if (cursor) params.set("cursor", cursor);
+  if (scope === "collect") {
+    params.set("set", selection.collectionSet);
+    params.set("task", selection.task);
+  }
+  return apiGet(`/api/episodes?${params.toString()}`, { timeoutMs: 5000 });
+}
+
+async function pollEpisodeHistory(force = false) {
+  const scope = S.ACTIVE_TAB === "collect" ? "collect"
+    : S.ACTIVE_TAB === "rl" ? "rollout" : null;
+  if (!scope || document.hidden || episodeHistoryPolling) return;
+  const cache = S.episodeHistory && S.episodeHistory[scope];
+  if (!cache) return;
+  const selection = scope === "collect" ? collectHistorySelection() : null;
+  if (scope === "collect" && (!selection.collectionSet || !selection.task)) return;
+  const selectionChanged = scope === "collect" && (
+    cache.collectionSet !== selection.collectionSet || cache.task !== selection.task
+  );
+  const now = performance.now();
+  if (!force && !selectionChanged &&
+      now - Number(cache.lastAttemptAt || 0) < EPISODE_HISTORY_POLL_MS) return;
+  cache.lastAttemptAt = now;
+  episodeHistoryPolling = true;
+  try {
+    const statusDir = String((S.STATUS && S.STATUS[scope] && S.STATUS[scope].dataset_dir) || "");
+    const datasetChanged = scope !== "collect" && cache.loaded && !!statusDir &&
+      !!cache.datasetDir && statusDir !== cache.datasetDir;
+    const canContinue = cache.loaded && !datasetChanged && !selectionChanged;
+    let nextSince = canContinue ? cache.episodes.length : 0;
+    let nextCursor = canContinue ? String(cache.cursor || "") : "";
+    const addedEpisodes = [];
+    let resetHistory = !canContinue;
+    let hasMore = true;
+    let payload = null;
+    while (hasMore) {
+      const requestedSince = nextSince;
+      payload = await fetchEpisodeHistory(scope, nextSince, selection, nextCursor);
+      if (!payload || payload.ok === false || !Array.isArray(payload.episodes)) return;
+      const activeScope = S.ACTIVE_TAB === "collect" ? "collect"
+        : S.ACTIVE_TAB === "rl" ? "rollout" : null;
+      if (activeScope !== scope || document.hidden) return;
+      const currentStatusDir = String(
+        (S.STATUS && S.STATUS[scope] && S.STATUS[scope].dataset_dir) || ""
+      );
+      if (scope !== "collect" && currentStatusDir !== statusDir) return;
+      if (scope === "collect") {
+        const current = collectHistorySelection();
+        if (current.collectionSet !== selection.collectionSet || current.task !== selection.task) {
+          return;
+        }
+        if (payload.set !== selection.collectionSet || payload.task !== selection.task) return;
+      }
+      if (payload.reset) {
+        resetHistory = true;
+        addedEpisodes.length = 0;
+      }
+      addedEpisodes.push(...payload.episodes);
+      const loadedLength = resetHistory
+        ? addedEpisodes.length : cache.episodes.length + addedEpisodes.length;
+      nextSince = Math.max(0, Number(payload.next_since) || loadedLength);
+      nextCursor = String(payload.cursor || "");
+      hasMore = !!payload.has_more;
+      if (hasMore && nextSince <= requestedSince) {
+        throw new Error("episode history cursor stalled");
+      }
+    }
+    cache.loaded = true;
+    if (resetHistory) {
+      cache.episodes = addedEpisodes;
+      cache.summary = episodeItemsSummary(addedEpisodes);
+    } else if (addedEpisodes.length) {
+      cache.episodes.push(...addedEpisodes);
+      cache.summary = appendEpisodeItemsSummary(cache.summary, addedEpisodes);
+    }
+    cache.queue = Array.isArray(payload.queue) ? payload.queue : [];
+    cache.datasetDir = String(payload.dataset_dir || statusDir || "");
+    if (scope === "collect") {
+      cache.collectionSet = selection.collectionSet;
+      cache.task = selection.task;
+    }
+    cache.version = String(payload.version || "");
+    cache.cursor = nextCursor;
+    if (scope === "collect") renderCollect();
+    else renderRolloutSave();
+  } catch {
+    // Keep the last complete snapshot while the low-frequency endpoint recovers.
+  } finally {
+    episodeHistoryPolling = false;
+  }
+}
 
 const DATASET_FORMAT_LABELS = {
   lerobot_v21: "LeRobot v2.1",
@@ -360,9 +560,22 @@ async function startCollectFromTab() {
       returnReviewToLive();
     }
     const task = collectTaskValue();
-    if (task && task !== S.STATUS.selected_collect_task) {
+    const collectionSet = collectSetValue();
+    const taskIndex = collectTaskIndexValue();
+    const needsSelection = task && (
+      task !== S.STATUS.selected_collect_task ||
+      collectionSet !== S.STATUS.selected_collect_set ||
+      taskIndex !== S.STATUS.selected_collect_task_index
+    );
+    if (needsSelection) {
       S.STATUS.selected_collect_task = task;
-      await apiPost("/api/select_collect_task", { task });
+      S.STATUS.selected_collect_set = collectionSet;
+      S.STATUS.selected_collect_task_index = taskIndex;
+      await apiPost("/api/select_collect_task", {
+        task,
+        dataset: collectionSet,
+        task_index: taskIndex,
+      });
     }
     await apiPost("/api/operator_action", { intent: "start" });
   }
@@ -444,9 +657,10 @@ function selectCollectEpisodePointer(event, item) {
 function selectedCollectEpisodeItem() {
     const episode = S.collectReplayEpisode;
     if (episode == null) return null;
-    if (reviewTask !== collectTaskValue()) return null;
+    if (!collectReviewMatchesSelection()) return null;
     const collect = S.STATUS.collect || {};
-    const items = (collect.episodes || []).concat(collect.queue || []);
+    const history = historyFor("collect", collect);
+    const items = history.episodes.concat(history.queue);
     return items.find((item) => savedEpisodeId(item) === episode) || null;
   }
 
@@ -471,7 +685,9 @@ function renderCollectTiles(items) {
       if (episode != null) {
         tile.classList.add("replayable");
         tile.title = `episode ${item.episode_index}`;
-        if (episode === S.collectReplayEpisode) tile.classList.add("selected");
+        if (collectReviewMatchesSelection() && episode === S.collectReplayEpisode) {
+          tile.classList.add("selected");
+        }
         tile.onpointerdown = (event) => selectCollectEpisodePointer(event, item);
         tile.onclick = () => selectCollectEpisode(item);
       } else {
@@ -495,7 +711,8 @@ function renderCollectList(items) {
     items.slice().reverse().forEach((item) => {
       const row = document.createElement("div");
       const episode = savedEpisodeId(item);
-      row.className = `collect-row ${episode != null ? "replayable" : ""}${episode === S.collectReplayEpisode ? " selected" : ""}`;
+      const selected = collectReviewMatchesSelection() && episode === S.collectReplayEpisode;
+      row.className = `collect-row ${episode != null ? "replayable" : ""}${selected ? " selected" : ""}`;
       const ep = document.createElement("span");
       const frames = document.createElement("span");
       const issue = document.createElement("span");
@@ -577,11 +794,12 @@ function renderRolloutSave() {
     const panel = $("rollout-save-panel");
     if (!panel) return;
     const rollout = S.STATUS.rollout || {};
-    const episodes = rollout.episodes || [];
-    const queue = rollout.queue || [];
-    const items = episodes.concat(queue);
+    const history = historyFor("rollout", rollout);
+    const episodes = history.episodes;
+    const queue = history.queue;
+    const totalItems = episodes.length + queue.length;
     const hideRolloutSave = ["sim", "step"].includes(uiMode(S.STATUS.cli_mode)) &&
-      items.length === 0 && S.reviewKind !== "rollout";
+      totalItems === 0 && S.reviewKind !== "rollout";
     panel.style.display = hideRolloutSave ? "none" : "";
     if (hideRolloutSave) return;
     const enabled = !!rollout.enabled;
@@ -594,7 +812,7 @@ function renderRolloutSave() {
     pipeBadge($("rollout-save-pipeline"), enabled ? (rollout.pipeline_state || "IDLE") : "DISABLED");
     $("rollout-save-dir").style.display = savedComplete ? "block" : "none";
     $("rollout-save-dir").textContent = savedComplete ? `saved to ${rollout.dataset_dir || "—"}` : "";
-    $("rollout-save-count").textContent = `${episodes.length}/${items.length}`;
+    $("rollout-save-count").textContent = `${episodes.length}/${totalItems}`;
     $("rollout-save-progress-fill").style.width = `${progress * 100}%`;
     $("rollout-save-eta").textContent = fmtEta(rollout.eta_sec);
     const acceptedInterventions = Number(rollout.accepted_intervention_segments || 0);
@@ -609,17 +827,77 @@ function renderRolloutSave() {
     $("b-rollout-qc-pass").disabled = !enabled || S.rolloutSaveEpisode == null;
     $("b-rollout-qc-fail").disabled = !enabled || S.rolloutSaveEpisode == null;
 
-    renderRolloutSaveTiles(items);
-    renderRolloutSaveList(items);
+    const renderKey = [
+      history.summary.signature,
+      episodeItemsSignature(queue),
+      S.rolloutSaveEpisode == null ? "" : S.rolloutSaveEpisode,
+      S.rolloutSaveQueueExpanded ? "expanded" : "collapsed",
+    ].join("\n");
+    if (renderKey !== rolloutItemsRenderKey) {
+      rolloutItemsRenderKey = renderKey;
+      const items = episodes.concat(queue);
+      renderRolloutSaveTiles(items);
+      renderRolloutSaveList(items);
+    }
 
     if (S.rolloutSaveEpisode == null) {
       $("rollout-review-title").textContent = "no rollout selected";
     }
   }
 
+function collectHistoryReadyFor(collectionSet, prompt) {
+    const cache = S.episodeHistory && S.episodeHistory.collect;
+    return !!(
+      cache && cache.loaded &&
+      cache.collectionSet === collectionSet && cache.task === prompt
+    );
+  }
+
+function maybeAutoAdvanceCollectTask(prompt, usableCollected, required, collecting) {
+    const selectionKey = collectTaskSelectionKey();
+    const historyReady = collectHistoryReadyFor(collectSetValue(), prompt);
+    if (collectAutoAdvanceState.selectionKey !== selectionKey) {
+      collectAutoAdvanceState.selectionKey = selectionKey;
+      collectAutoAdvanceState.historyReady = false;
+      collectAutoAdvanceState.usableCollected = null;
+      collectAutoAdvanceState.completionPending = false;
+      collectAutoAdvanceState.scheduledKey = "";
+    }
+    if (!historyReady) {
+      collectAutoAdvanceState.historyReady = false;
+      collectAutoAdvanceState.usableCollected = null;
+      return;
+    }
+    if (!collectAutoAdvanceState.historyReady) {
+      collectAutoAdvanceState.historyReady = true;
+      collectAutoAdvanceState.usableCollected = usableCollected;
+      return;
+    }
+    if (collectAutoAdvanceState.usableCollected === null) {
+      collectAutoAdvanceState.usableCollected = usableCollected;
+      return;
+    }
+    const crossedTarget = Number.isInteger(required) && required > 0 &&
+      collectAutoAdvanceState.usableCollected < required && usableCollected >= required;
+    collectAutoAdvanceState.usableCollected = usableCollected;
+    if (crossedTarget) collectAutoAdvanceState.completionPending = true;
+    if (usableCollected < required) collectAutoAdvanceState.completionPending = false;
+    if (!collectAutoAdvanceState.completionPending || collecting) return;
+    if (collectAutoAdvanceState.scheduledKey === selectionKey) return;
+    collectAutoAdvanceState.scheduledKey = selectionKey;
+    queueMicrotask(() => {
+      const stillCollecting = !!(S.STATUS.collect && S.STATUS.collect.collecting);
+      if (collectTaskSelectionKey() !== selectionKey || stillCollecting) return;
+      collectAutoAdvanceState.completionPending = false;
+      collectAutoAdvanceState.scheduledKey = "";
+      advanceCollectTask();
+    });
+  }
+
 function renderCollect() {
     if (!$("collect-control-col")) return;
     const collect = S.STATUS.collect || {};
+    const history = historyFor("collect", collect);
     const enabled = collectEnabled();
     const collecting = !!collect.collecting;
     // The toggle's action depends on the polled `collecting` flag, which lags the
@@ -630,28 +908,29 @@ function renderCollect() {
     }
     const toggleBusy = S.collectToggleBusy !== null;
     const prompt = collectTaskValue();
+    const collectionSet = collectSetValue();
     const hasPrompt = !!prompt;
     const queueFull = collect.pipeline_state === "QUEUE_FULL";
-    const episodes = collect.episodes || [];
-    const queue = collect.queue || [];
-    const items = episodes.concat(queue);
-    const taskEpisodes = episodes.filter((item) => (item.task || item.prompt || "") === prompt);
+    // historyFor is the collection view's set+prompt scope boundary.
+    const episodes = history.episodes;
+    const queue = history.queue;
+    const totalItems = episodes.length + queue.length;
     const required = collectTaskTarget(prompt);
     const hasRequirement = Number.isInteger(required) && required > 0;
     const unlimited = required === -1;
-    const usableCollected = taskEpisodes.filter(
-      (item) => collectOutcome(item) === "usable"
-    ).length;
+    const usableCollected = history.summary.usable;
     const requirementComplete = hasRequirement && usableCollected >= required;
-    const progress = Math.max(0, Math.min(1, Number(collect.progress || 0)));
-    const outcomes = items.map(collectOutcome);
-    const usableCount = outcomes.filter((value) => value === "usable").length;
-    const rejectedCount = outcomes.filter((value) => value === "rejected").length;
-    const pendingCount = outcomes.length - usableCount - rejectedCount;
+    maybeAutoAdvanceCollectTask(prompt, usableCollected, required, collecting);
+    const queueSummary = episodeItemsSummary(queue);
+    const usableCount = history.summary.usable + queueSummary.usable;
+    const rejectedCount = history.summary.rejected + queueSummary.rejected;
+    const pendingCount = history.summary.pending + queueSummary.pending;
+    const progress = totalItems === 0
+      ? 0 : Math.max(0, Math.min(1, (usableCount + rejectedCount) / totalItems));
 
     const collectFps = S.CFG && S.CFG.collection ? S.CFG.collection.fps : null;
     $("collect-fps").textContent = collectFps ? `${collectFps} FPS` : "";
-    $("collect-count").textContent = `${episodes.length}/${items.length}`;
+    $("collect-count").textContent = `${episodes.length}/${totalItems}`;
     $("collect-usable-count").textContent = threeDigitCount(usableCount);
     $("collect-rejected-count").textContent = threeDigitCount(rejectedCount);
     $("collect-pending-count").textContent = threeDigitCount(pendingCount);
@@ -695,7 +974,7 @@ function renderCollect() {
     const selectedEpisodeSaved = savedEpisodeId(selectedEpisode) != null;
     $("b-collect-qc-pass").disabled = !enabled || !selectedEpisodeSaved;
     $("b-goto-qc").disabled = !enabled || !selectedEpisodeSaved;
-    $("b-collect-note-save").disabled = S.collectReplayEpisode == null;
+    $("b-collect-note-save").disabled = !selectedEpisodeSaved;
     const exportButton = $("b-collect-quality-export");
     const uploadButton = $("b-collect-quality-upload");
     const exportFormat = $("collect-export-format");
@@ -759,10 +1038,22 @@ function renderCollect() {
     setPanel("collect-panel-record", recordState);
     const queueEnabled = enabled && (S.collectQueueEnabled || episodes.length > 0 || queue.length > 0);
     setPanel("collect-panel-queue", queue.length ? "active" : (queueEnabled ? "done" : "pending"));
-    setPanel("collect-panel-replay", S.collectReplayEpisode == null ? "pending" : "active");
+    setPanel("collect-panel-replay", selectedEpisodeSaved ? "active" : "pending");
 
-    renderCollectTiles(items);
-    renderCollectList(items);
+    const renderKey = [
+      collectionSet,
+      prompt,
+      history.summary.signature,
+      queueSummary.signature,
+      selectedEpisodeSaved ? S.collectReplayEpisode : "",
+      S.collectQueueExpanded ? "expanded" : "collapsed",
+    ].join("\n");
+    if (renderKey !== collectItemsRenderKey) {
+      collectItemsRenderKey = renderKey;
+      const items = episodes.concat(queue);
+      renderCollectTiles(items);
+      renderCollectList(items);
+    }
     renderCollectControls();
 
     const replayStatus = $("collect-replay-status");
@@ -773,10 +1064,10 @@ function renderCollect() {
             ? `episode ${S.collectReplayEpisode} · loading`
             : `episode ${S.collectReplayEpisode} · review`);
       replayStatus.style.display = S.ACTIVE_TAB === "collect" ? "" : "none";
-    } else if (S.collectReplayEpisode != null) {
+    } else if (selectedEpisodeSaved) {
       replayStatus.textContent = `episode ${S.collectReplayEpisode} selected`;
       replayStatus.style.display = S.ACTIVE_TAB === "collect" ? "" : "none";
-    } else if (S.collectReplayEpisode == null) {
+    } else {
       replayStatus.textContent = "";
       replayStatus.style.display = "none";
     }
@@ -920,6 +1211,8 @@ let reviewDatasetDir = "";
 
 let reviewTask = "";
 
+let reviewCollectionSet = "";
+
 let reviewEpisodeId = null;
 
 let reviewRequestId = 0;
@@ -949,6 +1242,10 @@ function episodeQcEndpoint(kind) {
     return kind === "collect" ? "/api/collect_qc_mark" : "/api/qc_mark";
   }
 
+function collectReviewMatchesSelection() {
+    return reviewTask === collectTaskValue() && reviewCollectionSet === collectSetValue();
+  }
+
 function reviewActiveInCurrentTab() {
     return (S.reviewKind === "collect" && S.ACTIVE_TAB === "collect") ||
       (S.reviewKind === "rollout" && S.ACTIVE_TAB === "debug");
@@ -959,6 +1256,7 @@ function clearReviewPlayback() {
     S.reviewKind = "";
     reviewDatasetDir = "";
     reviewTask = "";
+    reviewCollectionSet = "";
     reviewEpisodeId = null;
   }
 
@@ -1001,6 +1299,7 @@ async function reviewCollectEpisode(item) {
     exitReplayMode();
     S.collectReplayEpisode = episode;
     reviewTask = collectTaskValue();
+    reviewCollectionSet = collectSetValue();
     S.reviewKind = "collect";
     reviewDatasetDir = reviewDatasetFor("collect");
     reviewEpisodeId = episode;
@@ -1044,6 +1343,7 @@ async function reviewRolloutEpisode(item) {
     S.rolloutSaveEpisode = episode;
     S.reviewKind = "rollout";
     reviewTask = "";
+    reviewCollectionSet = "";
     reviewDatasetDir = reviewDatasetFor("rollout");
     reviewEpisodeId = episode;
     LIVE.replayOwner = "rollout";
@@ -1083,6 +1383,7 @@ async function submitEpisodeQc(kind, verdict) {
     const r = await apiPost(episodeQcEndpoint(kind), {
       dataset_dir: reviewDatasetDir,
       task: reviewTask,
+      dataset: kind === "collect" ? reviewCollectionSet : "",
       episode: String(reviewEpisodeId),
       verdict,
       note: reviewNoteFor(kind).value || "",
@@ -1099,13 +1400,18 @@ async function submitEpisodeQc(kind, verdict) {
     }
     if (title) title.textContent = `episode ${episode} · ${verdict}`;
     if (status) status.textContent = `episode ${episode} marked ${verdict}`;
+    invalidateEpisodeHistory(kind);
+    pollEpisodeHistory(true);
     applyStatus(await apiGet("/api/status"));
   }
 
 async function submitEpisodeNote(kind) {
     const episode = kind === "rollout" ? S.rolloutSaveEpisode : S.collectReplayEpisode;
     const status = kind === "rollout" ? $("rollout-save-err") : $("collect-qc-status");
-    if (episode == null) { if (status) status.textContent = "✗ select an episode first"; return; }
+    if (episode == null) {
+      if (status) status.textContent = "✗ select an episode first";
+      return;
+    }
     S.reviewKind = kind;
     reviewDatasetDir = reviewDatasetFor(kind);
     reviewEpisodeId = episode;
@@ -1113,6 +1419,7 @@ async function submitEpisodeNote(kind) {
     const r = await apiPost(episodeQcEndpoint(kind), {
       dataset_dir: reviewDatasetDir,
       task: reviewTask,
+      dataset: kind === "collect" ? reviewCollectionSet : "",
       episode: String(reviewEpisodeId),
       verdict: "",
       note: reviewNoteFor(kind).value || "",
@@ -1167,5 +1474,5 @@ export {
   clearReviewPlayback, loadAnnotation, reviewActiveInCurrentTab, reviewEpisode,
   exportCollectionQuality, saveAnnotation, submitEpisodeNote, submitEpisodeQc, submitQc,
   installCollectKeyboardControls, renderCollectControls, uploadCollectionQuality,
-  changeCollectionExportFormat,
+  changeCollectionExportFormat, invalidateEpisodeHistory, pollEpisodeHistory,
 };

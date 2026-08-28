@@ -3,9 +3,9 @@
 import { $, LIVE, S, apiGet, apiPost, setCommandMetadata } from "./core.js";
 import { closeChartModal, drawLiveCharts, liveDimsAll, onScrubInput, openChartModal, resetLiveSeries } from "./charts.js";
 import { applyTune, applyManualTune, renderConfig, manualConnect, manualDisconnect, manualDispatchToggle, enterManualSim, applyStatus, pauseSetup, replayIsLocalMode, resumeSetup, retrySetup, startRunFromDebug, updateGuide } from "./run.js";
-import { changeCollectionExportFormat, clearReviewPlayback, collectConfigured, exportCollectionQuality, installCollectKeyboardControls, renderCollect, renderRolloutSave, returnReviewToLive, reviewActiveInCurrentTab, saveAnnotation, startCollectFromTab, submitEpisodeNote, submitEpisodeQc, submitQc, uploadCollectionQuality } from "./collect.js";
+import { changeCollectionExportFormat, clearReviewPlayback, collectConfigured, exportCollectionQuality, installCollectKeyboardControls, pollEpisodeHistory, renderCollect, renderRolloutSave, returnReviewToLive, reviewActiveInCurrentTab, saveAnnotation, startCollectFromTab, submitEpisodeNote, submitEpisodeQc, submitQc, uploadCollectionQuality } from "./collect.js";
 import { evalReset, evalSetup, evalRunToggle, evalResumeOnEnter, submitEvalScore, loadEvalResults, renderEvalSelectors, loadResultsAll, tpSeek, tpToggle, trialPopClose } from "./eval.js";
-import { replayPlay, replayStop, replayToggle, seekReplay, loop, pollFrame, pollScene, refreshCameraStreams, exitReplayMode } from "./replay.js";
+import { handleVisibilityChange, replayPlay, replayStop, replayToggle, seekReplay, loop, pollFrame, pollScene, refreshCameraStreams, exitReplayMode } from "./replay.js";
 import { pollRlSeries, renderRlConfig, renderRlStatus } from "./rl.js";
 import { initDashboard, loadDashboard } from "./dashboard.js";
 
@@ -187,6 +187,10 @@ function setActiveTab(tab) {
     if (tab === "dashboard") { loadDashboard(true); }
     updateGuide();
     renderCollect();
+    // History is scoped to the visible collection/RL workspace and loaded outside
+    // the status heartbeat. Force one refresh when entering either tab so a cached
+    // snapshot never hides a newly saved episode for the whole polling interval.
+    pollEpisodeHistory(true);
   }
 
 // ===== main =====
@@ -243,13 +247,23 @@ async function boot() {
     window.addEventListener("resize", moveTabThumb);
     window.addEventListener("pagehide", closeMediaStreams);
     window.addEventListener("beforeunload", closeMediaStreams);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    // /api/status is also the run watchdog heartbeat. One request per second is
+    // enough to keep the 3s watchdog fed while avoiding repeated transfer/render
+    // of the same large status snapshot. The request timeout leaves room for a
+    // retry before the watchdog window expires when the server is briefly busy.
+    const STATUS_POLL_MS = 1000;
+    const STATUS_REQUEST_TIMEOUT_MS = 1500;
     loop(async () => {
       try {
-        const status = await apiGet("/api/status");
+        const status = await apiGet("/api/status", { timeoutMs: STATUS_REQUEST_TIMEOUT_MS });
         applyStatus(status);
         renderRlStatus(status);
-      } catch (e) {}
-    }, 250);
+      } catch {}
+    }, STATUS_POLL_MS);
+    // The loader itself enforces a 5s minimum interval; this lightweight scheduler
+    // notices tab switches without adding another high-rate request stream.
+    loop(pollEpisodeHistory, 1000);
     loop(pollRlSeries, 100);
     afterWindowLoad(() => loop(pollFrame, 200));
     loop(pollScene, 80);

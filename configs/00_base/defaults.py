@@ -193,6 +193,7 @@ inference_cfg = dict(
     action_space=dict(type="JointState"),
     inference_rate=3.0,
     publish_rate=30,
+    max_debug_time_s=300.0,
     setup_warmup_chunks=2,
     debug_tasks=["pour soybean", "put cup"],
 )

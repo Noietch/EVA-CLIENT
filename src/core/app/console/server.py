@@ -44,6 +44,7 @@ from core.app.handlers import (
     build_policy_observation,
     eval_episode_dir,
     eval_model_name,
+    load_episode_history,
     rollout_hil_status,
     rollout_intervention_source,
     rollout_save_status,
@@ -82,6 +83,9 @@ STATIC_DIR = Path(__file__).parent / "static"
 # frontend scene poll drains the reader ~12 Hz, so a live stream refreshes it well
 # inside the window while a dead publisher lets it lapse.
 _TRANSPORT_ONLINE_WINDOW_SECONDS = 2.0
+_CAMERA_STREAM_FPS = 10.0
+_EPISODE_HISTORY_DEFAULT_LIMIT = 128
+_EPISODE_HISTORY_MAX_LIMIT = 512
 
 # Transports that talk to a real arm: they track receipt freshness, so "no message
 # yet" means offline (not merely "configured"). debug/dataset are not in this set.
@@ -953,6 +957,23 @@ def _serialize_config(ctx: ConsoleContext) -> dict:
     }
 
 
+def _status_snapshot_for_poll(
+    logger_obj: Any,
+    task: str | None = None,
+    collection_dataset: str | None = None,
+) -> dict[str, Any]:
+    """Request a recorder snapshot without disk-backed history."""
+    snapshot = dict(
+        logger_obj.status_snapshot(
+            task,
+            include_history=False,
+            collection_dataset=collection_dataset,
+        )
+    )
+    snapshot.pop("episodes", None)
+    return snapshot
+
+
 def _serialize_status(ctx: ConsoleContext) -> dict:
     # Live snapshot polled by the frontend (~1 Hz). Mirrors the session/runtime
     # state machine so the UI can gate buttons and show telemetry.
@@ -1016,8 +1037,10 @@ def _serialize_status(ctx: ConsoleContext) -> dict:
             "samples": 0,
         }
     )
-    policy_samples = sum(1 for sample in r.rl_live_samples if sample[3] == "policy")
-    intervention_samples = len(r.rl_live_samples) - policy_samples
+    with r.rl_live_lock:
+        policy_samples = sum(1 for sample in r.rl_live_samples if sample[3] == "policy")
+        live_sample_count = len(r.rl_live_samples)
+    intervention_samples = live_sample_count - policy_samples
     return {
         "robot_type": config.robot.type,
         "transport_type": config.transport.type,
@@ -1029,6 +1052,8 @@ def _serialize_status(ctx: ConsoleContext) -> dict:
         "session_status": s.status.value,
         "selected_task": s.selected_task,
         "selected_collect_task": s.selected_collect_task,
+        "selected_collect_set": s.selected_collect_set,
+        "selected_collect_task_index": s.selected_collect_task_index,
         "selected_strategy": (
             resolve_inference_strategy_label(config, r.selected_inference_strategy_key)
             if r.selected_inference_strategy_key is not None
@@ -1083,14 +1108,18 @@ def _serialize_status(ctx: ConsoleContext) -> dict:
             else len(r.rollout_intervention_active_segment.frames)
         ),
         "rollout_intervention_segments": len(r.rollout_intervention_segments),
-        "rollout": rollout_save_status(config, r),
+        "rollout": rollout_save_status(config, r, include_history=False),
         "eval_recorder": (
-            r.episode_logger.status_snapshot(format_task_label(s.selected_task))
+            _status_snapshot_for_poll(r.episode_logger, format_task_label(s.selected_task))
             if config.eval and r.episode_logger is not None
             else None
         ),
         "collect": (
-            r.episode_logger.status_snapshot(format_task_label(s.selected_collect_task))
+            _status_snapshot_for_poll(
+                r.episode_logger,
+                format_task_label(s.selected_collect_task),
+                s.selected_collect_set,
+            )
             if r.episode_logger is not None
             else None
         ),
@@ -1133,7 +1162,10 @@ def _encode_jpeg(image: np.ndarray, convert_bgr_to_rgb: bool, quality: int = 60)
 
 
 def _camera_jpeg_payload(
-    reader: ObservationSource, key: str, convert_bgr_to_rgb: bool
+    reader: ObservationSource,
+    key: str,
+    convert_bgr_to_rgb: bool,
+    previous_signature: tuple[Any, ...] | None = None,
 ) -> tuple[bytes | None, tuple[Any, ...] | None]:
     get_jpeg = getattr(reader, "get_camera_jpeg", None)
     if get_jpeg is not None:
@@ -1521,14 +1553,23 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             return
         episode_index = int(body.get("episode", 0))
         task = format_task_label(self.ctx.session.selected_collect_task)
-        qpos = episode_logger.load_collection_replay_qpos(episode_index, task)
+        collection_dataset = self.ctx.session.selected_collect_set
+        qpos = episode_logger.load_collection_replay_qpos(
+            episode_index,
+            task,
+            collection_dataset=collection_dataset,
+        )
         if qpos is None or len(qpos) == 0:
             self._send_json(404, {"ok": False, "error": "collection episode unavailable"})
             return
         runtime.collection_replay_qpos = qpos
         runtime.collection_replay_episode = episode_index
         runtime.collection_replay_started = time.monotonic()
-        replay_fps = episode_logger.load_collection_episode_fps(episode_index, task)
+        replay_fps = episode_logger.load_collection_episode_fps(
+            episode_index,
+            task,
+            collection_dataset=collection_dataset,
+        )
         runtime.collection_replay_fps = max(
             1, int(round(replay_fps or self.ctx.config.inference_cfg.publish_rate))
         )
@@ -1643,13 +1684,12 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Connection", "close")
         self.send_header("Content-Type", f"multipart/x-mixed-replace; boundary={boundary}")
         self.end_headers()
-        period = 1.0 / 30.0
+        period = 1.0 / _CAMERA_STREAM_FPS
         # The profiled bottleneck is bandwidth, not CPU: pushing 30 fps of a 720p +
         # a 480p JPEG is ~17 MB/s, and a paused/replay view re-sends one *static*
-        # frame forever. Encode + transmit only when the pixels actually change
-        # (cheap subsampled signature), with a slow heartbeat so idle proxies and
-        # late-joining <img> tags still get a frame. Live cameras keep streaming at
-        # full rate because sensor noise changes the signature every frame.
+        # frame forever. Cap the stream at 10 FPS and encode + transmit only when
+        # the pixels actually change (cheap subsampled signature), with a slow
+        # heartbeat so idle proxies and late-joining <img> tags still get a frame.
         heartbeat = 2.0
         last_sig = None
         last_jpeg: bytes | None = None
@@ -1661,7 +1701,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                 # swaps the feed without the client reopening the <img> connection.
                 reader = _observation_reader(ctx)
                 jpeg = None
-                payload, sig = _camera_jpeg_payload(reader, key, convert)
+                payload, sig = _camera_jpeg_payload(reader, key, convert, last_sig)
                 if payload is not None and sig != last_sig:
                     jpeg = payload
                     last_sig = sig
@@ -1733,6 +1773,112 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         # This poll doubles as the client-liveness heartbeat the main loop watches.
         self.ctx.runtime.last_client_poll = time.monotonic()
         self._send_json(200, _serialize_status(self.ctx))
+
+    def _get_episodes(self) -> None:
+        """Serve saved episode rows separately from the watchdog status poll.
+
+        ``since`` is an offset into the history list and ``limit`` bounds one
+        response. The frontend and API clients use ``next_since`` plus ``cursor``
+        for incremental pages; a prefix rewrite requests a reset in the same response.
+        ``queue`` remains in this response because queued/in-flight rows are live
+        status and are not present in ``episodes.jsonl`` yet.
+        """
+        scope = self._query_str("scope", "rollout").strip().lower()
+        if scope not in {"collect", "rollout", "eval"}:
+            self._send_json(400, {"ok": False, "error": "invalid episode history scope"})
+            return
+        try:
+            since = max(0, self._query_int("since", 0))
+            limit_value = self._query_int("limit", _EPISODE_HISTORY_DEFAULT_LIMIT)
+        except ValueError:
+            self._send_json(400, {"ok": False, "error": "invalid episode history cursor"})
+            return
+        limit = min(_EPISODE_HISTORY_MAX_LIMIT, max(0, limit_value))
+        cursor = self._query_str("cursor").strip() or None
+
+        runtime = self.ctx.runtime
+        config = runtime.active_config or self.ctx.config
+        queue: list[dict[str, Any]] = []
+        dataset_dir: str = ""
+        task_filter = None
+        collection_set = None
+        if scope == "rollout":
+            status = rollout_save_status(config, runtime, include_history=False)
+            dataset_dir = str(status.get("dataset_dir", ""))
+            queue = list(status.get("queue") or [])
+        else:
+            logger_obj = runtime.episode_logger
+            task_filter = (
+                self._query_str("task")
+                if scope == "collect"
+                else format_task_label(self.ctx.session.selected_task)
+            ) or None
+            collection_set = self._query_str("set").strip() or None
+            if logger_obj is not None:
+                status = _status_snapshot_for_poll(
+                    logger_obj,
+                    task_filter,
+                    collection_set if scope == "collect" else None,
+                )
+                dataset_dir = str(status.get("dataset_dir", ""))
+                queue = list(status.get("queue") or [])
+                if scope == "collect" and task_filter:
+                    queue = [
+                        row
+                        for row in queue
+                        if str(row.get("task") or row.get("prompt") or "") == task_filter
+                    ]
+
+        explicit_dir = self._query_str("dataset_dir")
+        if explicit_dir:
+            active_dataset_dir = dataset_dir
+            dataset_dir = _resolve_dataset_dir(explicit_dir)
+            if (
+                not active_dataset_dir
+                or Path(active_dataset_dir).resolve() != Path(dataset_dir).resolve()
+            ):
+                queue = []
+        if not dataset_dir:
+            self._send_json(
+                200,
+                {
+                    "ok": True,
+                    "scope": scope,
+                    **({"set": collection_set, "task": task_filter} if scope == "collect" else {}),
+                    "episodes": [],
+                    "queue": [],
+                    "total": 0,
+                    "since": since,
+                    "next_since": since,
+                    "has_more": False,
+                    "version": "",
+                    "cursor": "",
+                    "reset": bool(cursor or since),
+                },
+            )
+            return
+
+        history = load_episode_history(
+            Path(dataset_dir),
+            task=task_filter,
+            since=since,
+            limit=limit,
+            cursor=cursor,
+            exclude_episode_indices={
+                int(row["episode_index"]) for row in queue if row.get("episode_index") is not None
+            },
+        )
+        self._send_json(
+            200,
+            {
+                "ok": True,
+                "scope": scope,
+                "dataset_dir": dataset_dir,
+                **({"set": collection_set, "task": task_filter} if scope == "collect" else {}),
+                "queue": queue,
+                **history,
+            },
+        )
 
     def _get_dashboard(self) -> None:
         config = self.ctx.runtime.active_config or self.ctx.config
@@ -1808,9 +1954,15 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             return
         since = self._query_int("since", 0)
         critic_since = self._query_int("critic_since", 0)
+        include_samples = self._query_str("samples", "1") != "0"
         self._send_json(
             200,
-            rl_live_series(self.ctx.runtime, max(since, 0), max(critic_since, 0)),
+            rl_live_series(
+                self.ctx.runtime,
+                max(since, 0),
+                max(critic_since, 0),
+                include_samples=include_samples,
+            ),
         )
 
     def _sync_preview_to_active_model(self) -> None:
@@ -2449,19 +2601,48 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
 
     def _post_select_collect_task(self, body: dict) -> None:
         task = str(body.get("task", "")).strip()
+        dataset = str(body.get("dataset", "")).strip()
+        task_index_value = body.get("task_index")
         config = self.ctx.runtime.active_config or self.ctx.config
-        configured = {
-            str(entry[0]) for entries in config.collection.tasks.values() for entry in entries
-        }
-        if task not in configured:
+        locations = [
+            (str(dataset_name), index)
+            for dataset_name, entries in config.collection.tasks.items()
+            for index, entry in enumerate(entries)
+            if str(entry[0]) == task
+        ]
+        if not locations:
             self._send_json(400, {"ok": False, "error": "unknown collection task"})
             return
+        if not dataset:
+            dataset, task_index = locations[0]
+        else:
+            task_index = task_index_value
+            entries = config.collection.tasks.get(dataset)
+            if entries is None:
+                self._send_json(400, {"ok": False, "error": "unknown collection dataset"})
+                return
+            valid_index = (
+                isinstance(task_index, int)
+                and not isinstance(task_index, bool)
+                and 0 <= task_index < len(entries)
+            )
+            if not valid_index or str(entries[task_index][0]) != task:
+                self._send_json(
+                    400,
+                    {"ok": False, "error": "collection task index does not match task"},
+                )
+                return
         logger_obj = self.ctx.runtime.episode_logger
         if logger_obj is not None and bool(getattr(logger_obj, "has_active_episode", False)):
             self._send_json(409, {"ok": False, "error": "cannot switch task while recording"})
             return
         self.ctx.session.selected_collect_task = task
-        self._send_json(200, {"ok": True})
+        self.ctx.session.selected_collect_set = dataset
+        self.ctx.session.selected_collect_task_index = task_index
+        self._send_json(
+            200,
+            {"ok": True, "task": task, "dataset": dataset, "task_index": task_index},
+        )
 
     def _post_select_episode(self, body: dict) -> None:
         self._enqueue_ok(f"web:select_episode:{int(body.get('episode', 0))}")
@@ -2634,11 +2815,10 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             )
             return
         task = str(body.get("task", ""))
+        collection_dataset = str(body.get("dataset", "")).strip() or None
         active_task = format_task_label(self.ctx.session.selected_collect_task)
-        config = self.ctx.runtime.active_config or self.ctx.config
-        task_set = _collection_set_for_prompt(config, task)
-        active_set = _collection_set_for_prompt(config, active_task)
-        if task_set is None or task_set != active_set:
+        active_set = self.ctx.session.selected_collect_set
+        if task != active_task or collection_dataset != active_set:
             self._send_json(
                 409,
                 {"ok": False, "error": "collection review task is no longer active"},
@@ -2649,6 +2829,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             episode,
             verdict,
             str(body.get("note", "")),
+            collection_dataset=collection_dataset,
         )
         if not ok:
             self._send_json(
@@ -2665,13 +2846,15 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             return None
         task = str(body.get("task", ""))
         active_task = format_task_label(self.ctx.session.selected_collect_task)
-        if task != active_task:
+        collection_dataset = str(body.get("dataset", "")).strip() or None
+        active_set = self.ctx.session.selected_collect_set
+        if task != active_task or collection_dataset not in {None, active_set}:
             self._send_json(
                 409,
                 {"ok": False, "error": "collection task is no longer active"},
             )
             return None
-        snapshot = logger_obj.status_snapshot(task)
+        snapshot = _status_snapshot_for_poll(logger_obj, task, active_set)
         dataset_dir = Path(str(snapshot.get("dataset_dir", ""))).resolve()
         if not dataset_dir.is_dir():
             self._send_json(404, {"ok": False, "error": "collection dataset is unavailable"})
@@ -2790,12 +2973,9 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"ok": False, "error": "accepted export source mismatch"})
             return
 
-        task = str(body.get("task", ""))
-        dataset_name = _collection_set_for_prompt(config, task)
-        if dataset_name is None:
-            dataset_name = (
-                dataset_dir.parent.name if dataset_dir.name == "raw" else dataset_dir.name
-            )
+        dataset_name = self.ctx.session.selected_collect_set or (
+            dataset_dir.parent.name if dataset_dir.name == "raw" else dataset_dir.name
+        )
         upload_specs = resolve_dataset_uploads(config.collection.storage, dataset_name)
         if not upload_specs:
             self._send_json(409, {"ok": False, "error": "dataset upload is not configured"})
@@ -2868,6 +3048,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
 _GET_ROUTES = {
     "/api/config": ConsoleRequestHandler._get_config,
     "/api/status": ConsoleRequestHandler._get_status,
+    "/api/episodes": ConsoleRequestHandler._get_episodes,
     "/api/dashboard": ConsoleRequestHandler._get_dashboard,
     "/api/collect_quality_export": ConsoleRequestHandler._get_collect_quality_export,
     "/api/collect_quality_upload": ConsoleRequestHandler._get_collect_quality_upload,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import numpy as np
 
 from core.app import handlers as recording_handlers
@@ -14,10 +16,14 @@ class _Logger:
 
     def __init__(self, active: bool) -> None:
         self.has_active_episode = active
-        self.paired: list[tuple[object, np.ndarray]] = []
+        self.actions: list[tuple[float, np.ndarray]] = []
+        self.snapshots: list[object] = []
 
-    def ingest_collection_action_snapshot(self, snapshot, action_qpos) -> None:
-        self.paired.append((snapshot, np.asarray(action_qpos).copy()))
+    def ingest_collection_action(self, timestamp, action_qpos) -> None:
+        self.actions.append((float(timestamp), np.asarray(action_qpos).copy()))
+
+    def ingest_collection_client_snapshot(self, snapshot) -> None:
+        self.snapshots.append(snapshot)
 
 
 class _Transport:
@@ -37,15 +43,17 @@ class _Transport:
 
 
 def _published() -> PublishedTeleopAction:
-    return PublishedTeleopAction(np.asarray([1.0, 2.0], dtype=np.float32))
+    return PublishedTeleopAction(np.asarray([1.0, 2.0], dtype=np.float32), timestamp=12.5)
+
+
+def _runtime(logger: object, transport: object) -> SimpleNamespace:
+    return SimpleNamespace(episode_logger=logger, transport=transport)
 
 
 def test_client_collection_does_not_read_snapshot_outside_recording() -> None:
     logger = _Logger(active=False)
     transport = _Transport(object())
-    runtime = type("Runtime", (), {})()
-    runtime.episode_logger = logger
-    runtime.transport = transport
+    runtime = _runtime(logger, transport)
 
     assert not ingest_client_teleop_action(None, runtime, _published())
     assert transport.calls == 0
@@ -55,27 +63,26 @@ def test_client_collection_reads_at_most_one_snapshot_and_pairs_published_qpos()
     snapshot = object()
     logger = _Logger(active=True)
     transport = _Transport(snapshot)
-    runtime = type("Runtime", (), {})()
-    runtime.episode_logger = logger
-    runtime.transport = transport
+    runtime = _runtime(logger, transport)
 
     published = _published()
     assert ingest_client_teleop_action(None, runtime, published)
     assert transport.calls == 1
-    assert logger.paired[0][0] is snapshot
-    np.testing.assert_allclose(logger.paired[0][1], published.qpos)
+    assert logger.snapshots == [snapshot]
+    assert logger.actions[0][0] == 12.5
+    np.testing.assert_allclose(logger.actions[0][1], published.qpos)
 
 
-def test_client_collection_counts_missing_snapshot_without_blocking() -> None:
+def test_client_collection_keeps_action_when_snapshot_is_not_ready() -> None:
     logger = _Logger(active=True)
     transport = _Transport(None)
-    runtime = type("Runtime", (), {})()
-    runtime.episode_logger = logger
-    runtime.transport = transport
+    runtime = _runtime(logger, transport)
 
     assert not ingest_client_teleop_action(None, runtime, _published())
     assert transport.calls == 1
-    assert logger.paired == []
+    assert logger.snapshots == []
+    assert logger.actions[0][0] == 12.5
+    np.testing.assert_allclose(logger.actions[0][1], [1.0, 2.0])
 
 
 def test_client_collection_start_does_not_start_background_capture(monkeypatch) -> None:

@@ -82,6 +82,7 @@ def test_arx_x5_initializes_fk_before_native_hardware_workers(monkeypatch) -> No
         action_endpoint="inproc://arx_x5-test-action",
         can_ports={},
         realsense_cameras=(),
+        publish_rate_hz=100.0,
         status_log_interval_s=0.0,
         disabled_groups=(),
     )
@@ -114,7 +115,7 @@ def test_arx_x5_fk_solver_can_be_seeded_from_both_live_arm_states(monkeypatch) -
     np.testing.assert_array_equal(seeded_groups[1], right)
 
 
-def test_arx_x5_observation_publishes_dual_arm_state_and_camera_image() -> None:
+def test_arx_x5_observation_publishes_state_at_full_rate_and_each_camera_frame_once() -> None:
     node = object.__new__(ArxX5ZmqNode)
     left = np.arange(7, dtype=np.float32)
     right = np.arange(7, 14, dtype=np.float32)
@@ -134,9 +135,13 @@ def test_arx_x5_observation_publishes_dual_arm_state_and_camera_image() -> None:
     node._obs_pub = SimpleNamespace(send=published.append)
 
     node._publish_observation()
+    node._publish_observation()
 
     observation = unpack_observation(published[0])
+    next_observation = unpack_observation(published[1])
     np.testing.assert_array_equal(observation.state["left_arm"], left)
     np.testing.assert_array_equal(observation.state["right_arm"], right)
     np.testing.assert_array_equal(observation.images["cam_high"], frame)
-    assert node._published_observations == 1
+    np.testing.assert_array_equal(next_observation.state["left_arm"], left)
+    assert next_observation.images == {}
+    assert node._published_observations == 2

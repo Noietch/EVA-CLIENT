@@ -117,19 +117,22 @@ class CollectionEpisodeWriter:
         self._min_capture_time = min_capture_time
         self._max_capture_time = None
 
-    def ingest(self, snapshot: RawCollectionSnapshot) -> None:
+    def ingest(self, snapshot: RawCollectionSnapshot, *, count_frame: bool = True) -> None:
         """Store one pre-decode snapshot. O(1), never decodes raw messages.
 
         The capture loop calls this while recording. Raw extraction is intentionally
         deferred to the save worker so start-record does not add image/vector decode
-        work to the live UI/control path.
+        work to the live UI/control path. Independent high-rate action samples pass
+        ``count_frame=False`` so UI frame counters continue to represent observations.
         """
         if self._is_before_episode_start(snapshot.timestamp):
-            with self._state_lock:
-                self._skipped_before_start += 1
+            if count_frame:
+                with self._state_lock:
+                    self._skipped_before_start += 1
             return
         with self._state_lock:
-            self._received_snapshots += 1
+            if count_frame:
+                self._received_snapshots += 1
             if snapshot.timestamp > 0.0:
                 self._max_capture_time = (
                     snapshot.timestamp
@@ -380,7 +383,9 @@ class CollectionEpisodeWriter:
             return None
 
         task = self._logger._task or ""
-        dataset_dir = self._logger._collection_dataset_dir(task)
+        dataset_dir = self._logger._collection_dataset_dir(
+            task, self._logger._active_collection_dataset
+        )
         episode_index = self._logger._next_collection_episode_index(dataset_dir)
         task_index, task_to_index = self._logger._resolve_collection_task(dataset_dir, task)
         package_done = time.perf_counter()

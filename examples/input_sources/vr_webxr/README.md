@@ -1,9 +1,10 @@
-# WebXR VR 输入节点
+# WebXR VR Input Node
 
-`node.py` 在服务器上提供 WebXR 页面，并通过 ZMQ 把 PICO/Quest 的输入发送给
-EVA Client。下面示例使用页面端口 `43876`、ZMQ 端口 `8765/8766`。
+`node.py` serves a WebXR page on the server and sends PICO/Quest input to EVA
+Client over ZMQ. The example below uses page port `43876` and ZMQ ports
+`8765/8766`.
 
-## 服务器启动
+## Start the Server
 
 ```bash
 cd "$CLIENT_ROOT"
@@ -16,30 +17,37 @@ python examples/input_sources/vr_webxr/node.py \
   --ack-endpoint tcp://127.0.0.1:8766
 ```
 
-保持进程运行。日志中的 WebXR URL 和 PICO 命令可直接使用。省略 `--token` 时，
-节点会生成随机 token，应使用日志中的 URL。
+Keep the process running. The WebXR URL and PICO command printed in the logs
+can be used directly. If `--token` is omitted, the node generates a random
+token; use the URL from the logs.
 
-## 输入协议
+## Input Protocol
 
-节点发送给 EVA Client 的 VR 协议版本为 `3`。每只手发送 WebXR 的绝对位姿：
-`position` 和 `orientation_xyzw`。相对位姿的参考点和累计 delta 由 EVA Client 的
-retargeter 计算。
+The VR protocol version sent by the node to EVA Client is `3`. Each hand sends
+the absolute WebXR pose: `position` and `orientation_xyzw`. EVA Client's
+retargeter computes the relative-pose reference and accumulated delta.
 
-每只手的 `grip`（WebXR gamepad button 1）由节点本地消费，用于长按切换该手的
-`grip_engaged` 状态。长按一次开启，再次长按关闭；raw grip 按钮不会进入 EVA Client，
-只有防抖后的状态会随绝对位姿发送。未授权的手由 client 通过 inactive-arm mask 保持
-当前机器人关节位置；再次授权时，新的手柄位姿增量会叠加到之前累计的 delta 上。
+The node consumes each hand's `grip` (WebXR gamepad button 1) locally to
+toggle that hand's `grip_engaged` state after a long press. One long press
+enables it and the next disables it. The raw grip button is not sent to EVA
+Client; only the debounced state is sent with the absolute pose. For an
+unauthorized hand, the client uses the inactive-arm mask to hold the current
+robot joint positions. When authorization is restored, the new controller-pose
+delta is added to the previously accumulated delta.
 
-ARM OFF 或 teleop reset 时，client 清理左右手累计的 delta 和参考位姿。
-每次 grip 长按触发 toggle 后，node 会向 WebXR 页面发送对应手柄的短 haptic 反馈；
-实际震动效果取决于设备浏览器是否支持 WebXR Gamepad haptics。
+When ARM is OFF or teleop is reset, the client clears the accumulated deltas
+and reference poses for both hands. After each grip long-press toggle, the node
+sends a short haptic feedback signal for the corresponding controller to the
+WebXR page. The actual vibration effect depends on WebXR Gamepad haptics support
+in the device browser.
 
-右手 B 键（WebXR gamepad button 5）的原有短按 `arm_toggle` 事件保持不变；它仍由
-client/app 负责全局 ARM 状态。Grip 权限和 B 键 ARM 状态是两条独立的数据流。
+The existing short-press `arm_toggle` event for the right-hand B button (WebXR
+gamepad button 5) is unchanged; `client/app` still owns the global ARM state.
+Grip authorization and the B-button ARM state are independent data streams.
 
-## Ubuntu 端口转发
+## Ubuntu Port Forwarding
 
-在连接 PICO 的 Ubuntu 主机上保持 SSH 隧道运行：
+Keep the SSH tunnel running on the Ubuntu host connected to the PICO:
 
 ```bash
 ssh -N \
@@ -51,23 +59,25 @@ ssh -N \
   <remote-user>@<remote-host>
 ```
 
-## Ubuntu 打开或刷新 PICO 页面
+## Open or Refresh the PICO Page on Ubuntu
 
-用 USB 线将 PICO 连接到 Ubuntu 主机，并查询设备序列号：
+Connect the PICO to the Ubuntu host with a USB cable and query the device
+serial number:
 
 ```bash
 adb devices -l
 ```
 
-只有一台已授权设备时，运行脚本即可自动识别设备、建立 ADB 反向端口转发并打开
-WebXR 页面：
+When only one authorized device is present, run the script to identify it,
+create the ADB reverse port forwarding, and open the WebXR page:
 
 ```bash
 export VR_TOKEN="<TOKEN_FROM_NODE_LOG>"
 ./examples/input_sources/vr_webxr/open_pico.sh
 ```
 
-也可以通过参数或环境变量明确指定设备：
+You can also specify the device explicitly with an argument or environment
+variable:
 
 ```bash
 ./examples/input_sources/vr_webxr/open_pico.sh "<PICO_SERIAL>"
@@ -77,12 +87,12 @@ export VR_TOKEN="<TOKEN_FROM_NODE_LOG>"
 ./examples/input_sources/vr_webxr/open_pico.sh
 ```
 
-强制刷新页面（`-S` 会先停止承载该 URL 的浏览器应用）：
+Force a page refresh (`-S` first stops the browser application hosting the URL):
 
 ```bash
 VR_URL="http://127.0.0.1:43876/?token=<TOKEN_FROM_NODE_LOG>&mode=ar&reload=$(date +%s)"
 adb -s "$PICO_SERIAL" shell "am start -S -a android.intent.action.VIEW -d '$VR_URL'"
 ```
 
-进入页面后点击 `ENTER MR`。这里通过 `127.0.0.1` + SSH/ADB 访问，直接用远程 IP
-访问节点时则需要 HTTPS/WSS。
+After opening the page, click `ENTER MR`. The example uses `127.0.0.1` through
+SSH/ADB. Directly accessing the node through a remote IP requires HTTPS/WSS.

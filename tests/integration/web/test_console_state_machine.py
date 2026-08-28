@@ -259,6 +259,20 @@ def test_collect_loop_uses_publish_rate_without_dataset_fps():
     )
 
 
+def test_active_client_teleop_loop_uses_publish_rate():
+    config = console_config(
+        publish_rate=100,
+        collection=ConfigDict(teleop=ConfigDict(control_source="client")),
+    )
+    runtime = SimpleNamespace(
+        replay_source=None,
+        collection_teleop_active=True,
+        teleop_execution=SimpleNamespace(active=True, control_source="client"),
+    )
+
+    assert app._target_loop_rate_hz(config, cast(RuntimeState, runtime)) == 100
+
+
 def test_replay_loop_uses_replay_fps_on_live_transport():
     config = console_config(publish_rate=50)
     runtime = SimpleNamespace(
@@ -289,7 +303,8 @@ def test_collect_status_follows_selected_collect_task():
         def __init__(self):
             self.tasks = []
 
-        def status_snapshot(self, task):
+        def status_snapshot(self, task, *, include_history=True, collection_dataset=None):
+            del include_history, collection_dataset
             self.tasks.append(task)
             return {
                 "dataset_dir": f"/datasets/{task.replace(' ', '_')}",
@@ -306,7 +321,49 @@ def test_collect_status_follows_selected_collect_task():
 
     assert logger.tasks[-1] == "pick up cup"
     assert collect["dataset_dir"] == "/datasets/pick_up_cup"
-    assert collect["episodes"] == [{"episode_index": 0, "status": "saved"}]
+    assert "episodes" not in collect
+
+
+def test_collect_selection_keeps_explicit_set_for_duplicate_prompt():
+    scene_1 = "ArxKine_PnP_DivObj_Norm_Sngl_Base_v1_scene_1_20260828"
+    scene_3 = "ArxKine_PnP_DivObj_Norm_Sngl_Base_v1_scene_3_20260828"
+    prompt = "pick up the yellow cup and place it on the green plate with left hand."
+    config = console_config()
+    config.collection.tasks = ConfigDict(
+        {
+            scene_1: [(prompt, 1)],
+            scene_3: [(prompt, 7), ("place cup", 2)],
+        }
+    )
+
+    with serve_console(config) as h:
+        response = h.post(
+            "/api/select_collect_task",
+            {"task": prompt, "dataset": scene_3, "task_index": 0},
+        )
+        status = h.status()
+
+    assert response.status == 200
+    assert response.json == {
+        "ok": True,
+        "task": prompt,
+        "dataset": scene_3,
+        "task_index": 0,
+    }
+    assert status["selected_collect_task"] == prompt
+    assert status["selected_collect_set"] == scene_3
+    assert status["selected_collect_task_index"] == 0
+
+
+def test_collect_selection_rejects_task_index_from_another_prompt():
+    with serve_console(console_config()) as h:
+        response = h.post(
+            "/api/select_collect_task",
+            {"task": "pick up cup", "dataset": "cup_set", "task_index": 1},
+        )
+
+    assert response.status == 400
+    assert response.json["error"] == "collection task index does not match task"
 
 
 @pytest.mark.parametrize("verdict", ["pass", "fail", ""])
@@ -314,7 +371,8 @@ def test_collect_qc_mark_routes_to_active_collection_logger(verdict):
     calls = []
 
     class _Logger:
-        def mark_collection_qc(self, task, episode, qc_verdict, note):
+        def mark_collection_qc(self, task, episode, qc_verdict, note, *, collection_dataset=None):
+            assert collection_dataset is None
             calls.append((task, episode, qc_verdict, note))
             return True
 
@@ -373,7 +431,8 @@ def test_collect_qc_mark_rejects_when_collection_logger_is_unavailable():
 
 def test_collect_qc_mark_rejects_episode_that_is_not_saved():
     class _Logger:
-        def mark_collection_qc(self, task, episode, verdict, note):
+        def mark_collection_qc(self, task, episode, verdict, note, *, collection_dataset=None):
+            assert collection_dataset is None
             return False
 
     with serve_console(console_config()) as h:
@@ -398,7 +457,7 @@ def test_collect_qc_mark_rejects_review_from_previous_collection_task():
     calls = []
 
     class _Logger:
-        def mark_collection_qc(self, task, episode, verdict, note):
+        def mark_collection_qc(self, task, episode, verdict, note, *, collection_dataset=None):
             calls.append((task, episode, verdict, note))
             return True
 
@@ -421,11 +480,11 @@ def test_collect_qc_mark_rejects_review_from_previous_collection_task():
     assert calls == []
 
 
-def test_collect_qc_mark_allows_review_after_switching_prompt_in_same_set():
+def test_collect_qc_mark_rejects_review_after_switching_prompt_in_same_set():
     calls = []
 
     class _Logger:
-        def mark_collection_qc(self, task, episode, verdict, note):
+        def mark_collection_qc(self, task, episode, verdict, note, *, collection_dataset=None):
             calls.append((task, episode, verdict, note))
             return True
 
@@ -443,8 +502,9 @@ def test_collect_qc_mark_allows_review_after_switching_prompt_in_same_set():
             },
         )
 
-    assert resp.status == 200
-    assert calls == [("pick up cup", 0, "pass", "same dataset set")]
+    assert resp.status == 409
+    assert resp.json == {"ok": False, "error": "collection review task is no longer active"}
+    assert calls == []
 
 
 class _CollectDatasetLogger:
@@ -452,8 +512,16 @@ class _CollectDatasetLogger:
         self._dataset_dir = dataset_dir
         self.has_active_episode = has_active_episode
 
-    def status_snapshot(self, task: str) -> dict[str, str]:
+    def status_snapshot(
+        self,
+        task: str,
+        *,
+        include_history: bool = True,
+        collection_dataset: str | None = None,
+    ) -> dict[str, str]:
+        assert include_history is False
         assert task == "pick up cup"
+        del collection_dataset
         return {"dataset_dir": str(self._dataset_dir)}
 
 
@@ -462,12 +530,14 @@ def _set_collect_dataset_logger(
     dataset_dir: Path,
     *,
     has_active_episode: bool = False,
+    collection_set: str = "cup_set",
 ) -> None:
     harness.runtime.episode_logger = cast(
         Any,
         _CollectDatasetLogger(dataset_dir, has_active_episode=has_active_episode),
     )
     harness.session.selected_collect_task = "pick up cup"
+    harness.session.selected_collect_set = collection_set
 
 
 def _wait_for_quality_job(harness: Any, endpoint: str, job_id: str) -> Any:
@@ -1350,7 +1420,8 @@ def test_collect_start_runs_collection_capture_in_background():
         def is_queue_full(self):
             return False
 
-        def start_episode(self, *, task, collection_min_capture_time=None):
+        def start_episode(self, *, task, collection_min_capture_time=None, collection_dataset=None):
+            assert collection_dataset is None
             return None
 
         def ingest_collection_snapshot(self, snapshot):
@@ -1409,8 +1480,8 @@ def test_collect_start_clears_backlog_and_passes_cutoff_to_logger():
         def is_queue_full(self):
             return False
 
-        def start_episode(self, *, task, collection_min_capture_time=None):
-            calls.append(("start_episode", task, collection_min_capture_time))
+        def start_episode(self, *, task, collection_min_capture_time=None, collection_dataset=None):
+            calls.append(("start_episode", task, collection_min_capture_time, collection_dataset))
 
     runtime = SimpleNamespace(
         episode_logger=_Logger(),
@@ -1421,7 +1492,7 @@ def test_collect_start_clears_backlog_and_passes_cutoff_to_logger():
         collection_teleop_active=False,
         last_collection_timestamp=None,
     )
-    session = SessionState(selected_collect_task="pick")
+    session = SessionState(selected_collect_task="pick", selected_collect_set="scene_3")
     config = console_config(inference_cfg=ConfigDict(publish_rate=200))
 
     assert handlers.collect_start(config, cast(RuntimeState, runtime), session)
@@ -1431,7 +1502,7 @@ def test_collect_start_clears_backlog_and_passes_cutoff_to_logger():
             ("set_hil_relay_enabled", True),
             "start_collection",
             "clear_collection_backlog",
-            ("start_episode", "pick", 42.0),
+            ("start_episode", "pick", 42.0, "scene_3"),
         ]
         assert session.status is SessionStatus.RUNNING
         assert runtime.collection_replay_qpos is None
@@ -2020,10 +2091,13 @@ def test_eval_stop_during_running_motion_is_requeued_finalized_and_left_ready():
             self.ended += 1
 
     logger_obj = _Logger()
+    finished_capture = []
     runtime = SimpleNamespace(
         web_phase="running",
         command_queue=command_queue,
         episode_logger=logger_obj,
+        collection_capture_runner=None,
+        transport=SimpleNamespace(finish_collection_capture=lambda: finished_capture.append(True)),
         needs_pre_start_reset=False,
     )
     session = SessionState(
@@ -2049,6 +2123,7 @@ def test_eval_stop_during_running_motion_is_requeued_finalized_and_left_ready():
     assert runtime.web_phase == "ready"
     assert runtime.needs_pre_start_reset is True
     assert logger_obj.ended == 1
+    assert finished_capture == [True]
 
 
 def test_interrupting_verb_during_reset_is_requeued_not_dropped(console):

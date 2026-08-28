@@ -115,9 +115,10 @@ def test_arx_x5_launcher_matches_r5_startup_defaults_and_node_contract() -> None
     assert 'ARM_TYPE_VALUE="2"' in script
     assert '--gripper-open-pos "-3.4"' in script
     assert '--gripper-close-pos "0.1"' in script
+    assert '--rate "100"' in script
     assert "LINK6_MASS" not in script
     assert 'ARX_X5_NODE_PATH="examples/hardware/arx_x5/node.py"' in script
-    assert "configs/01_deploy/arx_x5/openpi_qpos.py" in script
+    assert "configs/02_collection/arx_x5_vr.py" in script
     assert "examples/hardware/arx_x5/node.py" in script
 
     for value in (

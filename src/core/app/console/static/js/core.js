@@ -93,6 +93,21 @@ export const S = {
   rlCritic: "",
   rlQcEpisode: null,
   rlSaveExpanded: false,
+  // Episode history is intentionally loaded outside the heartbeat. Each scope keeps
+  // the last complete snapshot so status can contain only counters/progress while
+  // the collect/RL panels remain usable.
+  episodeHistory: {
+    collect: {
+      loaded: false, datasetDir: "", collectionSet: "", task: "",
+      episodes: [], queue: [], version: "", cursor: "", lastAttemptAt: 0,
+      summary: { usable: 0, rejected: 0, pending: 0, signature: "" },
+    },
+    rollout: {
+      loaded: false, datasetDir: "", episodes: [], queue: [],
+      version: "", cursor: "", lastAttemptAt: 0,
+      summary: { usable: 0, rejected: 0, pending: 0, signature: "" },
+    },
+  },
 };
 
 const CLIENT_TRACE_ID = (() => {
@@ -147,14 +162,36 @@ window.addEventListener("unhandledrejection", (event) => {
   });
 });
 
-async function apiGet(path) {
+// A hung GET used to keep its polling loop suspended indefinitely. That is
+// especially dangerous for /api/status because the server uses that request as
+// the client-liveness heartbeat. Keep ordinary requests bounded and let the
+// caller's single-flight loop retry on its next tick.
+const API_GET_TIMEOUT_MS = 5000;
+
+async function apiGet(path, { timeoutMs = API_GET_TIMEOUT_MS, signal = null } = {}) {
+  let controller = null;
+  let timer = null;
+  if (typeof AbortController !== "undefined" && timeoutMs > 0) {
+    controller = new AbortController();
+    if (signal) {
+      if (signal.aborted) controller.abort();
+      else signal.addEventListener("abort", () => controller.abort(), { once: true });
+    }
+    timer = setTimeout(() => controller.abort(), timeoutMs);
+  }
   try {
-    const r = await fetch(path);
+    const r = await fetch(path, controller ? { signal: controller.signal } : {});
     if (!r.ok) clientTrace("api.get.error", { path, status: r.status });
     return await r.json();
   } catch (error) {
-    clientTrace("api.get.exception", { path, message: String(error) });
+    clientTrace("api.get.exception", {
+      path,
+      message: String(error),
+      timeout: !!(error && error.name === "AbortError"),
+    });
     throw error;
+  } finally {
+    if (timer !== null) clearTimeout(timer);
   }
 }
 

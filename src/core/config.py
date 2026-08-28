@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import math
 import posixpath
+import re
 from pathlib import Path, PurePosixPath
 from typing import TypedDict
 
@@ -49,6 +50,9 @@ _TELEOP_CONTROL_SOURCES = frozenset({"transport", "client"})
 _ROLLOUT_INTERVENTION_SOURCES = frozenset({"transport", "teleop_client"})
 _CONSOLE_INITIAL_TABS = frozenset(
     {"auto", "debug", "manual", "collect", "replay", "rl", "eval", "result"}
+)
+_SCENE_DATASET_RE = re.compile(
+    r"^(?P<base>.+)_scene_(?P<index>[1-9][0-9]*)(?:_(?P<date>[0-9]{8}))?$"
 )
 
 
@@ -175,7 +179,7 @@ def _validate(cfg: ConfigDict) -> None:
         tasks = {}
     if not isinstance(tasks, dict):
         raise ValueError("collection.tasks must map dataset names to (prompt, target) lists")
-    seen_prompts: set[str] = set()
+    prompt_datasets: dict[str, str] = {}
     for dataset_name, prompts in tasks.items():
         normalized_name = str(dataset_name).strip()
         if not _is_safe_dataset_name_component(normalized_name):
@@ -193,11 +197,22 @@ def _validate(cfg: ConfigDict) -> None:
             normalized_prompt = str(prompt).strip()
             if not normalized_prompt:
                 raise ValueError(f"collection.tasks.{dataset_name} prompts must not be empty")
-            if normalized_prompt in seen_prompts:
-                raise ValueError(
-                    f"collection prompt must belong to one dataset: {normalized_prompt!r}"
+            previous_dataset = prompt_datasets.get(normalized_prompt)
+            if previous_dataset is not None:
+                previous_scene = _SCENE_DATASET_RE.fullmatch(previous_dataset)
+                current_scene = _SCENE_DATASET_RE.fullmatch(normalized_name)
+                same_scene_family = (
+                    previous_scene is not None
+                    and current_scene is not None
+                    and previous_scene.group("base") == current_scene.group("base")
+                    and previous_dataset != normalized_name
                 )
-            seen_prompts.add(normalized_prompt)
+                if not same_scene_family:
+                    raise ValueError(
+                        f"collection prompt must belong to one dataset: {normalized_prompt!r}"
+                    )
+            else:
+                prompt_datasets[normalized_prompt] = normalized_name
             if (
                 isinstance(target, bool)
                 or not isinstance(target, int)

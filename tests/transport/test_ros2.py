@@ -102,6 +102,45 @@ def _subscription_callbacks(node: _FakeNode, topic: str):
     ]
 
 
+def _build_ros2_transport(
+    monkeypatch,
+    config_path: Path,
+    *,
+    joint_state_type=object,
+    make_qos=None,
+):
+    node = _FakeNode()
+    runtime = types.SimpleNamespace(
+        node=node,
+        cv_bridge=object(),
+        image_type=object,
+        compressed_image_type=object,
+        joint_state_type=joint_state_type,
+        pose_stamped_type=object,
+    )
+    monkeypatch.setattr(ros2, "get_ros2_runtime", lambda node_name: runtime)
+    monkeypatch.setattr(
+        ros2,
+        "_make_live_qos",
+        make_qos or (lambda depth=10: object()),
+    )
+    config = load_config(config_path)
+    robot = ROBOT_REGISTRY.build(config.robot.type)
+    return node, config, robot, ros2.Ros2Transport(config, robot)
+
+
+def _build_collection_camera_transport(monkeypatch):
+    node, _config, robot, transport = _build_ros2_transport(
+        monkeypatch,
+        _R1LITE_COLLECTION,
+        joint_state_type=_FakeJointState,
+    )
+    camera = robot.observation_schema.cameras[0]
+    callbacks = _subscription_callbacks(node, transport._camera_topics[camera.name])
+    assert len(callbacks) == 2
+    return node, transport, camera, callbacks
+
+
 def test_ros2_live_qos_matches_best_effort_publishers(monkeypatch):
     fake_qos = types.ModuleType("rclpy.qos")
     fake_qos.QoSProfile = _FakeQoSProfile  # type: ignore[reportAttributeAccessIssue]
@@ -177,27 +216,18 @@ def test_ros2_camera_subscriptions_use_deeper_qos(monkeypatch):
 
 
 def test_ros2_collection_camera_subscriptions_use_depth_one_qos(monkeypatch):
-    node = _FakeNode()
     qoses = {}
-    runtime = types.SimpleNamespace(
-        node=node,
-        cv_bridge=object(),
-        image_type=object,
-        compressed_image_type=object,
-        joint_state_type=object,
-        pose_stamped_type=object,
-    )
-    monkeypatch.setattr(ros2, "get_ros2_runtime", lambda node_name: runtime)
 
     def make_qos(depth=10):
         qos = object()
         qoses[qos] = depth
         return qos
 
-    monkeypatch.setattr(ros2, "_make_live_qos", make_qos)
-    config = load_config(_R1LITE_COLLECTION)
-    robot = ROBOT_REGISTRY.build(config.robot.type)
-    transport = ros2.Ros2Transport(config, robot)
+    node, _config, _robot, transport = _build_ros2_transport(
+        monkeypatch,
+        _R1LITE_COLLECTION,
+        make_qos=make_qos,
+    )
 
     for camera in transport._collection_camera_specs():
         topic = transport._camera_topics[camera.name]
@@ -210,27 +240,18 @@ def test_ros2_collection_camera_subscriptions_use_depth_one_qos(monkeypatch):
 
 
 def test_ros2_collection_vector_subscriptions_use_depth_one_qos(monkeypatch):
-    node = _FakeNode()
     qoses = {}
-    runtime = types.SimpleNamespace(
-        node=node,
-        cv_bridge=object(),
-        image_type=object,
-        compressed_image_type=object,
-        joint_state_type=object,
-        pose_stamped_type=object,
-    )
-    monkeypatch.setattr(ros2, "get_ros2_runtime", lambda node_name: runtime)
 
     def make_qos(depth=10):
         qos = object()
         qoses[qos] = depth
         return qos
 
-    monkeypatch.setattr(ros2, "_make_live_qos", make_qos)
-    config = load_config(_R1LITE_COLLECTION)
-    robot = ROBOT_REGISTRY.build(config.robot.type)
-    transport = ros2.Ros2Transport(config, robot)
+    node, config, _robot, transport = _build_ros2_transport(
+        monkeypatch,
+        _R1LITE_COLLECTION,
+        make_qos=make_qos,
+    )
     depths_by_topic = {}
     for _msg_type, topic, _callback, qos in node.subscriptions:
         depths_by_topic.setdefault(topic, set()).add(qoses[qos])
@@ -259,24 +280,9 @@ def test_ros2_collection_vector_subscriptions_use_depth_one_qos(monkeypatch):
 
 
 def test_ros2_camera_subscription_keeps_raw_capture_deque_independent(monkeypatch):
-    node = _FakeNode()
-    runtime = types.SimpleNamespace(
-        node=node,
-        cv_bridge=object(),
-        image_type=object,
-        compressed_image_type=object,
-        joint_state_type=_FakeJointState,
-        pose_stamped_type=object,
-    )
-    monkeypatch.setattr(ros2, "get_ros2_runtime", lambda node_name: runtime)
-    monkeypatch.setattr(ros2, "_make_live_qos", lambda depth=10: object())
-
-    config = load_config(_R1LITE_COLLECTION)
-    robot = ROBOT_REGISTRY.build(config.robot.type)
-    transport = ros2.Ros2Transport(config, robot)
-    camera = robot.observation_schema.cameras[0]
-    callbacks = _subscription_callbacks(node, transport._camera_topics[camera.name])
-    assert len(callbacks) == 2
+    _node, transport, camera, callbacks = _build_collection_camera_transport(monkeypatch)
+    assert transport._camera_deques[camera.name].maxlen == ros2._CAMERA_QOS_DEPTH
+    assert transport._collection_camera_deques[camera.name].maxlen is None
     live_callback, collection_callback = callbacks
 
     before = _compressed_msg(1, b"before collection")
@@ -301,25 +307,26 @@ def test_ros2_camera_subscription_keeps_raw_capture_deque_independent(monkeypatc
     assert len(transport._collection_camera_deques[camera.name]) == 0
 
 
-def test_ros2_collection_raw_releases_consumed_camera_messages(monkeypatch):
-    node = _FakeNode()
-    runtime = types.SimpleNamespace(
-        node=node,
-        cv_bridge=object(),
-        image_type=object,
-        compressed_image_type=object,
-        joint_state_type=_FakeJointState,
-        pose_stamped_type=object,
-    )
-    monkeypatch.setattr(ros2, "get_ros2_runtime", lambda node_name: runtime)
-    monkeypatch.setattr(ros2, "_make_live_qos", lambda depth=10: object())
+def test_ros2_live_camera_deque_drops_old_frames_without_touching_collection(monkeypatch):
+    _node, transport, camera, callbacks = _build_collection_camera_transport(monkeypatch)
+    live_callback, collection_callback = callbacks
 
-    config = load_config(_R1LITE_COLLECTION)
-    robot = ROBOT_REGISTRY.build(config.robot.type)
-    transport = ros2.Ros2Transport(config, robot)
-    camera = robot.observation_schema.cameras[0]
-    callbacks = _subscription_callbacks(node, transport._camera_topics[camera.name])
-    assert len(callbacks) == 2
+    for stamp in range(ros2._CAMERA_QOS_DEPTH + 1):
+        live_callback(_compressed_msg(stamp, str(stamp).encode()))
+
+    live_deque = transport._camera_deques[camera.name]
+    assert len(live_deque) == ros2._CAMERA_QOS_DEPTH
+    assert live_deque[0].header.stamp.sec == 1
+    assert live_deque[-1].header.stamp.sec == ros2._CAMERA_QOS_DEPTH
+    assert len(transport._collection_camera_deques[camera.name]) == 0
+
+    transport.start_collection()
+    collection_callback(_compressed_msg(999, b"collection"))
+    assert len(transport._collection_camera_deques[camera.name]) == 1
+
+
+def test_ros2_collection_raw_releases_consumed_camera_messages(monkeypatch):
+    _node, transport, camera, callbacks = _build_collection_camera_transport(monkeypatch)
     collection_callback = callbacks[1]
     transport.start_collection()
     collection_callback(_compressed_msg(1, b"one"))
@@ -334,24 +341,7 @@ def test_ros2_collection_raw_releases_consumed_camera_messages(monkeypatch):
 
 
 def test_ros2_hil_relay_switch_keeps_collection_camera_capture_active(monkeypatch):
-    node = _FakeNode()
-    runtime = types.SimpleNamespace(
-        node=node,
-        cv_bridge=object(),
-        image_type=object,
-        compressed_image_type=object,
-        joint_state_type=_FakeJointState,
-        pose_stamped_type=object,
-    )
-    monkeypatch.setattr(ros2, "get_ros2_runtime", lambda node_name: runtime)
-    monkeypatch.setattr(ros2, "_make_live_qos", lambda depth=10: object())
-
-    config = load_config(_R1LITE_COLLECTION)
-    robot = ROBOT_REGISTRY.build(config.robot.type)
-    transport = ros2.Ros2Transport(config, robot)
-    camera = robot.observation_schema.cameras[0]
-    callbacks = _subscription_callbacks(node, transport._camera_topics[camera.name])
-    assert len(callbacks) == 2
+    _node, transport, camera, callbacks = _build_collection_camera_transport(monkeypatch)
     collection_callback = callbacks[1]
     transport.start_collection()
 
@@ -367,23 +357,12 @@ def test_ros2_hil_relay_switch_keeps_collection_camera_capture_active(monkeypatc
 
 
 def test_ros2_camera_subscriptions_report_minimum_image_hz(monkeypatch):
-    node = _FakeNode()
-    runtime = types.SimpleNamespace(
-        node=node,
-        cv_bridge=object(),
-        image_type=object,
-        compressed_image_type=object,
-        joint_state_type=object,
-        pose_stamped_type=object,
-    )
-    monkeypatch.setattr(ros2, "get_ros2_runtime", lambda node_name: runtime)
-    monkeypatch.setattr(ros2, "_make_live_qos", lambda depth=10: object())
     now = [0.0]
     monkeypatch.setattr(transport_utils.time, "monotonic", lambda: now[0])
-
-    config = load_config(_CONFIGS_DIR / "01_deploy" / "r1lite" / "openpi_qpos.py")
-    robot = ROBOT_REGISTRY.build(config.robot.type)
-    transport = ros2.Ros2Transport(config, robot)
+    node, _config, _robot, transport = _build_ros2_transport(
+        monkeypatch,
+        _CONFIGS_DIR / "01_deploy" / "r1lite" / "openpi_qpos.py",
+    )
 
     topics = tuple(transport._camera_topics.values())
     for topic in topics:

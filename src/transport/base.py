@@ -180,6 +180,15 @@ class TransportBridge(abc.ABC):
         """
         return None
 
+    def prepare_collection_capture(self, directory: str | None) -> None:
+        """Select storage for transport-owned resources used by the next capture."""
+        _ = directory
+        return None
+
+    def finish_collection_capture(self) -> None:
+        """Release transport-owned resources for the just-finished capture."""
+        return None
+
     def collection_diagnostics(self) -> str:
         """Human-readable reason collection frames are not currently available."""
         return ""
