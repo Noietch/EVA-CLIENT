@@ -218,7 +218,9 @@ def load_orbbec_white_balances(path: str | Path | None) -> dict[str, int]:
     for image_key, value in values.items():
         key = str(image_key)
         if key not in ARX_R5_CAMERA_KEYS:
-            raise ValueError(f"Unknown ARX camera key {key!r}; expected one of {ARX_R5_CAMERA_KEYS}")
+            raise ValueError(
+                f"Unknown ARX camera key {key!r}; expected one of {ARX_R5_CAMERA_KEYS}"
+            )
         out[key] = int(value)
     return out
 

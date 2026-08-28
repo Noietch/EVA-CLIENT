@@ -74,9 +74,7 @@ def export_dataset_by_quality(
         if output.exists() and not output.is_dir():
             raise NotADirectoryError(f"output path is not a directory: {output}")
         output.parent.mkdir(parents=True, exist_ok=True)
-    native_root = Path(
-        tempfile.mkdtemp(prefix=".conversion.native.", dir=accepted_dir.parent)
-    )
+    native_root = Path(tempfile.mkdtemp(prefix=".conversion.native.", dir=accepted_dir.parent))
     accepted_stage_root = Path(
         tempfile.mkdtemp(prefix=".conversion.accepted.", dir=accepted_dir.parent)
     )
@@ -97,9 +95,7 @@ def export_dataset_by_quality(
             progress_callback=None,
         )
         if progress_callback is not None:
-            progress_callback(
-                DatasetExportProgress(0, native_summary.source_episodes, "", None)
-            )
+            progress_callback(DatasetExportProgress(0, native_summary.source_episodes, "", None))
         _convert_subset(
             native_accepted,
             stage_accepted,
@@ -140,9 +136,9 @@ def _convert_subset(
     progress_callback: Callable[[DatasetExportProgress], None] | None,
 ) -> None:
     output_dir.mkdir(parents=True)
-    source_indices = json.loads(
-        (source_dir / "meta" / "quality_split.json").read_text()
-    )["source_episode_indices"]
+    source_indices = json.loads((source_dir / "meta" / "quality_split.json").read_text())[
+        "source_episode_indices"
+    ]
     exporter = _load_exporter(dataset_format)
 
     def update(completed: int, row: dict[str, Any]) -> None:

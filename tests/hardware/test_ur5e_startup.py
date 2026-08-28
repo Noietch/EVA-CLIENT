@@ -39,7 +39,7 @@ def test_ur5e_uses_an_isolated_python_project() -> None:
     assert "pydhgripper==1.0.2" in project
     assert "UV_PROJECT_ENVIRONMENT" in setup
     assert 'uv sync --project "$UR5E_DIR"' in setup
-    assert 'source .venv/bin/activate' not in setup
+    assert "source .venv/bin/activate" not in setup
 
     assert 'requires-python = ">=3.11,<3.12"' in root_project
     assert "[project.optional-dependencies]" in root_project
@@ -64,8 +64,8 @@ def test_ur5e_scripts_use_the_local_hardware_environment(script_path: Path) -> N
 
     assert "examples/hardware/ur5e/.venv" in script
     assert 'UR5E_PYTHON_BIN="${UR5E_VENV_DIR}/bin/python"' in script
-    assert 'source .venv/bin/activate' not in script
-    assert 'Run: bash examples/hardware/ur5e/setup_env.sh' in script
+    assert "source .venv/bin/activate" not in script
+    assert "Run: bash examples/hardware/ur5e/setup_env.sh" in script
 
 
 @pytest.mark.skipif(

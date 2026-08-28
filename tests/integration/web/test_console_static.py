@@ -133,7 +133,7 @@ def test_quality_export_and_upload_do_not_block_collection_controls():
     assert html.count("}, { concurrent: true });") >= 2
     assert "/api/collect_quality_export?job_id=" in html
     assert 'id="collect-export-format"' in html
-    assert 'exportFormatSelect.onchange = changeCollectionExportFormat;' in source
+    assert "exportFormatSelect.onchange = changeCollectionExportFormat;" in source
     assert "function changeCollectionExportFormat()" in html
     assert 'qualityTransfer.acceptedDir = "";' in html
     assert 'value="lerobot_v3"' in html
@@ -148,11 +148,13 @@ def test_quality_export_format_controls_requests_and_upload_readiness():
 
     assert 'const datasetFormat = $("collect-export-format").value;' in source
     assert source.count("dataset_format: datasetFormat,") == 2
-    assert 'qualityTransfer.datasetFormat === selectedFormat' in source
-    assert 'datasetFormat !== selectedFormat' in source
-    assert 'exportFormat.disabled = qualityTransfer.exporting || qualityTransfer.uploading;' in source
-    assert 'exportButton.disabled = !enabled || !episodes.length ||' in source
-    assert 'uploadButton.disabled = !upload.configured || !selectedExportReady ||' in source
+    assert "qualityTransfer.datasetFormat === selectedFormat" in source
+    assert "datasetFormat !== selectedFormat" in source
+    assert (
+        "exportFormat.disabled = qualityTransfer.exporting || qualityTransfer.uploading;" in source
+    )
+    assert "exportButton.disabled = !enabled || !episodes.length ||" in source
+    assert "uploadButton.disabled = !upload.configured || !selectedExportReady ||" in source
 
 
 def test_quality_export_progress_and_outcomes_include_selected_format():
@@ -163,8 +165,8 @@ def test_quality_export_progress_and_outcomes_include_selected_format():
     assert "export required before upload" in html
     assert "export complete ·" in html
     assert "accepted upload complete ·" in html
-    assert '`✗ ${formatLabel} export · ${message}`' in html
-    assert '`✗ ${formatLabel} upload · ${message}`' in html
+    assert "`✗ ${formatLabel} export · ${message}`" in html
+    assert "`✗ ${formatLabel} upload · ${message}`" in html
 
 
 def test_console_boots_into_the_configured_tab():

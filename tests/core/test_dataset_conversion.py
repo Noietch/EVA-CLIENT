@@ -19,6 +19,7 @@ except ModuleNotFoundError:
     make_reader = None
 
 if "openpi_client" not in sys.modules:
+
     class _FakeMsgpackPacker:
         def pack(self, value: object) -> bytes:
             return pickle.dumps(value)
@@ -250,9 +251,7 @@ def test_quality_export_converts_each_supported_format(
         assert (accepted / "data/chunk-000/episode_000000.parquet").is_file()
     elif dataset_format == "lerobot_v3":
         assert pq.read_table(accepted / "data/chunk-000/file-000.parquet").num_rows == 3
-        episode_table = pq.read_table(
-            accepted / "meta/episodes/chunk-000/file-000.parquet"
-        )
+        episode_table = pq.read_table(accepted / "meta/episodes/chunk-000/file-000.parquet")
         assert episode_table["videos/observation.images.cam/from_timestamp"][0].as_py() == 0
         assert episode_table["videos/observation.images.cam/to_timestamp"][0].as_py() == 0.15
     elif dataset_format == "hdf5":

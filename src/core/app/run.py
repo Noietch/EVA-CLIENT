@@ -1348,9 +1348,7 @@ def run(
                     if operator_event == "collection_cancel":
                         intent = "cancel" if session.status is SessionStatus.RUNNING else None
                     else:
-                        intent = (
-                            "accept" if session.status is SessionStatus.RUNNING else "start"
-                        )
+                        intent = "accept" if session.status is SessionStatus.RUNNING else "start"
                     if intent is not None:
                         command_queue.put(f"web:operator_action:{intent}:yam_leader")
                         logger.info(
@@ -1359,9 +1357,7 @@ def run(
                             intent,
                         )
                     else:
-                        logger.warning(
-                            "[OPERATOR] ignored YAM cancel event with no active episode"
-                        )
+                        logger.warning("[OPERATOR] ignored YAM cancel event with no active episode")
                 else:
                     logger.warning(
                         "[OPERATOR] ignored YAM leader event outside armed Collection mode"

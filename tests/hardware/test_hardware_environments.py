@@ -20,18 +20,12 @@ FORBIDDEN_SCRIPT_PATTERNS = (
 
 def _adapter_dirs() -> list[Path]:
     return sorted(
-        path
-        for path in HARDWARE_ROOT.iterdir()
-        if path.is_dir() and not path.name.startswith("__")
+        path for path in HARDWARE_ROOT.iterdir() if path.is_dir() and not path.name.startswith("__")
     )
 
 
 def _root_shell_scripts(adapter_dir: Path) -> list[Path]:
-    return sorted(
-        path
-        for path in adapter_dir.iterdir()
-        if path.is_file() and path.suffix == ".sh"
-    )
+    return sorted(path for path in adapter_dir.iterdir() if path.is_file() and path.suffix == ".sh")
 
 
 def _load_pyproject(pyproject_path: Path) -> dict:
