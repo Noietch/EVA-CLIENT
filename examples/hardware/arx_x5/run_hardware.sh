@@ -11,7 +11,6 @@ ARX_X5_PYTHON_BIN="${ARX_X5_VENV_DIR}/bin/python"
 # Official ARX X5 SDK-V2, commit 1aa8a7d2ddefced2229f953feffc248be1c0b44d.
 ARX_X5_SDK_DIR="$PWD/examples/hardware/arx_x5/SDK/X5"
 ARX_X5_BIMANUAL_DIR="$ARX_X5_SDK_DIR/bimanual"
-export PYTHONPATH="$ARX_X5_SDK_DIR:$PYTHONPATH"
 
 LEFT_CAN_PORT_VALUE="can1"
 RIGHT_CAN_PORT_VALUE="can3"
@@ -591,7 +590,10 @@ fi
 export VIRTUAL_ENV="${ARX_X5_VENV_DIR}"
 export PATH="${ARX_X5_VENV_DIR}/bin:${PATH}"
 unset PYTHONHOME
+# Set the repository path before prepending the vendored SDK.  PYTHONPATH may
+# be unset, and this launcher runs with `set -u`.
 export PYTHONPATH="$PWD:$PWD/src"
+export PYTHONPATH="$ARX_X5_SDK_DIR:$PYTHONPATH"
 
 append_disabled_arm() {
   if [[ -n "${DISABLED_ARMS_VALUE}" ]]; then
