@@ -118,7 +118,6 @@ function renderTrend(mode, rows) {
       }
     }
   }
-  const legendX = svgWidth - 130;
   host.innerHTML = `<div class="dashboard-calendar-scroll"><svg class="dashboard-calendar" style="min-width:${svgWidth}px" viewBox="0 0 ${svgWidth} ${svgHeight}" role="img" aria-label="${mode} episodes calendar heatmap">
     ${monthLabels.join("")}
     <text x="50" y="${y0 + 10}" class="dashboard-calendar-weekday">MON</text>
@@ -126,10 +125,11 @@ function renderTrend(mode, rows) {
     <text x="50" y="${y0 + pitch * 4 + 10}" class="dashboard-calendar-weekday">FRI</text>
     <text x="50" y="${y0 + pitch * 6 + 10}" class="dashboard-calendar-weekday">SUN</text>
     ${cells.join("")}
-    <text x="${legendX - 8}" y="190" text-anchor="end" class="dashboard-calendar-legend">LESS</text>
-    ${[0, 1, 2, 3, 4].map((level, index) => `<rect x="${legendX + index * 16}" y="179" width="12" height="12" rx="2.5" class="dashboard-calendar-legend-cell level-${level}"></rect>`).join("")}
-    <text x="${legendX + 86}" y="190" class="dashboard-calendar-legend">MORE</text>
-  </svg></div><div class="dashboard-calendar-tooltip" role="status"></div>`;
+  </svg></div><div class="dashboard-calendar-legend" aria-label="Episode volume scale">
+    <span>LESS</span>
+    ${[0, 1, 2, 3, 4].map((level) => `<i class="dashboard-calendar-legend-cell level-${level}" aria-hidden="true"></i>`).join("")}
+    <span>MORE</span>
+  </div><div class="dashboard-calendar-tooltip" role="status"></div>`;
 
   const scrollHost = host.querySelector(".dashboard-calendar-scroll");
   const tooltip = host.querySelector(".dashboard-calendar-tooltip");

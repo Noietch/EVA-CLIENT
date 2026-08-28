@@ -276,9 +276,9 @@
   }
   .dashboard-section-head h2 { margin: 3px 0 0; font-size: 14px; line-height: 1.2; letter-spacing: 0; }
   .dashboard-section-note { color: var(--ink-dim); font: 10px/1.2 var(--mono); letter-spacing: 0; }
-  .dashboard-trend { position: relative; min-height: 228px; padding: 10px 16px 0; display: flex; align-items: center; overflow: hidden; }
-  .dashboard-calendar-scroll { width: 100%; overflow-x: auto; overflow-y: hidden; }
-  .dashboard-calendar { display: block; width: 100%; height: 218px; overflow: visible; font-family: var(--mono); shape-rendering: geometricPrecision; }
+  .dashboard-trend { position: relative; min-height: 228px; padding: 10px 16px 0; display: flex; flex-direction: column; justify-content: center; overflow: hidden; }
+  .dashboard-calendar-scroll { flex: 0 0 auto; width: 100%; overflow-x: auto; overflow-y: hidden; }
+  .dashboard-calendar { display: block; width: 100%; height: 200px; overflow: visible; font-family: var(--mono); shape-rendering: geometricPrecision; }
   .dashboard-calendar-month { fill: var(--ink-dim); font-size: 8px; font-weight: 700; letter-spacing: 0; }
   .dashboard-calendar-weekday { fill: var(--ink-faint); font-size: 7px; font-weight: 700; text-anchor: end; }
   .dashboard-calendar-cell {
@@ -288,13 +288,21 @@
     transition: transform .12s ease, stroke .12s ease, filter .12s ease;
   }
   .dashboard-calendar-cell:hover, .dashboard-calendar-cell:focus { transform: scale(1.16); stroke: var(--ink); stroke-width: 1.1; filter: drop-shadow(0 1px 2px rgba(31,30,28,.18)); }
-  .dashboard-calendar-cell.level-0, .dashboard-calendar-legend-cell.level-0 { fill: #EBEDF0; }
-  .dashboard-calendar-cell.level-1, .dashboard-calendar-legend-cell.level-1 { fill: #9BE9A8; }
-  .dashboard-calendar-cell.level-2, .dashboard-calendar-legend-cell.level-2 { fill: #40C463; }
-  .dashboard-calendar-cell.level-3, .dashboard-calendar-legend-cell.level-3 { fill: #30A14E; }
-  .dashboard-calendar-cell.level-4, .dashboard-calendar-legend-cell.level-4 { fill: #216E39; }
-  .dashboard-calendar-legend { fill: var(--ink-faint); font-size: 7px; font-weight: 600; }
-  .dashboard-calendar-legend-cell { stroke: rgba(31,30,28,.08); stroke-width: .7; }
+  .dashboard-calendar-cell.level-0 { fill: #EBEDF0; }
+  .dashboard-calendar-cell.level-1 { fill: #9BE9A8; }
+  .dashboard-calendar-cell.level-2 { fill: #40C463; }
+  .dashboard-calendar-cell.level-3 { fill: #30A14E; }
+  .dashboard-calendar-cell.level-4 { fill: #216E39; }
+  .dashboard-calendar-legend {
+    flex: 0 0 18px; display: flex; align-items: center; justify-content: flex-end; gap: 4px;
+    padding: 2px 4px 0; color: var(--ink-faint); font: 600 7px/1 var(--mono);
+  }
+  .dashboard-calendar-legend-cell { flex: 0 0 12px; width: 12px; height: 12px; border: 1px solid rgba(31,30,28,.08); border-radius: 3px; }
+  .dashboard-calendar-legend-cell.level-0 { background: #EBEDF0; }
+  .dashboard-calendar-legend-cell.level-1 { background: #9BE9A8; }
+  .dashboard-calendar-legend-cell.level-2 { background: #40C463; }
+  .dashboard-calendar-legend-cell.level-3 { background: #30A14E; }
+  .dashboard-calendar-legend-cell.level-4 { background: #216E39; }
   .dashboard-calendar-tooltip {
     position: absolute; z-index: 3; width: max-content; max-width: calc(100% - 16px); pointer-events: none; opacity: 0;
     padding: 7px 9px; border-radius: 5px; background: var(--ink); color: var(--paper);
@@ -306,7 +314,7 @@
   @media (prefers-reduced-motion: reduce) {
     .dashboard-calendar-cell { animation: none; }
   }
-  .dashboard-trend-empty { color: var(--ink-faint); text-align: center; font: 11px/1.4 var(--mono); }
+  .dashboard-trend-empty { margin: auto; color: var(--ink-faint); text-align: center; font: 11px/1.4 var(--mono); }
   .dashboard-health-section { display: flex; flex-direction: column; }
   .dashboard-health-value { padding: 22px 16px 6px; font: 650 32px/1 var(--mono); color: #F5572F; }
   .dashboard-meter { height: 7px; margin: 4px 16px 18px; background: var(--surface-2); overflow: hidden; }
