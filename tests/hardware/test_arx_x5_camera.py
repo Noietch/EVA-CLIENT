@@ -5,9 +5,9 @@ import numpy as np
 import pytest
 
 from examples.hardware.arx_x5.camera import (
+    ARX_X5_CAMERA_KEYS,
     DEFAULT_ARX_X5_D405_CAMERAS,
     DEFAULT_ARX_X5_D405_PROFILE_PATH,
-    ARX_X5_CAMERA_KEYS,
     RealSenseCameraSpec,
     _RealSenseCameraWorker,
     default_realsense_camera_specs,

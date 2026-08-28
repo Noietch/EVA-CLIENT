@@ -28,6 +28,7 @@ import logging
 import subprocess
 import threading
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -1559,7 +1560,7 @@ class EpisodeLogger:
     def _write_encoded_sample_video(
         self,
         path: Path,
-        frames: list[bytes | CollectionRawImage],
+        frames: Sequence[bytes | CollectionRawImage],
         fps: float,
         size: tuple[int, int] | None,
     ) -> None:

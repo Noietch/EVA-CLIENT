@@ -89,6 +89,7 @@ class ArxR5(Robot):
             raise ImportError("ARX R5 kinematics requires the PyRoki/JAX dependencies") from (
                 _PYROKI_IMPORT_ERROR
             )
+        assert pyroki_arms is not None
         return pyroki_arms(
             self.URDF,
             [{"joints": self.ARM_JOINTS, "eef_link": "link6", "reference_frame": "base_link"}] * 2,
