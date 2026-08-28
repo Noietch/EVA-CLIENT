@@ -1597,8 +1597,11 @@ def test_dashboard_uses_animated_multi_month_calendar_heatmaps():
     assert "#9BE9A8" in html
     assert "#216E39" in html
     assert 'rx="2.5"' in html
-    assert ">LESS</text>" in html
-    assert ">MORE</text>" in html
+    assert '<div class="dashboard-calendar-legend" aria-label="Episode volume scale">' in html
+    assert ">LESS</span>" in html
+    assert ">MORE</span>" in html
+    assert "</svg></div><div class=\"dashboard-calendar-legend\"" in html
+    assert '.dashboard-calendar-legend-cell.level-4 { background: #216E39; }' in html
     assert (
         "scrollHost.scrollLeft = Math.max(0, peak.x * scale - scrollHost.clientWidth / 2);" in html
     )
