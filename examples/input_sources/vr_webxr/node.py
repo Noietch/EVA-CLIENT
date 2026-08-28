@@ -479,6 +479,14 @@ class GripToggleEncoder:
         self._hands = {hand: _HandGripState() for hand in HANDS}
         self._toggled_hands: tuple[str, ...] = ()
 
+    def reset_permissions(self) -> None:
+        """Clear per-arm grip permissions when the global ARM gate is toggled."""
+        for state in self._hands.values():
+            state.grip_engaged = False
+            state.press_started_ms = None
+            state.long_press_fired = False
+        self._toggled_hands = ()
+
     def _encode_controller(
         self,
         hand: str,
@@ -976,6 +984,11 @@ class WebXrNode:
                     )
                 for event in events:
                     self.bridge.submit_event(event)
+                if any(event.get("intent") == "arm_toggle" for event in events):
+                    # B controls the global ARM gate. A subsequent B press starts
+                    # from a fully disabled per-arm state instead of restoring the
+                    # grip permissions that were active before the gate was closed.
+                    grip_encoder.reset_permissions()
                 monitor.observe(frame)
         except (BrowserProtocolError, UnicodeDecodeError) as protocol_error:
             error = str(protocol_error)
