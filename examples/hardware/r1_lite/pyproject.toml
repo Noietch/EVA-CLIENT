@@ -1,0 +1,37 @@
+[project]
+name = "eva-r1-lite-hardware"
+version = "0.1.0"
+description = "Isolated runtime for the EVA R1 Lite hardware workflows."
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "eva-client",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==8.3.5",
+    "ruff==0.15.9",
+]
+
+[tool.uv]
+package = false
+environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+
+[tool.uv.sources]
+eva-client = { path = "../../..", editable = true }
+
+[[tool.uv.index]]
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
+
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = []
+
+[tool.ruff]
+line-length = 100

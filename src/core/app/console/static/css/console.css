@@ -167,10 +167,13 @@
   .toggle-row input { accent-color: var(--signal); cursor: pointer; }
   #view-manual .btn-grid { margin-bottom: 6px; }
   #view-manual .btn.active { border-color: var(--signal); color: var(--signal); }
+  .manual-pose-legend { font-family: var(--mono); font-size: 9px; color: var(--ink-faint); text-align: right; letter-spacing: 0.04em; }
   .manual-sliders { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
-  .manual-sliders .ms-row { display: grid; grid-template-columns: 28px 1fr 56px; align-items: center; gap: 6px; }
+  .manual-sliders .ms-row { display: grid; grid-template-columns: 28px 1fr 116px; align-items: center; gap: 6px; }
   .manual-sliders .ms-j { font-family: var(--mono); font-size: 9px; color: var(--ink-faint); }
   .manual-sliders .ms-x { font-family: var(--mono); font-size: 10px; color: var(--ink); text-align: right; font-variant-numeric: tabular-nums; }
+  .manual-sliders .ms-current { color: var(--ink-dim); }
+  .manual-sliders .ms-sep { color: var(--ink-faint); padding: 0 3px; }
   .manual-sliders input[type=range] { width: 100%; accent-color: var(--signal); }
 
   /* ============ workspace ============ */
@@ -1203,6 +1206,17 @@
   }
   .qc-status { font-size: 10px; color: var(--ink-dim); min-height: 12px; }
   .quality-export-actions { display: grid; gap: 6px; }
+  .quality-export-format {
+    display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; align-items: center;
+    font-family: var(--mono); font-size: 10px; color: var(--ink-dim);
+  }
+  .quality-export-format select {
+    min-width: 0; width: 100%; font-family: var(--mono); font-size: 11px; color: var(--ink);
+    padding: 7px 8px; border: 1px solid var(--rule-strong); border-radius: var(--radius-sm);
+    background: var(--paper); box-shadow: var(--shadow-sm);
+  }
+  .quality-export-format select:focus { outline: none; border-color: var(--ink); }
+  .quality-export-format select:disabled { opacity: 0.4; cursor: not-allowed; box-shadow: none; }
   .qc-anno {
     font-family: var(--mono); font-size: 11px; resize: vertical;
     padding: 7px 9px; border: 1px solid var(--rule-strong); background: transparent; color: var(--ink);

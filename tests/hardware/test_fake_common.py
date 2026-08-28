@@ -10,8 +10,8 @@ import pytest
 
 from core.config import load_config
 from core.registry import ROBOT_REGISTRY
+from examples.hardware.arx_x5.fake_node import ArxX5FakeRobotNode
 from examples.hardware.fake_common import FakeRobotNode, build_arg_parser
-from examples.hardware.x5.fake_node import X5FakeRobotNode
 from transport.zmq import ZmqTransport
 
 
@@ -155,10 +155,10 @@ def test_fake_node_uses_registered_robot_dimensions(robot_name: str) -> None:
         node.close()
 
 
-def test_x5_zmq_action_drives_gradual_state_and_collection_does_not_control_plant() -> None:
+def test_arx_x5_zmq_action_drives_gradual_state_and_collection_does_not_control_plant() -> None:
     suffix = uuid.uuid4().hex
-    observation_endpoint = f"inproc://x5-observation-{suffix}"
-    action_endpoint = f"inproc://x5-action-{suffix}"
+    observation_endpoint = f"inproc://arx_x5-observation-{suffix}"
+    action_endpoint = f"inproc://arx_x5-action-{suffix}"
     node = FakeRobotNode(
         robot_name="arx_x5",
         observation_endpoint=observation_endpoint,
@@ -220,10 +220,10 @@ def test_x5_zmq_action_drives_gradual_state_and_collection_does_not_control_plan
         node.close()
 
 
-def test_x5_direct_mode_returns_action_as_observed_state() -> None:
+def test_arx_x5_direct_mode_returns_action_as_observed_state() -> None:
     suffix = uuid.uuid4().hex
-    observation_endpoint = f"inproc://x5-direct-observation-{suffix}"
-    action_endpoint = f"inproc://x5-direct-action-{suffix}"
+    observation_endpoint = f"inproc://arx_x5-direct-observation-{suffix}"
+    action_endpoint = f"inproc://arx_x5-direct-action-{suffix}"
     node = FakeRobotNode(
         robot_name="arx_x5",
         observation_endpoint=observation_endpoint,
@@ -264,7 +264,7 @@ def test_x5_direct_mode_returns_action_as_observed_state() -> None:
         node.close()
 
 
-def test_x5_vr_config_supports_fake_node_defaults() -> None:
+def test_arx_x5_vr_config_supports_fake_node_defaults() -> None:
     config = load_config(Path("configs/02_collection/arx_x5_vr.py"))
 
     assert config.robot.type == "arx_x5"
@@ -276,5 +276,5 @@ def test_x5_vr_config_supports_fake_node_defaults() -> None:
     assert config.collection.storage.log_dir == "work_dirs/collection/arx_x5_vr"
 
 
-def test_x5_fake_node_inherits_the_common_plant() -> None:
-    assert issubclass(X5FakeRobotNode, FakeRobotNode)
+def test_arx_x5_fake_node_inherits_the_common_plant() -> None:
+    assert issubclass(ArxX5FakeRobotNode, FakeRobotNode)

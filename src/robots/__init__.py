@@ -14,6 +14,7 @@ from robots.zoo import (
     arx_r5,  # noqa: F401
     arx_x5,  # noqa: F401
     dual_franka,  # noqa: F401
+    dual_yam,  # noqa: F401
     r1_lite,  # noqa: F401
     ur5e,  # noqa: F401
 )

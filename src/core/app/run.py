@@ -1338,6 +1338,34 @@ def run(
             if target_hz != loop_rate_hz:
                 loop_rate = transport.create_rate(target_hz)
                 loop_rate_hz = target_hz
+            operator_event = transport.poll_operator_event()
+            if operator_event in {"collection_record_toggle", "collection_cancel"}:
+                if (
+                    runtime.collection_teleop_armed
+                    and runtime.collection_teleop_active
+                    and session.mode is SessionMode.COLLECT
+                ):
+                    if operator_event == "collection_cancel":
+                        intent = "cancel" if session.status is SessionStatus.RUNNING else None
+                    else:
+                        intent = (
+                            "accept" if session.status is SessionStatus.RUNNING else "start"
+                        )
+                    if intent is not None:
+                        command_queue.put(f"web:operator_action:{intent}:yam_leader")
+                        logger.info(
+                            "[OPERATOR] source=yam_leader event=%s intent=%s",
+                            operator_event,
+                            intent,
+                        )
+                    else:
+                        logger.warning(
+                            "[OPERATOR] ignored YAM cancel event with no active episode"
+                        )
+                else:
+                    logger.warning(
+                        "[OPERATOR] ignored YAM leader event outside armed Collection mode"
+                    )
             while True:
                 try:
                     cmd = command_queue.get_nowait()

@@ -27,8 +27,12 @@ work_dirs/
 logs/
 Log/
 
-# Local helper directory (new files are ignored; existing tracked files stay tracked).
-tools/
+# Local helpers are ignored except the maintained dataset conversion package.
+tools/*
+!tools/__init__.py
+!tools/conversion/
+!tools/conversion/**
+tools/conversion/__pycache__/
 temp/
 
 # Native libraries and bundled external dependencies.

@@ -67,8 +67,5 @@ collection = dict(
         pick_up_the_mango_and_place_it_in_the_plate=[
             ("pick up the mango and place it in the plate", 100),
         ],
-        clean=[
-            ("clean the whiteboard", 100),
-        ],
     ),
 )

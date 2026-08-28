@@ -1,0 +1,170 @@
+<?xml version="1.0"?>
+<robot name="yam_fallback">
+  <material name="dark">
+    <color rgba="0.20 0.20 0.20 1.0"/>
+  </material>
+  <material name="white">
+    <color rgba="0.88 0.88 0.88 1.0"/>
+  </material>
+
+  <link name="base_link">
+    <visual>
+      <origin xyz="0 0 0.02" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.10 0.10 0.04"/>
+      </geometry>
+      <material name="dark"/>
+    </visual>
+    <visual>
+      <origin xyz="0 0 0.07" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.025" length="0.08"/>
+      </geometry>
+      <material name="dark"/>
+    </visual>
+  </link>
+
+  <link name="link1">
+    <visual>
+      <origin xyz="0 0 0.06" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.03" length="0.06"/>
+      </geometry>
+      <material name="dark"/>
+    </visual>
+  </link>
+
+  <link name="link2">
+    <visual>
+      <origin xyz="0 0 0.12" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.05 0.05 0.24"/>
+      </geometry>
+      <material name="white"/>
+    </visual>
+  </link>
+
+  <link name="link3">
+    <visual>
+      <origin xyz="0 0 0.12" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.045 0.045 0.24"/>
+      </geometry>
+      <material name="white"/>
+    </visual>
+  </link>
+
+  <link name="link4">
+    <visual>
+      <origin xyz="0 0 0.05" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.022" length="0.10"/>
+      </geometry>
+      <material name="dark"/>
+    </visual>
+  </link>
+
+  <link name="link5">
+    <visual>
+      <origin xyz="0 0 0.05" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.018" length="0.10"/>
+      </geometry>
+      <material name="dark"/>
+    </visual>
+  </link>
+
+  <link name="link6">
+    <visual>
+      <origin xyz="0 0 0.04" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.03 0.03 0.08"/>
+      </geometry>
+      <material name="dark"/>
+    </visual>
+  </link>
+
+  <link name="left_finger">
+    <visual>
+      <origin xyz="0 0.015 0.03" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.01 0.03 0.06"/>
+      </geometry>
+      <material name="white"/>
+    </visual>
+  </link>
+
+  <link name="right_finger">
+    <visual>
+      <origin xyz="0 -0.015 0.03" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.01 0.03 0.06"/>
+      </geometry>
+      <material name="white"/>
+    </visual>
+  </link>
+
+  <joint name="joint1" type="revolute">
+    <parent link="base_link"/>
+    <child link="link1"/>
+    <origin xyz="0 0 0.04" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-3.14" upper="3.14" effort="1" velocity="1"/>
+  </joint>
+
+  <joint name="joint2" type="revolute">
+    <parent link="link1"/>
+    <child link="link2"/>
+    <origin xyz="0 0 0.08" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-3.14" upper="3.14" effort="1" velocity="1"/>
+  </joint>
+
+  <joint name="joint3" type="revolute">
+    <parent link="link2"/>
+    <child link="link3"/>
+    <origin xyz="0 0 0.24" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-3.14" upper="3.14" effort="1" velocity="1"/>
+  </joint>
+
+  <joint name="joint4" type="revolute">
+    <parent link="link3"/>
+    <child link="link4"/>
+    <origin xyz="0 0 0.24" rpy="0 0 0"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="-3.14" upper="3.14" effort="1" velocity="1"/>
+  </joint>
+
+  <joint name="joint5" type="revolute">
+    <parent link="link4"/>
+    <child link="link5"/>
+    <origin xyz="0 0 0.10" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-3.14" upper="3.14" effort="1" velocity="1"/>
+  </joint>
+
+  <joint name="joint6" type="revolute">
+    <parent link="link5"/>
+    <child link="link6"/>
+    <origin xyz="0 0 0.10" rpy="0 0 0"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="-3.14" upper="3.14" effort="1" velocity="1"/>
+  </joint>
+
+  <joint name="left_finger_joint" type="prismatic">
+    <parent link="link6"/>
+    <child link="left_finger"/>
+    <origin xyz="0 0 0.08" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-0.05" upper="0.05" effort="1" velocity="1"/>
+  </joint>
+
+  <joint name="right_finger_joint" type="prismatic">
+    <parent link="link6"/>
+    <child link="right_finger"/>
+    <origin xyz="0 0 0.08" rpy="0 0 0"/>
+    <axis xyz="0 -1 0"/>
+    <limit lower="-0.05" upper="0.05" effort="1" velocity="1"/>
+  </joint>
+</robot>

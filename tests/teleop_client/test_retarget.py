@@ -107,7 +107,7 @@ def test_linear_gripper_mapping_uses_pico_trigger_value() -> None:
     assert mapping.map(1.0) == 0.0
 
 
-def test_trigger_toggles_gripper_in_x5_mode() -> None:
+def test_trigger_toggles_gripper_in_arx_x5_mode() -> None:
     retarget = _toggle_retarget()
     initial = retarget.update(_controller(trigger=0.0), _measured())
     pressed = retarget.update(_controller(trigger=1.0), _measured())

@@ -175,7 +175,7 @@ def test_load_arx_r5_collection_uses_transport_teleop():
     assert cfg.collection.teleop.client == {}
 
 
-def test_x5_collection_has_no_default_remote_upload_target():
+def test_arx_x5_collection_has_no_default_remote_upload_target():
     cfg = load_config(_CONFIGS_DIR / "02_collection" / "arx_x5_vr.py")
 
     assert not cfg.collection.storage.get("sftp")

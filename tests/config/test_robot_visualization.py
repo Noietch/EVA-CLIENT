@@ -13,7 +13,7 @@ from core.registry import ROBOT_REGISTRY
 from robots.utils import UrdfScene
 
 
-def test_x5_uses_ac_one_arm_visuals_without_whole_robot_mesh():
+def test_arx_x5_uses_ac_one_arm_visuals_without_whole_robot_mesh():
     robot = ROBOT_REGISTRY.build("arx_x5")
     parts = robot.vis_config.parts
 

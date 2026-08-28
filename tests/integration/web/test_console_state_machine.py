@@ -39,7 +39,7 @@ from core.app.state import (
 )
 from core.config import ConfigDict
 from core.utils.dataset_upload import DatasetUploadProgress, DatasetUploadResult
-from core.utils.quality_dataset import QualityExportProgress, QualitySplitSummary
+from tools.conversion import DatasetExportSummary, QualityExportProgress
 
 
 def test_run_before_setup_is_rejected(console):
@@ -456,22 +456,25 @@ def test_collect_quality_export_uses_active_task_dataset(tmp_path, monkeypatch):
             assert task == "pick up cup"
             return {"dataset_dir": str(source)}
 
-    def split(
+    def export(
         source_dir,
         accepted_dir,
         rejected_dir,
         *,
+        dataset_format,
         replace_existing,
         progress_callback,
     ):
+        assert dataset_format == "lerobot_v21"
         assert replace_existing is True
         calls.append((source_dir, accepted_dir, rejected_dir))
         progress_callback(QualityExportProgress(1, 3, "accepted", 0))
         progress_callback(QualityExportProgress(3, 3, "rejected", 2))
-        return QualitySplitSummary(
+        return DatasetExportSummary(
             source_dir=str(source_dir),
             accepted_dir=str(accepted_dir),
             rejected_dir=str(rejected_dir),
+            dataset_format=dataset_format,
             source_episodes=3,
             accepted_episodes=2,
             rejected_episodes=1,
@@ -480,12 +483,16 @@ def test_collect_quality_export_uses_active_task_dataset(tmp_path, monkeypatch):
             rejected_source_indices=(1,),
         )
 
-    monkeypatch.setattr(console_server, "split_dataset_by_quality", split)
+    monkeypatch.setattr(console_server, "export_dataset_by_quality", export)
     with serve_console(console_config()) as h:
         h.runtime.episode_logger = cast(Any, _Logger())
         h.session.selected_collect_task = "pick up cup"
-        response = h.post("/api/collect_quality_export", {"task": "pick up cup"})
+        response = h.post(
+            "/api/collect_quality_export",
+            {"task": "pick up cup", "dataset_format": "lerobot_v21"},
+        )
         assert response.status == 202
+        assert response.json["dataset_format"] == "lerobot_v21"
         job_id = response.json["job_id"]
         deadline = time.monotonic() + 2
         while True:
@@ -497,22 +504,30 @@ def test_collect_quality_export_uses_active_task_dataset(tmp_path, monkeypatch):
 
     assert status.status == 200
     assert status.json["state"] == "completed"
+    assert status.json["dataset_format"] == "lerobot_v21"
     assert status.json["progress"] == 1.0
     assert status.json["episodes_completed"] == 3
     assert status.json["accepted_episodes"] == 2
     assert status.json["rejected_episodes"] == 1
     assert calls[0][0] == source.resolve()
-    assert calls[0][1] == source.with_name("pick_up_cup_export") / "accepted"
-    assert calls[0][2] == source.with_name("pick_up_cup_export") / "rejected"
+    export_root = source.with_name("pick_up_cup_export") / "lerobot_v21"
+    assert calls[0][1] == export_root / "accepted"
+    assert calls[0][2] == export_root / "rejected"
 
 
 def test_collect_quality_upload_uses_config_and_accepts_only_accepted_export(tmp_path, monkeypatch):
     source = tmp_path / "legacy_local_name" / "raw"
     source.mkdir(parents=True)
-    accepted = source.parent / "export" / "accepted"
+    accepted = source.parent / "export" / "lerobot_v21" / "accepted"
     (accepted / "meta").mkdir(parents=True)
     (accepted / "meta" / "quality_split.json").write_text(
-        json.dumps({"subset": "accepted", "source_dir": str(source)})
+        json.dumps(
+            {
+                "subset": "accepted",
+                "source_dir": str(source),
+                "dataset_format": "lerobot_v21",
+            }
+        )
     )
     calls = []
 
@@ -552,7 +567,8 @@ def test_collect_quality_upload_uses_config_and_accepts_only_accepted_export(tmp
             job_id="completed-export",
             source_dir=str(source.resolve()),
             accepted_dir=str(accepted.resolve()),
-            rejected_dir=str((source.parent / "export" / "rejected").resolve()),
+            rejected_dir=str((source.parent / "export" / "lerobot_v21" / "rejected").resolve()),
+            dataset_format="lerobot_v21",
             state="completed",
         )
         public_config = h.get("/api/config")
@@ -563,7 +579,7 @@ def test_collect_quality_upload_uses_config_and_accepts_only_accepted_export(tmp
         }
         response = h.post(
             "/api/collect_quality_upload",
-            {"task": "pick up cup"},
+            {"task": "pick up cup", "dataset_format": "lerobot_v21"},
         )
         assert response.status == 202
         job_id = response.json["job_id"]
@@ -586,6 +602,116 @@ def test_collect_quality_upload_uses_config_and_accepts_only_accepted_export(tmp
     specs = calls[0][1]
     assert [spec.backend for spec in specs] == ["sftp"]
     assert specs[0].target == "/datasets/arx_x5/cup_set"
+
+
+def test_collect_quality_export_rejects_unknown_dataset_format(tmp_path):
+    source = tmp_path / "pick_up_cup"
+    source.mkdir()
+
+    class _Logger:
+        def status_snapshot(self, task):
+            assert task == "pick up cup"
+            return {"dataset_dir": str(source)}
+
+    with serve_console(console_config()) as h:
+        h.runtime.episode_logger = cast(Any, _Logger())
+        h.session.selected_collect_task = "pick up cup"
+
+        response = h.post(
+            "/api/collect_quality_export",
+            {"task": "pick up cup", "dataset_format": "unknown"},
+        )
+
+    assert response.status == 400
+    assert response.json == {
+        "ok": False,
+        "error": "unsupported dataset export format",
+    }
+
+
+def test_collect_quality_export_requires_dataset_format(tmp_path):
+    source = tmp_path / "pick_up_cup"
+    source.mkdir()
+
+    class _Logger:
+        def status_snapshot(self, task):
+            assert task == "pick up cup"
+            return {"dataset_dir": str(source)}
+
+    with serve_console(console_config()) as h:
+        h.runtime.episode_logger = cast(Any, _Logger())
+        h.session.selected_collect_task = "pick up cup"
+
+        response = h.post("/api/collect_quality_export", {"task": "pick up cup"})
+
+    assert response.status == 400
+    assert response.json == {"ok": False, "error": "dataset_format is required"}
+
+
+def test_collect_quality_upload_requires_dataset_format(tmp_path):
+    source = tmp_path / "pick_up_cup"
+    source.mkdir()
+
+    class _Logger:
+        def status_snapshot(self, task):
+            assert task == "pick up cup"
+            return {"dataset_dir": str(source)}
+
+    with serve_console(console_config()) as h:
+        h.runtime.episode_logger = cast(Any, _Logger())
+        h.session.selected_collect_task = "pick up cup"
+
+        response = h.post("/api/collect_quality_upload", {"task": "pick up cup"})
+
+    assert response.status == 400
+    assert response.json == {"ok": False, "error": "dataset_format is required"}
+
+
+def test_collect_quality_upload_rejects_legacy_marker_without_format(tmp_path):
+    source = tmp_path / "legacy_local_name" / "raw"
+    source.mkdir(parents=True)
+    accepted = source.parent / "export" / "hdf5" / "accepted"
+    (accepted / "meta").mkdir(parents=True)
+    (accepted / "meta" / "quality_split.json").write_text(
+        json.dumps(
+            {
+                "subset": "accepted",
+                "source_dir": str(source),
+            }
+        )
+    )
+
+    with serve_console(console_config()) as h:
+
+        class _Logger:
+            has_active_episode = False
+
+            def status_snapshot(self, task):
+                assert task == "pick up cup"
+                return {"dataset_dir": str(source)}
+
+        h.runtime.episode_logger = cast(Any, _Logger())
+        h.session.selected_collect_task = "pick up cup"
+        ctx = console_server.ConsoleRequestHandler.ctx
+        ctx.quality_export_jobs["completed-export"] = console_server._QualityExportJob(
+            job_id="completed-export",
+            source_dir=str(source.resolve()),
+            accepted_dir=str(accepted.resolve()),
+            rejected_dir=str((source.parent / "export" / "hdf5" / "rejected").resolve()),
+            dataset_format="hdf5",
+            state="completed",
+        )
+
+        response = h.post(
+            "/api/collect_quality_upload",
+            {"task": "pick up cup", "dataset_format": "hdf5"},
+        )
+
+    assert response.status == 400
+    assert response.json == {
+        "ok": False,
+        "error": "accepted export format mismatch",
+    }
 
 
 def test_status_exposes_replay_action_key_for_series_cache():

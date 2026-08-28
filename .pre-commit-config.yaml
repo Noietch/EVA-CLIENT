@@ -1,4 +1,4 @@
-exclude: ^examples/hardware/x5/SDK/
+exclude: ^examples/hardware/arx_x5/SDK/
 
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit

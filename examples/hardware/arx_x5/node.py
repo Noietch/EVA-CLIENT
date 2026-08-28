@@ -1,0 +1,806 @@
+#!/usr/bin/env python3
+"""ARX X5 execution-layer node for EVA's ZMQ transport."""
+
+from __future__ import annotations
+
+import argparse
+import dataclasses
+import faulthandler
+import logging
+import os
+import signal
+import sys
+import threading
+import time
+from pathlib import Path
+from typing import Any, Sequence, cast
+
+import numpy as np
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+logger = logging.getLogger(__name__)
+
+GROUP_NAMES: tuple[str, str] = ("left_arm", "right_arm")
+GROUP_DOF = 7
+ARM_DOF = 6
+DEFAULT_LEFT_CAN_PORT = "can1"
+DEFAULT_RIGHT_CAN_PORT = "can3"
+DEFAULT_ARM_TYPE = 2
+DEFAULT_GRIPPER_OPEN_POS = -3.4
+DEFAULT_GRIPPER_CLOSE_POS = 0.1
+ARX_X5_LIGHTING_PROFILES: tuple[str, ...] = ("day", "night")
+DEFAULT_ALICIA_PORT = ""
+DEFAULT_LEFT_ALICIA_PORT = "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5C4C192742-if00"
+DEFAULT_RIGHT_ALICIA_PORT = "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5C4C192642-if00"
+DEFAULT_ALICIA_READER = "sdk"
+ARX_R5_JOINT_LIMITS = np.asarray([[-10.0, 10.0]] * ARM_DOF)
+
+COLLECTION_CONTROL_TRANSPORT = "transport"
+COLLECTION_CONTROL_CLIENT = "client"
+COLLECTION_CONTROL_SOURCES = frozenset({COLLECTION_CONTROL_TRANSPORT, COLLECTION_CONTROL_CLIENT})
+COLLECTION_START_TARGET = "collect_start"
+COLLECTION_STOP_TARGET = "collect_stop"
+HIL_START_TARGET = "hil_start"
+HIL_STOP_TARGET = "hil_stop"
+
+
+def _transport_zmq() -> Any:
+    from transport import zmq as transport_zmq
+
+    return transport_zmq
+
+
+def _load_config(path: Path) -> Any:
+    from core.config import load_config
+
+    return load_config(path)
+
+
+def _camera_module() -> Any:
+    from examples.hardware.arx_x5 import camera as camera_module
+
+    return camera_module
+
+
+def _teleop_module() -> Any:
+    from examples.hardware.arx_r5 import teleop as teleop_module
+
+    return teleop_module
+
+
+def _robot_module() -> Any:
+    from examples.hardware.arx_x5 import robot as robot_module
+
+    return robot_module
+
+
+ArxX5DualArm: Any | None = None
+
+
+def build_arx_x5_fk_solver(
+    initial_qpos_groups: Sequence[Sequence[float]] | None = None,
+) -> Any:
+    import robots  # noqa: F401
+    from core.registry import ROBOT_REGISTRY
+
+    if initial_qpos_groups is None:
+        groups = [np.zeros(GROUP_DOF, dtype=np.float32) for _ in GROUP_NAMES]
+    else:
+        groups = [
+            np.asarray(group, dtype=np.float32).reshape(-1).copy()
+            for group in initial_qpos_groups
+        ]
+        if len(groups) != len(GROUP_NAMES) or any(
+            group.shape != (GROUP_DOF,) or not np.all(np.isfinite(group)) for group in groups
+        ):
+            raise ValueError("ARX X5 FK seed must contain one finite 7D state for each arm group")
+    solver = ROBOT_REGISTRY.build("arx_x5").build_kinematics(initial_qpos_groups=groups)
+    solver.fk_chunk(np.concatenate(groups)[np.newaxis, :])
+    return solver
+
+
+@dataclasses.dataclass(frozen=True)
+class ArxX5ZmqConfig:
+    """Runtime config for the ARX X5 ZMQ execution node.
+
+    Args:
+        observation_endpoint: ZMQ PUB bind endpoint for WireObservation frames.
+        action_endpoint: ZMQ SUB bind endpoint for WireAction commands.
+        can_ports: arm group name -> X5 CAN interface (e.g. can0).
+        arm_type: X5 SDK type code (0 = 2023 X5, 2 = 2025 X5).
+        gripper_open_pos: X5 SDK gripper endpoint mapped to scalar 1.0.
+        gripper_close_pos: X5 SDK gripper endpoint mapped to scalar 0.0.
+        initial_gripper_scalar: gripper scalar commanded when an X5 arm first connects.
+        start_at_zero: move both X5 arms to the all-zero joint position at startup.
+        disabled_groups: arm groups intentionally absent from this deployment.
+        realsense_cameras: RealSense D405 cameras mapped to EVA image keys.
+        publish_rate_hz: observation publish rate.
+        left_alicia_port: Alicia-D leader port for the left X5 arm.
+        right_alicia_port: Alicia-D leader port for the right X5 arm.
+        alicia_port: Legacy Alicia-D leader port alias for right_alicia_port.
+        alicia_reader: Alicia reader backend, "sdk" or "duo".
+        debug_alicia: Enable Alicia-D debug logs.
+        passive_collection: Only observe X5/cameras during collection. Default false:
+            Alicia-D drives the follower arms and supplies action_qpos.
+        status_log_interval_s: hardware status log interval; non-positive disables it.
+    """
+
+    observation_endpoint: str
+    action_endpoint: str
+    can_ports: dict[str, str]
+    arm_type: int
+    gripper_open_pos: float
+    gripper_close_pos: float
+    initial_gripper_scalar: float | None
+    disabled_groups: tuple[str, ...]
+    realsense_cameras: tuple[Any, ...]
+    publish_rate_hz: float
+    left_alicia_port: str = DEFAULT_LEFT_ALICIA_PORT
+    right_alicia_port: str = DEFAULT_RIGHT_ALICIA_PORT
+    alicia_port: str = DEFAULT_ALICIA_PORT
+    alicia_reader: str = DEFAULT_ALICIA_READER
+    debug_alicia: bool = False
+    passive_collection: bool = False
+    status_log_interval_s: float = 5.0
+    start_at_zero: bool = False
+
+
+class EmptyCameraCache:
+    def snapshot(self) -> dict[str, np.ndarray]:
+        return {}
+
+    def snapshot_versioned(self) -> tuple[dict[str, int], dict[str, np.ndarray]]:
+        return {}, {}
+
+    def hardware_status(self) -> dict[str, str]:
+        return {}
+
+    def close(self) -> None:
+        return
+
+
+def parse_name_list(values: list[str]) -> tuple[str, ...]:
+    names: list[str] = []
+    for value in values:
+        for item in value.split(","):
+            name = item.strip()
+            if name and name not in names:
+                names.append(name)
+    return tuple(names)
+
+
+def load_disabled_cameras(config_path: str) -> tuple[str, ...]:
+    if not config_path:
+        return ()
+    path = Path(config_path)
+    if not path.exists():
+        raise FileNotFoundError(f"EVA config not found: {path}")
+    cfg = _load_config(path)
+    transport = cfg.get("transport", {})
+    if not isinstance(transport, dict):
+        return ()
+    disabled = transport.get("disabled_cameras", ())
+    if disabled is None:
+        return ()
+    return tuple(str(name) for name in disabled)
+
+
+def format_status(status: dict[str, str]) -> str:
+    if not status:
+        return "none"
+    return " ".join(f"{name}={state}" for name, state in status.items())
+
+
+def flatten_group_state(state: dict[str, np.ndarray]) -> np.ndarray:
+    return np.concatenate(
+        [np.asarray(state[group_name], dtype=np.float32) for group_name in GROUP_NAMES],
+        axis=0,
+    )
+
+
+def split_group_eef(eef: np.ndarray) -> dict[str, np.ndarray]:
+    vector = np.asarray(eef, dtype=np.float32)
+    return {
+        "left_arm": vector[:8].copy(),
+        "right_arm": vector[8:16].copy(),
+    }
+
+
+class ArxX5TeleopSource:
+    def __init__(self, config: ArxX5ZmqConfig) -> None:
+        self._config = config
+        self._robots: dict[str, Any] = {}
+        self._joint_offsets: dict[str, np.ndarray] = {}
+        self._previous_joints: dict[str, np.ndarray] = {}
+        self._joint_compensation: dict[str, np.ndarray] = {}
+        self._last_gripper: dict[str, float] = dict.fromkeys(GROUP_NAMES, 0.0)
+        self._disabled_groups = set(config.disabled_groups)
+
+    def connect(self) -> None:
+        if self._robots:
+            return
+        teleop = _teleop_module()
+        ports = teleop.resolve_alicia_group_ports(
+            self._config.left_alicia_port,
+            self._config.right_alicia_port,
+            self._config.alicia_port,
+        )
+        for group_name in GROUP_NAMES:
+            if group_name in self._disabled_groups:
+                continue
+            self._robots[group_name] = teleop.create_alicia_robot(
+                ports[group_name],
+                self._config.debug_alicia,
+                self._config.alicia_reader,
+            )
+
+    def disconnect(self) -> None:
+        for robot in self._robots.values():
+            disconnect = getattr(robot, "disconnect", None)
+            if disconnect is not None:
+                disconnect()
+        self._robots = {}
+        self._joint_offsets = {}
+        self._previous_joints = {}
+        self._joint_compensation = {}
+
+    def calibrate_delta(self, robot_qpos: np.ndarray) -> None:
+        teleop = _teleop_module()
+        for group_name in GROUP_NAMES:
+            if group_name in self._disabled_groups:
+                continue
+            joints, gripper = self._read_group_state(group_name)
+            offset = GROUP_NAMES.index(group_name) * GROUP_DOF
+            self._joint_offsets[group_name] = teleop.calibrate_arx_r5_joint_offset(
+                joints,
+                robot_qpos[offset : offset + ARM_DOF],
+            )
+            self._previous_joints[group_name] = joints[:ARM_DOF].copy()
+            self._joint_compensation[group_name] = np.zeros(ARM_DOF, dtype=float)
+            self._last_gripper[group_name] = self._normalize_gripper(gripper)
+
+    def read_action_qpos(self, robot_qpos: np.ndarray) -> np.ndarray:
+        if not self._joint_offsets:
+            self.calibrate_delta(robot_qpos)
+
+        teleop = _teleop_module()
+        parts: list[np.ndarray] = []
+        for group_name in GROUP_NAMES:
+            offset = GROUP_NAMES.index(group_name) * GROUP_DOF
+            if group_name in self._disabled_groups:
+                parts.append(robot_qpos[offset : offset + GROUP_DOF].copy())
+                continue
+
+            joints, gripper = self._read_group_state(group_name)
+            joints = self._unwrap_joints(group_name, joints)
+            arm_joints = np.clip(
+                teleop.map_alicia_to_arx_r5_joints(joints) + self._joint_offsets[group_name],
+                ARX_R5_JOINT_LIMITS[:, 0],
+                ARX_R5_JOINT_LIMITS[:, 1],
+            )
+            gripper_scalar = self._normalize_gripper(gripper)
+            self._last_gripper[group_name] = gripper_scalar
+            parts.append(np.asarray([*arm_joints, gripper_scalar], dtype=np.float32))
+
+        return np.concatenate(parts, axis=0).astype(np.float32)
+
+    def _read_group_state(self, group_name: str) -> tuple[np.ndarray, float | None]:
+        robot = self._robots.get(group_name)
+        if robot is None:
+            raise RuntimeError(f"{group_name} Alicia-D teleop source is not connected")
+        return _teleop_module().read_alicia_state(robot, group_name)
+
+    def _unwrap_joints(self, group_name: str, joints: np.ndarray) -> np.ndarray:
+        current = np.asarray(joints, dtype=float)[:ARM_DOF]
+        previous = self._previous_joints[group_name]
+        compensation = self._joint_compensation[group_name]
+        variation = current - previous
+        compensation[variation > np.pi] -= 2.0 * np.pi
+        compensation[variation < -np.pi] += 2.0 * np.pi
+        self._previous_joints[group_name] = current.copy()
+        return current + compensation
+
+    def _normalize_gripper(self, raw_gripper: float | None) -> float:
+        if raw_gripper is None:
+            return 0.0
+        return float(np.clip(float(raw_gripper) / 1000.0, 0.0, 1.0))
+
+
+class ArxX5ZmqNode:
+    """Bridge EVA ZMQ wire messages to an ARX X5-controlled dual-arm pair."""
+
+    def __init__(self, config: ArxX5ZmqConfig) -> None:
+        self._config = config
+        # JAX initializes and compiles lazily. Warm up the collection FK path before
+        # the ARX X5 SDK and RealSense start their native worker threads.
+        logger.info("Initializing ARX X5 forward kinematics")
+        self._fk_solver = self._build_fk_solver()
+        logger.info("ARX X5 forward kinematics ready")
+
+        import zmq
+
+        self._stop = threading.Event()
+        self._zmq = zmq
+        self._ctx = zmq.Context.instance()
+        self._obs_pub = self._ctx.socket(zmq.PUB)
+        self._obs_pub.bind(config.observation_endpoint)
+        self._action_sub = self._ctx.socket(zmq.SUB)
+        self._action_sub.bind(config.action_endpoint)
+        self._action_sub.setsockopt(zmq.SUBSCRIBE, b"")
+        self._action_sub.setsockopt(zmq.RCVTIMEO, 0)
+        robot_cls = ArxX5DualArm
+        if robot_cls is None:
+            robot_cls = _robot_module().ArxX5DualArm
+        self._robot = robot_cls(cast(Any, config))
+        self._cameras = self._build_camera_cache(config)
+        self._teleop_source = ArxX5TeleopSource(config)
+        self._collection_active = False
+        self._collection_control_source = COLLECTION_CONTROL_TRANSPORT
+        self._hil_active = False
+        self._hil_error = ""
+        self._received_actions = 0
+        self._published_observations = 0
+        self._last_published_seqs: dict[str, int] = {}
+        now = time.monotonic()
+        self._last_status_log_time = now
+        self._next_status_log_time = now + max(config.status_log_interval_s, 0.0)
+        self._last_status_action_count = 0
+        self._last_status_observation_count = 0
+        logger.info(
+            "ARX X5 ZMQ node ready: obs_pub=%s action_sub=%s can_ports=%s "
+            "realsense_cameras=%d status_log_interval=%.1fs",
+            config.observation_endpoint,
+            config.action_endpoint,
+            config.can_ports,
+            len(config.realsense_cameras),
+            config.status_log_interval_s,
+        )
+
+    def _build_camera_cache(self, config: ArxX5ZmqConfig) -> Any:
+        if not config.realsense_cameras:
+            logger.info("RealSense camera backend disabled: no cameras configured")
+            return EmptyCameraCache()
+        return _camera_module().RealSenseCameraCache(config.realsense_cameras)
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def get_latest_qpos(self) -> np.ndarray:
+        return flatten_group_state(self._robot.read_state())
+
+    def start_collection(self, control_source: str = COLLECTION_CONTROL_TRANSPORT) -> None:
+        if control_source not in COLLECTION_CONTROL_SOURCES:
+            raise ValueError(
+                f"Unsupported ARX X5 collection control source: {control_source!r}"
+            )
+        if self._collection_active:
+            if control_source != self._collection_control_source:
+                logger.warning(
+                    "Ignoring collection control-source change while active: "
+                    "current=%s requested=%s",
+                    self._collection_control_source,
+                    control_source,
+                )
+            return
+        self._last_published_seqs = {}
+        self._collection_control_source = control_source
+        if self._config.passive_collection:
+            self._collection_active = True
+            return
+        if control_source == COLLECTION_CONTROL_CLIENT:
+            self._collection_active = True
+            logger.info("ARX X5 collection started with EVA client control")
+            return
+        try:
+            self._teleop_source.connect()
+            self._teleop_source.calibrate_delta(self.get_latest_qpos())
+            self._collection_active = True
+        except Exception:
+            self._collection_active = False
+            self._collection_control_source = COLLECTION_CONTROL_TRANSPORT
+            self._teleop_source.disconnect()
+            raise
+
+    def stop_collection(self) -> None:
+        self._collection_active = False
+        self._collection_control_source = COLLECTION_CONTROL_TRANSPORT
+        self._teleop_source.disconnect()
+
+    def start_hil(self, mode: str) -> None:
+        if self._config.passive_collection:
+            self._hil_error = "ARX X5 passive collection mode cannot control HIL"
+            return
+        if mode not in {"absolute", "relative"}:
+            self._hil_error = f"Unsupported HIL control mode: {mode}"
+            return
+        try:
+            self.start_collection()
+        except Exception as exc:
+            self._hil_error = str(exc)
+            return
+        self._hil_error = ""
+        self._hil_active = True
+
+    def stop_hil(self) -> None:
+        self.stop_collection()
+        self._hil_active = False
+        self._hil_error = ""
+
+    def _drain_actions(self) -> None:
+        transport_zmq = _transport_zmq()
+        while True:
+            try:
+                payload = self._action_sub.recv(self._zmq.NOBLOCK)
+            except self._zmq.Again:
+                return
+            try:
+                action = transport_zmq.unpack_action(payload)
+            except Exception as exc:
+                preview = bytes(payload[:16]).hex()
+                logger.warning(
+                    "Dropped malformed action frame: bytes=%d head=%s error=%s",
+                    len(payload),
+                    preview,
+                    exc,
+                )
+                continue
+            if action.target == COLLECTION_START_TARGET:
+                try:
+                    self.start_collection(action.mode or COLLECTION_CONTROL_TRANSPORT)
+                except ValueError as exc:
+                    logger.warning("Ignored invalid collection start: %s", exc)
+                continue
+            if action.target == COLLECTION_STOP_TARGET:
+                self.stop_collection()
+                continue
+            if action.target == HIL_START_TARGET:
+                self.start_hil(action.mode or "relative")
+                continue
+            if action.target == HIL_STOP_TARGET:
+                self.stop_hil()
+                continue
+            if action.target == "sim":
+                continue
+            if self._collection_active and self._config.passive_collection:
+                continue
+            self._robot.apply_action(action)
+            self._received_actions += 1
+
+    def _publish_observation(self) -> None:
+        state = self._robot.read_state()
+        seqs, images = self._cameras.snapshot_versioned()
+        eef = None
+        action_qpos = None
+        action_eef = None
+        if self._collection_active:
+            qpos = flatten_group_state(state)
+            eef_flat = self._fk(qpos)
+            eef = split_group_eef(eef_flat)
+            if self._config.passive_collection:
+                action_qpos = qpos.copy()
+                action_eef = eef_flat.copy()
+            elif self._collection_control_source == COLLECTION_CONTROL_CLIENT:
+                # EVA pairs its published client action with this state/camera snapshot.
+                pass
+            else:
+                action_qpos = self._teleop_source.read_action_qpos(qpos)
+                action_eef = self._fk(action_qpos)
+                transport_zmq = _transport_zmq()
+                self._robot.apply_action(
+                    transport_zmq.WireAction(
+                        t=time.monotonic(),
+                        action=action_qpos,
+                        target="real",
+                    )
+                )
+            # Gate collection publishes on fresh camera frames: the loop runs at
+            # publish_rate_hz (> camera fps), so without this the same cached frame
+            # would be republished and recorded as a static video. Teleop control
+            # above still runs every tick; only the recorded observation waits for
+            # every camera to advance, which also keeps the views mutually aligned.
+            if seqs and seqs == self._last_published_seqs:
+                return
+            self._last_published_seqs = seqs
+        transport_zmq = _transport_zmq()
+        obs = transport_zmq.WireObservation(
+            t=time.monotonic(),
+            images=images,
+            state=state,
+            eef=eef,
+            action=action_qpos,
+            action_eef=action_eef,
+            hil_supported=not self._config.passive_collection,
+            hil_active=self._hil_active,
+            hil_error=self._hil_error,
+        )
+        self._obs_pub.send(transport_zmq.pack_observation(obs))
+        self._published_observations += 1
+
+    def _fk(self, qpos: np.ndarray) -> np.ndarray:
+        if self._fk_solver is None:
+            live_state = self._robot.read_state()
+            self._fk_solver = self._build_fk_solver(
+                [live_state[group_name].tolist() for group_name in GROUP_NAMES]
+            )
+        return self._fk_solver.fk_chunk(qpos[np.newaxis, :])[0]
+
+    @staticmethod
+    def _build_fk_solver(
+        initial_qpos_groups: Sequence[Sequence[float]] | None = None,
+    ) -> Any:
+        return build_arx_x5_fk_solver(initial_qpos_groups)
+
+    def _reseed_fk_solver_from_live_state(self) -> None:
+        state = self._robot.read_state()
+        solver = self._build_fk_solver([state[group_name].tolist() for group_name in GROUP_NAMES])
+        previous_solver = self._fk_solver
+        self._fk_solver = solver
+        if previous_solver is not None:
+            previous_solver.close()
+        logger.info(
+            "ARX X5 forward kinematics reseeded from live state: left=%s right=%s",
+            np.asarray(state[GROUP_NAMES[0]], dtype=np.float32)[:ARM_DOF].round(4).tolist(),
+            np.asarray(state[GROUP_NAMES[1]], dtype=np.float32)[:ARM_DOF].round(4).tolist(),
+        )
+
+    def _log_hardware_status_if_due(self) -> None:
+        if self._config.status_log_interval_s <= 0:
+            return
+        now = time.monotonic()
+        if now < self._next_status_log_time:
+            return
+
+        elapsed_s = max(now - self._last_status_log_time, 1e-6)
+        observation_hz = (
+            self._published_observations - self._last_status_observation_count
+        ) / elapsed_s
+        action_hz = (self._received_actions - self._last_status_action_count) / elapsed_s
+        logger.info(
+            "Hardware status: arms=[%s] cameras=[%s] rates=[obs=%.1fHz actions=%.1fHz]",
+            format_status(self._robot.hardware_status()),
+            format_status(self._cameras.hardware_status()),
+            observation_hz,
+            action_hz,
+        )
+        self._last_status_log_time = now
+        self._next_status_log_time = now + self._config.status_log_interval_s
+        self._last_status_observation_count = self._published_observations
+        self._last_status_action_count = self._received_actions
+
+    def serve_forever(self) -> None:
+        if not self._robot.slow_home(should_stop=self._stop.is_set):
+            return
+        self._reseed_fk_solver_from_live_state()
+        period = 1.0 / max(self._config.publish_rate_hz, 1e-6)
+        next_tick = time.monotonic()
+        while not self._stop.is_set():
+            self._drain_actions()
+            self._publish_observation()
+            self._log_hardware_status_if_due()
+            next_tick += period
+            sleep_s = next_tick - time.monotonic()
+            if sleep_s > 0:
+                time.sleep(sleep_s)
+            else:
+                next_tick = time.monotonic()
+
+    def close(self) -> None:
+        self._stop.set()
+        self.stop_collection()
+        if self._fk_solver is not None:
+            self._fk_solver.close()
+        self._robot.close()
+        self._cameras.close()
+        self._action_sub.close(linger=0)
+        self._obs_pub.close(linger=0)
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--obs-endpoint", default="tcp://127.0.0.1:5555")
+    parser.add_argument("--action-endpoint", default="tcp://127.0.0.1:5556")
+    parser.add_argument("--left-can-port", default=DEFAULT_LEFT_CAN_PORT)
+    parser.add_argument("--right-can-port", default=DEFAULT_RIGHT_CAN_PORT)
+    parser.add_argument(
+        "--alicia-port",
+        default=DEFAULT_ALICIA_PORT,
+        help="Legacy alias for --right-alicia-port.",
+    )
+    parser.add_argument("--left-alicia-port", default=DEFAULT_LEFT_ALICIA_PORT)
+    parser.add_argument("--right-alicia-port", default=DEFAULT_RIGHT_ALICIA_PORT)
+    parser.add_argument(
+        "--alicia-reader",
+        choices=("duo", "sdk"),
+        default=DEFAULT_ALICIA_READER,
+    )
+    parser.add_argument("--debug-alicia", action="store_true")
+    parser.add_argument(
+        "--collection-teleop-control",
+        dest="passive_collection",
+        action="store_false",
+        help="Drive ARX X5 arms from Alicia-D during collection; this is the default.",
+    )
+    parser.add_argument(
+        "--passive-collection",
+        dest="passive_collection",
+        action="store_true",
+        help=(
+            "Only observe ARX X5 arms/cameras during collection; "
+            "do not drive ARX X5 from Alicia-D."
+        ),
+    )
+    parser.set_defaults(passive_collection=False)
+    parser.add_argument(
+        "--arm-type",
+        type=int,
+        default=DEFAULT_ARM_TYPE,
+        help="ARX X5 SDK arm type code: 0 = X5 2023, 2 = X5 2025.",
+    )
+    parser.add_argument(
+        "--gripper-open-pos",
+        type=float,
+        default=DEFAULT_GRIPPER_OPEN_POS,
+        help="ARX X5 SDK gripper position that maps to normalized scalar 1.0.",
+    )
+    parser.add_argument(
+        "--gripper-close-pos",
+        type=float,
+        default=DEFAULT_GRIPPER_CLOSE_POS,
+        help="ARX X5 SDK gripper position that maps to normalized scalar 0.0.",
+    )
+    parser.add_argument(
+        "--initial-gripper-scalar",
+        type=float,
+        default=None,
+        help="Initial gripper scalar to command on first ARX X5 connection; 1.0 is fully open.",
+    )
+    parser.add_argument(
+        "--start-at-zero",
+        action="store_true",
+        help="Move both ARX X5 arms to the all-zero joint position during startup.",
+    )
+    parser.add_argument(
+        "--disabled-arm",
+        action="append",
+        default=[],
+        metavar="left_arm|right_arm",
+        help="Intentionally skip one ARX X5 arm; repeatable.",
+    )
+    parser.add_argument("--rate", type=float, default=30.0)
+    parser.add_argument(
+        "--eva-config",
+        default="",
+        help="Optional EVA config; transport.disabled_cameras disables missing camera keys.",
+    )
+    parser.add_argument(
+        "--disabled-camera",
+        action="append",
+        default=[],
+        metavar="KEY",
+        help="Disable an EVA image key in the hardware node; repeatable or comma-separated.",
+    )
+    parser.add_argument(
+        "--realsense-camera",
+        action="append",
+        default=[],
+        metavar="KEY=SERIAL_OR_INDEX",
+        help="D405 mapping, e.g. cam_high=409122271504 or cam_high=index:0; repeatable.",
+    )
+    parser.add_argument(
+        "--realsense-resolution",
+        default="640x480",
+        help="Requested D405 color resolution, e.g. 640x480.",
+    )
+    parser.add_argument("--realsense-fps", type=int, default=30)
+    parser.add_argument("--realsense-timeout-ms", type=int, default=1000)
+    parser.add_argument(
+        "--realsense-profile",
+        choices=ARX_X5_LIGHTING_PROFILES,
+        default="day",
+        help="D405 lighting profile; day avoids the longer night exposure.",
+    )
+    parser.add_argument(
+        "--status-log-interval",
+        type=float,
+        default=5.0,
+        help="Seconds between hardware status logs; set <=0 to disable.",
+    )
+    parser.add_argument("--log-level", default="INFO")
+    return parser
+
+
+def build_config(args: argparse.Namespace) -> ArxX5ZmqConfig:
+    camera = _camera_module()
+    can_ports = {
+        "left_arm": args.left_can_port,
+        "right_arm": args.right_can_port,
+    }
+    configured_disabled = load_disabled_cameras(args.eva_config)
+    cli_disabled = parse_name_list(args.disabled_camera)
+    disabled_cameras = tuple(dict.fromkeys(configured_disabled + cli_disabled))
+    resolution = camera.parse_resolution(args.realsense_resolution)
+    default_cameras = camera.default_realsense_camera_specs(
+        resolution=resolution,
+        fps=int(args.realsense_fps),
+        timeout_ms=int(args.realsense_timeout_ms),
+        profile=args.realsense_profile,
+    )
+    override_cameras = camera.parse_realsense_camera_specs(
+        args.realsense_camera,
+        resolution=resolution,
+        fps=int(args.realsense_fps),
+        timeout_ms=int(args.realsense_timeout_ms),
+        profile=args.realsense_profile,
+    )
+    cameras = camera.merge_realsense_camera_specs(
+        default_cameras,
+        override_cameras,
+        disabled_cameras=disabled_cameras,
+    )
+    return ArxX5ZmqConfig(
+        observation_endpoint=args.obs_endpoint,
+        action_endpoint=args.action_endpoint,
+        can_ports=can_ports,
+        arm_type=int(args.arm_type),
+        gripper_open_pos=float(args.gripper_open_pos),
+        gripper_close_pos=float(args.gripper_close_pos),
+        initial_gripper_scalar=args.initial_gripper_scalar,
+        disabled_groups=_robot_module().parse_disabled_groups(args.disabled_arm),
+        realsense_cameras=cameras,
+        publish_rate_hz=args.rate,
+        start_at_zero=bool(args.start_at_zero),
+        left_alicia_port=args.left_alicia_port,
+        right_alicia_port=args.right_alicia_port,
+        alicia_port=args.alicia_port,
+        alicia_reader=args.alicia_reader,
+        debug_alicia=bool(args.debug_alicia),
+        passive_collection=bool(args.passive_collection),
+        status_log_interval_s=args.status_log_interval,
+    )
+
+
+def configure_hardware_logging(log_level: str) -> Any:
+    """Keep Python logs and native output visible through the launcher."""
+    log_stream = os.fdopen(os.dup(2), "w", buffering=1)
+    logging.basicConfig(
+        level=getattr(logging, str(log_level).upper()),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        stream=log_stream,
+        force=True,
+    )
+    faulthandler.enable(file=log_stream, all_threads=True)
+    return log_stream
+
+
+def main() -> None:
+    parser = build_arg_parser()
+    args = parser.parse_args()
+    log_stream = configure_hardware_logging(args.log_level)
+    node: ArxX5ZmqNode | None = None
+    try:
+        config = build_config(args)
+        node = ArxX5ZmqNode(config)
+
+        def _stop(_signum: int, _frame: Any) -> None:
+            assert node is not None
+            node.stop()
+
+        signal.signal(signal.SIGINT, _stop)
+        signal.signal(signal.SIGTERM, _stop)
+
+        node.serve_forever()
+    except Exception:
+        logger.exception("ARX X5 hardware node failed")
+        raise
+    finally:
+        if node is not None:
+            node.close()
+        logging.shutdown()
+        log_stream.close()
+
+
+if __name__ == "__main__":
+    main()
