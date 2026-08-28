@@ -26,18 +26,36 @@ same SDK, publishes EVA ZMQ `WireObservation` frames, and consumes EVA
 
 ## Requirements
 
-Run from the EVA client virtual environment:
+Create the isolated offline/fake environment without opening hardware:
 
 ```bash
-source .venv/bin/activate
+bash examples/hardware/agibot_g2/setup_env.sh
 ```
 
-The real node imports `agibot_gdk`, which is **not** declared in `pyproject.toml`.
-It is expected to already be installed on the AgiBot robot host. If it is missing,
-`node.py` raises `ImportError("Please install agibot_gdk first.")` at startup.
+The real node additionally requires exactly one source for the proprietary
+`agibot_gdk` package. For a local SDK checkout or wheel directory, provide its
+exact path:
 
-The fake node imports no robot SDK and runs anywhere the EVA base package is
-installed.
+```bash
+AGIBOT_GDK_LOCAL_PATH=/absolute/path/to/agibot_gdk \
+  bash examples/hardware/agibot_g2/setup_env.sh
+```
+
+Alternatively, provide a Git repository URL that contains the installable SDK:
+
+```bash
+AGIBOT_GDK_GIT_URL=https://github.com/example/agibot_gdk.git \
+  bash examples/hardware/agibot_g2/setup_env.sh
+```
+
+Do not set both variables. The setup script creates
+`examples/hardware/agibot_g2/.venv`. When a GDK source is selected, it installs
+the SDK there and verifies that `agibot_gdk` imports successfully. Without a
+GDK source the setup still succeeds for offline/fake use, but the real node
+cannot be used.
+
+The fake node imports no robot SDK and can run from the isolated environment
+after its normal Python dependencies have been installed.
 
 ## Run the Fake Node (no hardware)
 

@@ -6,6 +6,7 @@ import dataclasses
 import enum
 import logging
 import time
+from collections.abc import Callable
 
 import numpy as np
 
@@ -559,6 +560,8 @@ def _step_active_teleop(
     state: TeleopExecutionState,
     client: TeleopClient,
     current_time: float,
+    *,
+    still_active: Callable[[], bool] | None = None,
 ) -> PublishedTeleopAction | None:
     current_qpos = _current_qpos(runtime)
     try:
@@ -601,11 +604,7 @@ def _step_active_teleop(
         action = _limit_qpos(runtime, state, command.value, previous)
     else:
         raise TeleopExecutionError(f"unsupported teleop command: {type(command).__name__}")
-    if (
-        not state.active
-        or not runtime.collection_teleop_armed
-        or not runtime.collection_teleop_active
-    ):
+    if not state.active or (still_active is not None and not still_active()):
         return None
     validator = getattr(client, "validate_result", None)
     if callable(validator):
@@ -648,11 +647,105 @@ def step_teleop(
         return None
     current_time = time.monotonic() if now is None else float(now)
     try:
-        return _step_active_teleop(config, runtime, state, client, current_time)
+        return _step_active_teleop(
+            config,
+            runtime,
+            state,
+            client,
+            current_time,
+            still_active=lambda: (
+                runtime.collection_teleop_armed
+                and runtime.collection_teleop_active
+                and session.mode is SessionMode.COLLECT
+            ),
+        )
     except Exception as error:
         state.condition = TeleopExecutionCondition.REJECTED
         state.last_fault = str(error)
         logger.warning("Dropped teleop tick: %s", error)
+        return None
+
+
+def activate_rollout_teleop(
+    config: ConfigDict,
+    runtime: RuntimeState,
+    session: SessionState,
+) -> bool:
+    """Arm client teleop for rollout intervention without touching collection state."""
+    try:
+        state = _execution(runtime)
+        client = getattr(runtime, "teleop_client", None)
+        if state.control_source != TELEOP_CONTROL_SOURCE_CLIENT or client is None:
+            _ensure_teleop_setup(config, runtime)
+            state = _execution(runtime)
+            client = getattr(runtime, "teleop_client", None)
+        if state.control_source != TELEOP_CONTROL_SOURCE_CLIENT or client is None:
+            raise TeleopExecutionError("Configured teleop client is unavailable")
+        client.start()
+        status = client.status()
+        if not status.connected:
+            raise TeleopExecutionError(status.source_error or "Teleop client is not connected")
+        client.reset(require_neutral=True)
+    except Exception as error:
+        session.last_error = f"Cannot activate rollout teleop: {error}"
+        logger.exception("Rollout teleop activation failed")
+        return False
+    state.active = True
+    state.condition = TeleopExecutionCondition.IDLE
+    state.motion_started = False
+    state.last_safe_qpos = None
+    state.last_fault = ""
+    session.last_error = ""
+    return True
+
+
+def deactivate_rollout_teleop(runtime: RuntimeState) -> None:
+    """Drop rollout-intervention teleop state while keeping the client alive."""
+    client = getattr(runtime, "teleop_client", None)
+    if client is not None:
+        client.reset()
+    state = _execution(runtime)
+    state.active = False
+    state.condition = TeleopExecutionCondition.IDLE
+    state.motion_started = False
+    state.last_safe_qpos = None
+    state.last_fault = ""
+
+
+def step_rollout_teleop(
+    config: ConfigDict,
+    runtime: RuntimeState,
+    session: SessionState,
+    *,
+    now: float | None = None,
+) -> PublishedTeleopAction | None:
+    """Poll one client command and publish at most one RL intervention action."""
+    state = _execution(runtime)
+    client = getattr(runtime, "teleop_client", None)
+    if (
+        state.control_source != TELEOP_CONTROL_SOURCE_CLIENT
+        or client is None
+        or not state.active
+        or not runtime.rollout_intervention_active
+        or session.mode is not SessionMode.REAL
+    ):
+        return None
+    current_time = time.monotonic() if now is None else float(now)
+    try:
+        return _step_active_teleop(
+            config,
+            runtime,
+            state,
+            client,
+            current_time,
+            still_active=lambda: (
+                runtime.rollout_intervention_active and session.mode is SessionMode.REAL
+            ),
+        )
+    except Exception as error:
+        state.condition = TeleopExecutionCondition.REJECTED
+        state.last_fault = str(error)
+        logger.warning("Dropped rollout teleop tick: %s", error)
         return None
 
 
@@ -709,13 +802,16 @@ __all__ = [
     "PublishedTeleopAction",
     "acknowledge_teleop_event",
     "activate_teleop",
+    "activate_rollout_teleop",
     "close_teleop",
+    "deactivate_rollout_teleop",
     "deactivate_teleop",
     "drain_teleop_events",
     "prewarm_teleop_ik",
     "reset_teleop",
     "setup_teleop",
     "start_teleop_input",
+    "step_rollout_teleop",
     "step_teleop",
     "teleop_control_source",
     "teleop_status",

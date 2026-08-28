@@ -146,6 +146,7 @@ class CollectionCaptureRunner:
             snapshot = self._runtime.transport.acquire_collection_raw()
             if snapshot is None:
                 break
+            self._runtime.last_collection_timestamp = float(snapshot.timestamp)
             if rollout_mode:
                 self._runtime.rollout_raw_snapshots.put(snapshot)
                 self._captured += 1
@@ -173,6 +174,7 @@ class CollectionCaptureRunner:
             snapshot = self._runtime.transport.acquire_collection_raw()
             if snapshot is None:
                 return recorded
+            self._runtime.last_collection_timestamp = float(snapshot.timestamp)
             if rollout_mode:
                 self._runtime.rollout_raw_snapshots.put(snapshot)
                 self._captured += 1

@@ -131,6 +131,9 @@ def test_parsers_validate_version_session_and_intent() -> None:
     event = parse_operator_event(_event(2, intent="record_toggle"), received_at=2.0)
     arm_event = parse_operator_event(_event(4, intent="arm_toggle"), received_at=2.0)
     home_event = parse_operator_event(_event(5, intent="home"), received_at=2.0)
+    intervention_event = parse_operator_event(
+        _event(6, intent="intervention_toggle"), received_at=2.0
+    )
 
     assert frame.session_id == "s"
     assert frame.controllers["left"].profiles == ("pico-4-ultra",)
@@ -140,6 +143,7 @@ def test_parsers_validate_version_session_and_intent() -> None:
     assert event.intent == "record_toggle"
     assert arm_event.intent == "arm_toggle"
     assert home_event.intent == "home"
+    assert intervention_event.intent == "intervention_toggle"
     with pytest.raises(VrProtocolError, match="unsupported operator intent"):
         parse_operator_event(_event(3, intent="scene_reset"), received_at=2.0)
     invalid = _frame()

@@ -44,6 +44,8 @@ from core.app.handlers import (
     build_policy_observation,
     eval_episode_dir,
     eval_model_name,
+    rollout_hil_status,
+    rollout_intervention_source,
     rollout_save_status,
     teleop_status,
 )
@@ -69,7 +71,7 @@ from tools.conversion import (
     DatasetExportProgress,
     export_dataset_by_quality,
 )
-from transport.base import HilStatus, ObservationSource
+from transport.base import ObservationSource
 from transport.dataset import DatasetTransport
 
 logger = logging.getLogger(__name__)
@@ -88,6 +90,8 @@ _VIDEO_CACHE_CONTROL = "public, max-age=3600"
 _VIDEO_FASTSTART_CACHE_ENV = "EVA_VIDEO_CACHE_DIR"
 _VIDEO_FASTSTART_LOCK = threading.Lock()
 _VIDEO_POSTER_LOCK = threading.Lock()
+_QUALITY_JOB_LIMIT = 16
+_QUALITY_UPLOAD_FAILED_ERROR = "dataset upload failed"
 _TRANSFORM_EXECUTOR: concurrent.futures.ProcessPoolExecutor | None = None
 _TRANSFORM_EXECUTOR_LOCK = threading.Lock()
 _TRACE_EVENT_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,96}$")
@@ -611,13 +615,13 @@ def _run_quality_upload(
             upload_specs,
             progress_callback=update_progress,
         )
-    except Exception as error:
+    except Exception:
         logger.exception("Failed to upload accepted collection dataset")
         with ctx.quality_upload_lock:
             job = ctx.quality_upload_jobs.get(job_id)
             if job is not None:
                 job.state = "failed"
-                job.error = str(error)
+                job.error = _QUALITY_UPLOAD_FAILED_ERROR
         return
 
     with ctx.quality_upload_lock:
@@ -630,6 +634,7 @@ def _run_quality_upload(
             job.bytes_total = result.bytes
             job.current_file = ""
             job.destination = result.destination
+            job.remote_dir = result.remote_dir
 
 
 def _quality_export_paths(dataset_dir: Path, dataset_format: str) -> tuple[Path, Path]:
@@ -714,6 +719,19 @@ def _collection_set_for_prompt(config: ConfigDict, prompt: str) -> str | None:
     return None
 
 
+def _trim_finished_jobs(jobs: OrderedDict[str, Any], limit: int = _QUALITY_JOB_LIMIT) -> None:
+    while len(jobs) >= limit:
+        oldest_id, oldest = next(iter(jobs.items()))
+        if oldest.state in {"queued", "running"}:
+            break
+        jobs.pop(oldest_id)
+
+
+def _quality_job_payload(jobs: OrderedDict[str, Any], job_id: str) -> dict[str, Any] | None:
+    job = jobs.get(job_id)
+    return None if job is None else job.payload()
+
+
 def _serialize_eval(ctx: ConsoleContext) -> dict:
     # Eval block for the EVAL/RESULT tabs. Empty dict when the config carries no eval,
     # which the frontend reads as "disable those tabs". Each checkpoint exposes its
@@ -763,6 +781,9 @@ def _serialize_rl(ctx: ConsoleContext) -> dict:
         "backend_ready": True,
         "cli_mode": str(rl_cfg.cli_mode),
         "inference_strategy": str(rl_cfg.inference_strategy),
+        "rollout_intervention_source": str(
+            (rl_cfg.get("intervention") or {}).get("source", "transport")
+        ),
         "tasks": [str(task) for task in rl_cfg.tasks],
         "policies": [
             {"slot": slot, "name": str(model.name)} for slot, model in enumerate(rl_cfg.policies)
@@ -938,11 +959,7 @@ def _serialize_status(ctx: ConsoleContext) -> dict:
     s = ctx.session
     r = ctx.runtime
     config = r.active_config or ctx.config
-    hil_status = (
-        r.transport.hil_status()
-        if hasattr(r.transport, "hil_status")
-        else HilStatus(supported=False, error="Transport does not support HIL")
-    )
+    hil_status = rollout_hil_status(config, r)
     elapsed_ms = 0
     if s.status.value == "running" and s.run_start_time > 0:
         elapsed_ms = int((time.monotonic() - s.run_start_time) * 1000)
@@ -1056,6 +1073,7 @@ def _serialize_status(ctx: ConsoleContext) -> dict:
         "teleop": teleop_status(r),
         "rollout_intervention_active": r.rollout_intervention_active,
         "rollout_intervention_enabled": r.rollout_intervention_enabled,
+        "rollout_intervention_source": rollout_intervention_source(config),
         "hil_supported": hil_status.supported,
         "hil_active": hil_status.active,
         "hil_error": hil_status.error,
@@ -1735,8 +1753,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         query = parse_qs(urlparse(self.path).query)
         job_id = str((query.get("job_id") or [""])[0])
         with self.ctx.quality_upload_lock:
-            job = self.ctx.quality_upload_jobs.get(job_id)
-            payload = job.payload() if job is not None else None
+            payload = _quality_job_payload(self.ctx.quality_upload_jobs, job_id)
         if payload is None:
             self._send_json(404, {"ok": False, "error": "upload job not found"})
             return
@@ -1746,8 +1763,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         query = parse_qs(urlparse(self.path).query)
         job_id = str((query.get("job_id") or [""])[0])
         with self.ctx.quality_upload_lock:
-            job = self.ctx.quality_export_jobs.get(job_id)
-            payload = job.payload() if job is not None else None
+            payload = _quality_job_payload(self.ctx.quality_export_jobs, job_id)
         if payload is None:
             self._send_json(404, {"ok": False, "error": "export job not found"})
             return
@@ -2701,11 +2717,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                         {"ok": False, "error": "dataset export is already running"},
                     )
                     return
-            while len(self.ctx.quality_export_jobs) >= 16:
-                oldest_id, oldest = next(iter(self.ctx.quality_export_jobs.items()))
-                if oldest.state in {"queued", "running"}:
-                    break
-                self.ctx.quality_export_jobs.pop(oldest_id)
+            _trim_finished_jobs(self.ctx.quality_export_jobs)
             job_id = uuid.uuid4().hex
             job = _QualityExportJob(
                 job_id=job_id,
@@ -2760,8 +2772,9 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         marker_path = local_dir / "meta" / "quality_split.json"
         try:
             marker = json.loads(marker_path.read_text())
-        except (OSError, ValueError) as error:
-            self._send_json(400, {"ok": False, "error": f"invalid accepted export: {error}"})
+        except (OSError, ValueError):
+            logger.warning("Invalid accepted collection export marker", exc_info=True)
+            self._send_json(400, {"ok": False, "error": "invalid accepted export"})
             return
         if marker.get("subset") != "accepted":
             self._send_json(400, {"ok": False, "error": "only accepted exports can be uploaded"})
@@ -2796,11 +2809,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                         {"ok": False, "error": "dataset upload is already running"},
                     )
                     return
-            while len(self.ctx.quality_upload_jobs) >= 16:
-                oldest_id, oldest = next(iter(self.ctx.quality_upload_jobs.items()))
-                if oldest.state in {"queued", "running"}:
-                    break
-                self.ctx.quality_upload_jobs.pop(oldest_id)
+            _trim_finished_jobs(self.ctx.quality_upload_jobs)
             job_id = uuid.uuid4().hex
             job = _QualityUploadJob(
                 job_id=job_id,

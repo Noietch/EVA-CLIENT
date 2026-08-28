@@ -1,6 +1,6 @@
-"""Dual Piper RL workspace with independent policy and critic selection."""
+"""ARX X5 RL workspace with VR intervention and independent policy/critic selection."""
 
-_base_ = ["../02_collection/dual_agilex_piper_vr.py"]
+_base_ = ["../02_collection/arx_x5_vr.py"]
 
 console = dict(
     initial_tab="rl",
@@ -12,15 +12,15 @@ rl_cfg = dict(
     tasks=["placeholder task — replace with the real RL task prompt"],
     policies=[
         dict(
-            name="dual_agilex_piper_openpi_qpos",
-            config="../01_deploy/dual_agilex_piper/openpi_qpos.py",
+            name="arx_x5_openpi_qpos",
+            config="../01_deploy/arx_x5/openpi_qpos.py",
             host="127.0.0.1",
             port=9000,
         ),
     ],
     critics=[
         dict(
-            name="dual_agilex_piper_critic",
+            name="arx_x5_critic",
             type="websocket",
             host="127.0.0.1",
             port=9100,
@@ -30,7 +30,7 @@ rl_cfg = dict(
     data=dict(
         format="lerobot",
         storage=dict(
-            log_dir="work_dirs/rl/dual_agilex_piper",
+            log_dir="work_dirs/rl/arx_x5",
             fps=30,
             save_queue_max=15,
             async_save=True,

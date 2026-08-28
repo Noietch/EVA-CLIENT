@@ -802,6 +802,20 @@ def test_mixed_camera_specs_and_node_config() -> None:
         build_config(unsafe_args)
 
 
+def test_yam_build_config_keeps_fixed_gripper_limit_pair() -> None:
+    args = build_arg_parser().parse_args(
+        [
+            "--gripper-limits-override",
+            "0.071",
+            "-5.072",
+        ]
+    )
+
+    config = build_config(args)
+
+    assert config.gripper_limits_override == pytest.approx((0.071, -5.072))
+
+
 def test_yam_preset_enables_three_camera_observations() -> None:
     root = Path(__file__).resolve().parents[2]
     deploy = load_config(root / "configs" / "01_deploy/dual_yam/openpi_qpos.py")

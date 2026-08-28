@@ -322,7 +322,7 @@ def test_grip_toggle_reports_only_the_hand_that_changed() -> None:
     assert encoder.consume_toggles() == ()
 
 
-def test_node_ignores_y_and_unmapped_buttons() -> None:
+def test_node_ignores_unmapped_buttons() -> None:
     mapper = OperatorEventMapper()
     for button in (2, 3):
         frame, face = normalize_browser_frame(
@@ -337,19 +337,6 @@ def test_node_ignores_y_and_unmapped_buttons() -> None:
             )
             == ()
         )
-
-    frame, face = normalize_browser_frame(
-        _frame(1, left=(5,), timestamp=200.0), session_id="session"
-    )
-    assert (
-        mapper.update(
-            session_id="session",
-            client_time_ms=200.0,
-            controllers=frame["controllers"],
-            face_buttons=face,
-        )
-        == ()
-    )
 
 
 def test_node_generates_home_on_left_x_release() -> None:
@@ -374,6 +361,34 @@ def test_node_generates_home_on_left_x_release() -> None:
         face_buttons=face,
     )
     assert [(event["event_id"], event["intent"]) for event in events] == [(0, "home")]
+
+
+def test_node_generates_intervention_toggle_on_left_y_release() -> None:
+    mapper = OperatorEventMapper()
+    pressed, face = normalize_browser_frame(
+        _frame(0, left=(5,), timestamp=100.0), session_id="session"
+    )
+    assert (
+        mapper.update(
+            session_id="session",
+            client_time_ms=100.0,
+            controllers=pressed["controllers"],
+            face_buttons=face,
+        )
+        == ()
+    )
+    assert mapper.input_feedback(150.0)["pressed"] == ["left.secondary"]
+
+    released, face = normalize_browser_frame(_frame(1, timestamp=200.0), session_id="session")
+    events = mapper.update(
+        session_id="session",
+        client_time_ms=200.0,
+        controllers=released["controllers"],
+        face_buttons=face,
+    )
+    assert [(event["event_id"], event["intent"]) for event in events] == [
+        (0, "intervention_toggle")
+    ]
 
 
 def test_grip_does_not_block_a_record_toggle() -> None:

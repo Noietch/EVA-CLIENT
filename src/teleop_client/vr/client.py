@@ -47,6 +47,7 @@ _EVENT_INTENTS = frozenset(
         "record_cancel",
         "arm_toggle",
         "home",
+        "intervention_toggle",
     }
 )
 

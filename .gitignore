@@ -10,6 +10,7 @@
 
 # Python environments, caches, and type-checker output.
 .venv/
+examples/hardware/*/.venv
 __pycache__/
 .pytest_cache/
 .ruff_cache/
@@ -27,11 +28,13 @@ work_dirs/
 logs/
 Log/
 
-# Local helpers are ignored except the maintained dataset conversion package.
+# Local helpers are ignored except maintained tool packages.
 tools/*
 !tools/__init__.py
 !tools/conversion/
 !tools/conversion/**
+!tools/skills/
+!tools/skills/**
 tools/conversion/__pycache__/
 temp/
 

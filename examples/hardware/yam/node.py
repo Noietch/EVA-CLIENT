@@ -505,6 +505,7 @@ class YamZmqNode:
         publisher: zmq.Socket | None = None
         try:
             publisher = self._ctx.socket(zmq.PUB)
+            assert publisher is not None
             publisher.bind(self._config.observation_endpoint)
             self._obs_pub = publisher
             self._publisher_ready.set()
@@ -816,6 +817,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def build_config(args: argparse.Namespace) -> YamZmqConfig:
     group_names = GROUP_NAMES
+    gripper_limits_override: tuple[float, float] | None = None
     follower_defaults = {"left_arm": "can0", "right_arm": "can1"}
     follower_can = _parse_group_map(args.follower_can, group_names, follower_defaults)
     leader_gripper_endpoints = _parse_leader_gripper_endpoints(
@@ -927,6 +929,7 @@ def build_config(args: argparse.Namespace) -> YamZmqConfig:
             raise ValueError(
                 "--gripper-limits-override values must be distinct and within [-20, 20]"
             )
+        gripper_limits_override = (float(closed), float(opened))
     if args.gripper_limits_override is None and not args.allow_gripper_calibration:
         raise ValueError(
             "motorized gripper startup requires calibrated --gripper-limits-override "
@@ -971,11 +974,7 @@ def build_config(args: argparse.Namespace) -> YamZmqConfig:
             if args.gravity_comp_factor is None
             else tuple(float(value) for value in args.gravity_comp_factor)
         ),
-        gripper_limits_override=(
-            None
-            if args.gripper_limits_override is None
-            else tuple(float(value) for value in args.gripper_limits_override)
-        ),
+        gripper_limits_override=gripper_limits_override,
         allow_gripper_calibration=bool(args.allow_gripper_calibration),
         tracking_ki=float(args.tracking_ki),
         tracking_trim_limit=float(args.tracking_trim_limit),

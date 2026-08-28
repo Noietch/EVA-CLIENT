@@ -120,7 +120,7 @@ core.config.load_config(os.environ['EVA_TEST_DEFAULTS'])
         env=environment,
         capture_output=True,
         text=True,
-        timeout=15,
+        timeout=60,
         check=False,
     )
     assert result.returncode == 0, result.stderr

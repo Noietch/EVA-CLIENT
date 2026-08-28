@@ -864,9 +864,7 @@ async function uploadCollectionQuality() {
     qualityTransfer.filesTotal = 0;
     qualityTransfer.bytesCompleted = 0;
     qualityTransfer.bytesTotal = 0;
-    if (status) {
-      status.textContent = `uploading ${formatLabel} accepted export…`;
-    }
+    if (status) status.textContent = `uploading ${formatLabel} accepted export…`;
     renderCollect();
     try {
       const result = await apiPost("/api/collect_quality_upload", {
@@ -892,7 +890,9 @@ async function uploadCollectionQuality() {
         renderCollect();
         if (job.state === "completed") {
           if (status) {
-            status.textContent = `${formatLabel} accepted upload complete · ${job.files_total || 0} files`;
+            const remoteDir = job.remote_dir || "remote target";
+            status.textContent = `${formatLabel} accepted upload complete · ` +
+              `${job.files_total || 0} files · ${remoteDir}`;
           }
           return;
         }
