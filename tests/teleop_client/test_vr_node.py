@@ -322,6 +322,33 @@ def test_grip_toggle_reports_only_the_hand_that_changed() -> None:
     assert encoder.consume_toggles() == ()
 
 
+def test_global_arm_toggle_reset_clears_previous_grip_permissions() -> None:
+    encoder = GripToggleEncoder(long_press_ms=1000.0)
+
+    first, face = normalize_browser_frame(_frame(0), session_id="session")
+    encoder.encode(first, face)
+    held, face = normalize_browser_frame(
+        _frame(1, right=(1,), timestamp=1000.0), session_id="session"
+    )
+    encoder.encode(held, face)
+    activated, face = normalize_browser_frame(
+        _frame(2, right=(1,), timestamp=2000.0), session_id="session"
+    )
+    encoded = encoder.encode(activated, face)
+    assert encoded["controllers"]["right"]["grip_engaged"] is True
+
+    encoder.reset_permissions()
+    released, face = normalize_browser_frame(_frame(3, timestamp=2100.0), session_id="session")
+    encoded = encoder.encode(released, face)
+    assert encoded["controllers"]["left"]["grip_engaged"] is False
+    assert encoded["controllers"]["right"]["grip_engaged"] is False
+
+    # Reopening the global ARM gate does not restore the previous arm permission.
+    reopened, face = normalize_browser_frame(_frame(4, timestamp=2200.0), session_id="session")
+    encoded = encoder.encode(reopened, face)
+    assert encoded["controllers"]["right"]["grip_engaged"] is False
+
+
 def test_node_ignores_unmapped_buttons() -> None:
     mapper = OperatorEventMapper()
     for button in (2, 3):

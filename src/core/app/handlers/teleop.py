@@ -259,12 +259,10 @@ def activate_teleop(config: ConfigDict, runtime: RuntimeState, session: SessionS
             if client is None:
                 raise TeleopExecutionError("Configured teleop client is unavailable")
             client.start()
-            status = client.status()
-            if not status.connected:
-                raise TeleopExecutionError(status.source_error or "Teleop client is not connected")
-            if not status.neutral:
-                raise TeleopExecutionError("Teleop client must be neutral before activation")
-            client.reset(require_neutral=True)
+            # Collection ARM is an explicit operator gate. Do not make the gate
+            # depend on the transient neutral snapshot; the per-arm grip latch
+            # remains the source of which arm is allowed to follow.
+            client.reset(require_neutral=False)
         runtime.transport.reset_hil_control()
         _set_hil_relay_enabled(
             runtime,
@@ -665,9 +663,7 @@ def activate_rollout_teleop(
         status = client.status()
         if not status.connected:
             raise TeleopExecutionError(status.source_error or "Teleop client is not connected")
-        if not status.neutral:
-            raise TeleopExecutionError("Teleop client must be neutral before activation")
-        client.reset(require_neutral=True)
+        client.reset(require_neutral=False)
     except Exception as error:
         session.last_error = f"Cannot activate rollout teleop: {error}"
         logger.exception("Rollout teleop activation failed")

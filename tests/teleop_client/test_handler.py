@@ -186,7 +186,7 @@ def test_rollout_step_dispatches_client_qpos_without_collection_gate(monkeypatch
     np.testing.assert_allclose(runtime.transport.published[0][1], [0.1, 0.5, 0.1, 0.0])
 
 
-def test_activate_rollout_teleop_requires_connected_neutral_client() -> None:
+def test_activate_rollout_teleop_requires_connected_client() -> None:
     client = _Client([])
     runtime = _runtime(client)
     runtime.teleop_execution.active = False
@@ -197,11 +197,11 @@ def test_activate_rollout_teleop_requires_connected_neutral_client() -> None:
     assert teleop.activate_rollout_teleop(_config(), runtime, session) is True
 
     assert client.starts == 1
-    assert client.resets == [True]
+    assert client.resets == [False]
     assert runtime.teleop_execution.active is True
 
 
-def test_activate_rollout_teleop_rejects_non_neutral_client() -> None:
+def test_activate_rollout_teleop_does_not_require_neutral_client() -> None:
     client = _Client([])
     client.neutral = False
     runtime = _runtime(client)
@@ -210,12 +210,12 @@ def test_activate_rollout_teleop_rejects_non_neutral_client() -> None:
     runtime.collection_teleop_active = False
     session = SessionState(mode=SessionMode.REAL)
 
-    assert teleop.activate_rollout_teleop(_config(), runtime, session) is False
+    assert teleop.activate_rollout_teleop(_config(), runtime, session) is True
 
     assert client.starts == 1
-    assert client.resets == []
-    assert runtime.teleop_execution.active is False
-    assert "neutral before activation" in session.last_error
+    assert client.resets == [False]
+    assert runtime.teleop_execution.active is True
+    assert session.last_error == ""
 
 
 def test_deactivate_rollout_teleop_leaves_state_active_when_neutral_reset_fails() -> None:
@@ -818,12 +818,12 @@ def test_activate_teleop_lazily_builds_and_starts_client(monkeypatch) -> None:
 
     assert runtime.teleop_client is client
     assert client.starts == 1
-    assert client.resets == [True]
+    assert client.resets == [False]
     assert runtime.collection_teleop_active is True
     assert session.status is SessionStatus.READY
 
 
-def test_activate_teleop_rejects_non_neutral_client(monkeypatch) -> None:
+def test_activate_teleop_does_not_require_neutral_client(monkeypatch) -> None:
     client = _Client([])
     client.neutral = False
     runtime = RuntimeState(robot=_robot(), transport=_Transport())
@@ -833,12 +833,12 @@ def test_activate_teleop_rejects_non_neutral_client(monkeypatch) -> None:
     session = _session()
     monkeypatch.setattr(teleop, "build_client", lambda *_args, **_kwargs: client)
 
-    assert teleop.activate_teleop(config, runtime, session) is False
+    assert teleop.activate_teleop(config, runtime, session) is True
 
     assert client.starts == 1
     assert client.resets == [False]
-    assert runtime.collection_teleop_active is False
-    assert "neutral before activation" in session.last_error
+    assert runtime.collection_teleop_active is True
+    assert session.last_error == ""
 
 
 def test_lazy_client_start_failure_keeps_client_for_retry(monkeypatch) -> None:
