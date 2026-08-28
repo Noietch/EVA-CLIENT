@@ -355,6 +355,7 @@ function buildControlHint(host, binding) {
   }));
   const label = document.createElement("span");
   label.className = "control-key-label";
+  label.dataset.key = key;
   label.dataset.label = key;
   label.textContent = key;
   keycap.classList.toggle("wide", wide);
@@ -399,6 +400,15 @@ function updateControlHint(host, binding, feedback) {
   host.classList.toggle("complete", pressed && progress >= 1);
   host.style.setProperty("--control-progress", String(progress * 100));
   host.style.setProperty("--control-fill-width", `${progress * 100}%`);
+  const label = host.querySelector(".control-key-label");
+  if (label) {
+    const key = label.dataset.key || String(binding.key || "?").toUpperCase();
+    const display = pressed && binding.gesture === "hold"
+      ? `${Math.round(progress * 100)}%`
+      : key;
+    label.textContent = display;
+    label.dataset.label = display;
+  }
   const gesture = host.querySelector(".control-gesture");
   if (gesture) {
     gesture.textContent = pressed && binding.gesture === "hold"
@@ -444,15 +454,16 @@ function renderCollectControls() {
 
   const teleop = (S.STATUS && S.STATUS.teleop) || {};
   const connected = !!teleop.connected;
+  const armEnabled = !!S.collectArmEnabled;
   const authorized = new Set(teleop.authorized_groups || []);
   const engaged = new Set(teleop.engaged_groups || []);
   $("collect-control-groups").querySelectorAll(".collect-control-state").forEach((row) => {
     const group = groups.find((item) => String(item.id) === row.dataset.group);
     if (!group) return;
-    let state = "locked";
+    let state = "disabled";
     if (!connected) state = "unavailable";
-    else if (engaged.has(group.id)) state = "active";
-    else if (authorized.has(group.id)) state = "ready";
+    else if (armEnabled && engaged.has(group.id)) state = "active";
+    else if (armEnabled && authorized.has(group.id)) state = "ready";
     const value = row.querySelector(".collect-state-value");
     if (value) value.textContent = state.toUpperCase();
     row.dataset.state = state;
