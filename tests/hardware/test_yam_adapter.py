@@ -997,6 +997,7 @@ def test_yam_project_and_setup_cover_the_isolated_runtime_imports() -> None:
     assert 'uv sync --no-cache --project "$PROJECT_DIR"' in setup
     assert 'PYTHONPATH="$REPOSITORY_ROOT/src:$REPOSITORY_ROOT"' in setup
     assert "from examples.hardware.yam.node import build_arg_parser" in setup
+    assert 'find_spec("pyrealsense2")' in setup
 
 
 def test_run_hardware_rejects_a_second_instance_before_hardware_setup(
