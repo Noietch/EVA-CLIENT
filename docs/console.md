@@ -36,6 +36,17 @@ out or read-only.
 
 ---
 
+## RL workspace and HIL intervention
+
+The RL workspace supports human-in-the-loop (HIL) intervention during policy
+rollouts and real-time value-curve visualization.
+
+<p align="center">
+  <video src="https://github.com/user-attachments/assets/62883016-1d5c-4688-9c39-740810b36b86" controls muted></video>
+</p>
+
+---
+
 ## 🔋 Headless / low-power mode
 
 `eva --config <cfg> --headless` runs the console **without any web server** — for
