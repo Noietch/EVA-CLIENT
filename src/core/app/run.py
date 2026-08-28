@@ -49,11 +49,13 @@ from core.app.handlers import (
     prewarm_teleop_ik,
     publish_next_action,
     rebuild_eval_episode_logger,
+    record_client_rollout_intervention_step,
     record_rollout_intervention_step,
     reset_ik_solver,
     reset_infer_strategy,
     reset_session_progress,
     rollback_rollout_intervention,
+    rollout_intervention_source,
     run_init_done,
     run_init_move,
     run_one_chunk_on_sim,
@@ -75,6 +77,7 @@ from core.app.handlers import (
     start_inference_loop,
     start_rollout_intervention,
     start_teleop_input,
+    step_rollout_teleop,
     step_teleop,
     stop_collection_capture,
     stop_rollout_intervention,
@@ -453,6 +456,12 @@ def _handle_web_command(
             session.last_error = f"RL inference strategy is not configured: {strategy}"
             return
         select_inference_strategy(strategy, config, runtime, session)
+        try:
+            start_teleop_input(config, runtime)
+        except Exception as error:
+            session.last_error = f"Cannot start teleop input: {error}"
+            logger.exception("RL teleop input listener failed to start")
+            return
         if not connect_policy(config, runtime, session, force_reconnect=True):
             session.last_error = runtime.last_policy_error
             return
@@ -1371,6 +1380,17 @@ def run(
                 effective = runtime.active_config or config
                 prompt_ready.set()
 
+            if runtime.teleop_client is not None:
+                for event in drain_teleop_events(runtime):
+                    handle_teleop_operator_event(
+                        event,
+                        effective,
+                        runtime,
+                        session,
+                        dispatch=handle_command,
+                    )
+                    effective = runtime.active_config or config
+
             if (
                 session.mode in (SessionMode.REAL, SessionMode.SIM)
                 and session.status is SessionStatus.RUNNING
@@ -1396,7 +1416,22 @@ def run(
                 last_running_tick = None
 
             if getattr(runtime, "rollout_intervention_active", False):
-                if record_rollout_intervention_step(runtime, session):
+                recorded = False
+                if (
+                    rollout_intervention_source(effective) == "teleop_client"
+                    and session.mode is SessionMode.REAL
+                ):
+                    published = step_rollout_teleop(effective, runtime, session)
+                    if published is not None:
+                        recorded = record_client_rollout_intervention_step(
+                            effective,
+                            runtime,
+                            session,
+                            published,
+                        )
+                else:
+                    recorded = record_rollout_intervention_step(runtime, session)
+                if recorded:
                     segment = runtime.rollout_intervention_active_segment
                     assert segment is not None and segment.frames
                     frame = segment.frames[-1]
@@ -1447,16 +1482,6 @@ def run(
                             "intervention",
                             timestamp=frame.timestamp,
                         )
-
-            if runtime.teleop_client is not None:
-                for event in drain_teleop_events(runtime):
-                    handle_teleop_operator_event(
-                        event,
-                        effective,
-                        runtime,
-                        session,
-                        dispatch=handle_command,
-                    )
 
             client_teleop_active = bool(
                 session.mode is SessionMode.COLLECT

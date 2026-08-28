@@ -131,6 +131,7 @@ def test_status_exposes_collection_arm_lifecycle_without_transport_teleop_detail
     assert status["collection_teleop_armed"] is True
     assert status["collection_teleop_active"] is True
     assert status["teleop"] is None
+    assert status["rollout_intervention_source"] == "transport"
     assert "teleop_collection_metrics" not in status
 
 
@@ -188,6 +189,45 @@ def test_status_exposes_lightweight_client_input_source_health():
         "last_fault": "",
         "source_error": "",
     }
+
+
+def test_status_exposes_rollout_intervention_source_for_vr_rl() -> None:
+    config = console_config()
+    config.collection.teleop = ConfigDict(
+        control_source="client",
+        client=ConfigDict(type="vr_webxr"),
+    )
+    config.rollout.intervention.source = "teleop_client"
+    runtime, session = build_runtime(config)
+    runtime.teleop_execution = TeleopExecutionState(
+        control_source="client",
+        client_type="vr_webxr",
+        active=True,
+    )
+    runtime.teleop_client = type(
+        "_TeleopClient",
+        (),
+        {
+            "status": lambda self: TeleopStatus(
+                source_type="vr_webxr",
+                connected=True,
+                neutral=True,
+            )
+        },
+    )()
+    try:
+        status = _serialize_status(
+            ConsoleContext(
+                config=config,
+                runtime=runtime,
+                session=session,
+                obs_reader=runtime.transport.create_observation_reader(),
+            )
+        )
+    finally:
+        runtime.transport.close()
+
+    assert status["rollout_intervention_source"] == "teleop_client"
 
 
 def test_config_exposes_client_teleop_identity_for_console_bootstrap():

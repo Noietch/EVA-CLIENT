@@ -2,6 +2,39 @@
 
 _base_ = ["../01_deploy/dual_franka/openpi_qpos.py"]
 
+console = dict(
+    initial_tab="rl",
+)
+
+collection = dict(
+    teleop=dict(
+        control_source="client",
+        client=dict(
+            type="vr_webxr",
+            endpoint="tcp://127.0.0.1:8765",
+            ack_endpoint="tcp://127.0.0.1:8766",
+            input_timeout_s=0.25,
+            heartbeat_timeout_s=2.0,
+            position_scale=1.0,
+            base_from_xr_rotation=[
+                [0.0, 0.0, -1.0],
+                [-1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+            ],
+            gripper=dict(
+                mode="linear",
+                threshold=0.6,
+                open_value=1.0,
+                close_value=0.0,
+            ),
+            arms=dict(
+                left_arm=dict(controller="left"),
+                right_arm=dict(controller="right"),
+            ),
+        ),
+    ),
+)
+
 rl_cfg = dict(
     cli_mode="real",
     inference_strategy="async",
@@ -32,5 +65,5 @@ rl_cfg = dict(
             async_save=True,
         ),
     ),
-    intervention=dict(control_mode="relative"),
+    intervention=dict(control_mode="relative", source="teleop_client"),
 )

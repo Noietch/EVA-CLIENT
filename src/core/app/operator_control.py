@@ -202,6 +202,13 @@ def handle_teleop_operator_event(
     message = ""
     if client is None or execution is None:
         message = "Teleop client is unavailable"
+    elif runtime.rl_active and event.intent in {
+        "arm_toggle",
+        "home",
+        "record_toggle",
+        "record_cancel",
+    }:
+        message = "Collection VR controls are unavailable in the RL workspace"
     elif event.intent == "arm_toggle":
         enabled = not bool(runtime.collection_teleop_armed)
         try:
@@ -238,6 +245,57 @@ def handle_teleop_operator_event(
         except Exception as error:
             message = f"Operator dispatch failed: {error}"
             logger.exception("Teleop HOME dispatch failed")
+    elif event.intent == "intervention_toggle":
+        intervention_active = bool(runtime.rollout_intervention_active)
+        if not bool(runtime.rl_active):
+            message = "VR intervention requires the active RL workspace"
+        elif session.mode is not SessionMode.REAL:
+            message = "VR intervention requires RL REAL mode"
+        elif not session.is_setup_done:
+            message = "Complete RL setup before using the VR intervention control"
+        elif not intervention_active and not bool(runtime.rollout_intervention_enabled):
+            message = "Enable RL HIL before using the VR intervention control"
+        elif not intervention_active:
+            from core.app.handlers.recording import rollout_hil_status
+
+            hil_status = rollout_hil_status(config, runtime)
+            if not hil_status.supported or hil_status.error:
+                message = hil_status.error or "Transport does not support RL HIL"
+            elif session.status is not SessionStatus.RUNNING:
+                message = "VR intervention requires a running RL policy"
+            else:
+                message = ""
+        else:
+            message = ""
+        if not message:
+            command = resolve_operator_action(
+                runtime,
+                session,
+                event.intent,
+                source="teleop_client",
+            )
+            if command is None:
+                message = session.last_error or "RL intervention is invalid in the current state"
+            else:
+                try:
+                    session.last_error = ""
+                    dispatch(command, config, runtime, session)
+                    now_active = bool(runtime.rollout_intervention_active)
+                    accepted = now_active is not intervention_active and not bool(
+                        session.last_error
+                    )
+                    message = (
+                        "RL intervention abandoned"
+                        if intervention_active and accepted
+                        else (
+                            "RL intervention started"
+                            if accepted
+                            else (session.last_error or "RL intervention state did not change")
+                        )
+                    )
+                except Exception as error:
+                    message = f"Operator dispatch failed: {error}"
+                    logger.exception("Teleop RL intervention dispatch failed")
     elif (
         not execution.active
         or not runtime.collection_teleop_armed

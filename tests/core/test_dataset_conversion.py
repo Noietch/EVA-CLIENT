@@ -91,8 +91,12 @@ class _FakeVideoWriter:
         self.path.write_bytes(pickle.dumps(self.frames))
 
 
-def _write_jsonl(path: Path, rows: list[dict]) -> None:
+def _write_jsonl(path: Path, rows: list[dict[str, object]]) -> None:
     path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+
+def _read_jsonl(path: Path) -> list[dict[str, object]]:
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
 def _read_fake_video(path: Path) -> Iterator[np.ndarray]:
@@ -112,19 +116,29 @@ def _patch_video_io(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(lerobot_v3_module.imageio, "get_writer", _FakeVideoWriter)
 
 
-def _source_dataset(root: Path, *, rejected_indices: set[int] | None = None) -> None:
-    if rejected_indices is None:
-        rejected_indices = {1}
-    else:
-        rejected_indices = set(rejected_indices)
+def _source_dataset(
+    root: Path,
+    *,
+    rejected_indices: set[int] | None = None,
+    video_keys: tuple[str, ...] = ("observation.images.cam",),
+) -> None:
+    rejected_indices = {1} if rejected_indices is None else set(rejected_indices)
     meta_dir = root / "meta"
     meta_dir.mkdir(parents=True)
+    features: dict[str, dict[str, object]] = {
+        "observation.state": {"dtype": "float32", "shape": [2]},
+        "action": {"dtype": "float32", "shape": [2]},
+    }
+    for key in video_keys:
+        features[key] = {"dtype": "video", "shape": [8, 8, 3]}
+
+    # Build a minimal v2.1 source dataset that conversion can split and rewrite.
     info = {
         "codebase_version": "v2.1",
         "robot_type": "test",
         "total_episodes": 2,
         "total_frames": 6,
-        "total_videos": 2,
+        "total_videos": 2 * len(video_keys),
         "total_tasks": 1,
         "total_chunks": 1,
         "chunks_size": 1000,
@@ -134,11 +148,7 @@ def _source_dataset(root: Path, *, rejected_indices: set[int] | None = None) -> 
         "video_path": (
             "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4"
         ),
-        "features": {
-            "observation.state": {"dtype": "float32", "shape": [2]},
-            "action": {"dtype": "float32", "shape": [2]},
-            "observation.images.cam": {"dtype": "video", "shape": [8, 8, 3]},
-        },
+        "features": features,
     }
     (meta_dir / "info.json").write_text(json.dumps(info))
     (meta_dir / "stats.json").write_text(
@@ -153,22 +163,24 @@ def _source_dataset(root: Path, *, rejected_indices: set[int] | None = None) -> 
             }
         )
     )
-    (meta_dir / "tasks.jsonl").write_text('{"task_index": 0, "task": "test"}\n')
-    rows = [
-        {
-            "episode_index": 0,
-            "length": 3,
-            "quality": "red" if 0 in rejected_indices else "green",
-            "video_keys": ["observation.images.cam"],
-        },
-        {
-            "episode_index": 1,
-            "length": 3,
-            "qc_verdict": "fail" if 1 in rejected_indices else "pass",
-            "video_keys": ["observation.images.cam"],
-        },
-    ]
-    _write_jsonl(meta_dir / "episodes.jsonl", rows)
+    _write_jsonl(meta_dir / "tasks.jsonl", [{"task_index": 0, "task": "test"}])
+    _write_jsonl(
+        meta_dir / "episodes.jsonl",
+        [
+            {
+                "episode_index": 0,
+                "length": 3,
+                "quality": "red" if 0 in rejected_indices else "green",
+                "video_keys": list(video_keys),
+            },
+            {
+                "episode_index": 1,
+                "length": 3,
+                "qc_verdict": "fail" if 1 in rejected_indices else "pass",
+                "video_keys": list(video_keys),
+            },
+        ],
+    )
     _write_jsonl(meta_dir / "episodes_stats.jsonl", [])
 
     for episode_index in range(2):
@@ -186,19 +198,18 @@ def _source_dataset(root: Path, *, rejected_indices: set[int] | None = None) -> 
         data_path = root / "data" / "chunk-000" / f"episode_{episode_index:06d}.parquet"
         data_path.parent.mkdir(parents=True, exist_ok=True)
         pq.write_table(table, data_path)
-        video_path = (
-            root
-            / "videos"
-            / "chunk-000"
-            / "observation.images.cam"
-            / f"episode_{episode_index:06d}.mp4"
-        )
-        video_path.parent.mkdir(parents=True, exist_ok=True)
-        frames = [
-            np.full((8, 8, 3), episode_index * 20 + frame_index, dtype=np.uint8)
-            for frame_index in range(3)
-        ]
-        video_path.write_bytes(pickle.dumps(frames))
+        for key_index, key in enumerate(video_keys):
+            video_path = root / "videos" / "chunk-000" / key / f"episode_{episode_index:06d}.mp4"
+            video_path.parent.mkdir(parents=True, exist_ok=True)
+            frames = [
+                np.full(
+                    (8, 8, 3),
+                    episode_index * 40 + key_index * 20 + frame_index,
+                    dtype=np.uint8,
+                )
+                for frame_index in range(3)
+            ]
+            video_path.write_bytes(pickle.dumps(frames))
 
 
 def test_dataset_export_formats_are_registered() -> None:
@@ -340,7 +351,139 @@ def test_quality_export_supports_empty_rejected_subset_across_parents(tmp_path: 
     assert summary.accepted_dir == str(accepted.resolve())
     assert summary.rejected_dir == str(rejected.resolve())
     assert pq.read_table(accepted / "data/chunk-000/file-000.parquet").num_rows == 6
-    assert json.loads((rejected / "meta" / "info.json").read_text())["total_episodes"] == 0
-    marker = json.loads((rejected / "meta" / "quality_split.json").read_text())
+    assert json.loads((rejected / "meta/info.json").read_text())["total_episodes"] == 0
+    marker = json.loads((rejected / "meta/quality_split.json").read_text())
     assert marker["subset"] == "rejected"
     assert not (rejected / "data").exists()
+
+
+def test_mcap_interleaves_multi_camera_frames_by_frame_index(tmp_path: Path) -> None:
+    if make_reader is None:
+        pytest.skip("real mcap reader is unavailable")
+
+    source = tmp_path / "source"
+    accepted = tmp_path / "accepted"
+    rejected = tmp_path / "rejected"
+    video_keys = ("observation.images.left", "observation.images.right")
+    _source_dataset(source, video_keys=video_keys)
+
+    export_dataset_by_quality(source, accepted, rejected, dataset_format="mcap")
+
+    with (accepted / "data/chunk-000/episode_000000.mcap").open("rb") as stream:
+        records = list(make_reader(stream).iter_messages())
+
+    image_records = records[1:]
+    topics = [channel.topic for _, channel, _ in image_records]
+    sequences = [message.sequence for _, _, message in image_records]
+    timestamps = [message.log_time for _, _, message in image_records]
+    frames = [msgpack_numpy.unpackb(message.data) for _, _, message in image_records]
+    expected_topics = [f"episode/image/{key}" for _ in range(3) for key in video_keys]
+
+    assert topics == expected_topics
+    assert sequences == [0, 0, 1, 1, 2, 2]
+    assert timestamps == [
+        50_000_000,
+        50_000_000,
+        100_000_000,
+        100_000_000,
+        150_000_000,
+        150_000_000,
+    ]
+    assert int(frames[0][0, 0, 0]) == 0
+    assert int(frames[1][0, 0, 0]) == 20
+    assert int(frames[2][0, 0, 0]) == 1
+    assert int(frames[3][0, 0, 0]) == 21
+
+
+@pytest.mark.parametrize("dataset_format", ["hdf5", "mcap"])
+def test_embedded_formats_rewrite_common_metadata(
+    tmp_path: Path,
+    dataset_format: str,
+) -> None:
+    source = tmp_path / "source"
+    accepted = tmp_path / "accepted"
+    rejected = tmp_path / "rejected"
+    video_keys = ("observation.images.left", "observation.images.right")
+    _source_dataset(source, video_keys=video_keys)
+
+    export_dataset_by_quality(source, accepted, rejected, dataset_format=dataset_format)
+
+    accepted_info = json.loads((accepted / "meta/info.json").read_text())
+    rejected_info = json.loads((rejected / "meta/info.json").read_text())
+    accepted_rows = _read_jsonl(accepted / "meta/episodes.jsonl")
+    rejected_rows = _read_jsonl(rejected / "meta/episodes.jsonl")
+
+    for info in (accepted_info, rejected_info):
+        assert info["dataset_format"] == dataset_format
+        assert info["embedded_images"] is True
+        assert info["total_videos"] == 0
+        assert "video_path" not in info
+        for key in video_keys:
+            assert info["features"][key]["dtype"] == "image"
+            assert info["features"][key]["shape"] == [8, 8, 3]
+
+    assert "video_keys" not in accepted_rows[0]
+    assert "video_keys" not in rejected_rows[0]
+    assert accepted_rows[0]["quality"] == "green"
+    assert rejected_rows[0]["qc_verdict"] == "fail"
+
+
+def test_replace_existing_restores_previous_outputs_when_second_publish_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import tools.conversion._publish as publish_module
+
+    source = tmp_path / "source"
+    accepted = tmp_path / "accepted-root" / "accepted"
+    rejected = tmp_path / "rejected-root" / "rejected"
+    _source_dataset(source)
+    accepted.mkdir(parents=True)
+    rejected.mkdir(parents=True)
+    (accepted / "sentinel.txt").write_text("accepted-old")
+    (rejected / "sentinel.txt").write_text("rejected-old")
+
+    original_replace = publish_module.Path.replace
+
+    def fail_second_publish(self: Path, target: Path) -> Path:
+        source_path = Path(self)
+        target_path = Path(target)
+        if source_path.name == "dataset" and target_path == rejected:
+            raise OSError("rejected publish failed")
+        return original_replace(self, target)
+
+    monkeypatch.setattr(publish_module.Path, "replace", fail_second_publish)
+
+    with pytest.raises(OSError, match="rejected publish failed"):
+        export_dataset_by_quality(
+            source,
+            accepted,
+            rejected,
+            dataset_format="hdf5",
+            replace_existing=True,
+        )
+
+    assert (accepted / "sentinel.txt").read_text() == "accepted-old"
+    assert (rejected / "sentinel.txt").read_text() == "rejected-old"
+    assert sorted(path.name for path in accepted.parent.iterdir()) == ["accepted"]
+    assert sorted(path.name for path in rejected.parent.iterdir()) == ["rejected"]
+
+
+def test_failed_conversion_leaves_no_partial_outputs(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    accepted = tmp_path / "accepted-root" / "accepted"
+    rejected = tmp_path / "rejected-root" / "rejected"
+    _source_dataset(source, video_keys=("observation.images.left", "observation.images.right"))
+    broken_video = source / "videos/chunk-000/observation.images.right/episode_000000.mp4"
+    broken_video.write_bytes(pickle.dumps([np.zeros((8, 8, 3), dtype=np.uint8)] * 2))
+
+    with pytest.raises(
+        ValueError,
+        match=r"MCAP episode 0 video 'observation\.images\.right' has 2 frames; expected 3",
+    ):
+        export_dataset_by_quality(source, accepted, rejected, dataset_format="mcap")
+
+    assert not accepted.exists()
+    assert not rejected.exists()
+    assert list(accepted.parent.iterdir()) == []
+    assert list(rejected.parent.iterdir()) == []

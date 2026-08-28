@@ -12,6 +12,8 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from ._publish import publish_output_pair
+
 
 @dataclasses.dataclass(frozen=True)
 class QualitySplitSummary:
@@ -181,7 +183,7 @@ def split_dataset_by_quality(
             episodes_total=len(rows),
             progress_callback=progress_callback,
         )
-        _publish_pair(
+        publish_output_pair(
             ((accepted_dir, accepted_stage), (rejected_dir, rejected_stage)),
             replace_existing=replace_existing,
         )
@@ -402,41 +404,6 @@ def _export_subset(
         + "\n"
     )
     return global_index
-
-
-def _publish_pair(
-    outputs: tuple[tuple[Path, Path], tuple[Path, Path]],
-    *,
-    replace_existing: bool,
-) -> None:
-    backups: dict[Path, tuple[Path, Path]] = {}
-    published: list[Path] = []
-    try:
-        for output, stage in outputs:
-            if output.exists() and not replace_existing:
-                raise FileExistsError(f"output directory already exists: {output}")
-            if output.exists() and not output.is_dir():
-                raise NotADirectoryError(f"output path is not a directory: {output}")
-            output.parent.mkdir(parents=True, exist_ok=True)
-            if output.exists():
-                backup_root = Path(
-                    tempfile.mkdtemp(prefix=f".{output.name}.previous.", dir=output.parent)
-                )
-                backup = backup_root / output.name
-                output.replace(backup)
-                backups[output] = (backup_root, backup)
-            stage.replace(output)
-            published.append(output)
-    except Exception:
-        for output in reversed(published):
-            shutil.rmtree(output, ignore_errors=True)
-        for output, (_, backup) in backups.items():
-            if backup.exists() and not output.exists():
-                backup.replace(output)
-        raise
-    finally:
-        for backup_root, _ in backups.values():
-            shutil.rmtree(backup_root, ignore_errors=True)
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:

@@ -39,18 +39,41 @@ class DatasetUploadSpec:
     options: dict[str, Any]
 
 
+def _normalize_dataset_name(dataset_name: str) -> str:
+    normalized_name = str(dataset_name).strip()
+    if not normalized_name:
+        return ""
+    path = PurePosixPath(normalized_name)
+    if path.is_absolute() or len(path.parts) != 1 or path.name in {"", ".", ".."}:
+        raise ValueError("dataset upload name must be one path component")
+    return path.name
+
+
+def _normalize_remote_root(remote_root: str) -> str:
+    normalized_root = str(remote_root)
+    canonical_root = normalized_root.rstrip("/") or "/"
+    path = PurePosixPath(canonical_root)
+    if (
+        any(char in normalized_root for char in "\r\n")
+        or not path.is_absolute()
+        or ".." in path.parts
+        or "." in path.parts
+        or path.as_posix() != canonical_root
+    ):
+        raise ValueError("dataset upload root must be an absolute canonical path")
+    return path.as_posix()
+
+
 def resolve_dataset_uploads(
     storage: Mapping[str, Any], dataset_name: str = ""
 ) -> tuple[DatasetUploadSpec, ...]:
     """Resolve the configured public SFTP upload backend."""
-    normalized_name = str(dataset_name).strip()
-    if normalized_name and Path(normalized_name).name != normalized_name:
-        raise ValueError("dataset upload name must be one path component")
+    normalized_name = _normalize_dataset_name(dataset_name)
 
     specs: list[DatasetUploadSpec] = []
     sftp = storage.get("sftp") or {}
     if sftp:
-        root = str(PurePosixPath(str(sftp.get("remote_dir", ""))))
+        root = _normalize_remote_root(str(sftp.get("remote_dir", "")))
         target = str(PurePosixPath(root) / normalized_name) if normalized_name else root
         host = str(sftp.get("host", "")).strip()
         port = int(sftp.get("port", 22))

@@ -102,7 +102,7 @@ def video_frames(path: Path) -> Iterator[np.ndarray]:
 def write_common_metadata(source: LeRobotV21Source, output: Path, data_format: str) -> None:
     meta_dir = output / "meta"
     meta_dir.mkdir(parents=True, exist_ok=True)
-    info = dict(source.info)
+    info = _converted_info(source.info, data_format)
     info["dataset_format"] = data_format
     info["codebase_version"] = {
         "lerobot_v3": "v3.0",
@@ -127,10 +127,38 @@ def write_common_metadata(source: LeRobotV21Source, output: Path, data_format: s
     (meta_dir / "info.json").write_text(json.dumps(info, indent=2) + "\n")
     _copy_optional(source.meta_dir / "stats.json", meta_dir / "stats.json")
     _copy_optional(source.meta_dir / "tasks.jsonl", meta_dir / "tasks.jsonl")
-    _copy_optional(source.meta_dir / "episodes.jsonl", meta_dir / "episodes.jsonl")
+    _write_episode_rows(source.episode_rows, meta_dir / "episodes.jsonl", data_format)
     marker = json.loads((source.meta_dir / "quality_split.json").read_text())
     marker["dataset_format"] = data_format
     (meta_dir / "quality_split.json").write_text(json.dumps(marker, indent=2) + "\n")
+
+
+def _converted_info(source_info: dict[str, Any], data_format: str) -> dict[str, Any]:
+    info = dict(source_info)
+    if data_format == "lerobot_v3":
+        return info
+    info["features"] = {
+        key: _converted_feature(feature) for key, feature in source_info.get("features", {}).items()
+    }
+    return info
+
+
+def _converted_feature(feature: Any) -> Any:
+    if not isinstance(feature, dict) or feature.get("dtype") != "video":
+        return feature
+    converted = dict(feature)
+    converted["dtype"] = "image"
+    return converted
+
+
+def _write_episode_rows(rows: list[dict[str, Any]], path: Path, data_format: str) -> None:
+    source_rows = []
+    for row in rows:
+        output_row = dict(row)
+        if data_format != "lerobot_v3":
+            output_row.pop("video_keys", None)
+        source_rows.append(output_row)
+    path.write_text("".join(json.dumps(row) + "\n" for row in source_rows))
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:

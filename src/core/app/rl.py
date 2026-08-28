@@ -27,6 +27,8 @@ def build_rl_active_config(config: ConfigDict, policy_slot: int) -> ConfigDict:
     active.rl_cfg = active.rl
     active.eval = None
     active.eval_cfg = None
+    active.console = copy.deepcopy(config.console)
+    active.collection = copy.deepcopy(config.collection)
     active.rollout.storage = copy.deepcopy(rl_cfg.data.storage)
     active.rollout.storage.enabled = True
     active.rollout.intervention = copy.deepcopy(rl_cfg.intervention)

@@ -8,6 +8,7 @@ from core.app.operator_control import handle_teleop_operator_event
 from core.app.state import RuntimeState, SessionMode, SessionState, SessionStatus
 from core.config import ConfigDict
 from teleop_client.base import TeleopOperatorEvent, TeleopStatus
+from transport.base import HilStatus
 
 
 class _Logger:
@@ -34,6 +35,15 @@ class _Client:
         self.acks.append((event.intent, accepted, message))
 
 
+class _Transport:
+    def __init__(self) -> None:
+        self.hil_supported = True
+        self.hil_error = ""
+
+    def hil_status(self) -> HilStatus:
+        return HilStatus(supported=self.hil_supported, error=self.hil_error)
+
+
 def _runtime() -> tuple[RuntimeState, SessionState]:
     runtime = SimpleNamespace(
         teleop_client=_Client(),
@@ -41,6 +51,10 @@ def _runtime() -> tuple[RuntimeState, SessionState]:
         collection_teleop_armed=True,
         collection_teleop_active=True,
         episode_logger=_Logger(),
+        rl_active=False,
+        rollout_intervention_active=False,
+        rollout_intervention_enabled=False,
+        transport=_Transport(),
     )
     session = SessionState(mode=SessionMode.COLLECT, status=SessionStatus.READY)
     return cast(RuntimeState, runtime), session
@@ -69,6 +83,12 @@ def _dispatch(command, _config, runtime, session) -> None:
         session.mode = SessionMode.COLLECT
     elif command == "web:collect_home":
         session.last_error = ""
+    elif command == "web:halt":
+        runtime.rollout_intervention_active = True
+        session.status = SessionStatus.READY
+    elif command == "web:rollout_intervention_abandon":
+        runtime.rollout_intervention_active = False
+        session.status = SessionStatus.RUNNING
 
 
 def test_operator_events_toggle_recording() -> None:
@@ -139,3 +159,120 @@ def test_home_uses_the_shared_collect_home_command_when_disarmed() -> None:
 
     assert commands == ["web:collect_home"]
     assert runtime.teleop_client.acks[-1][:2] == ("home", True)
+
+
+def test_intervention_toggle_starts_and_abandons_rl_intervention() -> None:
+    runtime, session = _runtime()
+    runtime.rl_active = True
+    runtime.rollout_intervention_enabled = True
+    session.mode = SessionMode.REAL
+    session.status = SessionStatus.RUNNING
+    session.is_setup_done = True
+    config = ConfigDict(collection=ConfigDict(teleop=ConfigDict()))
+
+    handle_teleop_operator_event(
+        _event(7, "intervention_toggle"), config, runtime, session, dispatch=_dispatch
+    )
+    handle_teleop_operator_event(
+        _event(8, "intervention_toggle"), config, runtime, session, dispatch=_dispatch
+    )
+
+    assert runtime.teleop_client.acks[-2] == (
+        "intervention_toggle",
+        True,
+        "RL intervention started",
+    )
+    assert runtime.teleop_client.acks[-1] == (
+        "intervention_toggle",
+        True,
+        "RL intervention abandoned",
+    )
+
+
+def test_intervention_toggle_requires_active_rl_hil() -> None:
+    runtime, session = _runtime()
+    session.mode = SessionMode.REAL
+    session.status = SessionStatus.RUNNING
+    config = ConfigDict(collection=ConfigDict(teleop=ConfigDict()))
+
+    handle_teleop_operator_event(
+        _event(9, "intervention_toggle"), config, runtime, session, dispatch=_dispatch
+    )
+    assert runtime.teleop_client.acks[-1][1:] == (
+        False,
+        "VR intervention requires the active RL workspace",
+    )
+
+    runtime.rl_active = True
+    session.is_setup_done = True
+    handle_teleop_operator_event(
+        _event(10, "intervention_toggle"), config, runtime, session, dispatch=_dispatch
+    )
+    assert runtime.teleop_client.acks[-1][1:] == (
+        False,
+        "Enable RL HIL before using the VR intervention control",
+    )
+
+
+def test_intervention_toggle_rejects_unsupported_hil_without_stopping_policy() -> None:
+    runtime, session = _runtime()
+    runtime.rl_active = True
+    runtime.rollout_intervention_enabled = True
+    runtime.transport.hil_supported = False
+    runtime.transport.hil_error = "HIL input is unavailable"
+    session.mode = SessionMode.REAL
+    session.status = SessionStatus.RUNNING
+    session.is_setup_done = True
+    config = ConfigDict(collection=ConfigDict(teleop=ConfigDict()))
+    commands: list[str] = []
+
+    def dispatch(command, *_args) -> None:
+        commands.append(command)
+
+    handle_teleop_operator_event(
+        _event(11, "intervention_toggle"), config, runtime, session, dispatch=dispatch
+    )
+
+    assert commands == []
+    assert session.status is SessionStatus.RUNNING
+    assert runtime.teleop_client.acks[-1][1:] == (False, "HIL input is unavailable")
+
+
+def test_intervention_toggle_uses_teleop_client_source_instead_of_transport_hil() -> None:
+    runtime, session = _runtime()
+    runtime.rl_active = True
+    runtime.rollout_intervention_enabled = True
+    runtime.transport.hil_supported = False
+    runtime.transport.hil_error = "transport HIL unavailable"
+    session.mode = SessionMode.REAL
+    session.status = SessionStatus.RUNNING
+    session.is_setup_done = True
+    config = ConfigDict(
+        collection=ConfigDict(teleop=ConfigDict()),
+        rl=ConfigDict(intervention=ConfigDict(source="teleop_client")),
+    )
+
+    handle_teleop_operator_event(
+        _event(12, "intervention_toggle"), config, runtime, session, dispatch=_dispatch
+    )
+
+    assert runtime.rollout_intervention_active is True
+    assert runtime.teleop_client.acks[-1][1:] == (True, "RL intervention started")
+
+
+def test_delayed_collection_event_is_rejected_in_rl_workspace() -> None:
+    runtime, session = _runtime()
+    runtime.rl_active = True
+    session.mode = SessionMode.REAL
+    session.status = SessionStatus.RUNNING
+    config = ConfigDict(collection=ConfigDict(teleop=ConfigDict()))
+
+    handle_teleop_operator_event(
+        _event(12, "arm_toggle"), config, runtime, session, dispatch=_dispatch
+    )
+
+    assert runtime.collection_teleop_armed is True
+    assert runtime.teleop_client.acks[-1][1:] == (
+        False,
+        "Collection VR controls are unavailable in the RL workspace",
+    )

@@ -266,7 +266,8 @@ class OperatorEventMapper:
     A short press emits ``record_toggle`` on release. Holding A for the configured
     duration emits exactly one ``record_cancel`` and suppresses the later release.
     A short B press emits ``arm_toggle`` on release. A short left X press emits
-    ``home`` on release. Y is ignored. Grip is consumed here only for its
+    ``home`` on release, and a short left Y press emits ``intervention_toggle``.
+    Grip is consumed here only for its
     long-press toggle state; the client receives the resulting state alongside
     the absolute controller pose.
     """
@@ -279,6 +280,7 @@ class OperatorEventMapper:
         self._previous_primary = False
         self._previous_secondary = False
         self._previous_home = False
+        self._previous_intervention = False
         self._press_started_ms: float | None = None
         self._secondary_started_ms: float | None = None
         self._long_press_fired = False
@@ -288,6 +290,7 @@ class OperatorEventMapper:
         self._previous_primary = False
         self._previous_secondary = False
         self._previous_home = False
+        self._previous_intervention = False
         self._press_started_ms = None
         self._secondary_started_ms = None
         self._long_press_fired = False
@@ -304,6 +307,7 @@ class OperatorEventMapper:
         pressed = bool(face_buttons["right"].get("primary", False))
         secondary = bool(face_buttons["right"].get("secondary", False))
         home_pressed = bool(face_buttons["left"].get("primary", False))
+        intervention_pressed = bool(face_buttons["left"].get("secondary", False))
         intents: list[str] = []
         if pressed and not self._previous_primary:
             self._press_started_ms = float(client_time_ms)
@@ -328,9 +332,12 @@ class OperatorEventMapper:
             self._secondary_started_ms = None
         if self._previous_home and not home_pressed:
             intents.append("home")
+        if self._previous_intervention and not intervention_pressed:
+            intents.append("intervention_toggle")
         self._previous_primary = pressed
         self._previous_secondary = secondary
         self._previous_home = home_pressed
+        self._previous_intervention = intervention_pressed
         events = []
         for intent in intents:
             events.append(
@@ -355,6 +362,8 @@ class OperatorEventMapper:
             pressed.append("right.secondary")
         if self._previous_home:
             pressed.append("left.primary")
+        if self._previous_intervention:
+            pressed.append("left.secondary")
         progress: dict[str, float] = {}
         if self._previous_primary and self._press_started_ms is not None:
             progress["right.primary"] = min(

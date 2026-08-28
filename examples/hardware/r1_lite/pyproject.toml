@@ -2,7 +2,7 @@
 name = "eva-r1-lite-hardware"
 version = "0.1.0"
 description = "Isolated runtime for the EVA R1 Lite hardware workflows."
-requires-python = ">=3.10,<3.13"
+requires-python = ">=3.11,<3.12"
 dependencies = [
     "eva-client",
 ]

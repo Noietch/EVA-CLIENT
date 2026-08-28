@@ -69,7 +69,9 @@ class _Client:
         self.resets: list[bool] = []
         self.starts = 0
         self.closes = 0
+        self.connected = True
         self.neutral = True
+        self.source_error = ""
         self.fail_start = False
         self.fail_reset = False
         self.fail_close = False
@@ -99,7 +101,12 @@ class _Client:
             raise RuntimeError("client reset failed")
 
     def status(self):
-        return TeleopStatus(source_type="test", connected=True, neutral=self.neutral)
+        return TeleopStatus(
+            source_type="test",
+            connected=self.connected,
+            neutral=self.neutral,
+            source_error=self.source_error,
+        )
 
 
 class _GenerationClient(_Client):
@@ -163,6 +170,51 @@ def test_handler_dispatches_qpos_and_limits_joint_step(monkeypatch) -> None:
     target, action = runtime.transport.published[0]
     assert target == "real"
     np.testing.assert_allclose(action, [0.1, 0.5, -0.1, 0.0])
+
+
+def test_rollout_step_dispatches_client_qpos_without_collection_gate(monkeypatch) -> None:
+    client = _Client([TeleopResult.from_command(QposCommand(np.asarray([0.2, 0.5, 0.2, 0.0])))])
+    runtime = _runtime(client)
+    runtime.collection_teleop_armed = False
+    runtime.collection_teleop_active = False
+    runtime.rollout_intervention_active = True
+    session = SessionState(mode=SessionMode.REAL)
+    monkeypatch.setattr(teleop, "forward_canonical_eef", lambda *_args: np.zeros(16))
+
+    assert teleop.step_rollout_teleop(_config(), runtime, session, now=1.0)
+    assert runtime.transport.published[0][0] == "real"
+    np.testing.assert_allclose(runtime.transport.published[0][1], [0.1, 0.5, 0.1, 0.0])
+
+
+def test_activate_rollout_teleop_requires_connected_neutral_client() -> None:
+    client = _Client([])
+    runtime = _runtime(client)
+    runtime.teleop_execution.active = False
+    runtime.collection_teleop_armed = False
+    runtime.collection_teleop_active = False
+    session = SessionState(mode=SessionMode.REAL)
+
+    assert teleop.activate_rollout_teleop(_config(), runtime, session) is True
+
+    assert client.starts == 1
+    assert client.resets == [True]
+    assert runtime.teleop_execution.active is True
+
+
+def test_deactivate_rollout_teleop_leaves_state_active_when_neutral_reset_fails() -> None:
+    client = _Client([])
+    client.fail_reset = True
+    runtime = _runtime(client)
+    runtime.collection_teleop_armed = False
+    runtime.collection_teleop_active = False
+    runtime.rollout_intervention_active = True
+
+    with pytest.raises(RuntimeError, match="client reset failed"):
+        teleop.deactivate_rollout_teleop(runtime)
+
+    assert runtime.teleop_execution.active is True
+    assert runtime.teleop_execution.condition is teleop.TeleopExecutionCondition.IDLE
+    assert runtime.teleop_execution.last_fault == ""
 
 
 def test_prewarm_teleop_ik_runs_once_without_publishing() -> None:
@@ -283,6 +335,42 @@ def test_handler_rejects_result_when_worker_generation_changes_before_publish(mo
 
     assert errors == []
     assert "changed before publish" in runtime.teleop_execution.last_fault
+    assert runtime.transport.published == []
+
+
+def test_handler_skips_collection_publish_when_collection_deactivates_mid_tick(monkeypatch) -> None:
+    target = np.asarray(
+        [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0] * 2,
+        dtype=np.float32,
+    )
+    client = _GenerationClient(
+        TeleopResult.from_command(
+            CanonicalEefCommand(target, (True, True)),
+            source_token=TeleopInputToken(2),
+        )
+    )
+    runtime = _runtime(client)
+    solving = threading.Event()
+    release = threading.Event()
+    monkeypatch.setattr(teleop, "forward_canonical_eef", lambda *_args: target.copy())
+
+    def solve(*_args, **_kwargs):
+        solving.set()
+        assert release.wait(timeout=1.0)
+        return np.zeros(4, dtype=np.float32)
+
+    monkeypatch.setattr(teleop, "solve_canonical_eef", solve)
+
+    def run_step() -> None:
+        teleop.step_teleop(_config(), runtime, _session(), now=1.0)
+
+    worker = threading.Thread(target=run_step)
+    worker.start()
+    assert solving.wait(timeout=1.0)
+    runtime.collection_teleop_active = False
+    release.set()
+    worker.join(timeout=1.0)
+
     assert runtime.transport.published == []
 
 
@@ -471,8 +559,20 @@ def test_select_mode_stops_teleop_but_keeps_input_worker(monkeypatch) -> None:
     assert runtime.transport.stopped == 1
 
 
+@pytest.mark.parametrize(
+    ("entrypoint", "stop_module"),
+    [
+        ("select_mode", control),
+        ("tab_switch", app_run),
+    ],
+)
 @pytest.mark.parametrize("message", ["capture stop failed", "episode finalize failed"])
-def test_select_mode_deactivates_when_collection_stop_raises(monkeypatch, message) -> None:
+def test_collection_exit_deactivates_when_collection_stop_raises(
+    monkeypatch,
+    entrypoint: str,
+    stop_module,
+    message: str,
+) -> None:
     client = _Client([])
     runtime = _runtime(client)
     runtime.teleop_execution.active = True
@@ -483,11 +583,14 @@ def test_select_mode_deactivates_when_collection_stop_raises(monkeypatch, messag
     def fail_stop(*_args) -> None:
         raise RuntimeError(message)
 
-    monkeypatch.setattr(control, "collect_stop", fail_stop)
+    monkeypatch.setattr(stop_module, "collect_stop", fail_stop)
     monkeypatch.setattr(teleop, "stop_collection_capture", lambda _runtime: None)
 
     with pytest.raises(RuntimeError, match=message):
-        control.select_mode(SessionMode.SIM, ConfigDict(), session, runtime)
+        if entrypoint == "select_mode":
+            control.select_mode(SessionMode.SIM, ConfigDict(), session, runtime)
+        else:
+            app_run.handle_command("web:tab_switch:manual", _config(), runtime, session)
 
     assert runtime.collection_teleop_active is False
     assert runtime.teleop_execution.active is False
@@ -497,33 +600,18 @@ def test_select_mode_deactivates_when_collection_stop_raises(monkeypatch, messag
     assert session.last_error == ""
 
 
-@pytest.mark.parametrize("message", ["capture stop failed", "episode finalize failed"])
-def test_tab_switch_deactivates_when_collection_stop_raises(monkeypatch, message) -> None:
-    client = _Client([])
-    runtime = _runtime(client)
-    runtime.teleop_execution.active = True
-    runtime.collection_teleop_active = True
-    session = _session()
-    session.status = SessionStatus.RUNNING
-
-    def fail_stop(*_args) -> None:
-        raise RuntimeError(message)
-
-    monkeypatch.setattr(app_run, "collect_stop", fail_stop)
-    monkeypatch.setattr(teleop, "stop_collection_capture", lambda _runtime: None)
-
-    with pytest.raises(RuntimeError, match=message):
-        app_run.handle_command("web:tab_switch:manual", _config(), runtime, session)
-
-    assert runtime.collection_teleop_active is False
-    assert runtime.teleop_execution.active is False
-    assert client.closes == 0
-    assert runtime.transport.stopped == 1
-    assert runtime.transport.published == []
-    assert session.last_error == ""
-
-
-def test_arm_off_saves_and_stops_teleop_without_robot_reset(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("command", "reset_message"),
+    [
+        ("web:collect_arm:off", "ARM OFF must not reset robot"),
+        ("web:tab_switch:manual", "tab switch must not reset robot"),
+    ],
+)
+def test_collection_exit_saves_and_stops_teleop_without_robot_reset(
+    monkeypatch,
+    command: str,
+    reset_message: str,
+) -> None:
     runtime = _runtime(_Client([]))
     session = _session()
     session.status = SessionStatus.RUNNING
@@ -543,10 +631,10 @@ def test_arm_off_saves_and_stops_teleop_without_robot_reset(monkeypatch) -> None
     monkeypatch.setattr(
         app_run,
         "run_reset",
-        lambda *_args: (_ for _ in ()).throw(AssertionError("ARM OFF must not reset robot")),
+        lambda *_args: (_ for _ in ()).throw(AssertionError(reset_message)),
     )
 
-    app_run.handle_command("web:collect_arm:off", _config(), runtime, session)
+    app_run.handle_command(command, _config(), runtime, session)
 
     assert calls == ["save", "stop_teleop"]
     assert runtime.collection_teleop_armed is False
@@ -573,37 +661,6 @@ def test_collect_home_runs_reset_only_when_disarmed(monkeypatch) -> None:
     app_run.handle_command("web:collect_home", _config(), runtime, session)
     assert calls == ["run_reset"]
     assert session.last_error == "Collection HOME requires ARM OFF"
-
-
-def test_tab_switch_saves_and_stops_teleop_without_robot_reset(monkeypatch) -> None:
-    runtime = _runtime(_Client([]))
-    session = _session()
-    session.status = SessionStatus.RUNNING
-    calls: list[str] = []
-
-    def save(*_args) -> None:
-        calls.append("save")
-        session.status = SessionStatus.READY
-
-    def stop(*_args) -> None:
-        calls.append("stop_teleop")
-        runtime.collection_teleop_active = False
-        runtime.teleop_execution.active = False
-
-    monkeypatch.setattr(app_run, "collect_stop", save)
-    monkeypatch.setattr(app_run, "collect_stop_teleop", stop)
-    monkeypatch.setattr(
-        app_run,
-        "run_reset",
-        lambda *_args: (_ for _ in ()).throw(AssertionError("tab switch must not reset robot")),
-    )
-
-    app_run.handle_command("web:tab_switch:manual", _config(), runtime, session)
-
-    assert calls == ["save", "stop_teleop"]
-    assert runtime.collection_teleop_armed is False
-    assert session.mode is SessionMode.SELECT
-    assert session.status is SessionStatus.UNSET
 
 
 def test_deactivate_then_reactivate_reuses_input_client(monkeypatch) -> None:

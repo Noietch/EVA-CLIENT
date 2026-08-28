@@ -4,15 +4,22 @@ import copy
 import json
 import threading
 import time
+from unittest.mock import Mock
 
 import numpy as np
+import pyarrow.parquet as pq
 import pytest
 
 from core.app import run as app
 from core.app.console import server as console_server
+from core.app.handlers import teleop
+from core.app.handlers.recording import record_client_rollout_intervention_step
+from core.app.operator_control import handle_teleop_operator_event
 from core.app.rl import build_rl_critic_observation, record_rl_sample, submit_rl_critic
 from core.app.state import SessionStatus
 from core.config import ConfigDict
+from core.types import Observation
+from teleop_client.base import QposCommand, TeleopOperatorEvent, TeleopResult, TeleopStatus
 
 
 def _configure_rl(console, tmp_path) -> None:
@@ -50,6 +57,34 @@ def _configure_rl(console, tmp_path) -> None:
     )
     console.config.rl = rl_cfg
     console.config.rl_cfg = rl_cfg
+
+
+def _configure_client_intervention(console, tmp_path, results):
+    _configure_rl(console, tmp_path)
+    console.config.rl.intervention.source = "teleop_client"
+    console.config.rl.data.storage.async_save = False
+    console.config.collection.teleop = ConfigDict(
+        control_source="client", client=ConfigDict(type="test")
+    )
+    client = Mock()
+    client.poll.side_effect = list(results)
+    client.validate_result.return_value = True
+    client.status.return_value = TeleopStatus(source_type="test", connected=True, neutral=True)
+    console.runtime.teleop_client = client
+    console.runtime.teleop_execution = teleop.TeleopExecutionState(
+        control_source="client", client_type="vr_webxr"
+    )
+    for path, body in (
+        ("/api/tab_switch", {"tab": "rl"}),
+        ("/api/rl/select_task", {"task": "pack the phone"}),
+        ("/api/rl/select_policy", {"slot": 0}),
+        ("/api/rl/setup", None),
+        ("/api/rl/hil_enabled", {"enabled": True}),
+        ("/api/rl/run", None),
+    ):
+        console.do(path, body)
+    app.publish_next_action(console.runtime.active_config, console.runtime, console.session)
+    return client
 
 
 def test_rl_routes_setup_policy_then_select_optional_critic(console, tmp_path):
@@ -626,3 +661,95 @@ def test_rl_replay_critic_uses_critic_action_horizon(console, tmp_path, monkeypa
     assert response.status == 200
     assert runner.actions.shape == (4, 2)
     np.testing.assert_array_equal(runner.actions, np.vstack([source.actions, source.actions[-1]]))
+
+
+def test_rl_client_intervention_accept_and_save_persists_rollout(console, tmp_path, monkeypatch):
+    client = _configure_client_intervention(
+        console,
+        tmp_path,
+        [TeleopResult.from_command(QposCommand(np.full(14, 0.02, dtype=np.float32)))],
+    )
+    monkeypatch.setattr(
+        teleop,
+        "forward_canonical_eef",
+        lambda _config, runtime, _qpos: np.zeros(
+            8 * len(runtime.robot.arm_groups), dtype=np.float32
+        ),
+    )
+    event = TeleopOperatorEvent("test", 1, "intervention_toggle", 1.0)
+    handle_teleop_operator_event(
+        event,
+        console.runtime.active_config or console.config,
+        console.runtime,
+        console.session,
+        dispatch=app.handle_command,
+    )
+    client.acknowledge_event.assert_called_with(
+        event,
+        accepted=True,
+        message="RL intervention started",
+    )
+    assert console.runtime.rollout_intervention_active is True
+    monkeypatch.setattr(
+        console.runtime.transport,
+        "get_frame",
+        lambda: Observation(
+            timestamp=2.5,
+            images={
+                "cam_high": np.zeros((4, 4, 3), dtype=np.uint8),
+                "cam_left_wrist": np.ones((4, 4, 3), dtype=np.uint8),
+                "cam_right_wrist": np.full((4, 4, 3), 2, dtype=np.uint8),
+            },
+            state_qpos=np.full(14, 0.01, dtype=np.float32),
+        ),
+    )
+    published = teleop.step_rollout_teleop(
+        console.runtime.active_config,
+        console.runtime,
+        console.session,
+        now=2.5,
+    )
+    assert published is not None
+    assert record_client_rollout_intervention_step(
+        console.runtime.active_config,
+        console.runtime,
+        console.session,
+        published,
+    )
+    console.do("/api/rl/accept")
+    assert (
+        console.runtime.rollout_intervention_active,
+        console.runtime.rollout_intervention_active_segment is None,
+        len(console.runtime.rollout_intervention_segments),
+    ) == (False, True, 1)
+    assert console.do("/api/rl/save").json == {"ok": True}
+    rollout_table = pq.read_table(
+        str(tmp_path / "rl" / "data" / "chunk-000" / "episode_000000.parquet")
+    )
+    assert "intervention" in rollout_table.column("control_source").to_pylist()
+    assert True in rollout_table.column("intervention").to_pylist()
+    assert 0 in rollout_table.column("intervention_segment_index").to_pylist()
+    assert client.reset.call_count >= 2
+
+
+def test_tab_switch_away_from_rl_clears_active_client_intervention(console, tmp_path):
+    client = _configure_client_intervention(console, tmp_path, [])
+    event = TeleopOperatorEvent("test", 2, "intervention_toggle", 2.0)
+    handle_teleop_operator_event(
+        event,
+        console.runtime.active_config or console.config,
+        console.runtime,
+        console.session,
+        dispatch=app.handle_command,
+    )
+    assert console.runtime.rollout_intervention_active is True
+    console.do("/api/tab_switch", {"tab": "debug"})
+    assert (
+        console.runtime.rollout_intervention_active,
+        console.runtime.rollout_intervention_active_segment is None,
+        console.runtime.rl_active,
+        console.runtime.teleop_execution.active,
+        console.session.status,
+        (tmp_path / "rl" / "data" / "chunk-000" / "episode_000000.parquet").exists(),
+    ) == (False, True, False, False, SessionStatus.UNSET, False)
+    assert client.reset.call_count >= 2

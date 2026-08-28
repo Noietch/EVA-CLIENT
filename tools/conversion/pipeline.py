@@ -9,6 +9,7 @@ from importlib import import_module
 from pathlib import Path
 from typing import Any
 
+from ._publish import publish_output_pair
 from .native import QualityExportProgress as DatasetExportProgress
 from .native import QualitySplitSummary, split_dataset_by_quality
 
@@ -114,7 +115,7 @@ def export_dataset_by_quality(
             total=native_summary.source_episodes,
             progress_callback=progress_callback,
         )
-        _publish_pair(
+        publish_output_pair(
             ((accepted_dir, stage_accepted), (rejected_dir, stage_rejected)),
             replace_existing=replace_existing,
         )
@@ -156,41 +157,6 @@ def _convert_subset(
 
     # Convert the subset with the format-specific writer selected above.
     exporter(source_dir, output_dir, update)
-
-
-def _publish_pair(
-    outputs: tuple[tuple[Path, Path], tuple[Path, Path]],
-    *,
-    replace_existing: bool,
-) -> None:
-    backups: dict[Path, tuple[Path, Path]] = {}
-    published: list[Path] = []
-    try:
-        for output, stage in outputs:
-            if output.exists() and not replace_existing:
-                raise FileExistsError(f"output directory already exists: {output}")
-            if output.exists() and not output.is_dir():
-                raise NotADirectoryError(f"output path is not a directory: {output}")
-            output.parent.mkdir(parents=True, exist_ok=True)
-            if output.exists():
-                backup_root = Path(
-                    tempfile.mkdtemp(prefix=f".{output.name}.previous.", dir=output.parent)
-                )
-                backup = backup_root / output.name
-                output.replace(backup)
-                backups[output] = (backup_root, backup)
-            stage.replace(output)
-            published.append(output)
-    except Exception:
-        for output in reversed(published):
-            shutil.rmtree(output, ignore_errors=True)
-        for output, (_, backup) in backups.items():
-            if backup.exists() and not output.exists():
-                backup.replace(output)
-        raise
-    finally:
-        for backup_root, _ in backups.values():
-            shutil.rmtree(backup_root, ignore_errors=True)
 
 
 def _summary(

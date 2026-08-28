@@ -61,8 +61,9 @@ ARX_X5_PYTHON=/path/to/python3.12 bash examples/hardware/arx_x5/setup_env.sh
    [ARARX_X5_beta SDK-V2](https://github.com/ARXroboticsX/ARARX_X5_beta)，当前同步到
    `1aa8a7d2ddefced2229f953feffc248be1c0b44d`，路径为
    `examples/hardware/arx_x5/SDK/X5`。
-4. 校验官方 CPython 3.12 二进制和 FK/IK，并安装 `pin`、`python-can`、
-   `ruckig` 等官方依赖。
+4. 校验官方 CPython 3.12 二进制和 `SingleArm` 接口，并安装 `pin`、
+   `python-can`、`ruckig` 等 vendor import 所需依赖。安装过程不执行 FK/IK
+   计算，也不连接机器人。
 
 EVA Client 中新增的 X5 集成代码遵循仓库根目录的 Apache-2.0 许可证。
 `ARARX_X5_beta` 是独立的第三方 submodule，不在 EVA Client 的 Apache-2.0

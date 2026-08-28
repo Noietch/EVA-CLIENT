@@ -19,6 +19,7 @@ dependencies = [
     "pyyaml==6.0.3",
     "pyzmq==27.1.0",
     "rich>=13.9.4",
+    "scipy==1.15.3",
     "yourdfpy==0.0.60",
 ]
 
@@ -45,3 +46,8 @@ i2rt = { path = "SDK/i2rt", editable = true }
 [[tool.uv.index]]
 url = "https://pypi.tuna.tsinghua.edu.cn/simple"
 default = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = ["SDK"]

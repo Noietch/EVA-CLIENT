@@ -8,6 +8,7 @@ import pytest
 
 import robots  # noqa: F401  (registers robots)
 import transport  # noqa: F401  (registers transport backends)
+from core.app import rl as app_rl
 from core.config import ConfigDict, load_config, resolve_video_key
 from core.registry import TRANSPORT_REGISTRY
 from transport.base import resolve_topics
@@ -75,17 +76,21 @@ def test_rl_config_exposes_preview_models_and_lerobot_storage():
     assert cfg.rl.cli_mode == "real"
     assert cfg.rl.inference_strategy == "async"
     assert cfg.rl.data.format == "lerobot"
+    assert cfg.collection.teleop.control_source == "client"
+    assert cfg.collection.teleop.client.type == "vr_webxr"
     assert cfg.rl.policies[0].name == "r1lite_openpi_qpos"
     assert cfg.rl.policies[0].config.policy.type == "openpi"
     assert cfg.rl.policies[0].config.policy.host == "127.0.0.1"
     assert cfg.rl.policies[0].config.policy.port == 9000
     assert cfg.rl.critics[0].name == "r1lite_critic"
+    assert cfg.rl.intervention.source == "teleop_client"
 
 
 @pytest.mark.parametrize(
     ("filename", "robot_type"),
     [
         ("agibot_g2_rl.py", "agibot_g2"),
+        ("arx_x5_rl.py", "arx_x5"),
         ("arx_r5_rl.py", "arx_r5"),
         ("dual_agilex_piper_rl.py", "agilex_piper"),
         ("dual_franka_rl.py", "dual_franka"),
@@ -102,6 +107,37 @@ def test_all_robot_rl_templates_load(filename: str, robot_type: str):
     assert cfg.rl.critics[0].type == "websocket"
     assert cfg.rl.data.format == "lerobot"
     assert cfg.rl.intervention.control_mode == "relative"
+    assert cfg.rl.intervention.source == "teleop_client"
+    assert cfg.collection.teleop.control_source == "client"
+    assert cfg.collection.teleop.client.type == "vr_webxr"
+
+
+@pytest.mark.parametrize(
+    ("filename", "robot_type"),
+    [
+        ("arx_x5_rl.py", "arx_x5"),
+        ("dual_agilex_piper_rl.py", "agilex_piper"),
+    ],
+)
+def test_vr_rl_templates_reuse_client_teleop_and_open_on_rl_tab(filename: str, robot_type: str):
+    cfg = load_config(_CONFIGS_DIR / "04_rl" / filename)
+
+    assert cfg.robot.type == robot_type
+    assert cfg.console.initial_tab == "rl"
+    assert cfg.collection.teleop.control_source == "client"
+    assert cfg.collection.teleop.client.type == "vr_webxr"
+    assert cfg.rl.intervention.source == "teleop_client"
+    assert cfg.rl.policies[0].config.robot.type == robot_type
+
+
+def test_build_rl_active_config_preserves_vr_teleop_contract():
+    cfg = load_config(_CONFIGS_DIR / "04_rl" / "dual_agilex_piper_rl.py")
+
+    active = app_rl.build_rl_active_config(cfg, 0)
+
+    assert active.collection.teleop.control_source == "client"
+    assert active.collection.teleop.client.type == "vr_webxr"
+    assert active.rollout.intervention.source == "teleop_client"
 
 
 def test_rl_local_config_pattern_is_ignored():
@@ -132,6 +168,19 @@ def test_rl_config_rejects_unimplemented_transition_storage(tmp_path):
     )
 
     with pytest.raises(ValueError, match="rl.data.format must be 'lerobot'"):
+        load_config(config)
+
+
+def test_rl_teleop_client_source_requires_client_control_source(tmp_path):
+    config = tmp_path / "rl_bad_source.py"
+    config.write_text(
+        "_base_ = ['"
+        + str((_CONFIGS_DIR / "04_rl" / "r1lite_rl.py").resolve())
+        + "']\ncollection = dict(teleop=dict("
+        + "_delete_=True, control_source='transport', client={}))\n"
+    )
+
+    with pytest.raises(ValueError, match="requires collection.teleop.control_source='client'"):
         load_config(config)
 
 
@@ -214,6 +263,17 @@ def test_console_initial_tab_rejects_unknown_workspace(tmp_path):
             "collection = dict(teleop=dict("
             "control_source='client', client=dict(type='unknown')))\n",
             "unsupported teleop client type",
+        ),
+        (
+            "rl_cfg = dict(data=dict(format='lerobot'), intervention=dict(source='invalid'))\n",
+            "rl.intervention.source",
+        ),
+        (
+            "rl_cfg = dict(\n"
+            "    data=dict(format='lerobot'),\n"
+            "    intervention=dict(source='teleop_client'),\n"
+            ")\n",
+            "collection.teleop.control_source='client'",
         ),
     ],
 )
@@ -362,6 +422,7 @@ def test_collection_tasks_are_dataset_to_prompt_target_lists(tmp_path):
         "dict(cup_set=[('pick up cup', 0)])",
         "dict(cup_set=[('pick up cup', -2)])",
         "dict(cup_set=[('pick up cup', 1.5)])",
+        "dict(**{'..': [('pick up cup', 1)]})",
     ],
 )
 def test_collection_tasks_reject_invalid_grouping(tmp_path, tasks):
@@ -371,6 +432,26 @@ def test_collection_tasks_reject_invalid_grouping(tmp_path, tasks):
     )
 
     with pytest.raises(ValueError, match="collection.tasks|collection prompt"):
+        load_config(cfg_path)
+
+
+@pytest.mark.parametrize(
+    "remote_dir",
+    [
+        "/datasets/../escape",
+        "/datasets/./current",
+    ],
+)
+def test_collection_sftp_remote_dir_rejects_noncanonical_absolute_paths(tmp_path, remote_dir):
+    cfg_path = _write_config(
+        tmp_path / "bad_sftp.py",
+        "collection = dict(storage=dict(sftp=dict("
+        "host='upload.example.com', port=22, remote_dir="
+        f"{remote_dir!r}"
+        ")))\n",
+    )
+
+    with pytest.raises(ValueError, match="collection.storage.sftp.remote_dir"):
         load_config(cfg_path)
 
 

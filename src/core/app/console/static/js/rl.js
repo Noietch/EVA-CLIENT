@@ -104,6 +104,36 @@ function syncModelLink(id, selected, connected, error, optional = false) {
   link.title = error || "";
 }
 
+function resolveRlInterventionSource(status) {
+  const rolloutSource = status && status.rollout_intervention_source;
+  if (rolloutSource) return String(rolloutSource);
+  const rlSource = status && status.rl && status.rl.rollout_intervention_source;
+  if (rlSource) return String(rlSource);
+  const rlCfg = (S.CFG && S.CFG.rl && S.CFG.rl.intervention) || {};
+  if (rlCfg.source) return String(rlCfg.source);
+  const rolloutCfg = (S.CFG && S.CFG.rollout && S.CFG.rollout.intervention) || {};
+  if (rolloutCfg.source) return String(rolloutCfg.source);
+  return "transport";
+}
+
+function syncRlTeleopStatus(status) {
+  const badge = $("rl-teleop-status");
+  if (!badge) return { ready: true, state: "off" };
+  const source = resolveRlInterventionSource(status);
+  const teleop = status && status.teleop;
+  const vrClient = source === "teleop_client";
+  const fault = vrClient && !!(teleop && (teleop.last_fault || teleop.source_error));
+  const linked = !!(teleop && teleop.connected && !fault);
+  const state = !vrClient ? "off" : (fault ? "warn" : (linked ? "ok" : "warn"));
+  const text = !vrClient ? "VR N/A" : (fault ? "VR ERROR" : (linked ? "VR LINKED" : "VR DOWN"));
+  badge.dataset.state = state;
+  badge.textContent = text;
+  badge.title = !vrClient
+    ? "Rollout HIL is using transport teleop"
+    : (fault ? (teleop.last_fault || teleop.source_error || "VR input error") : "VR controller connection for rollout HIL");
+  return { source, ready: linked, vrClient, fault };
+}
+
 function syncRlStageCharts(status) {
   const stage = $("stage");
   if (!stage) return;
@@ -484,6 +514,7 @@ function renderRlStatus(status) {
   if (criticChoice) criticChoice.style.display = setup ? "" : "none";
   syncRlStageCharts(status);
   updateScrub();
+  const teleop = syncRlTeleopStatus(status);
   const retry = $("rl-b-setup");
   retry.disabled = !selected || setupBusy || status.session_status === "running";
   retry.style.display = setupError && !setup ? "" : "none";
@@ -506,6 +537,7 @@ function renderRlStatus(status) {
   const intervention = !!status.rollout_intervention_active;
   const hilSupported = !!status.hil_supported;
   const hilEnabled = !!status.rollout_intervention_enabled;
+  const teleopStatus = status.teleop || {};
   $("rl-hil-enable").checked = hilEnabled;
   $("rl-hil-enable").disabled = !setup || !hilSupported || intervention;
   $("rl-hil-label").textContent = hilSupported ? (hilEnabled ? "HIL ON" : "HIL OFF") : "HIL N/A";
@@ -519,7 +551,7 @@ function renderRlStatus(status) {
   $("rl-b-intervene").textContent = hilEnabled ? "INTERVENE ■" : "STOP ■";
   $("rl-b-accept").disabled = !intervention;
   $("rl-b-abandon").disabled = !intervention;
-  $("rl-run-error").textContent = setupError || rl.critic_error || "";
+  $("rl-run-error").textContent = setupError || rl.critic_error || (teleop.fault ? (teleopStatus.last_fault || teleopStatus.source_error || "") : "");
 
   const progress = Math.max(0, Math.min(1, Number(rollout.progress || 0)));
   const items = (rollout.episodes || []).concat(rollout.queue || []);

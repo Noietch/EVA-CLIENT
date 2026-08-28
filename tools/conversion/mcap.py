@@ -76,29 +76,85 @@ def _write_video_messages(
     expected_frames: int,
 ) -> None:
     frame_period_ns = max(1, int(round(1_000_000_000 / fps)))
-    next_timestamp = frame_period_ns
-    for key, path in videos.items():
-        channel_id = writer.register_channel(
+    channels = {
+        key: writer.register_channel(
             topic=f"episode/image/{key}",
             message_encoding="messagepack",
             schema_id=0,
         )
-        observed_frames = 0
-        for frame_index, frame in enumerate(video_frames(path)):
+        for key in videos
+    }
+    frames_by_key = {key: iter(video_frames(path)) for key, path in videos.items()}
+    observed_frames = {key: 0 for key in videos}
+
+    # Emit one aligned timestamp per frame index across all cameras.
+    for frame_index in range(expected_frames):
+        timestamp = (frame_index + 1) * frame_period_ns
+        for key in videos:
+            frame = _next_frame(
+                frames_by_key[key],
+                episode_index=episode_index,
+                key=key,
+                observed_frames=observed_frames[key],
+                expected_frames=expected_frames,
+            )
             writer.add_message(
-                channel_id=channel_id,
-                log_time=next_timestamp,
-                publish_time=next_timestamp,
+                channel_id=channels[key],
+                log_time=timestamp,
+                publish_time=timestamp,
                 sequence=frame_index,
                 data=_pack(np.asarray(frame)),
             )
-            observed_frames += 1
-            next_timestamp += frame_period_ns
-        if observed_frames != expected_frames:
-            raise ValueError(
-                f"MCAP episode {episode_index} video {key!r} has {observed_frames} frames; "
-                f"expected {expected_frames}"
-            )
+            observed_frames[key] += 1
+
+    # Validate there are no trailing frames beyond the shared sequence length.
+    for key in videos:
+        _ensure_frame_count(
+            frames_by_key[key],
+            episode_index=episode_index,
+            key=key,
+            observed_frames=observed_frames[key],
+            expected_frames=expected_frames,
+        )
+
+
+def _next_frame(
+    frames: Any,
+    *,
+    episode_index: int,
+    key: str,
+    observed_frames: int,
+    expected_frames: int,
+) -> np.ndarray:
+    try:
+        return np.asarray(next(frames))
+    except StopIteration as error:
+        raise ValueError(
+            f"MCAP episode {episode_index} video {key!r} has {observed_frames} frames; "
+            f"expected {expected_frames}"
+        ) from error
+
+
+def _ensure_frame_count(
+    frames: Any,
+    *,
+    episode_index: int,
+    key: str,
+    observed_frames: int,
+    expected_frames: int,
+) -> None:
+    try:
+        next(frames)
+    except StopIteration:
+        return
+
+    observed_frames += 1
+    for _ in frames:
+        observed_frames += 1
+    raise ValueError(
+        f"MCAP episode {episode_index} video {key!r} has {observed_frames} frames; "
+        f"expected {expected_frames}"
+    )
 
 
 def _pack(value: Any) -> bytes:

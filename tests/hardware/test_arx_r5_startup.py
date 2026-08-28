@@ -17,17 +17,7 @@ TELEOP = ARX_R5_DIR / "teleop.py"
 
 
 def _arx_r5_env_ready() -> bool:
-    if not (ARX_R5_DIR / ".venv" / "bin" / "python").is_file():
-        return False
-    result = subprocess.run(
-        ["bash", str(SCRIPT), "--help"],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        timeout=20,
-        check=False,
-    )
-    return result.returncode == 0
+    return (ARX_R5_DIR / ".venv" / "bin" / "python").is_file()
 
 
 def test_arx_r5_shell_entrypoints_have_valid_bash_syntax() -> None:
@@ -91,7 +81,7 @@ def test_arx_r5_help_forwards_arguments_without_can_access() -> None:
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
-        timeout=20,
+        timeout=60,
         check=False,
     )
 

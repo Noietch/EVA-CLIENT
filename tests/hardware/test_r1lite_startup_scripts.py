@@ -16,6 +16,7 @@ ALLOWED_FILES = {
     "run_fake_node.sh",
     "run_hardware.sh",
     "setup_env.sh",
+    "uv.lock",
 }
 
 REMOVED_HELPERS = {
@@ -231,12 +232,15 @@ def test_r1lite_setup_script_builds_the_local_helper_environment():
     project = (R1_LITE_DIR / "pyproject.toml").read_text()
 
     assert 'name = "eva-r1-lite-hardware"' in project
-    assert 'requires-python = ">=3.10,<3.13"' in project
+    assert 'requires-python = ">=3.11,<3.12"' in project
     assert 'eva-client = { path = "../../..", editable = true }' in project
     assert 'R1_LITE_DIR="$REPO_ROOT/examples/hardware/r1_lite"' in setup
     assert 'R1_LITE_VENV_DIR="${R1_LITE_VENV_DIR:-$R1_LITE_DIR/.venv}"' in setup
     assert 'UV_PROJECT_ENVIRONMENT="$R1_LITE_VENV_DIR" uv sync --project "$R1_LITE_DIR"' in setup
+    assert "if [[ -f /opt/ros/humble/setup.bash ]]; then" in setup
     assert "source /opt/ros/humble/setup.bash" in setup
+    assert "R1 Lite offline helper environment is ready" in setup
+    assert "Real ROS workflows require /opt/ros/humble/setup.bash" in setup
 
 
 def test_run_hardware_keeps_real_r1lite_fastdds_environment_external():

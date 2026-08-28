@@ -69,8 +69,22 @@ def test_arx_x5_uses_an_isolated_python_project() -> None:
     assert '"${ARX_X5_PYTHON}" -m venv --clear "${ARX_X5_VENV_DIR}"' in setup
     assert '"${ARX_X5_PYTHON_BIN}" -m pip install "${ARX_X5_DIR}"' in setup
     assert 'ARX_X5_SDK_DIR="${ARX_X5_DIR}/SDK/X5"' in setup
+    assert 'ARX_X5_SDK_SUBMODULE_PATH="examples/hardware/arx_x5/SDK/X5"' in setup
+    assert 'ARX_X5_REPO_ROOT=""' in setup
+    assert (
+        'ARX_X5_REPO_ROOT="$(git -C "${ARX_X5_DIR}" rev-parse --show-toplevel 2>/dev/null)"'
+    ) in setup
+    assert (
+        'git -C "${ARX_X5_REPO_ROOT}" submodule update --init --recursive -- '
+        '"${ARX_X5_SDK_SUBMODULE_PATH}"'
+    ) in setup
+    assert 'submodule update --init --recursive -- "${ARX_X5_SDK_SUBMODULE_PATH}"' in setup
+    assert "is not available outside a git checkout" in setup
     assert "git clone" not in setup
     assert "official ARX X5 SDK-V2" in setup
+    assert "from bimanual import SingleArm" in setup
+    assert "forward_kinematics" not in setup
+    assert "inverse_kinematics" not in setup
 
 
 def test_arx_x5_launcher_uses_only_the_arx_x5_sdk_layout() -> None:

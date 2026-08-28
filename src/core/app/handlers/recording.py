@@ -15,8 +15,11 @@ import numpy as np
 from core.app.collection_capture import start_collection_capture, stop_collection_capture
 from core.app.handlers.imaging import prepare_image
 from core.app.handlers.teleop import (
+    TELEOP_CONTROL_SOURCE_CLIENT,
     PublishedTeleopAction,
+    activate_rollout_teleop,
     activate_teleop,
+    deactivate_rollout_teleop,
     deactivate_teleop,
 )
 from core.app.handlers.utils import _resolve_runtime_path
@@ -32,12 +35,15 @@ from core.config import ConfigDict
 from core.recorder.episode import EpisodeLogger, sanitize_path_component
 from core.recorder.lerobot_meta import history_row
 from core.types import Observation, RolloutInterventionSegment
+from transport.base import HilStatus
 
 logger = logging.getLogger(__name__)
 
 
 COLLECT_STEP_MAX_RAW_SNAPSHOTS = 16
 ROLLOUT_STEP_MAX_RAW_SNAPSHOTS = 1
+ROLLOUT_INTERVENTION_SOURCE_TRANSPORT = "transport"
+ROLLOUT_INTERVENTION_SOURCE_CLIENT = "teleop_client"
 
 
 def state_to_eef(config: ConfigDict, runtime: RuntimeState, qpos_state: np.ndarray) -> np.ndarray:
@@ -175,6 +181,45 @@ def _gripper_recording_config(
     )
 
 
+def rollout_intervention_source(config: ConfigDict) -> str:
+    teleop_cfg = (config.get("collection") or {}).get("teleop") or {}
+    if str(teleop_cfg.get("control_source", "")) == TELEOP_CONTROL_SOURCE_CLIENT:
+        return ROLLOUT_INTERVENTION_SOURCE_CLIENT
+    rl_cfg = config.get("rl")
+    if rl_cfg is not None:
+        rl_intervention = rl_cfg.get("intervention") or {}
+        source = rl_intervention.get("source")
+        if source:
+            return str(source)
+    rollout_cfg = config.get("rollout") or {}
+    rollout_intervention = rollout_cfg.get("intervention") or {}
+    source = rollout_intervention.get("source")
+    if source:
+        return str(source)
+    return ROLLOUT_INTERVENTION_SOURCE_TRANSPORT
+
+
+def rollout_hil_status(config: ConfigDict, runtime: RuntimeState) -> HilStatus:
+    source = rollout_intervention_source(config)
+    if source != ROLLOUT_INTERVENTION_SOURCE_CLIENT:
+        return runtime.transport.hil_status()
+    execution = getattr(runtime, "teleop_execution", None)
+    client = getattr(runtime, "teleop_client", None)
+    if execution is None or execution.control_source != TELEOP_CONTROL_SOURCE_CLIENT:
+        return HilStatus(supported=False, error="Teleop client control is not configured")
+    if client is None:
+        return HilStatus(supported=False, error="Teleop client is unavailable")
+    status = client.status()
+    error = status.source_error
+    if not status.connected and not error:
+        error = "Teleop client is not connected"
+    return HilStatus(
+        supported=True,
+        active=bool(runtime.rollout_intervention_active and execution.active and status.connected),
+        error=error,
+    )
+
+
 def resolve_storage(config: ConfigDict) -> ConfigDict | None:
     """Return the active recording storage block: ``eval.storage`` for eval configs,
     else ``collection.storage`` for collection configs, else None (no recording).
@@ -250,7 +295,7 @@ def maybe_build_rollout_episode_logger(config: ConfigDict, runtime: RuntimeState
         dataset_keys=config.transport.dataset_keys,
         convert_bgr_to_rgb=config.transport.convert_bgr_to_rgb,
         collection=None,
-        async_save=True,
+        async_save=bool(storage.get("async_save", True)),
         save_queue_max=storage.save_queue_max,
         save_image_height=storage.get("image_height"),
         save_image_width=storage.get("image_width"),
@@ -645,9 +690,14 @@ def start_rollout_intervention(
     if not runtime.rollout_intervention_enabled:
         session.last_error = "Rollout HIL is off"
         return False
-    hil_status = runtime.transport.hil_status()
-    if not hil_status.supported:
-        session.last_error = hil_status.error or "Transport does not support HIL"
+    source = rollout_intervention_source(config)
+    hil_status = rollout_hil_status(config, runtime)
+    if not hil_status.supported or hil_status.error:
+        session.last_error = hil_status.error or (
+            "Teleop client is unavailable"
+            if source == ROLLOUT_INTERVENTION_SOURCE_CLIENT
+            else "Transport does not support HIL"
+        )
         return False
     pre_qpos = runtime.transport.get_latest_qpos()
     if pre_qpos is None:
@@ -656,10 +706,14 @@ def start_rollout_intervention(
     # Keep the raw capture runner active through HIL so camera streams remain continuous.
     if runtime.infer_strategy is not None:
         runtime.infer_strategy.reset()
-    started = runtime.transport.start_hil_control(runtime.hil_control_mode)
-    if not started.supported or not started.active or started.error:
-        session.last_error = started.error or "HIL takeover did not activate"
-        return False
+    if source == ROLLOUT_INTERVENTION_SOURCE_CLIENT:
+        if not activate_rollout_teleop(config, runtime, session):
+            return False
+    else:
+        started = runtime.transport.start_hil_control(runtime.hil_control_mode)
+        if not started.supported or not started.active or started.error:
+            session.last_error = started.error or "HIL takeover did not activate"
+            return False
     intervention_start_time = time.time()
     _close_rollout_exclusion(runtime, intervention_start_time)
     runtime.rollout_intervention_pre_qpos = np.asarray(pre_qpos, dtype=np.float32).copy()
@@ -690,10 +744,20 @@ def stop_rollout_intervention(
     """Disable rollout teleop takeover before policy resume or cleanup."""
     if not runtime.rollout_intervention_active:
         return True
-    stopped = runtime.transport.stop_hil_control()
-    if required and (stopped.active or stopped.error):
-        session.last_error = stopped.error or "HIL takeover did not stop"
-        return False
+    if rollout_intervention_source(config) == ROLLOUT_INTERVENTION_SOURCE_CLIENT:
+        try:
+            deactivate_rollout_teleop(runtime)
+        except Exception as error:
+            session.last_error = f"Teleop takeover did not stop: {error}"
+            if required:
+                return False
+            logger.warning("Rollout teleop cleanup failed during optional stop: %s", error)
+            return False
+    else:
+        stopped = runtime.transport.stop_hil_control()
+        if required and (stopped.active or stopped.error):
+            session.last_error = stopped.error or "HIL takeover did not stop"
+            return False
     runtime.rollout_intervention_active = False
     logger.info(
         "Rollout teleop intervention stopped queued_raw_snapshots=%d",
@@ -762,6 +826,38 @@ def record_rollout_intervention_step(runtime: RuntimeState, session: SessionStat
     if frame is None:
         return False
     return _record_rollout_intervention_frame(runtime, session, frame)
+
+
+def record_client_rollout_intervention_step(
+    config: ConfigDict,
+    runtime: RuntimeState,
+    session: SessionState,
+    published: PublishedTeleopAction,
+) -> bool:
+    """Record one client-driven RL intervention step into the active rollout segment."""
+    if not runtime.rollout_intervention_active:
+        return False
+    segment = runtime.rollout_intervention_active_segment
+    if segment is None or segment.invalid_reason:
+        return False
+    frame = runtime.transport.get_frame()
+    if frame is None:
+        return False
+    recorded = _copy_observation(frame)
+    if recorded.timestamp <= 0.0:
+        recorded.timestamp = time.time()
+    recorded.action_qpos = published.qpos.copy()
+    if recorded.state_qpos is None:
+        latest_qpos = runtime.transport.get_latest_qpos()
+        if latest_qpos is not None:
+            recorded.state_qpos = np.asarray(latest_qpos, dtype=np.float32).copy()
+    try:
+        _fill_record_eef(config, runtime, recorded, published.qpos)
+    except Exception as error:
+        segment.invalid_reason = f"Intervention frame EEF derivation failed: {error}"
+        session.last_error = segment.invalid_reason
+        return False
+    return _record_rollout_intervention_frame(runtime, session, recorded)
 
 
 def accept_rollout_intervention_segment(runtime: RuntimeState, session: SessionState) -> bool:
@@ -1057,7 +1153,9 @@ def record_executed_action(
     runner = getattr(runtime, "collection_capture_runner", None)
     rollout_timestamp = None
     if rollout_logger in loggers:
-        rollout_timestamp = time.time()
+        rollout_timestamp = runtime.last_collection_timestamp
+        if rollout_timestamp is None:
+            rollout_timestamp = time.time()
         _close_rollout_exclusion(runtime, rollout_timestamp)
     if rollout_logger in loggers and runner is None:
         assert rollout_logger is not None
@@ -1130,7 +1228,10 @@ __all__ = [
     "end_episode",
     "start_rollout_intervention",
     "stop_rollout_intervention",
+    "rollout_hil_status",
+    "rollout_intervention_source",
     "record_rollout_intervention_step",
+    "record_client_rollout_intervention_step",
     "accept_rollout_intervention_segment",
     "discard_rollout_intervention_segment",
     "rollback_rollout_intervention",

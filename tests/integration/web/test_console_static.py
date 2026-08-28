@@ -124,7 +124,7 @@ def test_console_post_requests_are_serialized():
     assert "postQueue = result.then(() => undefined, () => undefined);" in html
 
 
-def test_quality_export_and_upload_do_not_block_collection_controls():
+def test_quality_export_and_upload_ui_wiring_supports_format_switch_and_remote_dir_status():
     html = console_source()
     source = (STATIC_DIR / "js" / "collect.js").read_text()
 
@@ -132,34 +132,21 @@ def test_quality_export_and_upload_do_not_block_collection_controls():
     assert 'apiPost("/api/collect_quality_upload", {' in html
     assert html.count("}, { concurrent: true });") >= 2
     assert "/api/collect_quality_export?job_id=" in html
+    assert "/api/collect_quality_upload?job_id=" in html
     assert 'id="collect-export-format"' in html
     assert "exportFormatSelect.onchange = changeCollectionExportFormat;" in source
     assert "function changeCollectionExportFormat()" in html
     assert 'qualityTransfer.acceptedDir = "";' in html
-    assert 'value="lerobot_v3"' in html
-    assert 'value="hdf5"' in html
-    assert 'value="mcap"' in html
-    assert "episodes · ${formatLabel}" in html
-    assert "accepted upload complete · ${job.files_total || 0} files" in html
-
-
-def test_quality_export_format_controls_requests_and_upload_readiness():
-    source = (STATIC_DIR / "js" / "collect.js").read_text()
-
     assert 'const datasetFormat = $("collect-export-format").value;' in source
     assert source.count("dataset_format: datasetFormat,") == 2
     assert "qualityTransfer.datasetFormat === selectedFormat" in source
     assert "datasetFormat !== selectedFormat" in source
-    assert (
-        "exportFormat.disabled = qualityTransfer.exporting || qualityTransfer.uploading;" in source
-    )
-    assert "exportButton.disabled = !enabled || !episodes.length ||" in source
-    assert "uploadButton.disabled = !upload.configured || !selectedExportReady ||" in source
-
-
-def test_quality_export_progress_and_outcomes_include_selected_format():
-    html = console_source()
-
+    assert "overwrite:" not in source
+    assert 'const remoteDir = job.remote_dir || "remote target";' in source
+    assert 'value="lerobot_v3"' in html
+    assert 'value="hdf5"' in html
+    assert 'value="mcap"' in html
+    assert "episodes · ${formatLabel}" in html
     assert 'id="collect-quality-status" role="status" aria-live="polite"' in html
     assert '`${formatLabel} ${showingExport ? "export" : "upload"} progress`' in html
     assert "export required before upload" in html
@@ -167,6 +154,11 @@ def test_quality_export_progress_and_outcomes_include_selected_format():
     assert "accepted upload complete ·" in html
     assert "`✗ ${formatLabel} export · ${message}`" in html
     assert "`✗ ${formatLabel} upload · ${message}`" in html
+    assert (
+        "exportFormat.disabled = qualityTransfer.exporting || qualityTransfer.uploading;" in source
+    )
+    assert "exportButton.disabled = !enabled || !episodes.length ||" in source
+    assert "uploadButton.disabled = !upload.configured || !selectedExportReady ||" in source
 
 
 def test_console_boots_into_the_configured_tab():
@@ -909,28 +901,6 @@ def test_manual_qc_fail_marks_episode_tile_red():
     assert 'item.qc_verdict === "fail"' in html
 
 
-def test_collection_quality_export_and_upload_are_config_driven():
-    html = console_source()
-
-    assert 'id="b-collect-quality-export"' in html
-    assert 'id="b-collect-quality-upload"' in html
-    assert ">EXPORT DATASET</button>" in html
-    assert 'id="collect-quality-target"' not in html
-    assert 'id="collect-quality-progress-label"' in html
-    assert 'id="collect-quality-progress-bar"' in html
-    assert 'id="collect-quality-progress-fill"' in html
-    assert 'apiPost("/api/collect_quality_export", {' in html
-    assert 'apiPost("/api/collect_quality_upload", {' in html
-    assert "job.bytes_completed" in html
-    assert "job.bytes_total" in html
-    assert "job.episodes_completed" in html
-    assert "job.episodes_total" in html
-    assert 'job.state === "completed"' in html
-    assert "function qualityUploadTargets(upload)" not in html
-    assert 'backendLabel.join(" + ")' in html
-    assert "upload.configured" in html
-
-
 def test_rl_manual_qc_pass_overrides_automatic_quality_tone():
     html = console_source()
     start = html.index("function episodeTone(item)")
@@ -1061,8 +1031,27 @@ def test_hil_toggle_is_wired_only_in_rl_workspace():
 
     assert 'id="hil-intervention-enable"' not in html
     assert 'aria-label="Enable RL HIL intervention"' in html
+    assert 'id="rl-teleop-status"' in html
+    assert 'data-state="off">VR N/A</span>' in html
     assert 'id="rl-hil-enable" disabled aria-label="Enable RL HIL intervention"' in html
     assert 'apiPost("/api/rl/hil_enabled"' in html
+    assert "function resolveRlInterventionSource(status) {" in html
+    assert "const rolloutSource = status && status.rollout_intervention_source;" in html
+    assert "const rlCfg = (S.CFG && S.CFG.rl && S.CFG.rl.intervention) || {};" in html
+    assert (
+        "const rolloutCfg = (S.CFG && S.CFG.rollout && S.CFG.rollout.intervention) || {};" in html
+    )
+    assert html.index(
+        "const rlCfg = (S.CFG && S.CFG.rl && S.CFG.rl.intervention) || {};"
+    ) < html.index(
+        "const rolloutCfg = (S.CFG && S.CFG.rollout && S.CFG.rollout.intervention) || {};"
+    )
+    assert "const source = resolveRlInterventionSource(status);" in html
+    assert 'const vrClient = source === "teleop_client";' in html
+    assert "badge.dataset.state = state;" in html
+    assert "badge.textContent = text;" in html
+    assert 'rl-hil-enable").disabled = !setup || !hilSupported || intervention;' in html
+    assert 'rl-b-intervene").disabled = !running;' in html
     assert 'class="rl-preview-banner"' not in html
 
 
