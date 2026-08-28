@@ -984,7 +984,7 @@
   .collect-control-state:last-child { border-bottom: 0; }
   .collect-control-state[data-state="active"] .collect-state-value { color: var(--ok); }
   .collect-control-state[data-state="ready"] .collect-state-value { color: var(--accent); }
-  .collect-control-state[data-state="locked"] .collect-state-value { color: var(--danger); }
+  .collect-control-state[data-state="disabled"] .collect-state-value { color: var(--ink-faint); }
   .collect-control-state[data-state="unavailable"] { opacity: 0.48; }
   .collect-command {
     min-width: 0; display: flex !important; align-items: center;
