@@ -558,6 +558,27 @@ class Ros1Transport(_RosTransportBase):
             parts.append(np.asarray(deque[-1].position, dtype=np.float32))
         return np.concatenate(parts, axis=0)
 
+    def get_camera_frame(self, key: str) -> np.ndarray | None:
+        """Return one camera's newest image without consuming synchronized queues.
+
+        The console uses this read-only path for MJPEG previews. Keeping it
+        separate from ``get_frame`` prevents preview clients from stealing frames
+        from the control or collection synchronizers.
+        """
+        camera_name = None
+        for camera in self._robot.observation_schema.cameras:
+            if key in (camera.name, camera.observation_key):
+                camera_name = camera.name
+                break
+        if camera_name is None:
+            return None
+        with self._deque_guard():
+            deque = self._camera_deques.get(camera_name)
+            if not deque:
+                return None
+            msg = deque[-1]
+        return self._bridge.imgmsg_to_cv2(msg, "passthrough")
+
     def publish_action(self, action: np.ndarray, target: str = "real") -> None:
         """Split the action by group and publish JointState commands to ROS topics.
 

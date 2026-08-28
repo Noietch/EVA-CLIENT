@@ -20,9 +20,12 @@ from __future__ import annotations
 import collections
 import dataclasses
 import logging
+import tempfile
 import threading
 import time
+from pathlib import Path
 
+import msgpack
 import numpy as np
 from openpi_client import msgpack_numpy
 
@@ -72,6 +75,8 @@ class WireObservation:
     hil_supported: bool = False
     hil_active: bool = False
     hil_error: str = ""
+    operator_event: str = ""
+    operator_event_id: int = 0
 
 
 @dataclasses.dataclass
@@ -82,6 +87,8 @@ class WireAction:
         t: client-side send timestamp in seconds.
         action: flat action vector (joint space, full robot DOF).
         target: "real", "sim", "collect_start", or "collect_stop".
+        mode: Optional control mode. Collection start uses the teleop control
+            source; HIL start uses the intervention mode.
     """
 
     t: float
@@ -117,6 +124,9 @@ def pack_observation(obs: WireObservation) -> bytes:
     payload["hil_active"] = bool(obs.hil_active)
     if obs.hil_error:
         payload["hil_error"] = str(obs.hil_error)
+    if obs.operator_event:
+        payload["operator_event"] = str(obs.operator_event)
+        payload["operator_event_id"] = int(obs.operator_event_id)
     return _PACKER.pack(payload)
 
 
@@ -146,7 +156,44 @@ def unpack_observation(payload: bytes) -> WireObservation:
         hil_supported=bool(raw.get("hil_supported", False)),
         hil_active=bool(raw.get("hil_active", False)),
         hil_error=str(raw.get("hil_error", "")),
+        operator_event=str(raw.get("operator_event", "")),
+        operator_event_id=int(raw.get("operator_event_id", 0)),
     )
+
+
+def _inspect_observation_payload(payload: bytes) -> tuple[float, frozenset[str]]:
+    """Read capture metadata without materializing packed NumPy arrays."""
+    unpacker = msgpack.Unpacker(raw=False)
+    unpacker.feed(payload)
+    timestamp = None
+    image_keys: frozenset[str] = frozenset()
+    for _ in range(unpacker.read_map_header()):
+        key = unpacker.unpack()
+        if key == "t":
+            timestamp = float(unpacker.unpack())
+            continue
+        if key != "images":
+            unpacker.skip()
+            continue
+        keys = set()
+        for _ in range(unpacker.read_map_header()):
+            keys.add(str(unpacker.unpack()))
+            unpacker.skip()
+        image_keys = frozenset(keys)
+    if timestamp is None:
+        raise ValueError("wire observation is missing capture timestamp")
+    return timestamp, image_keys
+
+
+def _observation_timestamp(payload: bytes) -> float:
+    """Read the first wire field (``t``) from a small payload prefix."""
+    unpacker = msgpack.Unpacker(raw=False)
+    unpacker.feed(payload[:64])
+    unpacker.read_map_header()
+    if unpacker.unpack() == "t":
+        return float(unpacker.unpack())
+    timestamp, _ = _inspect_observation_payload(payload)
+    return timestamp
 
 
 def pack_action(action: WireAction) -> bytes:
@@ -175,6 +222,49 @@ def unpack_action(payload: bytes) -> WireAction:
 # --- transport -----------------------------------------------------------------
 
 
+class _WireCaptureJournal:
+    """Byte-preserving disk journal for selected collection snapshots awaiting save."""
+
+    def __init__(self, directory: Path | None = None) -> None:
+        if directory is not None:
+            directory.mkdir(parents=True, exist_ok=True)
+        self._file = tempfile.TemporaryFile(
+            prefix="eva-zmq-wire-",
+            dir=directory,
+            buffering=0,
+        )
+        self._lock = threading.Lock()
+        self._size = 0
+
+    def append(self, payload: bytes) -> _WireJournalEntry:
+        with self._lock:
+            offset = self._size
+            self._file.seek(offset)
+            written = self._file.write(payload)
+            if written != len(payload):
+                raise OSError(f"short write to ZMQ wire journal: {written}/{len(payload)}")
+            self._size += written
+        return _WireJournalEntry(self, offset, written)
+
+    def read(self, offset: int, size: int) -> bytes:
+        with self._lock:
+            self._file.seek(offset)
+            payload = self._file.read(size)
+        if len(payload) != size:
+            raise OSError(f"short read from ZMQ wire journal: {len(payload)}/{size}")
+        return payload
+
+
+@dataclasses.dataclass(frozen=True)
+class _WireJournalEntry:
+    journal: _WireCaptureJournal
+    offset: int
+    size: int
+
+    def read(self) -> bytes:
+        return self.journal.read(self.offset, self.size)
+
+
 class _ObservationReader:
     """One independent SUB socket + the WireObservation->Observation conversion.
 
@@ -191,6 +281,7 @@ class _ObservationReader:
         robot: Robot,
         zmq_mod,
         preserve_collection_backlog: bool = False,
+        conflate: bool = False,
     ) -> None:
         self._robot = robot
         self._zmq = zmq_mod
@@ -203,6 +294,9 @@ class _ObservationReader:
         self._image_rate = ImageRateTracker()
         self._lock = threading.Lock()
         self._closed = False
+        self._collection_journal: _WireCaptureJournal | None = None
+        self._operator_event_initialized = False
+        self._last_operator_event_id = 0
 
         self._disabled_cameras = set(config.transport.disabled_cameras)
         self._disabled_groups = set(config.transport.disabled_groups)
@@ -218,9 +312,14 @@ class _ObservationReader:
 
         ctx = zmq_mod.Context.instance()
         self._sub = ctx.socket(zmq_mod.SUB)
-        self._sub.connect(config.transport.sub_endpoint)
+        if conflate:
+            # Collection capture only consumes the freshest complete observation.
+            # Conflation prevents an idle reader from replaying pre-START frames
+            # that are still buffered below the application-level drain.
+            self._sub.setsockopt(zmq_mod.CONFLATE, 1)
         self._sub.setsockopt(zmq_mod.SUBSCRIBE, b"")
         self._sub.setsockopt(zmq_mod.RCVTIMEO, 0)  # non-blocking drain
+        self._sub.connect(config.transport.sub_endpoint)
 
     def _drain_latest(self) -> WireObservation | None:
         """Pop all queued SUB messages, keeping only the newest by timestamp."""
@@ -287,9 +386,30 @@ class _ObservationReader:
             error=observation.hil_error,
         )
 
+    def poll_operator_event(self) -> str | None:
+        """Return one new edge-triggered hardware event, never a stale replay."""
+        observation = self._drain_latest()
+        if observation is None:
+            return None
+        event_id = observation.operator_event_id
+        if not self._operator_event_initialized:
+            self._operator_event_initialized = True
+            self._last_operator_event_id = event_id
+            return None
+        if event_id < self._last_operator_event_id:
+            # Execution node restarted and reset its sequence. Establish a fresh
+            # baseline so an event retained in the newest frame cannot fire late.
+            self._last_operator_event_id = event_id
+            return None
+        if event_id == self._last_operator_event_id or not observation.operator_event:
+            return None
+        self._last_operator_event_id = event_id
+        return observation.operator_event
+
     def clear_collection_backlog(self) -> float | None:
         """Drain the socket and drop queued collection frames captured pre-recording."""
         with self._lock:
+            self._collection_journal = None
             cutoff = None
             if self._collection_queue:
                 cutoff = max(obs.t for obs in self._collection_queue)
@@ -301,7 +421,7 @@ class _ObservationReader:
                     break
             if last_payload is not None:
                 try:
-                    payload_time = unpack_observation(last_payload).t
+                    payload_time = _observation_timestamp(last_payload)
                 except Exception:
                     payload_time = None
                 if payload_time is not None:
@@ -328,11 +448,13 @@ class _ObservationReader:
         if wire_obs is None:
             return None
 
+        with self._lock:
+            latest_images = self._latest_images.copy()
         images: dict[str, np.ndarray] = {}
         for camera in self._robot.observation_schema.cameras:
             if camera.observation_key in self._disabled_cameras:
                 continue
-            image = wire_obs.images.get(camera.observation_key)
+            image = latest_images.get(camera.observation_key)
             if image is None:
                 return None
             images[camera.observation_key] = np.asarray(image)
@@ -455,7 +577,7 @@ class _ObservationReader:
         freshest snapshot, and converts it to an Observation (images plus the
         state_qpos/state_eef and action_qpos/action_eef carried on the wire).
         """
-        if self._preserve_collection_backlog:
+        if getattr(self, "_preserve_collection_backlog", False):
             wire_obs = self._drain_collection_queue()
         else:
             wire_obs = self._drain_latest()
@@ -464,26 +586,30 @@ class _ObservationReader:
         return self._wire_to_observation(wire_obs)
 
     def _drain_raw_collection(self) -> bytes | None:
-        """Drain a bounded socket batch and return only its newest raw payload.
-
-        The capture clock defines the stored frame rate, so retaining older full
-        observations would create latency and pin duplicate image payloads. Decoding
-        still happens later through the snapshot's raw-batch closure.
-        """
+        """Return one raw payload while honoring the collection backlog mode."""
         with self._lock:
-            got_message = False
-            latest = self._raw_collection_queue[-1] if self._raw_collection_queue else None
-            self._raw_collection_queue.clear()
-            for _ in range(COLLECTION_SOCKET_DRAIN_MAX):
-                try:
-                    payload = self._sub.recv(self._zmq.NOBLOCK)
-                except self._zmq.Again:
-                    break
-                got_message = True
-                latest = payload
-            if got_message:
-                self._freshness.mark()
-            return latest
+            if getattr(self, "_preserve_collection_backlog", False):
+                if self._raw_collection_queue:
+                    payload = self._raw_collection_queue.popleft()
+                else:
+                    try:
+                        payload = self._sub.recv(self._zmq.NOBLOCK)
+                    except self._zmq.Again:
+                        return None
+            else:
+                payload = self._raw_collection_queue.pop() if self._raw_collection_queue else None
+                self._raw_collection_queue.clear()
+                got_message = payload is not None
+                while True:
+                    try:
+                        payload = self._sub.recv(self._zmq.NOBLOCK)
+                    except self._zmq.Again:
+                        break
+                    got_message = True
+                if not got_message or payload is None:
+                    return None
+            self._freshness.mark()
+            return payload
 
     def acquire_collection_raw(self) -> RawCollectionSnapshot | None:
         """Capture one raw collection payload and expose it as timestamped streams.
@@ -493,9 +619,15 @@ class _ObservationReader:
         payload = self._drain_raw_collection()
         if payload is None:
             return None
-        wire_obs = unpack_observation(payload)
+        timestamp = _observation_timestamp(payload)
+        journal = getattr(self, "_collection_journal", None)
+        if journal is None:
+            journal = _WireCaptureJournal(getattr(self, "_collection_journal_dir", None))
+            self._collection_journal = journal
+        entry = journal.append(payload)
 
-        def decode_raw(wire_obs: WireObservation = wire_obs) -> CollectionRawBatch:
+        def decode_raw(entry: _WireJournalEntry = entry) -> CollectionRawBatch:
+            wire_obs = unpack_observation(entry.read())
             batch = CollectionRawBatch()
             for key, image in wire_obs.images.items():
                 batch.images.setdefault(key, []).append(
@@ -532,13 +664,26 @@ class _ObservationReader:
                 )
             return batch
 
-        return RawCollectionSnapshot(timestamp=wire_obs.t, decode_raw=decode_raw)
+        return RawCollectionSnapshot(timestamp=timestamp, decode_raw=decode_raw)
+
+    def prepare_collection_capture(self, directory: str | None) -> None:
+        """Place the next journal beside the active recorder's dataset."""
+        if not directory:
+            return
+        with self._lock:
+            self._collection_journal_dir = Path(directory)
+
+    def finish_collection_capture(self) -> None:
+        """Detach the active journal; queued snapshots retain it until save completes."""
+        with self._lock:
+            self._collection_journal = None
 
     def close(self) -> None:
         """Close this reader's SUB socket (idempotent)."""
         if self._closed:
             return
         self._closed = True
+        self._collection_journal = None
         self._sub.close(linger=0)
 
 
@@ -566,7 +711,12 @@ class ZmqTransport(TransportBridge):
         self._zmq = zmq
 
         self._reader = _ObservationReader(config, robot, zmq)
-        self._collection_reader = _ObservationReader(config, robot, zmq)
+        self._collection_reader = _ObservationReader(
+            config,
+            robot,
+            zmq,
+            preserve_collection_backlog=True,
+        )
         self._qpos_reader = _ObservationReader(config, robot, zmq)
         self._extra_readers: list[_ObservationReader] = []
 
@@ -597,6 +747,14 @@ class ZmqTransport(TransportBridge):
         """Deferred-decode collection snapshot from the dedicated collection reader."""
         return self._collection_reader.acquire_collection_raw()
 
+    def prepare_collection_capture(self, directory: str | None) -> None:
+        """Place the next raw wire journal on the active recorder's filesystem."""
+        self._collection_reader.prepare_collection_capture(directory)
+
+    def finish_collection_capture(self) -> None:
+        """Release the reader's reference to the completed raw wire journal."""
+        self._collection_reader.finish_collection_capture()
+
     def get_latest_qpos(self) -> np.ndarray | None:
         """Latest joint state [qpos_dim] float32 from the dedicated qpos reader."""
         return self._qpos_reader.get_latest_qpos()
@@ -604,6 +762,10 @@ class ZmqTransport(TransportBridge):
     def hil_status(self) -> HilStatus:
         """Return the latest HIL capability reported by the execution node."""
         return self._qpos_reader.hil_status()
+
+    def poll_operator_event(self) -> str | None:
+        """Poll the dedicated qpos/status reader for a hardware button edge."""
+        return self._qpos_reader.poll_operator_event()
 
     def _send_hil_control(self, target: str, mode: str | None = None) -> None:
         action = np.zeros(self._robot.total_action_dim, dtype=np.float32)
@@ -691,18 +853,31 @@ class ZmqTransport(TransportBridge):
         message = WireAction(t=time.monotonic(), action=np.asarray(action), target=target)
         self._pub.send(pack_action(message))
 
-    def _send_collection_control(self, target: str) -> None:
+    def _send_collection_control(self, target: str, mode: str | None = None) -> None:
         action = np.zeros(self._robot.total_action_dim, dtype=np.float32)
         for attempt in range(COLLECTION_CONTROL_REPEATS):
             self._pub.send(
-                pack_action(WireAction(t=time.monotonic(), action=action, target=target))
+                pack_action(
+                    WireAction(
+                        t=time.monotonic(),
+                        action=action,
+                        target=target,
+                        mode=mode,
+                    )
+                )
             )
             if attempt + 1 < COLLECTION_CONTROL_REPEATS:
                 time.sleep(COLLECTION_CONTROL_INTERVAL_S)
 
     def start_collection(self) -> None:
         """Tell the execution layer to start recording (sends repeated start signals)."""
-        self._send_collection_control(COLLECTION_START_TARGET)
+        teleop = (self._config.get("collection") or {}).get("teleop") or {}
+        control_source = str(teleop.get("control_source", "transport"))
+        self._send_collection_control(COLLECTION_START_TARGET, mode=control_source)
+
+    def start_policy_collection(self) -> None:
+        """Start a policy-driven rollout without connecting the teleop source."""
+        self._send_collection_control(COLLECTION_START_TARGET, mode="client")
 
     def clear_collection_backlog(self) -> float | None:
         """Drop collection frames buffered before the active recording episode."""

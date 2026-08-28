@@ -284,35 +284,32 @@ class Ros2Transport(_RosTransportBase):
             timestamp=max(state_timestamps),
         )
 
-    def _append_camera_copies(
-        self,
-        camera_name: str,
-        live_deque: collections.deque,
-        collection_deque: collections.deque,
-        msg: Any,
-    ) -> None:
-        self._image_rate.mark(camera_name)
+    def _append_collection_camera_msg(self, collection_deque: collections.deque, msg: Any) -> None:
+        """Append one image only while collection capture is active."""
         with self._deque_guard():
-            targets = (
-                (live_deque, collection_deque) if self._collection_capture_active else (live_deque,)
-            )
-            for target in targets:
-                if len(target) >= _COLLECTION_DEQUE_MAX:
-                    target.popleft()
-                target.append(msg)
-        self._freshness.mark()
+            if not self._collection_capture_active:
+                return
+            if len(collection_deque) >= _COLLECTION_DEQUE_MAX:
+                collection_deque.popleft()
+            collection_deque.append(msg)
 
     def _init_ros(self) -> None:
         schema = self._robot.observation_schema
         live_qos = _make_live_qos()
         camera_qos = _make_live_qos(depth=_CAMERA_QOS_DEPTH)
+        collection_camera_qos = _make_live_qos(depth=1)
+        collection_qos = _make_live_qos(depth=1)
         hil_qos = _make_live_qos(depth=1)
 
         for camera in schema.cameras:
             topic = self._camera_topics.get(camera.name)
             if topic is None:
                 continue
-            deque: collections.deque = collections.deque()
+            # The live reader only ever consumes the newest synchronized window.
+            # Keep this bounded to the DDS history depth so a stalled control loop
+            # cannot retain an unbounded number of full image messages. Collection
+            # uses a separate deque below and keeps its existing capture bound.
+            deque: collections.deque = collections.deque(maxlen=_CAMERA_QOS_DEPTH)
             collection_deque: collections.deque = collections.deque()
             self._camera_deques[camera.name] = deque
             self._collection_camera_deques[camera.name] = collection_deque
@@ -322,11 +319,16 @@ class Ros2Transport(_RosTransportBase):
             self._node.create_subscription(
                 msg_type,
                 topic,
-                lambda msg, c=camera.name, d=deque, cd=collection_deque: self._append_camera_copies(
-                    c, d, cd, msg
-                ),
+                lambda msg, c=camera.name, d=deque: self._append_camera_msg(c, d, msg),
                 camera_qos,
             )
+            if camera.observation_key in self._config.collection.schema.cameras:
+                self._node.create_subscription(
+                    msg_type,
+                    topic,
+                    lambda msg, d=collection_deque: self._append_collection_camera_msg(d, msg),
+                    collection_camera_qos,
+                )
 
         for group in self._robot.actuator_groups:
             group_cfg = self._group_topics.get(group.name)
@@ -386,7 +388,7 @@ class Ros2Transport(_RosTransportBase):
                         group.name,
                         self._JointState,
                         topics.qpos_topic,
-                        live_qos,
+                        collection_qos,
                     )
                 if topics.get("qpos_gripper_topic"):
                     self._subscribe_into(
@@ -394,7 +396,7 @@ class Ros2Transport(_RosTransportBase):
                         group.name,
                         self._JointState,
                         topics.qpos_gripper_topic,
-                        live_qos,
+                        collection_qos,
                     )
                 if topics.get("eef_topic"):
                     self._subscribe_into(
@@ -402,7 +404,7 @@ class Ros2Transport(_RosTransportBase):
                         group.name,
                         self._PoseStamped,
                         topics.eef_topic,
-                        live_qos,
+                        collection_qos,
                     )
                 if topics.get("action_qpos_topic"):
                     self._subscribe_into(
@@ -410,7 +412,7 @@ class Ros2Transport(_RosTransportBase):
                         group.name,
                         self._JointState,
                         topics.action_qpos_topic,
-                        live_qos,
+                        collection_qos,
                     )
                 action_qpos_gripper_source = topics.get("action_qpos_gripper_source", "topic")
                 if action_qpos_gripper_source not in {"topic", "operator"}:
@@ -426,7 +428,7 @@ class Ros2Transport(_RosTransportBase):
                         group.name,
                         self._JointState,
                         topics.action_qpos_gripper_topic,
-                        live_qos,
+                        collection_qos,
                     )
                 if topics.get("action_eef_topic"):
                     self._subscribe_into(
@@ -434,7 +436,7 @@ class Ros2Transport(_RosTransportBase):
                         group.name,
                         self._PoseStamped,
                         topics.action_eef_topic,
-                        live_qos,
+                        collection_qos,
                     )
                 if topics.get("hil_qpos_topic") and group.name not in self._hil_supported_groups:
                     self._node.create_subscription(
@@ -501,9 +503,13 @@ class Ros2Transport(_RosTransportBase):
         return snapshot
 
     def clear_collection_backlog(self) -> float | None:
-        """Advance raw cursors after seeding operator-sourced gripper action."""
+        """Advance raw cursors and drop collection images captured before START."""
         self.start_collection()
-        return super().clear_collection_backlog()
+        with self._deque_guard():
+            cutoff = super().clear_collection_backlog()
+            for deque in self._collection_camera_deques.values():
+                deque.clear()
+        return cutoff
 
     def record_collection_gripper_action(
         self, group_name: str, value: float, stamp: Any | None = None

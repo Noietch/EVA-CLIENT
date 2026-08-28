@@ -2,6 +2,8 @@
 
 _base_ = ["../01_deploy/dual_agilex_piper/_base.py"]
 
+console = dict(initial_tab="collect")
+
 collection = dict(
     storage=dict(
         log_dir="work_dirs/collection/dual_agilex_piper",
@@ -45,5 +47,5 @@ collection = dict(
             ),
         ),
     ),
-    tasks=["pick up the apple"],
+    tasks=dict(pick_up_the_apple=[("pick up the apple", -1)]),
 )

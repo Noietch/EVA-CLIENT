@@ -4,15 +4,38 @@ import copy
 import json
 import threading
 import time
+from unittest.mock import Mock
 
 import numpy as np
+import pyarrow.parquet as pq
 import pytest
 
 from core.app import run as app
 from core.app.console import server as console_server
-from core.app.rl import build_rl_critic_observation, record_rl_sample, submit_rl_critic
-from core.app.state import SessionStatus
+from core.app.handlers import teleop
+from core.app.handlers.recording import (
+    begin_rollout_save_episode,
+    maybe_build_rollout_episode_logger,
+    record_client_rollout_intervention_step,
+)
+from core.app.operator_control import handle_teleop_operator_event
+from core.app.rl import (
+    build_rl_critic_observation,
+    record_rl_sample,
+    rl_live_series,
+    submit_rl_critic,
+)
+from core.app.state import RL_LIVE_SAMPLE_MAX, SessionMode, SessionStatus
 from core.config import ConfigDict
+from core.types import Observation
+from teleop_client.base import QposCommand, TeleopOperatorEvent, TeleopResult, TeleopStatus
+
+
+def _wait_until(predicate, *, timeout_s: float = 2.0, interval_s: float = 0.01) -> None:
+    deadline = time.monotonic() + timeout_s
+    while not predicate():
+        assert time.monotonic() < deadline
+        time.sleep(interval_s)
 
 
 def _configure_rl(console, tmp_path) -> None:
@@ -52,6 +75,72 @@ def _configure_rl(console, tmp_path) -> None:
     console.config.rl_cfg = rl_cfg
 
 
+def _configure_client_intervention(console, tmp_path, results):
+    _configure_rl(console, tmp_path)
+    console.config.rl.intervention.source = "teleop_client"
+    console.config.rl.data.storage.async_save = False
+    console.config.collection.teleop = ConfigDict(
+        control_source="client", client=ConfigDict(type="test")
+    )
+    client = Mock()
+    client.poll.side_effect = list(results)
+    client.validate_result.return_value = True
+    client.status.return_value = TeleopStatus(source_type="test", connected=True, neutral=True)
+    console.runtime.teleop_client = client
+    console.runtime.teleop_execution = teleop.TeleopExecutionState(
+        control_source="client", client_type="vr_webxr"
+    )
+    for path, body in (
+        ("/api/tab_switch", {"tab": "rl"}),
+        ("/api/rl/select_task", {"task": "pack the phone"}),
+        ("/api/rl/select_policy", {"slot": 0}),
+        ("/api/rl/setup", None),
+        ("/api/rl/hil_enabled", {"enabled": True}),
+        ("/api/rl/run", None),
+    ):
+        console.do(path, body)
+    app.publish_next_action(console.runtime.active_config, console.runtime, console.session)
+    return client
+
+
+def _open_rl_tab(console) -> None:
+    console.do("/api/tab_switch", {"tab": "rl"})
+
+
+def _select_rl_policy(
+    console,
+    *,
+    task: str = "pack the phone",
+    policy_slot: int = 0,
+    critic_slot: int | None = None,
+    setup: bool = False,
+) -> None:
+    _open_rl_tab(console)
+    console.do("/api/rl/select_task", {"task": task})
+    console.do("/api/rl/select_policy", {"slot": policy_slot})
+    if critic_slot is not None:
+        console.do("/api/rl/select_critic", {"slot": critic_slot})
+    if setup:
+        console.do("/api/rl/setup")
+
+
+def _setup_rl(console, tmp_path) -> None:
+    _configure_rl(console, tmp_path)
+    _select_rl_policy(console, setup=True)
+
+
+def _publish_until_step_advances(console) -> None:
+    def advanced() -> bool:
+        app.publish_next_action(
+            console.runtime.active_config,
+            console.runtime,
+            console.session,
+        )
+        return console.session.step_index > 0
+
+    _wait_until(advanced, timeout_s=2.0, interval_s=0.005)
+
+
 def test_rl_routes_setup_policy_then_select_optional_critic(console, tmp_path):
     _configure_rl(console, tmp_path)
 
@@ -60,10 +149,7 @@ def test_rl_routes_setup_policy_then_select_optional_critic(console, tmp_path):
     assert cfg["policies"] == [{"slot": 0, "name": "policy-a"}]
     assert cfg["critics"] == [{"slot": 0, "name": "critic-a", "type": "mock"}]
 
-    console.do("/api/tab_switch", {"tab": "rl"})
-    console.do("/api/rl/select_task", {"task": "pack the phone"})
-    console.do("/api/rl/select_policy", {"slot": 0})
-    console.do("/api/rl/select_critic", {"slot": 0})
+    _select_rl_policy(console, critic_slot=0)
     selected = console.status()["rl"]
     assert selected["active"] is True
     assert selected["selected_policy_slot"] == 0
@@ -87,18 +173,80 @@ def test_rl_routes_setup_policy_then_select_optional_critic(console, tmp_path):
 def test_rl_saved_data_path_uses_rl_storage_before_setup(console, tmp_path):
     _configure_rl(console, tmp_path)
 
-    console.do("/api/tab_switch", {"tab": "rl"})
+    _open_rl_tab(console)
 
     assert console.status()["rollout"]["dataset_dir"] == str(tmp_path / "rl")
 
 
-def test_rl_setup_and_rollout_do_not_require_a_critic(console, tmp_path):
-    _configure_rl(console, tmp_path)
+def test_rl_replaces_rollout_logger_from_another_dataset(console, tmp_path):
+    normal_dir = tmp_path / "normal"
+    history_path = normal_dir / "meta" / "episodes.jsonl"
+    history_path.parent.mkdir(parents=True)
+    history_path.write_text(json.dumps({"episode_index": 0, "length": 1}) + "\n")
+    console.config.rollout.storage.enabled = True
+    console.config.rollout.storage.log_dir = str(normal_dir)
+    maybe_build_rollout_episode_logger(console.config, console.runtime)
+    ordinary_logger = console.runtime.rollout_episode_logger
+    assert ordinary_logger is not None
 
-    console.do("/api/tab_switch", {"tab": "rl"})
-    console.do("/api/rl/select_task", {"task": "pack the phone"})
-    console.do("/api/rl/select_policy", {"slot": 0})
-    console.do("/api/rl/setup")
+    _configure_rl(console, tmp_path)
+    _open_rl_tab(console)
+    assert console.status()["rollout"]["completed_episodes"] == 0
+    _select_rl_policy(console, setup=True)
+    active = console.runtime.active_config
+    assert active is not None
+
+    maybe_build_rollout_episode_logger(active, console.runtime)
+
+    assert console.runtime.rollout_episode_logger is not ordinary_logger
+    assert console.runtime.rollout_episode_logger._log_dir == tmp_path / "rl"
+
+
+def test_entering_rl_discards_an_active_ordinary_rollout(console, tmp_path):
+    normal_dir = tmp_path / "normal"
+    console.config.rollout.storage.enabled = True
+    console.config.rollout.storage.log_dir = str(normal_dir)
+    begin_rollout_save_episode(console.config, console.runtime, console.session)
+    ordinary_logger = console.runtime.rollout_episode_logger
+    assert ordinary_logger is not None
+    assert ordinary_logger.has_active_episode
+    assert console.runtime.collection_capture_runner is not None
+
+    _configure_rl(console, tmp_path)
+    _open_rl_tab(console)
+
+    assert not ordinary_logger.has_active_episode
+    assert console.runtime.rollout_episode_logger is ordinary_logger
+    assert console.runtime.collection_capture_runner is None
+
+
+def test_leaving_rl_releases_its_rollout_logger(console, tmp_path):
+    _setup_rl(console, tmp_path)
+    active = console.runtime.active_config
+    assert active is not None
+    begin_rollout_save_episode(active, console.runtime, console.session)
+    assert console.runtime.rollout_episode_logger is not None
+    assert console.runtime.collection_capture_runner is not None
+
+    console.do("/api/tab_switch", {"tab": "debug"})
+
+    assert console.runtime.rollout_episode_logger is None
+    assert console.runtime.collection_capture_runner is None
+
+
+def test_leaving_rl_uses_base_config_for_eval_mode(console, tmp_path):
+    console.config.eval = ConfigDict(cli_mode="sim")
+    _setup_rl(console, tmp_path)
+    assert console.session.mode is SessionMode.REAL
+
+    console.do("/api/tab_switch", {"tab": "eval"})
+
+    assert console.runtime.active_config is None
+    assert console.session.mode is SessionMode.SIM
+
+
+def test_rl_setup_and_rollout_do_not_require_a_critic(console, tmp_path):
+    _setup_rl(console, tmp_path)
 
     status = console.status()
     assert status["policy_connected"] is True
@@ -118,10 +266,7 @@ def test_rl_duplicate_setup_does_not_repeat_robot_setup(console, tmp_path, monke
         return original(*args, **kwargs)
 
     monkeypatch.setattr(app, "run_setup", counted_setup)
-    console.do("/api/tab_switch", {"tab": "rl"})
-    console.do("/api/rl/select_task", {"task": "pack the phone"})
-    console.do("/api/rl/select_policy", {"slot": 0})
-    console.do("/api/rl/setup")
+    _select_rl_policy(console, setup=True)
     console.do("/api/rl/setup")
 
     assert calls == 1
@@ -129,12 +274,7 @@ def test_rl_duplicate_setup_does_not_repeat_robot_setup(console, tmp_path, monke
 
 
 def test_rl_critic_can_connect_after_policy_setup_without_robot_reset(console, tmp_path):
-    _configure_rl(console, tmp_path)
-
-    console.do("/api/tab_switch", {"tab": "rl"})
-    console.do("/api/rl/select_task", {"task": "pack the phone"})
-    console.do("/api/rl/select_policy", {"slot": 0})
-    console.do("/api/rl/setup")
+    _setup_rl(console, tmp_path)
     assert console.status()["is_setup_done"] is True
 
     console.do("/api/rl/select_critic", {"slot": 0})
@@ -142,19 +282,14 @@ def test_rl_critic_can_connect_after_policy_setup_without_robot_reset(console, t
     assert status["is_setup_done"] is True
     assert status["rl"]["selected_critic_slot"] == 0
     assert status["rl"]["critic_connected"] is True
-    deadline = time.monotonic() + 2.0
-    while console.runtime.rl_critic_runner.series()["n"] < 1 and time.monotonic() < deadline:
-        time.sleep(0.01)
+    _wait_until(lambda: console.runtime.rl_critic_runner.series()["n"] >= 1)
     assert console.runtime.rl_critic_runner.series()["n"] == 1
 
 
 def test_rl_critic_selected_during_setup_is_rejected(console, tmp_path):
     _configure_rl(console, tmp_path)
 
-    console.do("/api/tab_switch", {"tab": "rl"})
-    console.do("/api/rl/select_task", {"task": "pack the phone"})
-    console.do("/api/rl/select_policy", {"slot": 0})
-    console.do("/api/rl/select_critic", {"slot": 0})
+    _select_rl_policy(console, critic_slot=0)
     assert console.status()["rl"]["selected_critic_slot"] is None
     assert console.status()["last_error"] == "RL Critic can only be selected after setup"
 
@@ -167,11 +302,7 @@ def test_rl_critic_selected_during_setup_is_rejected(console, tmp_path):
 
 
 def test_rl_reset_route_clears_setup_and_critic_series(console, tmp_path):
-    _configure_rl(console, tmp_path)
-    console.do("/api/tab_switch", {"tab": "rl"})
-    console.do("/api/rl/select_task", {"task": "pack the phone"})
-    console.do("/api/rl/select_policy", {"slot": 0})
-    console.do("/api/rl/setup")
+    _setup_rl(console, tmp_path)
     console.do("/api/rl/select_critic", {"slot": 0})
     assert console.status()["is_setup_done"] is True
 
@@ -194,19 +325,9 @@ def test_rl_async_reset_auto_setup_then_start_publishes_action(console, tmp_path
     )
     console.config.rl.inference_strategy = "async_"
 
-    console.do("/api/tab_switch", {"tab": "rl"})
-    console.do("/api/rl/select_task", {"task": "pack the phone"})
-    console.do("/api/rl/select_policy", {"slot": 0})
-    console.do("/api/rl/setup")
+    _select_rl_policy(console, setup=True)
     console.do("/api/rl/run")
-    deadline = time.monotonic() + 2.0
-    while console.session.step_index == 0 and time.monotonic() < deadline:
-        app.publish_next_action(
-            console.runtime.active_config,
-            console.runtime,
-            console.session,
-        )
-        time.sleep(0.005)
+    _publish_until_step_advances(console)
     assert console.session.step_index > 0
 
     console.do("/api/rl/reset")
@@ -217,14 +338,7 @@ def test_rl_async_reset_auto_setup_then_start_publishes_action(console, tmp_path
     assert status["rl"]["selected_policy_slot"] == 0
 
     console.do("/api/rl/run")
-    deadline = time.monotonic() + 2.0
-    while console.session.step_index == 0 and time.monotonic() < deadline:
-        app.publish_next_action(
-            console.runtime.active_config,
-            console.runtime,
-            console.session,
-        )
-        time.sleep(0.005)
+    _publish_until_step_advances(console)
 
     assert console.session.status is SessionStatus.RUNNING
     assert console.runtime.infer_strategy.is_loop_running()
@@ -235,10 +349,7 @@ def test_rl_reset_is_allowed_during_rollout_but_rejected_during_intervention(
     console, tmp_path, monkeypatch
 ):
     _configure_rl(console, tmp_path)
-    console.do("/api/tab_switch", {"tab": "rl"})
-    console.do("/api/rl/select_task", {"task": "pack the phone"})
-    console.do("/api/rl/select_policy", {"slot": 0})
-    console.do("/api/rl/setup")
+    _select_rl_policy(console, setup=True)
 
     console.session.status = SessionStatus.RUNNING
     console.do("/api/rl/reset")
@@ -361,11 +472,7 @@ def test_rl_critic_without_action_horizon_keeps_original_chunk(console):
 
 
 def test_rl_series_streams_control_source_and_critic_incrementally(console, tmp_path):
-    _configure_rl(console, tmp_path)
-    console.do("/api/tab_switch", {"tab": "rl"})
-    console.do("/api/rl/select_task", {"task": "pack the phone"})
-    console.do("/api/rl/select_policy", {"slot": 0})
-    console.do("/api/rl/setup")
+    _setup_rl(console, tmp_path)
     console.do("/api/rl/select_critic", {"slot": 0})
     runner = console.runtime.rl_critic_runner
     assert runner is not None
@@ -381,9 +488,7 @@ def test_rl_series_streams_control_source_and_critic_incrementally(console, tmp_
         "intervention",
         2.5,
     )
-    deadline = time.monotonic() + 2.0
-    while runner.series()["n"] < 1 and time.monotonic() < deadline:
-        time.sleep(0.01)
+    _wait_until(lambda: runner.series()["n"] >= 1)
 
     series = console.get("/api/rl/series?since=0&critic_since=0").json
 
@@ -397,9 +502,33 @@ def test_rl_series_streams_control_source_and_critic_incrementally(console, tmp_
     assert series["critic"]["n"] == 1
     assert series["critic"]["source"] == ["intervention"]
 
+    lightweight = console.get("/api/rl/series?samples=0&critic_since=0").json
+    assert lightweight["n"] == 1
+    assert lightweight["critic"]["n"] == 1
+    assert "timestamp" not in lightweight
+    assert "state" not in lightweight
+    assert "action" not in lightweight
+
     console.do("/api/tab_switch", {"tab": "replay"})
     assert console.runtime.rl_active is False
     assert console.runtime.rl_critic_runner is None
+
+
+def test_rl_live_series_keeps_only_the_latest_sample_window(console):
+    runtime = console.runtime
+    runtime.rl_active = True
+    sample = np.array([0.1, 0.2], dtype=np.float32)
+    total = RL_LIVE_SAMPLE_MAX + 3
+
+    for index in range(total):
+        record_rl_sample(runtime, sample, sample, "policy", float(index))
+
+    series = rl_live_series(runtime, 0, 0)
+
+    assert series["n"] == total
+    assert series["base"] == 3
+    assert len(series["timestamp"]) == RL_LIVE_SAMPLE_MAX
+    assert series["timestamp"][0] == 3.0
 
 
 def test_rl_replay_switch_closes_previous_source(console, tmp_path, monkeypatch):
@@ -626,3 +755,95 @@ def test_rl_replay_critic_uses_critic_action_horizon(console, tmp_path, monkeypa
     assert response.status == 200
     assert runner.actions.shape == (4, 2)
     np.testing.assert_array_equal(runner.actions, np.vstack([source.actions, source.actions[-1]]))
+
+
+def test_rl_client_intervention_accept_and_save_persists_rollout(console, tmp_path, monkeypatch):
+    client = _configure_client_intervention(
+        console,
+        tmp_path,
+        [TeleopResult.from_command(QposCommand(np.full(14, 0.02, dtype=np.float32)))],
+    )
+    monkeypatch.setattr(
+        teleop,
+        "forward_canonical_eef",
+        lambda _config, runtime, _qpos: np.zeros(
+            8 * len(runtime.robot.arm_groups), dtype=np.float32
+        ),
+    )
+    event = TeleopOperatorEvent("test", 1, "intervention_toggle", 1.0)
+    handle_teleop_operator_event(
+        event,
+        console.runtime.active_config or console.config,
+        console.runtime,
+        console.session,
+        dispatch=app.handle_command,
+    )
+    client.acknowledge_event.assert_called_with(
+        event,
+        accepted=True,
+        message="RL intervention started",
+    )
+    assert console.runtime.rollout_intervention_active is True
+    monkeypatch.setattr(
+        console.runtime.transport,
+        "get_frame",
+        lambda: Observation(
+            timestamp=2.5,
+            images={
+                "cam_high": np.zeros((4, 4, 3), dtype=np.uint8),
+                "cam_left_wrist": np.ones((4, 4, 3), dtype=np.uint8),
+                "cam_right_wrist": np.full((4, 4, 3), 2, dtype=np.uint8),
+            },
+            state_qpos=np.full(14, 0.01, dtype=np.float32),
+        ),
+    )
+    published = teleop.step_rollout_teleop(
+        console.runtime.active_config,
+        console.runtime,
+        console.session,
+        now=2.5,
+    )
+    assert published is not None
+    assert record_client_rollout_intervention_step(
+        console.runtime.active_config,
+        console.runtime,
+        console.session,
+        published,
+    )
+    console.do("/api/rl/accept")
+    assert (
+        console.runtime.rollout_intervention_active,
+        console.runtime.rollout_intervention_active_segment is None,
+        len(console.runtime.rollout_intervention_segments),
+    ) == (False, True, 1)
+    assert console.do("/api/rl/save").json == {"ok": True}
+    rollout_table = pq.read_table(
+        str(tmp_path / "rl" / "data" / "chunk-000" / "episode_000000.parquet")
+    )
+    assert "intervention" in rollout_table.column("control_source").to_pylist()
+    assert True in rollout_table.column("intervention").to_pylist()
+    assert 0 in rollout_table.column("intervention_segment_index").to_pylist()
+    assert client.reset.call_count >= 2
+
+
+def test_tab_switch_away_from_rl_clears_active_client_intervention(console, tmp_path):
+    client = _configure_client_intervention(console, tmp_path, [])
+    event = TeleopOperatorEvent("test", 2, "intervention_toggle", 2.0)
+    handle_teleop_operator_event(
+        event,
+        console.runtime.active_config or console.config,
+        console.runtime,
+        console.session,
+        dispatch=app.handle_command,
+    )
+    assert console.runtime.rollout_intervention_active is True
+    console.do("/api/tab_switch", {"tab": "debug"})
+    assert (
+        console.runtime.rollout_intervention_active,
+        console.runtime.rollout_intervention_active_segment is None,
+        console.runtime.rl_active,
+        console.runtime.teleop_execution.active,
+        console.session.status,
+        (tmp_path / "rl" / "data" / "chunk-000" / "episode_000000.parquet").exists(),
+    ) == (False, True, False, False, SessionStatus.UNSET, False)
+    assert client.reset.call_count >= 2

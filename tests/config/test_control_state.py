@@ -8,7 +8,7 @@ import queue
 import numpy as np
 
 from core.app import run as app
-from core.app.handlers import control, io, recording
+from core.app.handlers import control, io, recording, teleop
 from core.app.handlers.space import JointState
 from core.app.state import (
     RuntimeState,
@@ -27,6 +27,7 @@ from core.types import (
     RolloutInterventionSegment,
 )
 from robots.base import ActuatorGroup, CameraSpec, ObservationSchema, Robot
+from teleop_client.base import TeleopStatus
 from transport.base import HilStatus
 
 
@@ -111,6 +112,7 @@ def test_resolve_label_explicit_key_passthrough():
 class _CollectionTransport:
     def __init__(self) -> None:
         self.started = 0
+        self.policy_started = 0
         self.stopped = 0
         self.cleared = 0
         self.latest_qpos = np.array([0.1, 0.2], dtype=np.float32)
@@ -130,6 +132,10 @@ class _CollectionTransport:
     def start_collection(self) -> None:
         self.started += 1
 
+    def start_policy_collection(self) -> None:
+        self.policy_started += 1
+        self.start_collection()
+
     def stop_collection(self) -> None:
         self.stopped += 1
 
@@ -143,6 +149,9 @@ class _CollectionTransport:
         if not self.collection_frames:
             return None
         return self.collection_frames.pop(0)
+
+    def get_frame(self) -> Observation | None:
+        return self.get_collection_frame()
 
     def acquire_collection_raw(self):
         return None
@@ -297,6 +306,31 @@ class _BufferedBackgroundStrategy(_ResettableStrategy):
     runs_background_loop = True
 
 
+class _TeleopClient:
+    def __init__(self, *, connected: bool = True, source_error: str = "") -> None:
+        self.connected = connected
+        self.source_error = source_error
+        self.starts = 0
+        self.resets: list[bool] = []
+        self.fail_reset = False
+
+    def start(self) -> None:
+        self.starts += 1
+
+    def reset(self, *, require_neutral: bool = False) -> None:
+        self.resets.append(require_neutral)
+        if self.fail_reset:
+            raise RuntimeError("client reset failed")
+
+    def status(self) -> TeleopStatus:
+        return TeleopStatus(
+            source_type="test",
+            connected=self.connected,
+            neutral=True,
+            source_error=self.source_error,
+        )
+
+
 def _robot() -> Robot:
     return Robot(
         name="fake_arm",
@@ -350,6 +384,16 @@ def _config() -> ConfigDict:
             action_space=JointState(),
         ),
     )
+
+
+def _client_rollout_config() -> ConfigDict:
+    config = _config()
+    config.collection.teleop = ConfigDict(
+        control_source="client",
+        client=ConfigDict(type="vr_webxr"),
+    )
+    config.rollout.intervention.source = "teleop_client"
+    return config
 
 
 def _observation(timestamp: float = 1.0) -> Observation:
@@ -464,6 +508,29 @@ def test_start_rollout_intervention_does_not_restart_transport_collection():
     assert runtime.rollout_intervention_active_segment is not None
 
 
+def test_rollout_intervention_source_prefers_rl_config() -> None:
+    config = _config()
+    config.rl = ConfigDict(intervention=ConfigDict(source="teleop_client"))
+    config.rollout.intervention.source = "transport"
+
+    assert recording.rollout_intervention_source(config) == "teleop_client"
+
+
+def test_start_rollout_intervention_activates_teleop_client_source() -> None:
+    runtime, session = _runtime_and_session()
+    runtime.rollout_intervention_enabled = True
+    runtime.teleop_execution = teleop.TeleopExecutionState(control_source="client", active=False)
+    runtime.teleop_client = _TeleopClient()
+    config = _config()
+    config.rl = ConfigDict(intervention=ConfigDict(source="teleop_client"))
+
+    assert recording.start_rollout_intervention(config, runtime, session) is True
+    assert runtime.rollout_intervention_active is True
+    assert runtime.teleop_client.starts == 1
+    assert runtime.teleop_client.resets == [True]
+    assert runtime.transport.hil_modes == []
+
+
 def test_rollout_episode_starts_collection_before_policy_capture(monkeypatch):
     runtime, session = _runtime_and_session()
     episode_logger = _RolloutLifecycleLogger()
@@ -484,6 +551,7 @@ def test_rollout_episode_starts_collection_before_policy_capture(monkeypatch):
     recording.begin_rollout_save_episode(config, runtime, session)
 
     assert runtime.transport.started == 1
+    assert runtime.transport.policy_started == 1
     assert runtime.transport.cleared == 1
     assert episode_logger.started_tasks == ["pick"]
     assert capture_args == [(20, 1)]
@@ -721,6 +789,55 @@ def test_new_intervention_closes_pending_abandon_exclusion(monkeypatch):
     assert runtime.rollout_intervention_active_segment.start_time == 25.0
 
 
+def test_start_rollout_intervention_uses_teleop_client_path() -> None:
+    runtime, session = _runtime_and_session()
+    runtime.rollout_intervention_enabled = True
+    runtime.teleop_execution = teleop.TeleopExecutionState(control_source="client")
+    runtime.teleop_client = _TeleopClient()
+
+    assert recording.start_rollout_intervention(_client_rollout_config(), runtime, session) is True
+
+    assert runtime.transport.hil_resets == 0
+    assert runtime.transport.hil_relay_enabled == []
+    assert runtime.teleop_client.starts == 1
+    assert runtime.teleop_client.resets == [True]
+
+
+def test_rollout_hil_status_tracks_teleop_client_connection() -> None:
+    runtime, _session = _runtime_and_session()
+    runtime.rollout_intervention_active = True
+    runtime.teleop_execution = teleop.TeleopExecutionState(control_source="client", active=True)
+    runtime.teleop_client = _TeleopClient()
+
+    status = recording.rollout_hil_status(_client_rollout_config(), runtime)
+
+    assert status.supported is True
+    assert status.active is True
+    assert status.error == ""
+
+
+def test_stop_rollout_intervention_keeps_client_state_when_neutral_reset_fails() -> None:
+    runtime, session = _runtime_and_session()
+    runtime.rollout_intervention_active = True
+    runtime.teleop_execution = teleop.TeleopExecutionState(control_source="client", active=True)
+    runtime.teleop_client = _TeleopClient()
+    runtime.teleop_client.fail_reset = True
+
+    assert (
+        recording.stop_rollout_intervention(
+            _client_rollout_config(),
+            runtime,
+            session,
+            required=True,
+        )
+        is False
+    )
+
+    assert runtime.rollout_intervention_active is True
+    assert runtime.teleop_execution.active is True
+    assert session.last_error == "Teleop takeover did not stop: client reset failed"
+
+
 def test_stop_rollout_intervention_disables_only_hil_relay():
     runtime, session = _runtime_and_session()
     runtime.rollout_intervention_active = True
@@ -746,6 +863,30 @@ def test_record_rollout_intervention_step_appends_observation():
 
     assert len(runtime.rollout_intervention_active_segment.frames) == 1
     assert runtime.rollout_intervention_active_segment.frames[0].timestamp == 2.0
+
+
+def test_record_client_rollout_intervention_step_uses_published_qpos() -> None:
+    runtime, session = _runtime_and_session()
+    runtime.rollout_intervention_active = True
+    runtime.rollout_intervention_active_segment = RolloutInterventionSegment(
+        segment_index=5,
+        start_policy_frame_index=3,
+        pre_intervention_qpos=np.array([0.1, 0.2], dtype=np.float32),
+    )
+    runtime.collection_frames = []
+    runtime.transport.collection_frames = [_observation(4.0)]
+    published = teleop.PublishedTeleopAction(np.array([0.7, 0.8], dtype=np.float32))
+
+    assert recording.record_client_rollout_intervention_step(
+        _config(),
+        runtime,
+        session,
+        published,
+    )
+    assert len(runtime.rollout_intervention_active_segment.frames) == 1
+    frame = runtime.rollout_intervention_active_segment.frames[0]
+    np.testing.assert_allclose(frame.action_qpos, [0.7, 0.8])
+    np.testing.assert_allclose(frame.state_qpos, [0.3, 0.4])
 
 
 def test_accept_rollout_intervention_segment_moves_active_to_accepted():
@@ -872,6 +1013,18 @@ def test_rollout_intervention_enabled_is_applied_during_sync_motion_wait():
 
     assert interrupted is False
     assert runtime.rollout_intervention_enabled is False
+    assert runtime.command_queue.empty()
+
+
+def test_start_is_deferred_during_sync_motion_wait():
+    runtime, session = _runtime_and_session()
+    runtime.command_queue = queue.Queue()
+    runtime.command_queue.put("web:start")
+
+    interrupted = control.poll_motion_commands(_config(), runtime, session)
+
+    assert interrupted is False
+    assert runtime.command_queue.get_nowait() == "web:start"
     assert runtime.command_queue.empty()
 
 

@@ -38,6 +38,9 @@ from core.app.state import (
     SessionStatus,
 )
 from core.config import ConfigDict
+from core.types import CollectionRawBatch, RawCollectionSnapshot
+from core.utils.dataset_upload import DatasetUploadProgress, DatasetUploadResult
+from tools.conversion import DatasetExportSummary, QualityExportProgress
 
 
 def test_run_before_setup_is_rejected(console):
@@ -256,6 +259,20 @@ def test_collect_loop_uses_publish_rate_without_dataset_fps():
     )
 
 
+def test_active_client_teleop_loop_uses_publish_rate():
+    config = console_config(
+        publish_rate=100,
+        collection=ConfigDict(teleop=ConfigDict(control_source="client")),
+    )
+    runtime = SimpleNamespace(
+        replay_source=None,
+        collection_teleop_active=True,
+        teleop_execution=SimpleNamespace(active=True, control_source="client"),
+    )
+
+    assert app._target_loop_rate_hz(config, cast(RuntimeState, runtime)) == 100
+
+
 def test_replay_loop_uses_replay_fps_on_live_transport():
     config = console_config(publish_rate=50)
     runtime = SimpleNamespace(
@@ -286,7 +303,8 @@ def test_collect_status_follows_selected_collect_task():
         def __init__(self):
             self.tasks = []
 
-        def status_snapshot(self, task):
+        def status_snapshot(self, task, *, include_history=True, collection_dataset=None):
+            del include_history, collection_dataset
             self.tasks.append(task)
             return {
                 "dataset_dir": f"/datasets/{task.replace(' ', '_')}",
@@ -303,7 +321,49 @@ def test_collect_status_follows_selected_collect_task():
 
     assert logger.tasks[-1] == "pick up cup"
     assert collect["dataset_dir"] == "/datasets/pick_up_cup"
-    assert collect["episodes"] == [{"episode_index": 0, "status": "saved"}]
+    assert "episodes" not in collect
+
+
+def test_collect_selection_keeps_explicit_set_for_duplicate_prompt():
+    scene_1 = "ArxKine_PnP_DivObj_Norm_Sngl_Base_v1_scene_1_20260828"
+    scene_3 = "ArxKine_PnP_DivObj_Norm_Sngl_Base_v1_scene_3_20260828"
+    prompt = "pick up the yellow cup and place it on the green plate with left hand."
+    config = console_config()
+    config.collection.tasks = ConfigDict(
+        {
+            scene_1: [(prompt, 1)],
+            scene_3: [(prompt, 7), ("place cup", 2)],
+        }
+    )
+
+    with serve_console(config) as h:
+        response = h.post(
+            "/api/select_collect_task",
+            {"task": prompt, "dataset": scene_3, "task_index": 0},
+        )
+        status = h.status()
+
+    assert response.status == 200
+    assert response.json == {
+        "ok": True,
+        "task": prompt,
+        "dataset": scene_3,
+        "task_index": 0,
+    }
+    assert status["selected_collect_task"] == prompt
+    assert status["selected_collect_set"] == scene_3
+    assert status["selected_collect_task_index"] == 0
+
+
+def test_collect_selection_rejects_task_index_from_another_prompt():
+    with serve_console(console_config()) as h:
+        response = h.post(
+            "/api/select_collect_task",
+            {"task": "pick up cup", "dataset": "cup_set", "task_index": 1},
+        )
+
+    assert response.status == 400
+    assert response.json["error"] == "collection task index does not match task"
 
 
 @pytest.mark.parametrize("verdict", ["pass", "fail", ""])
@@ -311,7 +371,8 @@ def test_collect_qc_mark_routes_to_active_collection_logger(verdict):
     calls = []
 
     class _Logger:
-        def mark_collection_qc(self, task, episode, qc_verdict, note):
+        def mark_collection_qc(self, task, episode, qc_verdict, note, *, collection_dataset=None):
+            assert collection_dataset is None
             calls.append((task, episode, qc_verdict, note))
             return True
 
@@ -370,7 +431,8 @@ def test_collect_qc_mark_rejects_when_collection_logger_is_unavailable():
 
 def test_collect_qc_mark_rejects_episode_that_is_not_saved():
     class _Logger:
-        def mark_collection_qc(self, task, episode, verdict, note):
+        def mark_collection_qc(self, task, episode, verdict, note, *, collection_dataset=None):
+            assert collection_dataset is None
             return False
 
     with serve_console(console_config()) as h:
@@ -395,13 +457,13 @@ def test_collect_qc_mark_rejects_review_from_previous_collection_task():
     calls = []
 
     class _Logger:
-        def mark_collection_qc(self, task, episode, verdict, note):
+        def mark_collection_qc(self, task, episode, verdict, note, *, collection_dataset=None):
             calls.append((task, episode, verdict, note))
             return True
 
     with serve_console(console_config()) as h:
         h.runtime.episode_logger = cast(Any, _Logger())
-        h.session.selected_collect_task = "place cup"
+        h.session.selected_collect_task = "pour soybean"
 
         resp = h.post(
             "/api/collect_qc_mark",
@@ -416,6 +478,366 @@ def test_collect_qc_mark_rejects_review_from_previous_collection_task():
     assert resp.status == 409
     assert resp.json == {"ok": False, "error": "collection review task is no longer active"}
     assert calls == []
+
+
+def test_collect_qc_mark_rejects_review_after_switching_prompt_in_same_set():
+    calls = []
+
+    class _Logger:
+        def mark_collection_qc(self, task, episode, verdict, note, *, collection_dataset=None):
+            calls.append((task, episode, verdict, note))
+            return True
+
+    with serve_console(console_config()) as h:
+        h.runtime.episode_logger = cast(Any, _Logger())
+        h.session.selected_collect_task = "place cup"
+
+        resp = h.post(
+            "/api/collect_qc_mark",
+            {
+                "task": "pick up cup",
+                "episode": 0,
+                "verdict": "pass",
+                "note": "same dataset set",
+            },
+        )
+
+    assert resp.status == 409
+    assert resp.json == {"ok": False, "error": "collection review task is no longer active"}
+    assert calls == []
+
+
+class _CollectDatasetLogger:
+    def __init__(self, dataset_dir: Path, *, has_active_episode: bool = False) -> None:
+        self._dataset_dir = dataset_dir
+        self.has_active_episode = has_active_episode
+
+    def status_snapshot(
+        self,
+        task: str,
+        *,
+        include_history: bool = True,
+        collection_dataset: str | None = None,
+    ) -> dict[str, str]:
+        assert include_history is False
+        assert task == "pick up cup"
+        del collection_dataset
+        return {"dataset_dir": str(self._dataset_dir)}
+
+
+def _set_collect_dataset_logger(
+    harness: Any,
+    dataset_dir: Path,
+    *,
+    has_active_episode: bool = False,
+    collection_set: str = "cup_set",
+) -> None:
+    harness.runtime.episode_logger = cast(
+        Any,
+        _CollectDatasetLogger(dataset_dir, has_active_episode=has_active_episode),
+    )
+    harness.session.selected_collect_task = "pick up cup"
+    harness.session.selected_collect_set = collection_set
+
+
+def _wait_for_quality_job(harness: Any, endpoint: str, job_id: str) -> Any:
+    deadline = time.monotonic() + 2
+    while True:
+        status = harness.get(f"{endpoint}?job_id={job_id}")
+        if status.json["state"] in {"completed", "failed"}:
+            return status
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+
+
+def _write_quality_split_marker(
+    accepted_dir: Path,
+    source_dir: Path,
+    *,
+    dataset_format: str | None,
+) -> None:
+    (accepted_dir / "meta").mkdir(parents=True)
+    marker = {
+        "subset": "accepted",
+        "source_dir": str(source_dir),
+    }
+    if dataset_format is not None:
+        marker["dataset_format"] = dataset_format
+    (accepted_dir / "meta" / "quality_split.json").write_text(json.dumps(marker))
+
+
+def _register_completed_quality_export(
+    source_dir: Path,
+    accepted_dir: Path,
+    *,
+    dataset_format: str,
+) -> None:
+    ctx = console_server.ConsoleRequestHandler.ctx
+    ctx.quality_export_jobs["completed-export"] = console_server._QualityExportJob(
+        job_id="completed-export",
+        source_dir=str(source_dir.resolve()),
+        accepted_dir=str(accepted_dir.resolve()),
+        rejected_dir=str((accepted_dir.parent / "rejected").resolve()),
+        dataset_format=dataset_format,
+        state="completed",
+    )
+
+
+def test_collect_quality_export_uses_active_task_dataset(tmp_path, monkeypatch):
+    source = tmp_path / "pick_up_cup"
+    source.mkdir()
+    calls = []
+
+    def export(
+        source_dir,
+        accepted_dir,
+        rejected_dir,
+        *,
+        dataset_format,
+        replace_existing,
+        progress_callback,
+    ):
+        assert dataset_format == "lerobot_v21"
+        assert replace_existing is True
+        calls.append((source_dir, accepted_dir, rejected_dir))
+        progress_callback(QualityExportProgress(1, 3, "accepted", 0))
+        progress_callback(QualityExportProgress(3, 3, "rejected", 2))
+        return DatasetExportSummary(
+            source_dir=str(source_dir),
+            accepted_dir=str(accepted_dir),
+            rejected_dir=str(rejected_dir),
+            dataset_format=dataset_format,
+            source_episodes=3,
+            accepted_episodes=2,
+            rejected_episodes=1,
+            accepted_frames=20,
+            rejected_frames=10,
+            rejected_source_indices=(1,),
+        )
+
+    monkeypatch.setattr(console_server, "export_dataset_by_quality", export)
+    with serve_console(console_config()) as h:
+        _set_collect_dataset_logger(h, source)
+        response = h.post(
+            "/api/collect_quality_export",
+            {"task": "pick up cup", "dataset_format": "lerobot_v21"},
+        )
+        assert response.status == 202
+        assert response.json["dataset_format"] == "lerobot_v21"
+        status = _wait_for_quality_job(h, "/api/collect_quality_export", response.json["job_id"])
+
+    assert status.status == 200
+    assert status.json["state"] == "completed"
+    assert status.json["dataset_format"] == "lerobot_v21"
+    assert status.json["progress"] == 1.0
+    assert status.json["episodes_completed"] == 3
+    assert status.json["accepted_episodes"] == 2
+    assert status.json["rejected_episodes"] == 1
+    assert calls[0][0] == source.resolve()
+    export_root = source.with_name("pick_up_cup_export") / "lerobot_v21"
+    assert calls[0][1] == export_root / "accepted"
+    assert calls[0][2] == export_root / "rejected"
+
+
+def test_collect_quality_upload_uses_config_and_accepts_only_accepted_export(tmp_path, monkeypatch):
+    source = tmp_path / "legacy_local_name" / "raw"
+    source.mkdir(parents=True)
+    accepted = source.parent / "export" / "lerobot_v21" / "accepted"
+    _write_quality_split_marker(accepted, source, dataset_format="lerobot_v21")
+    calls = []
+
+    def upload(local_dir, specs, *, progress_callback):
+        calls.append((local_dir, specs))
+        progress_callback(DatasetUploadProgress(14, 14, 246, 246, "sftp: meta/info"))
+        return DatasetUploadResult(
+            local_dir=str(local_dir),
+            remote_dir=", ".join(spec.target for spec in specs),
+            destination="sftp",
+            files=14,
+            bytes=246,
+        )
+
+    monkeypatch.setattr(console_server, "upload_dataset_directory", upload)
+    config = console_config()
+    config.collection.storage.sftp = ConfigDict(
+        host="upload.example.com",
+        port=22,
+        user="robot",
+        identity_file=str(tmp_path / "key"),
+        remote_dir="/datasets/arx_x5",
+    )
+    with serve_console(config) as h:
+        _set_collect_dataset_logger(h, source)
+        _register_completed_quality_export(source, accepted, dataset_format="lerobot_v21")
+        public_config = h.get("/api/config")
+        assert public_config.json["collection"]["upload"] == {
+            "configured": True,
+            "backends": ["sftp"],
+            "targets": ["upload.example.com:22 · /datasets/arx_x5"],
+        }
+        response = h.post(
+            "/api/collect_quality_upload",
+            {"task": "pick up cup", "dataset_format": "lerobot_v21"},
+        )
+        assert response.status == 202
+        status = _wait_for_quality_job(h, "/api/collect_quality_upload", response.json["job_id"])
+
+    assert status.status == 200
+    assert status.json["state"] == "completed"
+    assert status.json["progress"] == 1.0
+    assert status.json["files_completed"] == 14
+    assert status.json["bytes_completed"] == 246
+    assert status.json["backends"] == ["sftp"]
+    assert len(calls) == 1
+    assert calls[0][0] == accepted.resolve()
+    specs = calls[0][1]
+    assert [spec.backend for spec in specs] == ["sftp"]
+    assert specs[0].target == "/datasets/arx_x5/cup_set"
+    assert status.json["remote_dir"] == "/datasets/arx_x5/cup_set"
+
+
+def test_collect_quality_upload_returns_actual_remote_copy_dir_and_never_uses_rejected_export(
+    tmp_path,
+    monkeypatch,
+):
+    source = tmp_path / "legacy_local_name" / "raw"
+    source.mkdir(parents=True)
+    accepted = source.parent / "export" / "lerobot_v21" / "accepted"
+    rejected = source.parent / "export" / "lerobot_v21" / "rejected"
+    _write_quality_split_marker(accepted, source, dataset_format="lerobot_v21")
+    rejected.mkdir(parents=True)
+    calls = []
+    copied_remote_dir = "/datasets/arx_x5/cup_set.copy_20260828T120000Z"
+
+    def upload(local_dir, specs, *, progress_callback):
+        calls.append((local_dir, specs))
+        assert local_dir == accepted.resolve()
+        assert local_dir != rejected.resolve()
+        progress_callback(DatasetUploadProgress(2, 2, 20, 20, "data/chunk-000/file"))
+        return DatasetUploadResult(
+            local_dir=str(local_dir),
+            remote_dir=copied_remote_dir,
+            destination="sftp",
+            files=2,
+            bytes=20,
+        )
+
+    monkeypatch.setattr(console_server, "upload_dataset_directory", upload)
+    config = console_config()
+    config.collection.storage.sftp = ConfigDict(
+        host="upload.example.com",
+        port=22,
+        user="robot",
+        identity_file=str(tmp_path / "key"),
+        remote_dir="/datasets/arx_x5",
+    )
+    with serve_console(config) as h:
+        _set_collect_dataset_logger(h, source)
+        _register_completed_quality_export(source, accepted, dataset_format="lerobot_v21")
+
+        first = h.post(
+            "/api/collect_quality_upload",
+            {"task": "pick up cup", "dataset_format": "lerobot_v21"},
+        )
+        assert first.status == 202
+        status = _wait_for_quality_job(h, "/api/collect_quality_upload", first.json["job_id"])
+
+    assert status.status == 200
+    assert status.json["state"] == "completed"
+    assert status.json["remote_dir"] == copied_remote_dir
+    assert len(calls) == 1
+    assert calls[0][0] == accepted.resolve()
+    assert calls[0][1][0].target == "/datasets/arx_x5/cup_set"
+
+
+def test_collect_quality_upload_requires_export_and_sanitizes_invalid_marker(tmp_path):
+    source = tmp_path / "pick_up_cup"
+    source.mkdir()
+    accepted = source.with_name("pick_up_cup_export") / "lerobot_v21" / "accepted"
+
+    with serve_console(console_config()) as h:
+        _set_collect_dataset_logger(h, source)
+        body = {"task": "pick up cup", "dataset_format": "lerobot_v21"}
+
+        missing_export = h.post("/api/collect_quality_upload", body)
+        assert missing_export.status == 409
+        assert missing_export.json["error"] == "export the current dataset before upload"
+
+        _register_completed_quality_export(source, accepted, dataset_format="lerobot_v21")
+        invalid_marker = h.post("/api/collect_quality_upload", body)
+
+    assert invalid_marker.status == 400
+    assert invalid_marker.json == {"ok": False, "error": "invalid accepted export"}
+    assert str(tmp_path) not in str(invalid_marker.json)
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        pytest.param("/api/collect_quality_export", id="export"),
+        pytest.param("/api/collect_quality_upload", id="upload"),
+    ],
+)
+def test_collect_quality_requires_dataset_format(tmp_path, endpoint):
+    source = tmp_path / "pick_up_cup"
+    source.mkdir()
+
+    with serve_console(console_config()) as h:
+        _set_collect_dataset_logger(h, source)
+        response = h.post(endpoint, {"task": "pick up cup"})
+
+    assert response.status == 400
+    assert response.json == {"ok": False, "error": "dataset_format is required"}
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "dataset_format", "marker_format", "expected_error"),
+    [
+        pytest.param(
+            "/api/collect_quality_export",
+            "unknown",
+            None,
+            "unsupported dataset export format",
+            id="export-unsupported-format",
+        ),
+        pytest.param(
+            "/api/collect_quality_upload",
+            "hdf5",
+            None,
+            "accepted export format mismatch",
+            id="upload-legacy-marker-mismatch",
+        ),
+    ],
+)
+def test_collect_quality_rejects_invalid_dataset_format_contracts(
+    tmp_path,
+    endpoint,
+    dataset_format,
+    marker_format,
+    expected_error,
+):
+    source = tmp_path / "legacy_local_name" / "raw"
+    source.mkdir(parents=True)
+    accepted = source.parent / "export" / dataset_format / "accepted"
+
+    if endpoint == "/api/collect_quality_upload":
+        _write_quality_split_marker(accepted, source, dataset_format=marker_format)
+
+    with serve_console(console_config()) as h:
+        _set_collect_dataset_logger(h, source)
+        if endpoint == "/api/collect_quality_upload":
+            _register_completed_quality_export(source, accepted, dataset_format=dataset_format)
+
+        response = h.post(
+            endpoint,
+            {"task": "pick up cup", "dataset_format": dataset_format},
+        )
+
+    assert response.status == 400
+    assert response.json == {
+        "ok": False,
+        "error": expected_error,
+    }
 
 
 def test_status_exposes_replay_action_key_for_series_cache():
@@ -964,7 +1386,10 @@ def test_collect_step_collection_capture_is_background_only():
 
 
 def test_collect_start_runs_collection_capture_in_background():
-    snapshots = [object(), object(), object()]
+    snapshots = [
+        RawCollectionSnapshot(timestamp=float(index), decode_raw=lambda: CollectionRawBatch())
+        for index in range(3)
+    ]
     ingested = []
 
     class _Transport:
@@ -995,7 +1420,8 @@ def test_collect_start_runs_collection_capture_in_background():
         def is_queue_full(self):
             return False
 
-        def start_episode(self, *, task, collection_min_capture_time=None):
+        def start_episode(self, *, task, collection_min_capture_time=None, collection_dataset=None):
+            assert collection_dataset is None
             return None
 
         def ingest_collection_snapshot(self, snapshot):
@@ -1054,8 +1480,8 @@ def test_collect_start_clears_backlog_and_passes_cutoff_to_logger():
         def is_queue_full(self):
             return False
 
-        def start_episode(self, *, task, collection_min_capture_time=None):
-            calls.append(("start_episode", task, collection_min_capture_time))
+        def start_episode(self, *, task, collection_min_capture_time=None, collection_dataset=None):
+            calls.append(("start_episode", task, collection_min_capture_time, collection_dataset))
 
     runtime = SimpleNamespace(
         episode_logger=_Logger(),
@@ -1066,7 +1492,7 @@ def test_collect_start_clears_backlog_and_passes_cutoff_to_logger():
         collection_teleop_active=False,
         last_collection_timestamp=None,
     )
-    session = SessionState(selected_collect_task="pick")
+    session = SessionState(selected_collect_task="pick", selected_collect_set="scene_3")
     config = console_config(inference_cfg=ConfigDict(publish_rate=200))
 
     assert handlers.collect_start(config, cast(RuntimeState, runtime), session)
@@ -1076,7 +1502,7 @@ def test_collect_start_clears_backlog_and_passes_cutoff_to_logger():
             ("set_hil_relay_enabled", True),
             "start_collection",
             "clear_collection_backlog",
-            ("start_episode", "pick", 42.0),
+            ("start_episode", "pick", 42.0, "scene_3"),
         ]
         assert session.status is SessionStatus.RUNNING
         assert runtime.collection_replay_qpos is None
@@ -1123,6 +1549,7 @@ def test_collect_start_requires_activation_gate():
 
 def test_collect_start_api_requires_collect_tab_activation():
     with serve_console(console_config()) as h:
+        h.runtime.transport.supports_collection = lambda: True
         resp = h.post("/api/collect_start")
         assert resp.json["ok"] is False
         assert h.status()["collection_teleop_armed"] is False
@@ -1132,7 +1559,7 @@ def test_collect_start_api_requires_collect_tab_activation():
         resp = h.post("/api/collect_start")
         assert resp.json["ok"] is False
 
-        h.post("/api/tab_switch", {"tab": "collect", "collect_teleop_armed": True})
+        h.do("/api/collect_arm", {"enabled": True})
         assert h.status()["collection_teleop_armed"] is True
 
 
@@ -1664,10 +2091,13 @@ def test_eval_stop_during_running_motion_is_requeued_finalized_and_left_ready():
             self.ended += 1
 
     logger_obj = _Logger()
+    finished_capture = []
     runtime = SimpleNamespace(
         web_phase="running",
         command_queue=command_queue,
         episode_logger=logger_obj,
+        collection_capture_runner=None,
+        transport=SimpleNamespace(finish_collection_capture=lambda: finished_capture.append(True)),
         needs_pre_start_reset=False,
     )
     session = SessionState(
@@ -1693,6 +2123,7 @@ def test_eval_stop_during_running_motion_is_requeued_finalized_and_left_ready():
     assert runtime.web_phase == "ready"
     assert runtime.needs_pre_start_reset is True
     assert logger_obj.ended == 1
+    assert finished_capture == [True]
 
 
 def test_interrupting_verb_during_reset_is_requeued_not_dropped(console):

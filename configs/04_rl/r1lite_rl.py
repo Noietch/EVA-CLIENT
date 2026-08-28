@@ -2,6 +2,10 @@
 
 _base_ = ["../01_deploy/r1lite/openpi_qpos.py"]
 
+console = dict(
+    initial_tab="rl",
+)
+
 rl_cfg = dict(
     cli_mode="real",
     inference_strategy="async",

@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import copy
 import time
+from collections import deque
 
 import numpy as np
 
 import critic_client  # noqa: F401
-from core.app.state import RuntimeState
+from core.app.state import RL_LIVE_SAMPLE_MAX, RuntimeState
 from core.config import ConfigDict
 from core.registry import CRITIC_REGISTRY
 from critic_client.base import CriticBuildContext, CriticConnectionError
@@ -27,6 +28,8 @@ def build_rl_active_config(config: ConfigDict, policy_slot: int) -> ConfigDict:
     active.rl_cfg = active.rl
     active.eval = None
     active.eval_cfg = None
+    active.console = copy.deepcopy(config.console)
+    active.collection = copy.deepcopy(config.collection)
     active.rollout.storage = copy.deepcopy(rl_cfg.data.storage)
     active.rollout.storage.enabled = True
     active.rollout.intervention = copy.deepcopy(rl_cfg.intervention)
@@ -84,6 +87,12 @@ def close_rl_critic(runtime: RuntimeState) -> None:
 def close_rl_workspace(runtime: RuntimeState) -> None:
     """Release RL-only model and replay resources when leaving the workspace."""
     close_rl_critic(runtime)
+    logger_obj = runtime.rollout_episode_logger
+    runtime.rollout_episode_logger = None
+    if logger_obj is not None:
+        if logger_obj.has_active_episode:
+            logger_obj.cancel_episode("leaving RL workspace")
+        logger_obj.finalize()
     with runtime.rl_replay_lock:
         runtime.rl_replay_generation += 1
         for source in runtime.rl_replay_sources:
@@ -93,7 +102,7 @@ def close_rl_workspace(runtime: RuntimeState) -> None:
         runtime.rl_replay_dataset_dir = ""
         runtime.rl_replay_episode_id = None
         runtime.rl_replay_timestamps = []
-    runtime.rl_live_samples = []
+    _reset_rl_live_samples(runtime)
     runtime.rl_pending_critic_observation = None
     runtime.rl_pending_critic_action = None
     runtime.rl_pending_critic_timestamp = None
@@ -105,7 +114,7 @@ def close_rl_workspace(runtime: RuntimeState) -> None:
 
 def reset_rl_series(runtime: RuntimeState) -> None:
     """Clear rollout telemetry and begin a fresh Critic curve."""
-    runtime.rl_live_samples = []
+    _reset_rl_live_samples(runtime)
     runtime.rl_pending_critic_observation = None
     runtime.rl_pending_critic_action = None
     runtime.rl_pending_critic_timestamp = None
@@ -124,15 +133,28 @@ def record_rl_sample(
     """Append one executed rollout or intervention sample for live charts."""
     if not runtime.rl_active or state is None or action is None:
         return
-    runtime.rl_live_samples.append(
-        (
-            float(time.time() if timestamp is None else timestamp),
-            np.asarray(state, dtype=np.float32).copy(),
-            np.asarray(action, dtype=np.float32).copy(),
-            str(source),
-            int(segment_index),
+    with runtime.rl_live_lock:
+        runtime.rl_live_samples.append(
+            (
+                float(time.time() if timestamp is None else timestamp),
+                np.asarray(state, dtype=np.float32).copy(),
+                np.asarray(action, dtype=np.float32).copy(),
+                str(source),
+                int(segment_index),
+            )
         )
-    )
+        runtime.rl_live_sample_count += 1
+        runtime.rl_live_sample_base = max(
+            0, runtime.rl_live_sample_count - len(runtime.rl_live_samples)
+        )
+
+
+def _reset_rl_live_samples(runtime: RuntimeState) -> None:
+    """Reset the bounded buffer and its absolute cursor atomically."""
+    with runtime.rl_live_lock:
+        runtime.rl_live_samples = deque(maxlen=RL_LIVE_SAMPLE_MAX)
+        runtime.rl_live_sample_count = 0
+        runtime.rl_live_sample_base = 0
 
 
 def build_rl_critic_observation(runtime: RuntimeState, observation: dict) -> dict:
@@ -212,26 +234,52 @@ def _align_critic_actions(runtime: RuntimeState, actions: np.ndarray) -> np.ndar
     return np.concatenate((actions, padding), axis=0)
 
 
-def rl_live_series(runtime: RuntimeState, since: int, critic_since: int) -> dict:
-    """Serialize incremental action/state/source and Critic samples."""
-    start = max(0, int(since))
-    samples = runtime.rl_live_samples[start:]
+def rl_live_series(
+    runtime: RuntimeState,
+    since: int,
+    critic_since: int,
+    *,
+    include_samples: bool = True,
+) -> dict:
+    """Serialize incremental live samples and Critic values."""
+    with runtime.rl_live_lock:
+        total = int(runtime.rl_live_sample_count)
+        base = int(runtime.rl_live_sample_base)
+        samples = list(runtime.rl_live_samples) if include_samples else []
+    runner = runtime.rl_critic_runner
     critic = (
-        runtime.rl_critic_runner.series(max(0, int(critic_since)))
-        if runtime.rl_critic_runner is not None
-        else {"n": 0, "timestamp": [], "value": [], "source": []}
+        runner.series(max(0, int(critic_since)))
+        if runner is not None
+        else {
+            "n": 0,
+            "timestamp": [],
+            "value": [],
+            "source": [],
+        }
     )
-    return {
+    result = {
         "active": runtime.rl_active,
-        "n": len(runtime.rl_live_samples),
-        "timestamp": [sample[0] for sample in samples],
-        "state": [sample[1].tolist() for sample in samples],
-        "action": [sample[2].tolist() for sample in samples],
-        "control_source": [sample[3] for sample in samples],
-        "intervention": [sample[3] == "intervention" for sample in samples],
-        "intervention_segment_index": [sample[4] for sample in samples],
+        # n/base form an absolute cursor. Clients that missed a window can reset
+        # locally to base and continue receiving at most RL_LIVE_SAMPLE_MAX rows.
+        "n": total,
+        "base": base,
         "critic": critic,
     }
+    if not include_samples:
+        return result
+    offset = max(0, max(base, int(since)) - base)
+    samples = samples[offset:]
+    result.update(
+        {
+            "timestamp": [sample[0] for sample in samples],
+            "state": [sample[1].tolist() for sample in samples],
+            "action": [sample[2].tolist() for sample in samples],
+            "control_source": [sample[3] for sample in samples],
+            "intervention": [sample[3] == "intervention" for sample in samples],
+            "intervention_segment_index": [sample[4] for sample in samples],
+        }
+    )
+    return result
 
 
 __all__ = [

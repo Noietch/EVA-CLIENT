@@ -3,7 +3,8 @@ name = "eva-client"
 version = "0.1.0"
 description = "Unified robot debugging client for VLA inference serving."
 readme = "README.md"
-requires-python = ">=3.10,<3.12"
+license = "Apache-2.0"
+requires-python = ">=3.11,<3.12"
 dependencies = [
     "addict>=2.4.0",
     "av>=17.1.0",
@@ -15,6 +16,7 @@ dependencies = [
     "jaxls @ git+https://github.com/brentyi/jaxls.git@50a58be88c5ef74532f09e3f55268b4f02c490e3",
     "msgpack==1.1.2",
     "msgpack-numpy==0.4.8",
+    "mcap==1.4.0",
     "numpy==1.26.4",
     "opencv-python==4.10.0.84",
     "openpi-client==0.1.2",
@@ -43,24 +45,6 @@ dev = [
     "pytest-cov==6.0.0",
     "ruff==0.15.9",
 ]
-franka = [
-    "franky-control==1.1.1",
-]
-arx = [
-    "alicia_d_sdk",
-    "pybind11==3.0.4",
-]
-camera = [
-    "pyorbbecsdk2 @ https://github.com/orbbec/pyorbbecsdk/releases/download/v2.1.1/pyorbbecsdk2-2.1.1-cp311-cp311-linux_x86_64.whl ; python_full_version >= '3.11' and python_full_version < '3.12' and sys_platform == 'linux' and platform_machine == 'x86_64'",
-    "pyorbbecsdk2 @ https://github.com/orbbec/pyorbbecsdk/releases/download/v2.1.1/pyorbbecsdk2-2.1.1-cp311-cp311-linux_aarch64.whl ; python_full_version >= '3.11' and python_full_version < '3.12' and sys_platform == 'linux' and platform_machine == 'aarch64'",
-    "pyorbbecsdk2 @ https://github.com/orbbec/pyorbbecsdk/releases/download/v2.1.1/pyorbbecsdk2-2.1.1-cp311-cp311-macosx_13_0_arm64.whl ; python_full_version >= '3.11' and python_full_version < '3.12' and sys_platform == 'darwin' and platform_machine == 'arm64'",
-]
-ur5e = [
-    "alicia_d_sdk",
-    "pydhgripper==1.0.2",
-    "synria-robocore>=2.0.0a1",
-    "ur-rtde==1.6.3",
-]
 viz = [
     "fast-simplification==0.1.13",
 ]
@@ -71,30 +55,6 @@ eva = "main:main"
 [tool.uv]
 environments = [
     "sys_platform == 'linux' and platform_machine == 'x86_64'",
-]
-# pyorbbecsdk2 hard-pins its bundled-example deps (av, open3d, pygame, pynput),
-# but orbbec_camera.py only imports the SDK core. Override the conflicting pins
-# so the project keeps av>=17 (used by src/transport/dataset.py) and skips the
-# example-only extras.
-override-dependencies = [
-    "av>=17.1.0",
-    "open3d; sys_platform == 'never'",
-    "pygame; sys_platform == 'never'",
-    "pynput; sys_platform == 'never'",
-]
-
-[tool.uv.sources]
-alicia_d_sdk = { path = "examples/hardware/arx/SDK/alicia_d", editable = true }
-
-[tool.eva.hardware.arx]
-sdk_path = "examples/hardware/arx/SDK/ARX_R5_python"
-ros_setup_path = "/opt/ros/jazzy/setup.sh"
-native_rpath = ["$ORIGIN/../arx_r5_src", "$ORIGIN/.."]
-native_library_paths = [
-    "examples/hardware/arx/SDK/ARX_R5_python/bimanual/api",
-    "examples/hardware/arx/SDK/ARX_R5_python/bimanual/api/arx_r5_src",
-    "/opt/ros/jazzy/lib",
-    "/usr/local/lib",
 ]
 
 [[tool.uv.index]]
@@ -110,17 +70,16 @@ allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 sources = ["src"]
-include = ["src"]
+include = ["src", "tools"]
 
 [tool.ruff]
 line-length = 100
-# Vendored third-party SDKs (ARX / alicia_d) ship their own style; never lint or format them.
-extend-exclude = ["examples/hardware/arx/SDK"]
+# Vendored third-party SDKs ship their own style; never lint or format them.
+extend-exclude = ["examples/hardware/arx_r5/SDK", "examples/hardware/arx_x5/SDK"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
-# UP042 wants `enum.StrEnum`, but we keep `class X(str, enum.Enum)` for Python 3.10
-# compatibility (StrEnum is 3.11+).
+# Keep the existing `class X(str, enum.Enum)` declarations for stable public enum behavior.
 ignore = ["UP042"]
 
 # These modules must run setup before importing project code: manual verify scripts
@@ -149,6 +108,9 @@ extraPaths = [
 # strict-only diagnostics (basedpyright defaults) for tests/ without relaxing src/.
 [[tool.pyright.executionEnvironments]]
 root = "tests"
+reportAttributeAccessIssue = false
+reportArgumentType = false
+reportCallIssue = false
 reportUnknownParameterType = false
 reportUnknownVariableType = false
 reportUnknownMemberType = false
@@ -156,6 +118,7 @@ reportUnknownArgumentType = false
 reportUnknownLambdaType = false
 reportMissingParameterType = false
 reportMissingTypeArgument = false
+reportOptionalMemberAccess = false
 reportPrivateUsage = false
 reportImplicitOverride = false
 reportUnusedCallResult = false

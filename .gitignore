@@ -10,6 +10,7 @@
 
 # Python environments, caches, and type-checker output.
 .venv/
+examples/hardware/*/.venv
 __pycache__/
 .pytest_cache/
 .ruff_cache/
@@ -27,8 +28,15 @@ work_dirs/
 logs/
 Log/
 
-# Local helper directory (new files are ignored; existing tracked files stay tracked).
-tools/
+# Local helpers are ignored except maintained tool packages.
+tools/*
+!tools/__init__.py
+!tools/conversion/
+!tools/conversion/**
+!tools/skills/
+!tools/skills/**
+tools/conversion/__pycache__/
+temp/
 
 # Native libraries and bundled external dependencies.
 upload_parallel*.sh

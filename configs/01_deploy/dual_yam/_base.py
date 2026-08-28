@@ -1,0 +1,37 @@
+"""YAM dual YAM shared deploy settings."""
+
+_base_ = ["../../00_base/defaults.py"]
+
+console = dict(initial_tab="debug")
+
+robot = dict(
+    type="dual_yam",
+    gripper_threshold=None,
+)
+
+transport = dict(
+    type="zmq",
+    resize_pad=False,
+    image_layout="hwc",
+    disabled_cameras=[],
+)
+
+policy = dict(type="openpi")
+
+inference_cfg = dict(
+    # Manual follower checkout: limit joints to 0.15 rad/s at the default 30 Hz
+    # and hold the final target long enough for the bounded tracking trim.
+    manual_max_qpos_step=0.005,
+    manual_settle_duration=2.0,
+)
+
+rollout = dict(
+    storage=dict(
+        enabled=True,
+        log_dir="work_dirs/rollout/dual_yam",
+        fps=30,
+        save_queue_max=15,
+        async_save=True,
+    ),
+    intervention=dict(control_mode="relative"),
+)

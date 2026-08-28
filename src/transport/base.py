@@ -147,6 +147,10 @@ class TransportBridge(abc.ABC):
         """Signal the source to begin emitting collection frames (no-op default)."""
         return None
 
+    def start_policy_collection(self) -> None:
+        """Start collection capture for actions produced by the policy."""
+        self.start_collection()
+
     def clear_collection_backlog(self) -> float | None:
         """Discard collection frames captured before the active recording episode.
 
@@ -176,6 +180,15 @@ class TransportBridge(abc.ABC):
         """
         return None
 
+    def prepare_collection_capture(self, directory: str | None) -> None:
+        """Select storage for transport-owned resources used by the next capture."""
+        _ = directory
+        return None
+
+    def finish_collection_capture(self) -> None:
+        """Release transport-owned resources for the just-finished capture."""
+        return None
+
     def collection_diagnostics(self) -> str:
         """Human-readable reason collection frames are not currently available."""
         return ""
@@ -201,6 +214,10 @@ class TransportBridge(abc.ABC):
     def hil_status(self) -> HilStatus:
         """Return the backend's current HIL capability and activation state."""
         return HilStatus(supported=False, error="Transport does not support HIL")
+
+    def poll_operator_event(self) -> str | None:
+        """Return one edge-triggered hardware operator event, if supported."""
+        return None
 
     def start_hil_control(self, mode: str) -> HilStatus:
         """Request HIL takeover and return the confirmed backend state."""

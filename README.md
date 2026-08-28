@@ -10,7 +10,7 @@
 <a href="https://colalab.net/projects/eva-client/"><img src="https://img.shields.io/badge/Project%20Page-colalab.net-blue?style=for-the-badge&logo=googlechrome&logoColor=white" alt="Project Page"></a>
 <a href="https://colalab.net/projects/eva-client/paper/EVA_Client_Report.pdf"><img src="https://img.shields.io/badge/Technical%20Report-PDF-red?style=for-the-badge&logo=adobeacrobatreader&logoColor=white" alt="Technical Report"></a>
 <a href="https://colalab.net/projects/eva-client/docs/introduction.html"><img src="https://img.shields.io/badge/Docs-English-2ea44f?style=for-the-badge&logo=readthedocs&logoColor=white" alt="Documentation (English)"></a>
-<a href="https://colalab.net/projects/eva-client/docs/introduction.zh.html"><img src="https://img.shields.io/badge/文档-中文-2ea44f?style=for-the-badge&logo=readthedocs&logoColor=white" alt="Documentation (中文)"></a>
+<a href="https://colalab.net/projects/eva-client/docs/introduction.zh.html"><img src="https://img.shields.io/badge/Docs-Chinese-2ea44f?style=for-the-badge&logo=readthedocs&logoColor=white" alt="Documentation (Chinese)"></a>
 <a href="https://github.com/Noietch/EVA-CLIENT/stargazers"><img src="https://img.shields.io/github/stars/Noietch/EVA-CLIENT?style=for-the-badge&logo=github&logoColor=white&color=0a0a0a&cacheSeconds=60" alt="GitHub Stars"></a>
 <p align="center">
   <video src="https://github.com/user-attachments/assets/09cf8c98-396d-45d0-bd38-8603412ec3c2" controls muted></video>
@@ -34,15 +34,21 @@
 
 ## 🔥 What's NEW!
 
-* **[2026-07-22] New RL Workspace.** EVA-Client now supports human-in-the-loop (HIL) intervention during policy rollouts and real-time value-curve visualization.
+* **[2026-08-28] Client-driven WebXR Teleoperation.** EVA-Client now supports VR teleoperation for real-robot data collection through a client-driven WebXR workflow.
 
 <p align="center">
-  <video src="https://github.com/user-attachments/assets/62883016-1d5c-4688-9c39-740810b36b86" controls muted></video>
+  <video src="https://github.com/user-attachments/assets/caeabb2f-7896-4863-848d-21f9a5a38dcb" controls muted></video>
 </p>
+
+* **[2026-08-28] Multi-format Dataset Export.** Export collected datasets to LeRobot v3.0, MCAP, or HDF5 through the unified collection workflow.
+
+* **[2026-08-28] YAM Leader-Follower Support.** Collect demonstrations with dual YAM follower arms and leader teaching handles.
+
+* **[2026-07-22] New RL Workspace.** EVA-Client now supports human-in-the-loop (HIL) intervention during policy rollouts and real-time value-curve visualization. See the [RL workspace and HIL intervention demo](./docs/console.md#rl-workspace-and-hil-intervention).
 
 * **[2026-07-18] Headless CLI + ZMQ control channel.** Drive the full deploy / eval / RL / collect loop from a single `.py` config without the browser — every console button (incl. HIL takeover) mirrored on a ZMQ socket. See [`docs/console.md`](./docs/console.md) and [`docs/control-channel.md`](./docs/control-channel.md).
 * **[2026-07-03] EVA-Client is open-sourced!**
-* **[2026-07-03] Paper, docs, and project page are live!** Read the [Technical Report](https://colalab.net/projects/eva-client/paper/EVA_Client_Report.pdf), browse the [Documentation](https://colalab.net/projects/eva-client/docs/introduction.html) ([中文](https://colalab.net/projects/eva-client/docs/introduction.zh.html)), and visit the [Project Page](https://colalab.net/projects/eva-client/).
+* **[2026-07-03] Paper, docs, and project page are live!** Read the [Technical Report](https://colalab.net/projects/eva-client/paper/EVA_Client_Report.pdf), browse the [Documentation](https://colalab.net/projects/eva-client/docs/introduction.html) ([Chinese](https://colalab.net/projects/eva-client/docs/introduction.zh.html)), and visit the [Project Page](https://colalab.net/projects/eva-client/).
 
 ---
 
@@ -52,7 +58,7 @@
   `.py` config → transport ([ROS1](https://github.com/ros/ros) / [ROS2](https://github.com/ros2/ros2) / [ZeroMQ](https://github.com/zeromq/pyzmq) / offline dataset) → policy
   backend ([OpenPI](https://github.com/Physical-Intelligence/openpi), [OpenPI-RTC](https://www.pi.website/research/real_time_chunking), [StarVLA](https://github.com/starVLA/starVLA), [GR00T](https://github.com/Nvidia/Isaac-GR00T), mock, replay) → inference
   strategy (sync / [async](https://github.com/OpenDriveLab/kai0#train-deploy-alignment) / naive / [ACT-ensemble](https://github.com/tonyzhaozh/act) / RTC) with live latency
-  compensation. **6 robots already** — joint-space or EEF-space (PyRoki IK),
+  compensation. **8 robots already** — joint-space or EEF-space (PyRoki IK),
   all live-switchable from the DEBUG tab.
 * **📊 Evaluation.** Multi-checkpoint sweeps with per-trial records: every
   rollout captures camera video, 3D URDF scene, per-dimension state charts,
@@ -74,12 +80,13 @@
 |-------|-------------|:---------:|
 | AgileX Piper | Dual 6-DoF arm + gripper | ✅ |
 | ARX R5 | Dual 6-DoF arm + gripper | ✅ |
+| ARX X5 | Dual 6-DoF arm + gripper | ✅ |
 | Dual Franka Panda | Dual 7-DoF arm + gripper | ✅ |
 | Galaxea R1 Lite | Dual 6-DoF arm on torso | ✅ |
 | Universal Robots UR5e | Single 6-DoF arm + gripper | ✅ |
 | AgiBot G2 | Dual-arm humanoid (24-DoF body) | ✅ |
+| YAM | Dual-arm follower + leader | ✅ |
 | AgiBot G2 (mobile base) | Humanoid on mobile chassis | 🚧 |
-| YAM | Dual-arm manipulator | 🚧 |
 | Tianji | Dual-arm manipulator | 🚧 |
 | Unitree H1 / G1 | Humanoid | 🚧 |
 | Fourier GR-1 | Humanoid | 📦 |
@@ -132,7 +139,7 @@ Full guides live in [`docs/`](./docs). Start here:
 ## 🗺️ Roadmap
 
 - [ ] **More robots.** Extend the robot zoo to more embodiments — dual-arm
-      manipulators (YAM, Tianji, …), humanoids
+      manipulators (Tianji, …), humanoids
       (Unitree H1/G1, Fourier GR-1, Booster T1, …) and mobile / wheeled
       platforms (mobile ALOHA, Galaxea R1 base, quadruped + arm).
 - [x] **Human-in-the-loop data collection for RL.** Interventions during

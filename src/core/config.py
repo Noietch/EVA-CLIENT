@@ -16,7 +16,10 @@ The returned ConfigDict supports dotted attribute access
 
 from __future__ import annotations
 
-from pathlib import Path
+import math
+import posixpath
+import re
+from pathlib import Path, PurePosixPath
 from typing import TypedDict
 
 from core.cfg import Config, ConfigDict
@@ -43,6 +46,26 @@ class StrategyYamlSpec(TypedDict):
 
 
 _COLLECTION_REQUIRED_COLUMNS = ("qpos", "eef", "action_qpos", "action_eef")
+_TELEOP_CONTROL_SOURCES = frozenset({"transport", "client"})
+_ROLLOUT_INTERVENTION_SOURCES = frozenset({"transport", "teleop_client"})
+_CONSOLE_INITIAL_TABS = frozenset(
+    {"auto", "debug", "manual", "collect", "replay", "rl", "eval", "result"}
+)
+_SCENE_DATASET_RE = re.compile(
+    r"^(?P<base>.+)_scene_(?P<index>[1-9][0-9]*)(?:_(?P<date>[0-9]{8}))?$"
+)
+
+
+def _is_safe_dataset_name_component(value: str) -> bool:
+    candidate = value.strip()
+    return bool(candidate) and Path(candidate).name == candidate and candidate not in {".", ".."}
+
+
+def _is_safe_posix_directory(value: str) -> bool:
+    path = PurePosixPath(value)
+    normalized = posixpath.normpath(value)
+    canonical = value == "/" or normalized == value.rstrip("/")
+    return path.is_absolute() and canonical and all(part not in {".", ".."} for part in path.parts)
 
 
 def load_config(path: str | Path) -> ConfigDict:
@@ -133,6 +156,7 @@ def _apply_derived(cfg: ConfigDict, path: Path) -> None:
     """
     work_dir = cfg.get("work_dir") or "work_dirs"
     coll = cfg.get("collection") or {}
+    _validate_teleop(cfg)
     schema = coll.get("schema") or {}
     if (schema.get("columns") or {}) and not (coll.get("storage") or {}).get("log_dir"):
         cfg.collection.storage["log_dir"] = str(Path(work_dir) / path.stem)
@@ -140,8 +164,82 @@ def _apply_derived(cfg: ConfigDict, path: Path) -> None:
 
 def _validate(cfg: ConfigDict) -> None:
     """Validate configured collection and RL storage contracts."""
+    console = cfg.get("console") or {}
+    initial_tab = str(console.get("initial_tab", "auto"))
+    if initial_tab not in _CONSOLE_INITIAL_TABS:
+        raise ValueError(
+            "console.initial_tab must be one of "
+            f"{sorted(_CONSOLE_INITIAL_TABS)}, got {initial_tab!r}"
+        )
+
     coll = cfg.get("collection") or {}
     schema = coll.get("schema") or {}
+    tasks = coll.get("tasks", {})
+    if tasks is None:
+        tasks = {}
+    if not isinstance(tasks, dict):
+        raise ValueError("collection.tasks must map dataset names to (prompt, target) lists")
+    prompt_datasets: dict[str, str] = {}
+    for dataset_name, prompts in tasks.items():
+        normalized_name = str(dataset_name).strip()
+        if not _is_safe_dataset_name_component(normalized_name):
+            raise ValueError("collection.tasks dataset names must be non-empty path components")
+        if not isinstance(prompts, (list, tuple)) or not prompts:
+            raise ValueError(f"collection.tasks.{dataset_name} must be a non-empty prompt list")
+        for entry in prompts:
+            if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+                raise ValueError(
+                    f"collection.tasks.{dataset_name} entries must be (prompt, target) pairs"
+                )
+            prompt, target = entry
+            if not isinstance(prompt, str):
+                raise ValueError(f"collection.tasks.{dataset_name} prompts must be strings")
+            normalized_prompt = str(prompt).strip()
+            if not normalized_prompt:
+                raise ValueError(f"collection.tasks.{dataset_name} prompts must not be empty")
+            previous_dataset = prompt_datasets.get(normalized_prompt)
+            if previous_dataset is not None:
+                previous_scene = _SCENE_DATASET_RE.fullmatch(previous_dataset)
+                current_scene = _SCENE_DATASET_RE.fullmatch(normalized_name)
+                same_scene_family = (
+                    previous_scene is not None
+                    and current_scene is not None
+                    and previous_scene.group("base") == current_scene.group("base")
+                    and previous_dataset != normalized_name
+                )
+                if not same_scene_family:
+                    raise ValueError(
+                        f"collection prompt must belong to one dataset: {normalized_prompt!r}"
+                    )
+            else:
+                prompt_datasets[normalized_prompt] = normalized_name
+            if (
+                isinstance(target, bool)
+                or not isinstance(target, int)
+                or target == 0
+                or target < -1
+            ):
+                raise ValueError(
+                    f"collection.tasks.{dataset_name} target must be -1 or a positive integer"
+                )
+    if "task_requirements" in coll:
+        raise ValueError(
+            "collection.task_requirements was removed; put each target beside its prompt"
+        )
+    sftp = (coll.get("storage") or {}).get("sftp") or {}
+    if sftp:
+        if not str(sftp.get("host", "")).strip():
+            raise ValueError("collection.storage.sftp.host must not be empty")
+        try:
+            sftp_port = int(sftp.get("port", 22))
+        except (TypeError, ValueError) as error:
+            raise ValueError("collection.storage.sftp.port must be an integer") from error
+        if not 1 <= sftp_port <= 65535:
+            raise ValueError("collection.storage.sftp.port must be in [1, 65535]")
+        remote_dir = str(sftp.get("remote_dir", "")).strip()
+        if not _is_safe_posix_directory(remote_dir):
+            raise ValueError("collection.storage.sftp.remote_dir must be a canonical absolute path")
+    rl_cfg = cfg.get("rl_cfg")
     columns = set(schema.get("columns") or {})
     if columns:
         missing = sorted(set(_COLLECTION_REQUIRED_COLUMNS) - columns)
@@ -151,10 +249,111 @@ def _validate(cfg: ConfigDict) -> None:
             raise ValueError("collection.schema.cameras must define at least one camera")
         if not (schema.get("arms") or {}):
             raise ValueError("collection.schema.arms must define at least one arm")
+        storage = coll.get("storage") or {}
+        image_skew_tolerance = storage.get("image_skew_tolerance_sec")
+        if image_skew_tolerance is not None:
+            _positive_finite(
+                image_skew_tolerance,
+                "collection.storage.image_skew_tolerance_sec",
+            )
 
-    rl_cfg = cfg.get("rl_cfg")
     if rl_cfg and str(rl_cfg.data.format) != "lerobot":
         raise ValueError("rl.data.format must be 'lerobot' in this version")
+    rollout_source = str(((cfg.get("rollout") or {}).get("intervention") or {}).get("source", ""))
+    if rollout_source and rollout_source not in _ROLLOUT_INTERVENTION_SOURCES:
+        raise ValueError(
+            "rollout.intervention.source must be one of "
+            f"{sorted(_ROLLOUT_INTERVENTION_SOURCES)}, got {rollout_source!r}"
+        )
+    if rl_cfg is not None:
+        rl_source = str((rl_cfg.get("intervention") or {}).get("source", ""))
+        if rl_source and rl_source not in _ROLLOUT_INTERVENTION_SOURCES:
+            raise ValueError(
+                "rl.intervention.source must be one of "
+                f"{sorted(_ROLLOUT_INTERVENTION_SOURCES)}, got {rl_source!r}"
+            )
+        if (
+            rl_source == "teleop_client"
+            and str((coll.get("teleop") or {}).get("control_source", "")) != "client"
+        ):
+            raise ValueError(
+                "rl.intervention.source='teleop_client' requires "
+                "collection.teleop.control_source='client'"
+            )
+
+    # Validate rollout intervention input source
+    for field, section in (("rollout", cfg.get("rollout") or {}), ("rl", rl_cfg or {})):
+        intervention = section.get("intervention") or {}
+        source = intervention.get("source")
+        if not source:
+            continue
+        source = str(source)
+        if source not in _ROLLOUT_INTERVENTION_SOURCES:
+            raise ValueError(
+                f"{field}.intervention.source must be one of "
+                f"{sorted(_ROLLOUT_INTERVENTION_SOURCES)}, got {source!r}"
+            )
+        if source == "teleop_client" and str((coll.get("teleop") or {}).get("control_source")) != (
+            "client"
+        ):
+            raise ValueError(
+                f"{field}.intervention.source='teleop_client' requires "
+                "collection.teleop.control_source='client'"
+            )
+
+
+def _positive_finite(value: object, field: str) -> float:
+    try:
+        parsed = float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{field} must be numeric") from error
+    if not math.isfinite(parsed) or parsed <= 0.0:
+        raise ValueError(f"{field} must be positive and finite")
+    return parsed
+
+
+def _teleop_arm_group_names(cfg: ConfigDict) -> tuple[str, ...]:
+    collection = cfg.get("collection") or {}
+    schema_arm_names = tuple((collection.get("schema") or {}).get("arms") or {})
+    if schema_arm_names:
+        return schema_arm_names
+    robot_type = str((cfg.get("robot") or {}).get("type", "")).strip()
+    if not robot_type:
+        raise ValueError("client-driven teleop requires robot.type")
+    import robots  # noqa: F401
+    from core.registry import ROBOT_REGISTRY
+
+    robot = ROBOT_REGISTRY.build(robot_type)
+    return tuple(group.name for group in robot.arm_groups)
+
+
+def _validate_teleop(cfg: ConfigDict) -> None:
+    """Validate the input-source selection without importing optional VR code eagerly."""
+    collection = cfg.get("collection") or {}
+    teleop = collection.get("teleop") or {}
+    source = str(teleop.get("control_source", "transport"))
+    if source not in _TELEOP_CONTROL_SOURCES:
+        raise ValueError(
+            "collection.teleop.control_source must be one of "
+            f"{sorted(_TELEOP_CONTROL_SOURCES)}, got {source!r}"
+        )
+    client = teleop.get("client") or {}
+    if source == "transport":
+        if client:
+            raise ValueError("transport-driven teleop cannot configure collection.teleop.client")
+        return
+    if teleop.get("type"):
+        raise ValueError("client-driven teleop must use client={...}, not legacy teleop.type")
+    from teleop_client import validate_client_config
+
+    validate_client_config(client, arm_group_names=_teleop_arm_group_names(cfg))
+    safety = teleop.get("safety") or {}
+    for name in (
+        "max_qpos_step",
+        "max_position_error_m",
+        "max_orientation_error_rad",
+    ):
+        _positive_finite(safety.get(name), f"collection.teleop.safety.{name}")
 
 
 def _resolve_eval_checkpoints(cfg: ConfigDict, path: Path) -> None:

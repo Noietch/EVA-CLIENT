@@ -1,0 +1,4 @@
+interface:
+  display_name: "Add Robots"
+  short_description: "Integrate robot SDKs and models safely"
+  default_prompt: "Use $add-robots to integrate a new robot SDK and URDF into EVA-CLIENT."

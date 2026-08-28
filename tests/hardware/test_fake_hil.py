@@ -5,6 +5,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
+from typing import Any, cast
 
 import numpy as np
 import pytest
@@ -25,7 +26,13 @@ def _free_port() -> int:
 
 @pytest.mark.parametrize(
     "robot_name",
-    ["r1_lite", "ur5e", "arx_r5", "agilex_piper"],
+    [
+        "r1_lite",
+        "ur5e",
+        "arx_r5",
+        "agilex_piper",
+        "dual_yam",
+    ],
 )
 def test_generic_fake_hil_relative_takeover_for_every_robot(robot_name: str):
     suffix = uuid.uuid4().hex
@@ -38,17 +45,19 @@ def test_generic_fake_hil_relative_takeover_for_every_robot(robot_name: str):
         image_width=8,
     )
     try:
-        before = node.hil_snapshot()
-        group = before["groups"][0]
-        group_name = group["name"]
-        first_before = np.asarray(before["feedback"][group_name], dtype=np.float32)
+        before = cast(dict[str, Any], node.hil_snapshot())
+        groups = cast(list[dict[str, Any]], before["groups"])
+        feedback = cast(dict[str, list[float]], before["feedback"])
+        group_name = cast(str, groups[0]["name"])
+        first_before = np.asarray(feedback[group_name], dtype=np.float32)
 
         node.start_hil("relative")
         node.adjust_hil_joint(group_name, 0, 0.2)
         node._publish_observation()
 
-        after = node.hil_snapshot()
-        first_after = np.asarray(after["feedback"][group_name], dtype=np.float32)
+        after = cast(dict[str, Any], node.hil_snapshot())
+        after_feedback = cast(dict[str, list[float]], after["feedback"])
+        first_after = np.asarray(after_feedback[group_name], dtype=np.float32)
         assert after["supported"] is True
         assert after["active"] is True
         assert first_after[0] == pytest.approx(first_before[0] + 0.2)
@@ -72,7 +81,7 @@ def test_generic_fake_reports_hil_unsupported_without_leader_adapter(robot_name:
     )
     try:
         node.start_hil("relative")
-        snapshot = node.hil_snapshot()
+        snapshot = cast(dict[str, Any], node.hil_snapshot())
         assert snapshot["supported"] is False
         assert snapshot["active"] is False
         assert snapshot["error"] == f"{robot_name} has no HIL leader adapter"
@@ -87,6 +96,7 @@ def test_generic_fake_reports_hil_unsupported_without_leader_adapter(robot_name:
         ("ur5e", "configs/01_deploy/ur5e/openpi_qpos.py"),
         ("arx_r5", "configs/01_deploy/arx_r5/openpi_qpos.py"),
         ("agilex_piper", "configs/01_deploy/dual_agilex_piper/openpi_qpos.py"),
+        ("dual_yam", "configs/01_deploy/dual_yam/openpi_qpos.py"),
     ],
 )
 def test_zmq_transport_confirms_fake_hil_and_receives_user_action(

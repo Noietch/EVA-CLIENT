@@ -2,6 +2,8 @@
 
 _base_ = ["../../00_base/defaults.py"]
 
+console = dict(initial_tab="debug")
+
 robot = dict(
     type="dual_franka",
     gripper_threshold=None,

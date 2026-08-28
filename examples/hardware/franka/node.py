@@ -45,7 +45,7 @@ class FrankaZmqConfig:
         gripper_ips: arm group name -> Franka gripper IP.
         disabled_groups: arm groups intentionally absent from this deployment.
         orbbec_cameras: Orbbec SDK cameras mapped to EVA image keys.
-        publish_rate_hz: observation publish rate.
+        publish_rate_hz: action/state publish rate; cameras keep their own frame rate.
         status_log_interval_s: hardware status log interval; non-positive disables it.
     """
 
@@ -62,6 +62,9 @@ class FrankaZmqConfig:
 class EmptyCameraCache:
     def snapshot(self) -> dict[str, np.ndarray]:
         return {}
+
+    def snapshot_versioned(self) -> tuple[dict[str, int], dict[str, np.ndarray]]:
+        return {}, {}
 
     def hardware_status(self) -> dict[str, str]:
         return {}
@@ -136,6 +139,7 @@ class FrankaZmqNode:
         self._cameras = self._build_camera_cache(config)
         self._received_actions = 0
         self._published_observations = 0
+        self._last_published_camera_seqs: dict[str, int] = {}
         now = time.monotonic()
         self._last_status_log_time = now
         self._next_status_log_time = now + max(config.status_log_interval_s, 0.0)
@@ -172,7 +176,13 @@ class FrankaZmqNode:
 
     def _publish_observation(self) -> None:
         state = self._robot.read_state()
-        images = self._cameras.snapshot()
+        seqs, images = self._cameras.snapshot_versioned()
+        images = {
+            key: image
+            for key, image in images.items()
+            if self._last_published_camera_seqs.get(key) != seqs.get(key)
+        }
+        self._last_published_camera_seqs.update(seqs)
         obs = WireObservation(t=time.monotonic(), images=images, state=state)
         self._obs_pub.send(pack_observation(obs))
         self._published_observations += 1

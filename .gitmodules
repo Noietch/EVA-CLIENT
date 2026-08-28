@@ -1,0 +1,7 @@
+[submodule "examples/hardware/arx_x5/SDK/X5"]
+	path = examples/hardware/arx_x5/SDK/X5
+	url = https://github.com/ARXroboticsX/ARX5_beta.git
+
+[submodule "examples/hardware/yam/SDK/i2rt"]
+	path = examples/hardware/yam/SDK/i2rt
+	url = https://github.com/Noietch/i2rt.git

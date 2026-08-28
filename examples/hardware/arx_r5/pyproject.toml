@@ -1,0 +1,52 @@
+[project]
+name = "eva-arx-r5-hardware"
+version = "0.1.0"
+description = "Isolated runtime for the EVA ARX R5 hardware adapter."
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "eva-client",
+    "alicia_d_sdk",
+    "pybind11==3.0.4",
+    "pyserial==3.5",
+    "pyorbbecsdk2 @ https://github.com/orbbec/pyorbbecsdk/releases/download/v2.1.1/pyorbbecsdk2-2.1.1-cp311-cp311-linux_x86_64.whl ; python_full_version >= '3.11' and python_full_version < '3.12' and sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "pyorbbecsdk2 @ https://github.com/orbbec/pyorbbecsdk/releases/download/v2.1.1/pyorbbecsdk2-2.1.1-cp311-cp311-linux_aarch64.whl ; python_full_version >= '3.11' and python_full_version < '3.12' and sys_platform == 'linux' and platform_machine == 'aarch64'",
+    "pyorbbecsdk2 @ https://github.com/orbbec/pyorbbecsdk/releases/download/v2.1.1/pyorbbecsdk2-2.1.1-cp311-cp311-macosx_13_0_arm64.whl ; python_full_version >= '3.11' and python_full_version < '3.12' and sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==8.3.5",
+    "ruff==0.15.9",
+]
+
+[tool.uv]
+package = false
+environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+override-dependencies = [
+    "av>=17.1.0",
+    "open3d; sys_platform == 'never'",
+    "pygame; sys_platform == 'never'",
+    "pynput; sys_platform == 'never'",
+]
+
+[tool.uv.sources]
+eva-client = { path = "../../..", editable = true }
+alicia_d_sdk = { path = "SDK/alicia_d", editable = true }
+
+[[tool.uv.index]]
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
+
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = []
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = ["SDK"]

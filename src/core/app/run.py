@@ -21,12 +21,13 @@ from core.app.handlers import (
     ROLLOUT_STEP_MAX_RAW_SNAPSHOTS,
     _anchor_buffer_to_current_qpos,
     accept_rollout_intervention_segment,
+    activate_teleop,
     begin_rollout_save_episode,
     build_policy_observation,
     clear_replay,
+    close_teleop,
     collect_cancel,
     collect_start,
-    collect_start_teleop,
     collect_step,
     collect_stop,
     collect_stop_teleop,
@@ -34,8 +35,10 @@ from core.app.handlers import (
     discard_rollout_episode,
     discard_rollout_intervention_segment,
     disconnect_policy,
+    drain_teleop_events,
     enable_default_recording,
     end_episode,
+    ingest_client_teleop_action,
     is_replay,
     iter_target_grippers,
     load_replay_dataset,
@@ -43,13 +46,16 @@ from core.app.handlers import (
     manual_send,
     mark_rollout_save_ready,
     maybe_build_episode_logger,
+    prewarm_teleop_ik,
     publish_next_action,
     rebuild_eval_episode_logger,
+    record_client_rollout_intervention_step,
     record_rollout_intervention_step,
     reset_ik_solver,
     reset_infer_strategy,
     reset_session_progress,
     rollback_rollout_intervention,
+    rollout_intervention_source,
     run_init_done,
     run_init_move,
     run_one_chunk_on_sim,
@@ -70,12 +76,16 @@ from core.app.handlers import (
     start_episode,
     start_inference_loop,
     start_rollout_intervention,
+    start_teleop_input,
+    step_rollout_teleop,
+    step_teleop,
     stop_collection_capture,
     stop_rollout_intervention,
     toggle_gripper_immediate,
     update_inference_params,
 )
 from core.app.operator_control import (
+    handle_teleop_operator_event,
     maybe_start_operator_action_listener,
     resolve_operator_action,
 )
@@ -104,8 +114,9 @@ from transport.base import build_transport
 logger = logging.getLogger(__name__)
 
 # Halt an active run if the frontend hasn't polled /api/status within this window.
-# The poll cadence is ~250ms, so this tolerates dozens of missed polls before tripping.
+# The browser polls every second, leaving two seconds for a delayed retry.
 CLIENT_WATCHDOG_TIMEOUT_S = 3.0
+MAX_DEBUG_TIME_EXCEEDED_ERROR = "Maximum debug time exceeded."
 
 # Headless heartbeat cadence. While RUNNING we log every beat (proof of life); while
 # idle we log far less often so a parked headless process doesn't spam the log.
@@ -299,11 +310,37 @@ def _queue_rl_setup_after_reset(runtime: RuntimeState) -> None:
     runtime.command_queue.put("web:rl_setup")
 
 
+def _resume_after_rollout_intervention(
+    config: ConfigDict,
+    runtime: RuntimeState,
+    session: SessionState,
+    *,
+    status_reason: str,
+) -> bool:
+    runtime.rollout_save_ready = False
+    runtime.rollout_save_reason = ""
+    session.action_chunk = None
+    session.chunk_index = 0
+    if not run_warmup_and_start(config, runtime, session):
+        return False
+    if runtime.collection_capture_runner is None:
+        start_collection_capture(
+            runtime,
+            fps=config.inference_cfg.publish_rate,
+            max_raw_snapshots_per_tick=ROLLOUT_STEP_MAX_RAW_SNAPSHOTS,
+        )
+    session.run_start_time = time.monotonic()
+    set_status(session, SessionStatus.RUNNING, reason=status_reason)
+    return True
+
+
 def _handle_web_command(
     command: str,
     config: ConfigDict,
     runtime: RuntimeState,
     session: SessionState,
+    *,
+    base_config: ConfigDict | None = None,
 ) -> None:
     """Programmatic command channel for the web server.
 
@@ -313,6 +350,7 @@ def _handle_web_command(
     verb, _, arg = payload.partition(":")
     verb = verb.strip()
     arg = arg.strip()
+    base_config = config if base_config is None else base_config
     logger.info(
         "[CMD] %s%s (phase=%s status=%s)",
         verb,
@@ -446,6 +484,12 @@ def _handle_web_command(
             session.last_error = f"RL inference strategy is not configured: {strategy}"
             return
         select_inference_strategy(strategy, config, runtime, session)
+        try:
+            start_teleop_input(config, runtime)
+        except Exception as error:
+            session.last_error = f"Cannot start teleop input: {error}"
+            logger.exception("RL teleop input listener failed to start")
+            return
         if not connect_policy(config, runtime, session, force_reconnect=True):
             session.last_error = runtime.last_policy_error
             return
@@ -522,6 +566,8 @@ def _handle_web_command(
         # timestamp) lands on disk immediately and the just-stopped trial is scorable
         # without waiting for the next RUN. Parquet/video flush in the background.
         end_episode(runtime)
+        runtime.current_clip_id = None
+        runtime.current_cell = None
         # Stop always leaves the arm un-reset. Either auto-reset now, or mark a deferred
         # reset that the next start will pick up.
         assert runtime.command_queue is not None
@@ -712,20 +758,13 @@ def _handle_web_command(
             runtime.rollout_exclusion_active = ("policy_warmup", warmup_exclusion_start)
             if not accept_rollout_intervention_segment(runtime, session):
                 return
-            runtime.rollout_save_ready = False
-            runtime.rollout_save_reason = ""
-            session.action_chunk = None
-            session.chunk_index = 0
-            if not run_warmup_and_start(config, runtime, session):
+            if not _resume_after_rollout_intervention(
+                config,
+                runtime,
+                session,
+                status_reason="resume after teleop intervention",
+            ):
                 return
-            if runtime.collection_capture_runner is None:
-                start_collection_capture(
-                    runtime,
-                    fps=config.inference_cfg.publish_rate,
-                    max_raw_snapshots_per_tick=ROLLOUT_STEP_MAX_RAW_SNAPSHOTS,
-                )
-            session.run_start_time = time.monotonic()
-            set_status(session, SessionStatus.RUNNING, reason="resume after teleop intervention")
             logger.info(
                 "[HIL_RESUME] path=warmup transition_ms=%.1f step=%d exclusion_start=%.6f",
                 (time.monotonic() - resume_started) * 1000.0,
@@ -798,20 +837,13 @@ def _handle_web_command(
             return
         discard_rollout_intervention_segment(runtime)
         runtime.transport.clear_collection_backlog()
-        runtime.rollout_save_ready = False
-        runtime.rollout_save_reason = ""
-        session.action_chunk = None
-        session.chunk_index = 0
-        if not run_warmup_and_start(config, runtime, session):
+        if not _resume_after_rollout_intervention(
+            config,
+            runtime,
+            session,
+            status_reason="resume after abandoned intervention",
+        ):
             return
-        if runtime.collection_capture_runner is None:
-            start_collection_capture(
-                runtime,
-                fps=config.inference_cfg.publish_rate,
-                max_raw_snapshots_per_tick=ROLLOUT_STEP_MAX_RAW_SNAPSHOTS,
-            )
-        session.run_start_time = time.monotonic()
-        set_status(session, SessionStatus.RUNNING, reason="resume after abandoned intervention")
         return
 
     if verb == "rollout_intervention_enabled":
@@ -870,21 +902,25 @@ def _handle_web_command(
 
     if verb == "tab_switch":
         # Switching tabs is a soft reset: stop continuous publishing and clear the
-        # session/runtime state machine so modes never bleed across tabs. Entering
-        # COLLECT is the exception: it arms teleop immediately, while recording stays
-        # controlled by START RECORD.
+        # session/runtime state machine so modes never bleed across tabs. Leaving
+        # COLLECT saves any active episode and stops teleop, but preserves
+        # origin/main behavior by leaving the robot at its current pose.
         # A REPLAY/QC dataset stays mounted on runtime.replay_source until explicitly
         # cleared; leaving it mounted keeps is_replay() true on the next tab, so EVAL/DEBUG
         # would publish the recorded trajectory instead of querying the policy. Unmount it
         # whenever the destination isn't the REPLAY tab (clear_replay also reconnects the
         # policy that load_replay_dataset dropped).
         was_rl_active = runtime.rl_active
+        entering_rl = arg == "rl" and not was_rl_active
+        if entering_rl:
+            discard_rollout_episode(runtime)
         if arg != "rl" and was_rl_active:
+            discard_rollout_episode(runtime)
             close_rl_workspace(runtime)
             runtime.active_config = None
             runtime.policy = None
             runtime.policy_metadata = None
-            config = runtime.active_config or config
+            config = base_config
         if arg == "rl":
             runtime.rl_active = True
         if arg != "replay" and runtime.replay_source is not None:
@@ -895,19 +931,22 @@ def _handle_web_command(
         runtime.collection_replay_episode = None
         stop_rollout_intervention(config, runtime, session, required=False)
         discard_rollout_intervention_segment(runtime)
-        if session.mode is SessionMode.COLLECT and session.status is SessionStatus.RUNNING:
-            collect_stop(config, runtime, session)
         if runtime.collection_teleop_active:
-            collect_stop_teleop(config, runtime, session)
+            try:
+                if session.mode is SessionMode.COLLECT and session.status is SessionStatus.RUNNING:
+                    collect_stop(config, runtime, session)
+            finally:
+                collect_stop_teleop(config, runtime, session)
         _dispatch_halt(config, runtime, session)
         end_episode(runtime)
         reset_session_progress(session)
         reset_infer_strategy(runtime)
         reset_ik_solver(config, runtime)
-        session.last_error = ""
         set_status(session, SessionStatus.UNSET, reason="tab switch")
-        if arg == "collect" and getattr(runtime, "collection_teleop_armed", False):
-            collect_start_teleop(config, runtime, session)
+        if arg == "collect":
+            prewarm_teleop_ik(config, runtime)
+        if arg == "collect" and runtime.collection_teleop_armed:
+            activate_teleop(config, runtime, session)
         elif arg == "rl" and config.rl is not None:
             session.mode = SessionMode(config.rl.cli_mode)
         elif arg == "eval" and config.eval is not None:
@@ -917,6 +956,38 @@ def _handle_web_command(
             session.mode = SessionMode(config.eval.cli_mode)
         else:
             session.mode = SessionMode.SELECT
+        return
+
+    if verb == "collect_arm":
+        enabled = arg.strip().lower() in {"1", "true", "on"}
+        if enabled:
+            if runtime.collection_teleop_armed and runtime.collection_teleop_active:
+                return
+            prewarm_teleop_ik(config, runtime)
+            runtime.collection_teleop_armed = True
+            if runtime.console_ctx is not None:
+                runtime.console_ctx.active_tab = "collect"
+            if not activate_teleop(config, runtime, session):
+                runtime.collection_teleop_armed = False
+            return
+
+        runtime.collection_teleop_armed = False
+        errors: list[str] = []
+        if session.mode is SessionMode.COLLECT and session.status is SessionStatus.RUNNING:
+            try:
+                collect_stop(config, runtime, session)
+            except Exception as error:
+                errors.append(f"episode save failed: {error}")
+                logger.exception("Collection ARM OFF could not save the active episode")
+        if runtime.collection_teleop_active:
+            try:
+                collect_stop_teleop(config, runtime, session)
+            except Exception as error:
+                errors.append(f"teleop stop failed: {error}")
+                logger.exception("Collection ARM OFF could not stop teleop cleanly")
+        session.mode = SessionMode.SELECT
+        set_status(session, SessionStatus.UNSET, reason="collection arm off")
+        session.last_error = "; ".join(errors)
         return
 
     if verb == "step_infer":
@@ -974,6 +1045,19 @@ def _handle_web_command(
 
     if verb == "manual_home":
         manual_home(config, runtime, session)
+        return
+
+    if verb == "collect_home":
+        teleop_execution = getattr(runtime, "teleop_execution", None)
+        if (
+            runtime.collection_teleop_armed
+            or runtime.collection_teleop_active
+            or bool(getattr(teleop_execution, "active", False))
+        ):
+            session.last_error = "Collection HOME requires ARM OFF"
+            logger.warning("Collection HOME rejected while teleop is armed or active")
+            return
+        run_reset(config, runtime, session)
         return
 
     # --- data collection (teleoperation) verbs ---
@@ -1072,17 +1156,69 @@ def _dispatch_halt(config: ConfigDict, runtime: RuntimeState, session: SessionSt
         set_status(session, SessionStatus.READY, reason="sim chunk cancelled")
 
 
+def _cancel_expired_debug_run(
+    config: ConfigDict,
+    runtime: RuntimeState,
+    session: SessionState,
+    *,
+    now: float | None = None,
+) -> bool:
+    """Apply the existing Cancel behavior once the configured run limit expires."""
+    if (
+        session.mode not in (SessionMode.REAL, SessionMode.SIM)
+        or session.status is not SessionStatus.RUNNING
+        or session.run_start_time <= 0.0
+    ):
+        return False
+    max_debug_time_s = float(config.inference_cfg.max_debug_time_s)
+    elapsed_s = (time.monotonic() if now is None else now) - session.run_start_time
+    if elapsed_s < max_debug_time_s:
+        return False
+
+    logger.error(
+        "[MAX_DEBUG_TIME] elapsed_s=%.1f limit_s=%.1f; cancelling active run",
+        elapsed_s,
+        max_debug_time_s,
+    )
+    if config.get("eval"):
+        _handle_web_command("web:eval_cancel", config, runtime, session)
+        if session.status is SessionStatus.RUNNING:
+            # An eval without an active recorder still has to stop at the safety limit.
+            _dispatch_halt(config, runtime, session)
+            runtime.needs_pre_start_reset = True
+            runtime.current_clip_id = None
+            runtime.current_cell = None
+            set_phase(runtime, "ready")
+    else:
+        _dispatch_halt(config, runtime, session)
+        if not is_replay(runtime):
+            discard_rollout_episode(runtime)
+            logger_obj = runtime.episode_logger
+            if logger_obj is not None and getattr(logger_obj, "has_active_episode", False):
+                logger_obj.cancel_episode("maximum debug time exceeded")
+    session.last_error = MAX_DEBUG_TIME_EXCEEDED_ERROR
+    return True
+
+
 def handle_command(
     command: str,
     config: ConfigDict,
     runtime: RuntimeState,
     session: SessionState,
+    *,
+    base_config: ConfigDict | None = None,
 ) -> None:
     """Dispatch one queued command. Web verbs (``web:`` prefix) route to the web
     handler; the bare run/halt verbs ``s``/``c`` drive the mode-specific execution.
     """
     if command.startswith("web:"):
-        _handle_web_command(command, config, runtime, session)
+        _handle_web_command(
+            command,
+            config,
+            runtime,
+            session,
+            base_config=base_config,
+        )
         return
     normalized = command.strip().lower()
     if normalized in {"s", "step"}:
@@ -1174,6 +1310,14 @@ def run(
     runtime.command_queue = command_queue
     runtime.prompt_ready = prompt_ready
     maybe_start_operator_action_listener(config, runtime)
+    initial_tab = str((config.get("console") or {}).get("initial_tab", "auto"))
+    if not headless and initial_tab == "collect":
+        prewarm_teleop_ik(config, runtime)
+    try:
+        start_teleop_input(config, runtime)
+    except Exception as error:
+        session.last_error = f"Cannot start teleop input: {error}"
+        logger.exception("Teleop input listener failed to start")
     loop_rate = transport.create_rate(config.inference_cfg.publish_rate)
     loop_rate_hz = config.inference_cfg.publish_rate
 
@@ -1273,14 +1417,49 @@ def run(
             if target_hz != loop_rate_hz:
                 loop_rate = transport.create_rate(target_hz)
                 loop_rate_hz = target_hz
+            operator_event = transport.poll_operator_event()
+            if operator_event in {"collection_record_toggle", "collection_cancel"}:
+                if (
+                    runtime.collection_teleop_armed
+                    and runtime.collection_teleop_active
+                    and session.mode is SessionMode.COLLECT
+                ):
+                    if operator_event == "collection_cancel":
+                        intent = "cancel" if session.status is SessionStatus.RUNNING else None
+                    else:
+                        intent = "accept" if session.status is SessionStatus.RUNNING else "start"
+                    if intent is not None:
+                        command_queue.put(f"web:operator_action:{intent}:yam_leader")
+                        logger.info(
+                            "[OPERATOR] source=yam_leader event=%s intent=%s",
+                            operator_event,
+                            intent,
+                        )
+                    else:
+                        logger.warning("[OPERATOR] ignored YAM cancel event with no active episode")
+                else:
+                    logger.warning(
+                        "[OPERATOR] ignored YAM leader event outside armed Collection mode"
+                    )
             while True:
                 try:
                     cmd = command_queue.get_nowait()
                 except queue.Empty:
                     break
-                handle_command(cmd, effective, runtime, session)
+                handle_command(cmd, effective, runtime, session, base_config=config)
                 effective = runtime.active_config or config
                 prompt_ready.set()
+
+            if runtime.teleop_client is not None:
+                for event in drain_teleop_events(runtime):
+                    handle_teleop_operator_event(
+                        event,
+                        effective,
+                        runtime,
+                        session,
+                        dispatch=handle_command,
+                    )
+                    effective = runtime.active_config or config
 
             if (
                 session.mode in (SessionMode.REAL, SessionMode.SIM)
@@ -1294,7 +1473,14 @@ def run(
                         session.step_index,
                     )
                 last_running_tick = running_tick
-                # Client-liveness watchdog: the frontend polls /api/status every ~250ms,
+                if _cancel_expired_debug_run(
+                    effective,
+                    runtime,
+                    session,
+                    now=running_tick,
+                ):
+                    continue
+                # Client-liveness watchdog: the frontend polls /api/status every second,
                 # so a stale timestamp means the operator's browser crashed or the network
                 # dropped. Halt the run rather than keep commanding the real robot blind.
                 stale = time.monotonic() - runtime.last_client_poll
@@ -1307,7 +1493,22 @@ def run(
                 last_running_tick = None
 
             if getattr(runtime, "rollout_intervention_active", False):
-                if record_rollout_intervention_step(runtime, session):
+                recorded = False
+                if (
+                    rollout_intervention_source(effective) == "teleop_client"
+                    and session.mode is SessionMode.REAL
+                ):
+                    published = step_rollout_teleop(effective, runtime, session)
+                    if published is not None:
+                        recorded = record_client_rollout_intervention_step(
+                            effective,
+                            runtime,
+                            session,
+                            published,
+                        )
+                else:
+                    recorded = record_rollout_intervention_step(runtime, session)
+                if recorded:
                     segment = runtime.rollout_intervention_active_segment
                     assert segment is not None and segment.frames
                     frame = segment.frames[-1]
@@ -1359,6 +1560,20 @@ def run(
                             timestamp=frame.timestamp,
                         )
 
+            client_teleop_active = bool(
+                session.mode is SessionMode.COLLECT
+                and runtime.collection_teleop_active
+                and runtime.teleop_client is not None
+            )
+            if client_teleop_active:
+                published = step_teleop(effective, runtime, session)
+                if published is not None and session.status is SessionStatus.RUNNING:
+                    ingest_client_teleop_action(
+                        effective,
+                        runtime,
+                        published,
+                    )
+
             if session.mode is SessionMode.COLLECT and session.status is SessionStatus.RUNNING:
                 collect_step(effective, runtime)
 
@@ -1380,9 +1595,10 @@ def run(
             loop_rate.sleep()
     finally:
         gc.callbacks.remove(log_gc_timing)
+        close_teleop(runtime)
+        stop_collection_capture(runtime)
         close_rl_workspace(runtime)
         stop_rollout_intervention(config, runtime, session, required=False)
-        stop_collection_capture(runtime)
         discard_rollout_intervention_segment(runtime)
         end_episode(runtime)
         if runtime.episode_logger is not None:
