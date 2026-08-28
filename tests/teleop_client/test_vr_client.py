@@ -281,12 +281,70 @@ def test_client_rejects_stale_input_and_reanchors_after_reset() -> None:
     assert client.poll(_context(now)).command is not None
 
     client.reset(require_neutral=True)
-    client._ingest(json.dumps(_frame(2, squeeze=1.0)).encode())
+    engaged = _frame(2, squeeze=1.0)
+    engaged["controllers"]["left"]["grip_engaged"] = True
+    client._ingest(json.dumps(engaged).encode())
+    blocked = client.poll(_context(now))
+    assert blocked.kind is TeleopResultKind.IDLE
+    assert client.status(now=now).neutral is False
+
+    neutral = _frame(3, squeeze=1.0)
+    neutral["controllers"]["left"]["grip_engaged"] = False
+    neutral["controllers"]["left"]["trigger"] = 0.0
+    neutral["input_feedback"] = {"pressed": [], "hold_progress": {}}
+    client._ingest(json.dumps(neutral).encode())
+    cleared = client.poll(_context(now))
+    assert cleared.kind is TeleopResultKind.IDLE
+    assert client.status(now=now).neutral is True
+
+    reengaged = _frame(4, squeeze=1.0)
+    reengaged["controllers"]["left"]["grip_engaged"] = True
+    client._ingest(json.dumps(reengaged).encode())
     reanchored = client.poll(_context(now))
     assert isinstance(reanchored.command, CanonicalEefCommand)
     np.testing.assert_allclose(reanchored.command.value, _context().measured_eef)
     with pytest.raises(TeleopClientError, match="stale"):
         client.poll(_context(now=now + 1.0))
+
+
+def test_status_neutral_requires_fresh_released_controls() -> None:
+    client = _client()
+    now = time.monotonic()
+    client._ingest(json.dumps(_frame(squeeze=0.0)).encode())
+    assert client.status(now=now).neutral is False
+
+    released = _frame(1, squeeze=0.0)
+    released["controllers"]["left"]["grip_engaged"] = False
+    released["controllers"]["left"]["trigger"] = 0.0
+    released["input_feedback"] = {"pressed": [], "hold_progress": {}}
+    client._ingest(json.dumps(released).encode())
+    assert client.status(now=now).neutral is True
+
+    pressed = _frame(2, squeeze=0.0)
+    pressed["controllers"]["left"]["grip_engaged"] = False
+    pressed["controllers"]["left"]["trigger"] = 0.0
+    pressed["input_feedback"] = {"pressed": ["left.grip"], "hold_progress": {"left.grip": 0.5}}
+    client._ingest(json.dumps(pressed).encode())
+    assert client.status(now=now).neutral is False
+
+    invalid = _frame(3, squeeze=0.0)
+    invalid["controllers"]["left"] = {
+        "valid": False,
+        "grip_engaged": False,
+        "trigger": 0.0,
+        "profiles": ["pico-4-ultra"],
+    }
+    invalid["input_feedback"] = {"pressed": [], "hold_progress": {}}
+    client._ingest(json.dumps(invalid).encode())
+    assert client.status(now=now).neutral is False
+
+    trigger = _frame(4, squeeze=0.0)
+    trigger["controllers"]["left"]["grip_engaged"] = False
+    trigger["controllers"]["left"]["trigger"] = 0.2
+    trigger["input_feedback"] = {"pressed": [], "hold_progress": {}}
+    client._ingest(json.dumps(trigger).encode())
+    assert client.status(now=now).neutral is False
+    assert client.status(now=now + 1.0).neutral is False
 
 
 def test_workspace_rejection_drops_only_the_invalid_frame() -> None:
@@ -408,7 +466,7 @@ def test_client_rejects_event_from_non_current_session() -> None:
     assert "active input session" in str(ack["message"])
 
 
-def test_session_restart_accepts_sequence_zero_without_reanchoring() -> None:
+def test_session_restart_requires_neutral_before_reanchoring() -> None:
     client = _client()
     client._ingest(json.dumps(_frame(4, session="old", squeeze=0.0)).encode())
     assert client.poll(_context()).command is not None
@@ -418,6 +476,20 @@ def test_session_restart_accepts_sequence_zero_without_reanchoring() -> None:
     client._ingest(json.dumps(_frame(0, session="new", squeeze=0.0)).encode())
 
     assert client.drain_events() == ()
+    blocked = client.poll(_context())
+    assert blocked.kind is TeleopResultKind.IDLE
+
+    neutral = _frame(1, session="new", squeeze=0.0)
+    neutral["controllers"]["left"]["grip_engaged"] = False
+    neutral["controllers"]["left"]["trigger"] = 0.0
+    neutral["input_feedback"] = {"pressed": [], "hold_progress": {}}
+    client._ingest(json.dumps(neutral).encode())
+    cleared = client.poll(_context())
+    assert cleared.kind is TeleopResultKind.IDLE
+
+    reengaged = _frame(2, session="new", squeeze=0.0)
+    reengaged["controllers"]["left"]["grip_engaged"] = True
+    client._ingest(json.dumps(reengaged).encode())
     result = client.poll(_context())
     assert isinstance(result.command, CanonicalEefCommand)
     np.testing.assert_allclose(result.command.value[:3], _context().measured_eef[:3])
@@ -641,18 +713,30 @@ def test_external_zmq_bridge_reaches_vr_client() -> None:
             time.sleep(0.01)
         assert client.status().connected
 
-        bridge.submit_frame(_frame(session="wire-session", squeeze=0.0))
-        command = None
+        neutral = _frame(session="wire-session", squeeze=0.0)
+        neutral["controllers"]["left"]["grip_engaged"] = False
+        neutral["controllers"]["left"]["trigger"] = 0.0
+        neutral["input_feedback"] = {"pressed": [], "hold_progress": {}}
+        bridge.submit_frame(neutral)
+        result = None
         while time.monotonic() < deadline:
             try:
-                command = client.poll(_context()).command
+                result = client.poll(_context())
             except TeleopClientError:
                 time.sleep(0.01)
                 continue
             break
+        assert result is not None and result.kind is TeleopResultKind.IDLE
+
+        bridge.submit_frame(_frame(1, session="wire-session", squeeze=0.0))
+        command = None
+        while command is None and time.monotonic() < deadline:
+            command = client.poll(_context()).command
+            if command is None:
+                time.sleep(0.01)
         assert isinstance(command, CanonicalEefCommand)
 
-        bridge.submit_frame(_frame(1, session="wire-session", squeeze=1.0))
+        bridge.submit_frame(_frame(2, session="wire-session", squeeze=1.0))
         command = None
         while command is None and time.monotonic() < deadline:
             command = client.poll(_context()).command

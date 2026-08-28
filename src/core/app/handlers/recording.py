@@ -525,61 +525,45 @@ def _rollout_intervention_save_status(runtime: RuntimeState) -> dict[str, Any]:
 def rollout_save_status(config: ConfigDict, runtime: RuntimeState) -> dict[str, Any]:
     """Return queue/progress state for the rollout save panel."""
     dataset_path = rollout_save_log_dir(config, runtime)
-    dataset_dir = str(dataset_path)
     saved_history = _load_saved_episode_history(dataset_path)
     logger_obj = runtime.rollout_episode_logger
     storage = _rollout_storage(config, runtime)
-    if not bool(storage.get("enabled", True)):
-        return {
-            "enabled": False,
-            "dataset_dir": dataset_dir,
-            "pipeline_state": "DISABLED",
-            "collecting": False,
-            "current_episode_frames": 0,
-            "completed_episodes": 0,
-            "save_queue_size": 0,
-            "save_queue_max": storage.save_queue_max,
-            "progress": 0.0,
-            "eta_sec": None,
-            "episodes": saved_history,
-            "queue": [],
-            "save_ready": False,
-            "reason": "",
-            **_rollout_intervention_save_status(runtime),
-        }
-    if logger_obj is None:
-        return {
-            "enabled": True,
-            "dataset_dir": dataset_dir,
-            "pipeline_state": "IDLE",
-            "collecting": False,
-            "current_episode_frames": 0,
-            "completed_episodes": len(saved_history),
-            "save_queue_size": 0,
-            "save_queue_max": storage.save_queue_max,
-            "progress": 1.0 if saved_history else 0.0,
-            "eta_sec": None,
-            "episodes": saved_history,
-            "queue": [],
-            "save_ready": False,
-            "reason": "",
-            **_rollout_intervention_save_status(runtime),
-        }
-    snapshot = logger_obj.status_snapshot()
-    snapshot["enabled"] = True
-    snapshot["dataset_dir"] = dataset_dir
-    snapshot["episodes"] = saved_history
-    snapshot["completed_episodes"] = len(saved_history)
-    buffered_frames = (
-        logger_obj.active_frame_count
-        + len(runtime.rollout_policy_actions)
-        + runtime.rollout_raw_snapshots.qsize()
-    )
-    snapshot["save_ready"] = bool(runtime.rollout_save_ready and buffered_frames > 0)
-    snapshot["reason"] = runtime.rollout_save_reason
-    if snapshot["save_ready"]:
-        snapshot["pipeline_state"] = "READY_TO_SAVE"
-        snapshot["collecting"] = False
+    snapshot = {
+        "enabled": bool(storage.get("enabled", True)),
+        "dataset_dir": str(dataset_path),
+        "pipeline_state": "IDLE",
+        "collecting": False,
+        "current_episode_frames": 0,
+        "completed_episodes": len(saved_history),
+        "save_queue_size": 0,
+        "save_queue_max": storage.save_queue_max,
+        "progress": 1.0 if saved_history else 0.0,
+        "eta_sec": None,
+        "episodes": saved_history,
+        "queue": [],
+        "save_ready": False,
+        "reason": "",
+    }
+    if not snapshot["enabled"]:
+        snapshot["pipeline_state"] = "DISABLED"
+        snapshot["completed_episodes"] = 0
+        snapshot["progress"] = 0.0
+    elif logger_obj is not None:
+        snapshot = logger_obj.status_snapshot()
+        snapshot["enabled"] = True
+        snapshot["dataset_dir"] = str(dataset_path)
+        snapshot["episodes"] = saved_history
+        snapshot["completed_episodes"] = len(saved_history)
+        buffered_frames = (
+            logger_obj.active_frame_count
+            + len(runtime.rollout_policy_actions)
+            + runtime.rollout_raw_snapshots.qsize()
+        )
+        snapshot["save_ready"] = bool(runtime.rollout_save_ready and buffered_frames > 0)
+        snapshot["reason"] = runtime.rollout_save_reason
+        if snapshot["save_ready"]:
+            snapshot["pipeline_state"] = "READY_TO_SAVE"
+            snapshot["collecting"] = False
     snapshot.update(_rollout_intervention_save_status(runtime))
     return snapshot
 

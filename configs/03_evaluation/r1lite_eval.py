@@ -2,6 +2,8 @@
 
 _base_ = ["../01_deploy/r1lite/openpi_qpos.py"]
 
+console = dict(initial_tab="eval")
+
 eval_cfg = dict(
     storage=dict(
         fps=15,

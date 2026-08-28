@@ -9,7 +9,7 @@ SDK_DIR="$REPOSITORY_ROOT/$SDK_RELATIVE_DIR"
 PROJECT_DIR="$PWD/examples/hardware/yam"
 VENV_DIR="${YAM_VENV_DIR:-$PROJECT_DIR/.venv}"
 YAM_REVISION="5dab60a49d3b59e2ae9c46b117765ef20e2f1699"
-YAM_RELEASE="Noietch/i2rt main"
+YAM_RELEASE="YAM main"
 
 if ! command -v uv >/dev/null 2>&1; then
   echo "uv is required. Install it with:" >&2

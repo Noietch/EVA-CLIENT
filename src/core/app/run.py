@@ -309,6 +309,30 @@ def _queue_rl_setup_after_reset(runtime: RuntimeState) -> None:
     runtime.command_queue.put("web:rl_setup")
 
 
+def _resume_after_rollout_intervention(
+    config: ConfigDict,
+    runtime: RuntimeState,
+    session: SessionState,
+    *,
+    status_reason: str,
+) -> bool:
+    runtime.rollout_save_ready = False
+    runtime.rollout_save_reason = ""
+    session.action_chunk = None
+    session.chunk_index = 0
+    if not run_warmup_and_start(config, runtime, session):
+        return False
+    if runtime.collection_capture_runner is None:
+        start_collection_capture(
+            runtime,
+            fps=config.inference_cfg.publish_rate,
+            max_raw_snapshots_per_tick=ROLLOUT_STEP_MAX_RAW_SNAPSHOTS,
+        )
+    session.run_start_time = time.monotonic()
+    set_status(session, SessionStatus.RUNNING, reason=status_reason)
+    return True
+
+
 def _handle_web_command(
     command: str,
     config: ConfigDict,
@@ -730,20 +754,13 @@ def _handle_web_command(
             runtime.rollout_exclusion_active = ("policy_warmup", warmup_exclusion_start)
             if not accept_rollout_intervention_segment(runtime, session):
                 return
-            runtime.rollout_save_ready = False
-            runtime.rollout_save_reason = ""
-            session.action_chunk = None
-            session.chunk_index = 0
-            if not run_warmup_and_start(config, runtime, session):
+            if not _resume_after_rollout_intervention(
+                config,
+                runtime,
+                session,
+                status_reason="resume after teleop intervention",
+            ):
                 return
-            if runtime.collection_capture_runner is None:
-                start_collection_capture(
-                    runtime,
-                    fps=config.inference_cfg.publish_rate,
-                    max_raw_snapshots_per_tick=ROLLOUT_STEP_MAX_RAW_SNAPSHOTS,
-                )
-            session.run_start_time = time.monotonic()
-            set_status(session, SessionStatus.RUNNING, reason="resume after teleop intervention")
             logger.info(
                 "[HIL_RESUME] path=warmup transition_ms=%.1f step=%d exclusion_start=%.6f",
                 (time.monotonic() - resume_started) * 1000.0,
@@ -816,20 +833,13 @@ def _handle_web_command(
             return
         discard_rollout_intervention_segment(runtime)
         runtime.transport.clear_collection_backlog()
-        runtime.rollout_save_ready = False
-        runtime.rollout_save_reason = ""
-        session.action_chunk = None
-        session.chunk_index = 0
-        if not run_warmup_and_start(config, runtime, session):
+        if not _resume_after_rollout_intervention(
+            config,
+            runtime,
+            session,
+            status_reason="resume after abandoned intervention",
+        ):
             return
-        if runtime.collection_capture_runner is None:
-            start_collection_capture(
-                runtime,
-                fps=config.inference_cfg.publish_rate,
-                max_raw_snapshots_per_tick=ROLLOUT_STEP_MAX_RAW_SNAPSHOTS,
-            )
-        session.run_start_time = time.monotonic()
-        set_status(session, SessionStatus.RUNNING, reason="resume after abandoned intervention")
         return
 
     if verb == "rollout_intervention_enabled":

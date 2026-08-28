@@ -2,6 +2,8 @@
 
 _base_ = ["../01_deploy/arx_x5/_base.py"]
 
+console = dict(initial_tab="eval")
+
 eval_cfg = dict(
     storage=dict(
         fps=30,

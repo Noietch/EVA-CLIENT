@@ -201,6 +201,23 @@ def test_activate_rollout_teleop_requires_connected_neutral_client() -> None:
     assert runtime.teleop_execution.active is True
 
 
+def test_activate_rollout_teleop_rejects_non_neutral_client() -> None:
+    client = _Client([])
+    client.neutral = False
+    runtime = _runtime(client)
+    runtime.teleop_execution.active = False
+    runtime.collection_teleop_armed = False
+    runtime.collection_teleop_active = False
+    session = SessionState(mode=SessionMode.REAL)
+
+    assert teleop.activate_rollout_teleop(_config(), runtime, session) is False
+
+    assert client.starts == 1
+    assert client.resets == []
+    assert runtime.teleop_execution.active is False
+    assert "neutral before activation" in session.last_error
+
+
 def test_deactivate_rollout_teleop_leaves_state_active_when_neutral_reset_fails() -> None:
     client = _Client([])
     client.fail_reset = True
@@ -801,8 +818,27 @@ def test_activate_teleop_lazily_builds_and_starts_client(monkeypatch) -> None:
 
     assert runtime.teleop_client is client
     assert client.starts == 1
+    assert client.resets == [True]
     assert runtime.collection_teleop_active is True
     assert session.status is SessionStatus.READY
+
+
+def test_activate_teleop_rejects_non_neutral_client(monkeypatch) -> None:
+    client = _Client([])
+    client.neutral = False
+    runtime = RuntimeState(robot=_robot(), transport=_Transport())
+    config = _config()
+    config.robot = ConfigDict(gripper_open=1.0, gripper_close=0.0)
+    runtime.collection_teleop_armed = True
+    session = _session()
+    monkeypatch.setattr(teleop, "build_client", lambda *_args, **_kwargs: client)
+
+    assert teleop.activate_teleop(config, runtime, session) is False
+
+    assert client.starts == 1
+    assert client.resets == [False]
+    assert runtime.collection_teleop_active is False
+    assert "neutral before activation" in session.last_error
 
 
 def test_lazy_client_start_failure_keeps_client_for_retry(monkeypatch) -> None:

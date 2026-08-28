@@ -60,8 +60,30 @@ def _runtime() -> tuple[RuntimeState, SessionState]:
     return cast(RuntimeState, runtime), session
 
 
+def _config(**kwargs) -> ConfigDict:
+    return ConfigDict(collection=ConfigDict(teleop=ConfigDict()), **kwargs)
+
+
 def _event(event_id: int, intent: str) -> TeleopOperatorEvent:
     return TeleopOperatorEvent("test", event_id, intent, float(event_id))
+
+
+def _handle(
+    runtime: RuntimeState,
+    session: SessionState,
+    event_id: int,
+    intent: str,
+    *,
+    config: ConfigDict | None = None,
+    dispatch=None,
+) -> None:
+    handle_teleop_operator_event(
+        _event(event_id, intent),
+        _config() if config is None else config,
+        runtime,
+        session,
+        dispatch=_dispatch if dispatch is None else dispatch,
+    )
 
 
 def _dispatch(command, _config, runtime, session) -> None:
@@ -93,14 +115,9 @@ def _dispatch(command, _config, runtime, session) -> None:
 
 def test_operator_events_toggle_recording() -> None:
     runtime, session = _runtime()
-    config = ConfigDict(collection=ConfigDict(teleop=ConfigDict()))
 
-    handle_teleop_operator_event(
-        _event(0, "record_toggle"), config, runtime, session, dispatch=_dispatch
-    )
-    handle_teleop_operator_event(
-        _event(1, "record_toggle"), config, runtime, session, dispatch=_dispatch
-    )
+    _handle(runtime, session, 0, "record_toggle")
+    _handle(runtime, session, 1, "record_toggle")
 
     assert runtime.teleop_client.acks[0][:2] == ("record_toggle", True)
     assert runtime.teleop_client.acks[1][:2] == ("record_toggle", True)
@@ -108,14 +125,11 @@ def test_operator_events_toggle_recording() -> None:
 
 def test_dispatch_failure_is_rejected_and_acknowledged_once() -> None:
     runtime, session = _runtime()
-    config = ConfigDict(collection=ConfigDict(teleop=ConfigDict()))
 
     def fail_dispatch(*_args) -> None:
         raise RuntimeError("queue unavailable")
 
-    handle_teleop_operator_event(
-        _event(3, "record_toggle"), config, runtime, session, dispatch=fail_dispatch
-    )
+    _handle(runtime, session, 3, "record_toggle", dispatch=fail_dispatch)
 
     assert len(runtime.teleop_client.acks) == 1
     intent, accepted, message = runtime.teleop_client.acks[0]
@@ -127,17 +141,12 @@ def test_dispatch_failure_is_rejected_and_acknowledged_once() -> None:
 
 def test_arm_toggle_uses_the_shared_collect_arm_command_while_inactive() -> None:
     runtime, session = _runtime()
-    config = ConfigDict(collection=ConfigDict(teleop=ConfigDict()))
 
-    handle_teleop_operator_event(
-        _event(4, "arm_toggle"), config, runtime, session, dispatch=_dispatch
-    )
+    _handle(runtime, session, 4, "arm_toggle")
     assert runtime.teleop_client.acks[-1][:2] == ("arm_toggle", True)
     assert not runtime.collection_teleop_armed
 
-    handle_teleop_operator_event(
-        _event(5, "arm_toggle"), config, runtime, session, dispatch=_dispatch
-    )
+    _handle(runtime, session, 5, "arm_toggle")
     assert runtime.teleop_client.acks[-1][:2] == ("arm_toggle", True)
     assert runtime.collection_teleop_armed
 
@@ -148,14 +157,13 @@ def test_home_uses_the_shared_collect_home_command_when_disarmed() -> None:
     runtime.collection_teleop_active = False
     runtime.teleop_execution.active = False
     session.mode = SessionMode.SELECT
-    config = ConfigDict(collection=ConfigDict(teleop=ConfigDict()))
     commands: list[str] = []
 
     def dispatch(command, config_arg, runtime_arg, session_arg):
         commands.append(command)
         _dispatch(command, config_arg, runtime_arg, session_arg)
 
-    handle_teleop_operator_event(_event(6, "home"), config, runtime, session, dispatch=dispatch)
+    _handle(runtime, session, 6, "home", dispatch=dispatch)
 
     assert commands == ["web:collect_home"]
     assert runtime.teleop_client.acks[-1][:2] == ("home", True)
@@ -168,14 +176,8 @@ def test_intervention_toggle_starts_and_abandons_rl_intervention() -> None:
     session.mode = SessionMode.REAL
     session.status = SessionStatus.RUNNING
     session.is_setup_done = True
-    config = ConfigDict(collection=ConfigDict(teleop=ConfigDict()))
-
-    handle_teleop_operator_event(
-        _event(7, "intervention_toggle"), config, runtime, session, dispatch=_dispatch
-    )
-    handle_teleop_operator_event(
-        _event(8, "intervention_toggle"), config, runtime, session, dispatch=_dispatch
-    )
+    _handle(runtime, session, 7, "intervention_toggle")
+    _handle(runtime, session, 8, "intervention_toggle")
 
     assert runtime.teleop_client.acks[-2] == (
         "intervention_toggle",
@@ -193,11 +195,8 @@ def test_intervention_toggle_requires_active_rl_hil() -> None:
     runtime, session = _runtime()
     session.mode = SessionMode.REAL
     session.status = SessionStatus.RUNNING
-    config = ConfigDict(collection=ConfigDict(teleop=ConfigDict()))
 
-    handle_teleop_operator_event(
-        _event(9, "intervention_toggle"), config, runtime, session, dispatch=_dispatch
-    )
+    _handle(runtime, session, 9, "intervention_toggle")
     assert runtime.teleop_client.acks[-1][1:] == (
         False,
         "VR intervention requires the active RL workspace",
@@ -205,9 +204,7 @@ def test_intervention_toggle_requires_active_rl_hil() -> None:
 
     runtime.rl_active = True
     session.is_setup_done = True
-    handle_teleop_operator_event(
-        _event(10, "intervention_toggle"), config, runtime, session, dispatch=_dispatch
-    )
+    _handle(runtime, session, 10, "intervention_toggle")
     assert runtime.teleop_client.acks[-1][1:] == (
         False,
         "Enable RL HIL before using the VR intervention control",
@@ -223,15 +220,12 @@ def test_intervention_toggle_rejects_unsupported_hil_without_stopping_policy() -
     session.mode = SessionMode.REAL
     session.status = SessionStatus.RUNNING
     session.is_setup_done = True
-    config = ConfigDict(collection=ConfigDict(teleop=ConfigDict()))
     commands: list[str] = []
 
     def dispatch(command, *_args) -> None:
         commands.append(command)
 
-    handle_teleop_operator_event(
-        _event(11, "intervention_toggle"), config, runtime, session, dispatch=dispatch
-    )
+    _handle(runtime, session, 11, "intervention_toggle", dispatch=dispatch)
 
     assert commands == []
     assert session.status is SessionStatus.RUNNING
@@ -247,13 +241,12 @@ def test_intervention_toggle_uses_teleop_client_source_instead_of_transport_hil(
     session.mode = SessionMode.REAL
     session.status = SessionStatus.RUNNING
     session.is_setup_done = True
-    config = ConfigDict(
-        collection=ConfigDict(teleop=ConfigDict()),
-        rl=ConfigDict(intervention=ConfigDict(source="teleop_client")),
-    )
-
-    handle_teleop_operator_event(
-        _event(12, "intervention_toggle"), config, runtime, session, dispatch=_dispatch
+    _handle(
+        runtime,
+        session,
+        12,
+        "intervention_toggle",
+        config=_config(rl=ConfigDict(intervention=ConfigDict(source="teleop_client"))),
     )
 
     assert runtime.rollout_intervention_active is True
@@ -265,11 +258,8 @@ def test_delayed_collection_event_is_rejected_in_rl_workspace() -> None:
     runtime.rl_active = True
     session.mode = SessionMode.REAL
     session.status = SessionStatus.RUNNING
-    config = ConfigDict(collection=ConfigDict(teleop=ConfigDict()))
 
-    handle_teleop_operator_event(
-        _event(12, "arm_toggle"), config, runtime, session, dispatch=_dispatch
-    )
+    _handle(runtime, session, 12, "arm_toggle")
 
     assert runtime.collection_teleop_armed is True
     assert runtime.teleop_client.acks[-1][1:] == (

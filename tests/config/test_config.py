@@ -70,20 +70,34 @@ def test_load_deploy_config_resolves_spaces_and_defaults():
     assert cfg.rl is None
 
 
+@pytest.mark.parametrize(
+    ("subdir", "pattern", "tab"),
+    [
+        ("01_deploy", "*/_base.py", "debug"),
+        ("02_collection", "*.py", "collect"),
+        ("03_evaluation", "*.py", "eval"),
+        ("04_rl", "*_rl.py", "rl"),
+    ],
+)
+def test_console_initial_tab_contract(subdir: str, pattern: str, tab: str):
+    paths = sorted((_CONFIGS_DIR / subdir).glob(pattern))
+    assert paths
+    for path in paths:
+        assert load_config(path).console.initial_tab == tab
+
+
 def test_rl_config_exposes_preview_models_and_lerobot_storage():
     cfg = load_config(_CONFIGS_DIR / "04_rl" / "r1lite_rl.py")
 
     assert cfg.rl.cli_mode == "real"
     assert cfg.rl.inference_strategy == "async"
     assert cfg.rl.data.format == "lerobot"
-    assert cfg.collection.teleop.control_source == "client"
-    assert cfg.collection.teleop.client.type == "vr_webxr"
     assert cfg.rl.policies[0].name == "r1lite_openpi_qpos"
     assert cfg.rl.policies[0].config.policy.type == "openpi"
     assert cfg.rl.policies[0].config.policy.host == "127.0.0.1"
     assert cfg.rl.policies[0].config.policy.port == 9000
     assert cfg.rl.critics[0].name == "r1lite_critic"
-    assert cfg.rl.intervention.source == "teleop_client"
+    assert cfg.rl.intervention.get("source", "transport") == "transport"
 
 
 @pytest.mark.parametrize(
@@ -107,16 +121,14 @@ def test_all_robot_rl_templates_load(filename: str, robot_type: str):
     assert cfg.rl.critics[0].type == "websocket"
     assert cfg.rl.data.format == "lerobot"
     assert cfg.rl.intervention.control_mode == "relative"
-    assert cfg.rl.intervention.source == "teleop_client"
-    assert cfg.collection.teleop.control_source == "client"
-    assert cfg.collection.teleop.client.type == "vr_webxr"
 
 
 @pytest.mark.parametrize(
     ("filename", "robot_type"),
     [
+        ("agibot_g2_rl.py", "agibot_g2"),
         ("arx_x5_rl.py", "arx_x5"),
-        ("dual_agilex_piper_rl.py", "agilex_piper"),
+        ("dual_franka_rl.py", "dual_franka"),
     ],
 )
 def test_vr_rl_templates_reuse_client_teleop_and_open_on_rl_tab(filename: str, robot_type: str):
@@ -130,8 +142,19 @@ def test_vr_rl_templates_reuse_client_teleop_and_open_on_rl_tab(filename: str, r
     assert cfg.rl.policies[0].config.robot.type == robot_type
 
 
+@pytest.mark.parametrize(
+    "filename",
+    ["arx_r5_rl.py", "dual_agilex_piper_rl.py", "r1lite_rl.py", "ur5e_rl.py"],
+)
+def test_leader_follower_rl_templates_use_transport_hil(filename: str):
+    cfg = load_config(_CONFIGS_DIR / "04_rl" / filename)
+
+    assert cfg.rl.intervention.get("source", "transport") == "transport"
+    assert cfg.rollout.intervention.get("source", "transport") == "transport"
+
+
 def test_build_rl_active_config_preserves_vr_teleop_contract():
-    cfg = load_config(_CONFIGS_DIR / "04_rl" / "dual_agilex_piper_rl.py")
+    cfg = load_config(_CONFIGS_DIR / "04_rl" / "arx_x5_rl.py")
 
     active = app_rl.build_rl_active_config(cfg, 0)
 
@@ -175,7 +198,7 @@ def test_rl_teleop_client_source_requires_client_control_source(tmp_path):
     config = tmp_path / "rl_bad_source.py"
     config.write_text(
         "_base_ = ['"
-        + str((_CONFIGS_DIR / "04_rl" / "r1lite_rl.py").resolve())
+        + str((_CONFIGS_DIR / "04_rl" / "arx_x5_rl.py").resolve())
         + "']\ncollection = dict(teleop=dict("
         + "_delete_=True, control_source='transport', client={}))\n"
     )
@@ -199,16 +222,17 @@ def test_load_collection_config_exposes_schema():
 
 
 def test_load_vr_collection_config_selects_client_input_source():
-    cfg = load_config(_CONFIGS_DIR / "02_collection" / "dual_agilex_piper_vr.py")
+    for filename in ("agibot_g2_vr.py", "arx_x5_vr.py", "dual_franka_vr.py"):
+        cfg = load_config(_CONFIGS_DIR / "02_collection" / filename)
 
-    assert cfg.collection.teleop.control_source == "client"
-    assert cfg.collection.teleop.client.type == "vr_webxr"
-    assert set(cfg.collection.schema.columns) == {
-        "qpos",
-        "eef",
-        "action_qpos",
-        "action_eef",
-    }
+        assert cfg.collection.teleop.control_source == "client"
+        assert cfg.collection.teleop.client.type == "vr_webxr"
+        assert set(cfg.collection.schema.columns) == {
+            "qpos",
+            "eef",
+            "action_qpos",
+            "action_eef",
+        }
 
 
 def test_load_arx_r5_collection_uses_transport_teleop():

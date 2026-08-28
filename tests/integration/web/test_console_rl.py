@@ -87,6 +87,27 @@ def _configure_client_intervention(console, tmp_path, results):
     return client
 
 
+def _open_rl_tab(console) -> None:
+    console.do("/api/tab_switch", {"tab": "rl"})
+
+
+def _select_rl_policy(
+    console,
+    *,
+    task: str = "pack the phone",
+    policy_slot: int = 0,
+    critic_slot: int | None = None,
+    setup: bool = False,
+) -> None:
+    _open_rl_tab(console)
+    console.do("/api/rl/select_task", {"task": task})
+    console.do("/api/rl/select_policy", {"slot": policy_slot})
+    if critic_slot is not None:
+        console.do("/api/rl/select_critic", {"slot": critic_slot})
+    if setup:
+        console.do("/api/rl/setup")
+
+
 def test_rl_routes_setup_policy_then_select_optional_critic(console, tmp_path):
     _configure_rl(console, tmp_path)
 
@@ -95,10 +116,7 @@ def test_rl_routes_setup_policy_then_select_optional_critic(console, tmp_path):
     assert cfg["policies"] == [{"slot": 0, "name": "policy-a"}]
     assert cfg["critics"] == [{"slot": 0, "name": "critic-a", "type": "mock"}]
 
-    console.do("/api/tab_switch", {"tab": "rl"})
-    console.do("/api/rl/select_task", {"task": "pack the phone"})
-    console.do("/api/rl/select_policy", {"slot": 0})
-    console.do("/api/rl/select_critic", {"slot": 0})
+    _select_rl_policy(console, critic_slot=0)
     selected = console.status()["rl"]
     assert selected["active"] is True
     assert selected["selected_policy_slot"] == 0
@@ -122,7 +140,7 @@ def test_rl_routes_setup_policy_then_select_optional_critic(console, tmp_path):
 def test_rl_saved_data_path_uses_rl_storage_before_setup(console, tmp_path):
     _configure_rl(console, tmp_path)
 
-    console.do("/api/tab_switch", {"tab": "rl"})
+    _open_rl_tab(console)
 
     assert console.status()["rollout"]["dataset_dir"] == str(tmp_path / "rl")
 
@@ -130,10 +148,7 @@ def test_rl_saved_data_path_uses_rl_storage_before_setup(console, tmp_path):
 def test_rl_setup_and_rollout_do_not_require_a_critic(console, tmp_path):
     _configure_rl(console, tmp_path)
 
-    console.do("/api/tab_switch", {"tab": "rl"})
-    console.do("/api/rl/select_task", {"task": "pack the phone"})
-    console.do("/api/rl/select_policy", {"slot": 0})
-    console.do("/api/rl/setup")
+    _select_rl_policy(console, setup=True)
 
     status = console.status()
     assert status["policy_connected"] is True
@@ -153,10 +168,7 @@ def test_rl_duplicate_setup_does_not_repeat_robot_setup(console, tmp_path, monke
         return original(*args, **kwargs)
 
     monkeypatch.setattr(app, "run_setup", counted_setup)
-    console.do("/api/tab_switch", {"tab": "rl"})
-    console.do("/api/rl/select_task", {"task": "pack the phone"})
-    console.do("/api/rl/select_policy", {"slot": 0})
-    console.do("/api/rl/setup")
+    _select_rl_policy(console, setup=True)
     console.do("/api/rl/setup")
 
     assert calls == 1
@@ -166,10 +178,7 @@ def test_rl_duplicate_setup_does_not_repeat_robot_setup(console, tmp_path, monke
 def test_rl_critic_can_connect_after_policy_setup_without_robot_reset(console, tmp_path):
     _configure_rl(console, tmp_path)
 
-    console.do("/api/tab_switch", {"tab": "rl"})
-    console.do("/api/rl/select_task", {"task": "pack the phone"})
-    console.do("/api/rl/select_policy", {"slot": 0})
-    console.do("/api/rl/setup")
+    _select_rl_policy(console, setup=True)
     assert console.status()["is_setup_done"] is True
 
     console.do("/api/rl/select_critic", {"slot": 0})
@@ -186,10 +195,7 @@ def test_rl_critic_can_connect_after_policy_setup_without_robot_reset(console, t
 def test_rl_critic_selected_during_setup_is_rejected(console, tmp_path):
     _configure_rl(console, tmp_path)
 
-    console.do("/api/tab_switch", {"tab": "rl"})
-    console.do("/api/rl/select_task", {"task": "pack the phone"})
-    console.do("/api/rl/select_policy", {"slot": 0})
-    console.do("/api/rl/select_critic", {"slot": 0})
+    _select_rl_policy(console, critic_slot=0)
     assert console.status()["rl"]["selected_critic_slot"] is None
     assert console.status()["last_error"] == "RL Critic can only be selected after setup"
 
@@ -203,10 +209,7 @@ def test_rl_critic_selected_during_setup_is_rejected(console, tmp_path):
 
 def test_rl_reset_route_clears_setup_and_critic_series(console, tmp_path):
     _configure_rl(console, tmp_path)
-    console.do("/api/tab_switch", {"tab": "rl"})
-    console.do("/api/rl/select_task", {"task": "pack the phone"})
-    console.do("/api/rl/select_policy", {"slot": 0})
-    console.do("/api/rl/setup")
+    _select_rl_policy(console, setup=True)
     console.do("/api/rl/select_critic", {"slot": 0})
     assert console.status()["is_setup_done"] is True
 
@@ -229,10 +232,7 @@ def test_rl_async_reset_auto_setup_then_start_publishes_action(console, tmp_path
     )
     console.config.rl.inference_strategy = "async_"
 
-    console.do("/api/tab_switch", {"tab": "rl"})
-    console.do("/api/rl/select_task", {"task": "pack the phone"})
-    console.do("/api/rl/select_policy", {"slot": 0})
-    console.do("/api/rl/setup")
+    _select_rl_policy(console, setup=True)
     console.do("/api/rl/run")
     deadline = time.monotonic() + 2.0
     while console.session.step_index == 0 and time.monotonic() < deadline:
@@ -270,10 +270,7 @@ def test_rl_reset_is_allowed_during_rollout_but_rejected_during_intervention(
     console, tmp_path, monkeypatch
 ):
     _configure_rl(console, tmp_path)
-    console.do("/api/tab_switch", {"tab": "rl"})
-    console.do("/api/rl/select_task", {"task": "pack the phone"})
-    console.do("/api/rl/select_policy", {"slot": 0})
-    console.do("/api/rl/setup")
+    _select_rl_policy(console, setup=True)
 
     console.session.status = SessionStatus.RUNNING
     console.do("/api/rl/reset")

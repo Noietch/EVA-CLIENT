@@ -2,6 +2,8 @@
 
 _base_ = ["../../00_base/defaults.py"]
 
+console = dict(initial_tab="debug")
+
 robot = dict(
     type="r1_lite",
     eef_reference_frame="torso_link3",

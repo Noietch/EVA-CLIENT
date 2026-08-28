@@ -1,6 +1,6 @@
 """Dual Piper RL workspace with independent policy and critic selection."""
 
-_base_ = ["../02_collection/dual_agilex_piper_vr.py"]
+_base_ = ["../01_deploy/dual_agilex_piper/openpi_qpos.py"]
 
 console = dict(
     initial_tab="rl",
@@ -36,5 +36,5 @@ rl_cfg = dict(
             async_save=True,
         ),
     ),
-    intervention=dict(control_mode="relative", source="teleop_client"),
+    intervention=dict(control_mode="relative"),
 )

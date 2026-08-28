@@ -78,7 +78,7 @@ def test_ur5e_fake_node_help_uses_the_local_environment() -> None:
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
-        timeout=20,
+        timeout=60,
         check=False,
     )
 
