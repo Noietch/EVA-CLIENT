@@ -50,8 +50,8 @@ env -u PYTHONHOME \
 import cv2
 import i2rt
 import pyorbbecsdk
-import pyrealsense2 as rs
 import zmq
+from importlib.util import find_spec
 
 from core.registry import ROBOT_REGISTRY
 from examples.hardware.yam.node import build_arg_parser
@@ -59,11 +59,13 @@ from examples.hardware.yam.node import build_arg_parser
 robot = ROBOT_REGISTRY.build("dual_yam")
 assert robot.total_action_dim == 14
 assert build_arg_parser().prog
+realsense_spec = find_spec("pyrealsense2")
+assert realsense_spec is not None
 
 print(f"i2rt installed: {i2rt.__file__}")
 print(f"opencv available: {cv2.__file__}")
 print(f"pyorbbecsdk available: {pyorbbecsdk.__file__}")
-print(f"pyrealsense2 available: {rs.__file__}")
+print(f"optional pyrealsense2 package available: {realsense_spec.origin}")
 print(f"pyzmq available: {zmq.__file__}")
 print("EVA YAM node import available")
 PY
