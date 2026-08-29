@@ -34,15 +34,13 @@
 
 ## 🔥 What's NEW!
 
-* **[2026-08-28] Client-driven WebXR Teleoperation.** EVA-Client now supports VR teleoperation for real-robot data collection through a client-driven WebXR workflow.
+* **[2026-08-28] EVA-Client 0.2.0.** EVA-Client now supports WebXR-based VR controller teleoperation, ARX X5 hardware, dual-YAM leader-follower data collection, export to LeRobot v3.0, MCAP, and HDF5, and multiple coding-agent skills for adding robots, calibrating cameras, and debugging robot SDKs.
+
+* **[2026-08-28] EVA-MHS Preview.** Inspired by Anthropic's [Model Hardware Standard (MHS) research preview](https://www.anthropic.com/news/model-hardware-standard-research-preview), EVA-MHS explores an MHS-style agent-to-hardware interface for robotics. Its MCP service allows coding agents to inspect runtime state, call policy models, and directly control robots. EVA-MHS is available on the `dev/mcp_preview` branch and will be formally released in a future update.
 
 <p align="center">
   <video src="https://github.com/user-attachments/assets/caeabb2f-7896-4863-848d-21f9a5a38dcb" controls muted></video>
 </p>
-
-* **[2026-08-28] Multi-format Dataset Export.** Export collected datasets to LeRobot v3.0, MCAP, or HDF5 through the unified collection workflow.
-
-* **[2026-08-28] YAM Leader-Follower Support.** Collect demonstrations with dual YAM follower arms and leader teaching handles.
 
 * **[2026-07-22] New RL Workspace.** EVA-Client now supports human-in-the-loop (HIL) intervention during policy rollouts and real-time value-curve visualization. See the [RL workspace and HIL intervention demo](./docs/console.md#rl-workspace-and-hil-intervention).
 
