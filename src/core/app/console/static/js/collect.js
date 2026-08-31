@@ -46,6 +46,324 @@ const collectAutoAdvanceState = {
   scheduledKey: "",
 };
 
+let scenePlanModalOpen = false;
+
+function scenePlanEscape(value) {
+  return String(value == null ? "" : value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function scenePlanTasks() {
+  return (S.SCENE_PLAN && Array.isArray(S.SCENE_PLAN.tasks)) ? S.SCENE_PLAN.tasks : [];
+}
+
+function scenePlanTask() {
+  return scenePlanTasks().find((task) => task.task_id === S.scenePlanTaskId) || null;
+}
+
+function scenePlanScene() {
+  const task = scenePlanTask();
+  const scenes = (S.SCENE_PLAN && Array.isArray(S.SCENE_PLAN.scenes))
+    ? S.SCENE_PLAN.scenes : [];
+  if (!task || !task.scene_ids.length) return null;
+  const index = Math.max(0, Math.min(S.scenePlanSceneIndex, task.scene_ids.length - 1));
+  const scene = scenes.find((item) => item.scene_id === task.scene_ids[index]);
+  return scene ? { ...scene, index, target: Number(task.scene_targets[index] || 0) } : null;
+}
+
+function scenePlanPositionRows(scene) {
+  const configured = (S.SCENE_PLAN && Array.isArray(S.SCENE_PLAN.positions))
+    ? S.SCENE_PLAN.positions : [];
+  const byId = new Map(configured.map((position) => [position.position_id, position]));
+  (scene && scene.placements || []).forEach((placement) => {
+    if (!byId.has(placement.position_id)) {
+      byId.set(placement.position_id, {
+        position_id: placement.position_id, x: null, y: null,
+        unit: "", coordinate_frame: "", calibration_status: "unverified",
+      });
+    }
+  });
+  return Array.from(byId.values());
+}
+
+function scenePlanPositionLayout(rows, scene) {
+  const hasCoordinates = scene && rows.length > 0 &&
+    rows.every((row) => Number.isFinite(row.x) && Number.isFinite(row.y));
+  const measured = hasCoordinates && scene.calibration_status === "verified" &&
+    rows.every((row) => row.calibration_status === "verified");
+  if (hasCoordinates) {
+    const xs = rows.map((row) => row.x);
+    const ys = rows.map((row) => row.y);
+    const minX = Math.min(...xs), maxX = Math.max(...xs);
+    const minY = Math.min(...ys), maxY = Math.max(...ys);
+    return {
+      calibrated: measured,
+      coords: new Map(rows.map((row) => [row.position_id, {
+        left: 18 + (maxX === minX ? 32 : ((row.x - minX) / (maxX - minX)) * 64),
+        top: 18 + (maxY === minY ? 32 : ((row.y - minY) / (maxY - minY)) * 64),
+      }])),
+    };
+  }
+  // Before calibration, keep every referenced position visible in a provisional
+  // layout. The banner and coordinate labels make the fallback impossible to
+  // confuse with measured geometry.
+  const cols = Math.max(1, Math.ceil(Math.sqrt(Math.max(1, rows.length))));
+  return {
+    calibrated: false,
+    coords: new Map(rows.map((row, index) => {
+      const col = index % cols;
+      const line = Math.floor(index / cols);
+      return [row.position_id, {
+        left: 18 + (cols === 1 ? 32 : (col / Math.max(1, cols - 1)) * 64),
+        top: rows.length <= cols
+          ? 50
+          : 22 + (line / Math.max(1, Math.ceil(rows.length / cols) - 1)) * 56,
+      }];
+    })),
+  };
+}
+
+function scenePlanObjectsAt(scene, positionId) {
+  return (scene && scene.placements || []).filter(
+    (placement) => placement.position_id === positionId
+  );
+}
+
+function scenePlanPlacementGroups(scene) {
+  return (scene && Array.isArray(scene.placement_groups)) ? scene.placement_groups : [];
+}
+
+function scenePlanObjectName(object) {
+  return object.name_zh || object.name || object.object_id || "OBJECT";
+}
+
+function scenePlanObjectMarkup(object, compact = false) {
+  const objectName = scenePlanObjectName(object);
+  const name = scenePlanEscape(objectName);
+  const initials = scenePlanEscape(String(objectName || "?").slice(0, 3));
+  const continued = compact && Number(object.group_size) > 1 &&
+    Number(object.group_position_index) > 0;
+  const visual = continued
+    ? `<span class="scene-plan-object-placeholder scene-plan-object-continuation" aria-label="Same object continues">↳</span>`
+    : object.photo_url
+    ? `<img class="scene-plan-object-photo" src="${scenePlanEscape(object.photo_url)}" alt="${name}">`
+    : `<span class="scene-plan-object-placeholder" aria-label="Photo missing">${initials}</span>`;
+  return `<span class="scene-plan-object">${visual}<span class="scene-plan-object-name">${name}</span></span>`;
+}
+
+function renderScenePlanMap(host, scene, large = false) {
+  if (!host) return;
+  host.innerHTML = "";
+  if (!scene) {
+    host.dataset.unverified = "false";
+    host.innerHTML = `<div class="scene-plan-detail-empty">No scene selected.</div>`;
+    return;
+  }
+  const rows = scenePlanPositionRows(scene);
+  const layout = scenePlanPositionLayout(rows, scene);
+  host.dataset.unverified = layout.calibrated ? "false" : "true";
+  const mapRect = host.getBoundingClientRect();
+  scenePlanPlacementGroups(scene).forEach((group) => {
+    const points = (group.position_ids || [])
+      .map((positionId) => layout.coords.get(positionId))
+      .filter(Boolean);
+    for (let index = 1; index < points.length; index += 1) {
+      const start = points[index - 1];
+      const end = points[index];
+      const dx = (end.left - start.left) * mapRect.width / 100;
+      const dy = (end.top - start.top) * mapRect.height / 100;
+      const length = Math.hypot(dx, dy);
+      if (!length) continue;
+      const link = document.createElement("span");
+      link.className = "scene-plan-group-link";
+      if ((group.position_ids || []).includes(S.scenePlanPositionId)) {
+        link.classList.add("selected");
+      }
+      link.title = `${group.name || group.object_id} · ${group.position_ids.join(" / ")}`;
+      link.style.left = `${start.left}%`;
+      link.style.top = `${start.top}%`;
+      link.style.width = `${length}px`;
+      link.style.transform = `rotate(${Math.atan2(dy, dx) * 180 / Math.PI}deg)`;
+      host.appendChild(link);
+    }
+  });
+  rows.forEach((row) => {
+    const coord = layout.coords.get(row.position_id) || { left: 50, top: 50 };
+    const objects = scenePlanObjectsAt(scene, row.position_id);
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "scene-plan-node";
+    button.dataset.positionId = row.position_id;
+    button.style.left = `${coord.left}%`;
+    button.style.top = `${coord.top}%`;
+    if (S.scenePlanPositionId === row.position_id) button.classList.add("selected");
+    const hasCoordinate = Number.isFinite(row.x) && Number.isFinite(row.y);
+    const xy = hasCoordinate
+      ? `${layout.calibrated ? "" : "~"}(${row.x}, ${row.y}) ${row.unit || ""}`
+      : "(x, y) pending";
+    button.innerHTML = `<span class="scene-plan-node-id"><span>${scenePlanEscape(row.position_id)}</span><span class="scene-plan-node-coord">${scenePlanEscape(xy)}</span></span>` +
+      (objects.length
+        ? `<span class="scene-plan-object-list">${objects.map((object) => scenePlanObjectMarkup(object, true)).join("")}</span>`
+        : `<span class="scene-plan-node-empty">EMPTY POSITION</span>`);
+    button.addEventListener("click", () => {
+      S.scenePlanPositionId = row.position_id;
+      renderScenePlanDetail(scene, row.position_id);
+      document.querySelectorAll(".scene-plan-node").forEach((node) => {
+        node.classList.toggle("selected", node.dataset.positionId === row.position_id);
+      });
+      if (!large) openScenePlanModal();
+    });
+    host.appendChild(button);
+  });
+}
+
+function renderScenePlanDetail(scene, positionId) {
+  const host = $("scene-plan-position-detail");
+  if (!host || !scene) return;
+  const row = scenePlanPositionRows(scene).find((item) => item.position_id === positionId);
+  if (!row) {
+    host.innerHTML = `<div class="scene-plan-detail-empty">Click a position to inspect its object.</div>`;
+    return;
+  }
+  const hasCoordinate = Number.isFinite(row.x) && Number.isFinite(row.y);
+  const xy = hasCoordinate
+    ? `${row.calibration_status === "verified" ? "" : "~"}(${row.x}, ${row.y}) ${row.unit || ""}`
+    : "(x, y) pending calibration";
+  const objects = scenePlanObjectsAt(scene, positionId);
+  host.innerHTML = `<h3>${scenePlanEscape(positionId)}</h3><div class="scene-plan-detail-coord">${scenePlanEscape(xy)} · ${scenePlanEscape(row.calibration_status || "unverified")}</div>` +
+    (objects.length
+      ? objects.map((object) => {
+        const occupied = Array.isArray(object.group_position_ids) && object.group_position_ids.length > 1
+          ? ` · ${object.group_position_ids.join("/")}` : "";
+        return `<div class="scene-plan-detail-item">${scenePlanObjectMarkup(object)}<span><b>${scenePlanEscape(scenePlanObjectName(object))}</b><small>${scenePlanEscape(object.object_id || "")}${object.photo_url ? " · PHOTO" : " · PHOTO OPTIONAL"}${scenePlanEscape(occupied)}</small></span></div>`;
+      }).join("")
+      : `<div class="scene-plan-detail-empty">No object assigned.</div>`);
+}
+
+function openScenePlanModal() {
+  const modal = $("scene-plan-modal");
+  if (!modal || !scenePlanScene()) return;
+  scenePlanModalOpen = true;
+  modal.classList.add("on");
+  modal.setAttribute("aria-hidden", "false");
+  renderScenePlan();
+}
+
+function closeScenePlanModal() {
+  const modal = $("scene-plan-modal");
+  if (!modal) return;
+  scenePlanModalOpen = false;
+  modal.classList.remove("on");
+  modal.setAttribute("aria-hidden", "true");
+}
+
+function renderScenePlan(usableCollected = null, prompt = collectTaskValue()) {
+  const panel = $("collect-panel-scene");
+  const select = $("scene-plan-task");
+  const preview = $("scene-plan-map-preview");
+  if (!panel || !select || !preview) return;
+  const tasks = scenePlanTasks();
+  if (!tasks.length) {
+    panel.dataset.st = "pending";
+    $("scene-plan-state").textContent = "UNAVAILABLE";
+    select.innerHTML = `<option value="">NO SCENE PLAN</option>`;
+    preview.innerHTML = `<div class="scene-plan-detail-empty">Add the normalized scene CSV to preview positions.</div>`;
+    $("scene-plan-hint").textContent = "Scene plan CSV not found.";
+    return;
+  }
+  if (S.scenePlanTaskPromptKey !== prompt) {
+    const linked = tasks.find((task) => task.prompt_en === prompt);
+    S.scenePlanTaskId = linked ? linked.task_id : "";
+    S.scenePlanSceneIndex = 0;
+    S.scenePlanPositionId = "";
+    S.scenePlanTaskPromptKey = prompt;
+  }
+  const selected = scenePlanTask();
+  const options = [`<option value="">SELECT SCENE PLAN</option>`].concat(tasks.map((task) =>
+    `<option value="${scenePlanEscape(task.task_id)}">${scenePlanEscape(`${task.task_id} · ${task.action} · ${task.operation_object}`)}</option>`));
+  const optionsKey = tasks.map((task) => task.task_id).join("|");
+  if (select.dataset.optionsKey !== optionsKey) {
+    select.innerHTML = options.join("");
+    select.dataset.optionsKey = optionsKey;
+  }
+  select.value = selected ? selected.task_id : "";
+  panel.dataset.st = selected ? "done" : "pending";
+  $("scene-plan-state").textContent = selected ? "READY" : "SELECT PLAN";
+  const scene = scenePlanScene();
+  const prevScene = $("scene-plan-prev");
+  const nextScene = $("scene-plan-next");
+  const sceneLabel = $("scene-plan-scene-label");
+  if (prevScene) prevScene.disabled = !selected || !scene || scene.index <= 0;
+  if (nextScene) nextScene.disabled = !selected || !scene || scene.index >= selected.scene_ids.length - 1;
+  if (sceneLabel) sceneLabel.textContent = scene
+    ? `SCENE ${scene.index + 1} / ${selected.scene_ids.length}` : "SCENE -- / --";
+  if (!selected || !scene) {
+    $("scene-plan-summary").innerHTML = "";
+    preview.dataset.unverified = "false";
+    preview.innerHTML = `<div class="scene-plan-detail-empty">Select a scene plan to preview its object positions.</div>`;
+    $("scene-plan-hint").textContent = "The plan is separate from the active collection prompt until the task IDs are linked.";
+    if (scenePlanModalOpen) closeScenePlanModal();
+    return;
+  }
+  const target = scene.target;
+  const linked = selected.prompt_en === prompt;
+  const sceneCount = selected.scene_ids.length;
+  const completedBefore = selected.scene_targets
+    .slice(0, scene.index)
+    .reduce((total, value) => total + (Number(value) || 0), 0);
+  const progress = linked && Number.isFinite(usableCollected)
+    ? Math.max(0, Math.min(target, usableCollected - completedBefore)) : null;
+  $("scene-plan-summary").innerHTML = `<span>SCENE <b>${scene.index + 1}/${sceneCount}</b></span><span>TARGET <b>${target || "--"}</b></span><span>${progress == null ? "PLAN PREVIEW" : `VALID <b>${progress}/${target}</b>`}</span>`;
+  $("scene-plan-hint").textContent = linked
+    ? `${selected.action} · ${selected.operation_object} · click a position for details`
+    : "PLAN PREVIEW · select a matching collection prompt to connect live progress";
+  renderScenePlanMap(preview, scene);
+  if (scenePlanModalOpen) {
+    const modalMap = $("scene-plan-map-modal");
+    renderScenePlanMap(modalMap, scene, true);
+    const modalSub = $("scene-plan-modal-sub");
+    if (modalSub) modalSub.textContent = `${selected.task_id} · scene ${scene.index + 1}/${sceneCount} · ${scene.calibration_status || "unverified"}`;
+    renderScenePlanDetail(scene, S.scenePlanPositionId || scenePlanPositionRows(scene)[0]?.position_id);
+  }
+}
+
+function installScenePlan() {
+  const select = $("scene-plan-task");
+  if (select) select.onchange = () => {
+    S.scenePlanTaskId = select.value;
+    S.scenePlanSceneIndex = 0;
+    S.scenePlanPositionId = "";
+    renderScenePlan();
+  };
+  const shiftScene = (delta) => {
+    const task = scenePlanTask();
+    if (!task) return;
+    S.scenePlanSceneIndex = Math.max(0, Math.min(task.scene_ids.length - 1, S.scenePlanSceneIndex + delta));
+    S.scenePlanPositionId = "";
+    renderScenePlan();
+  };
+  const previous = $("scene-plan-prev");
+  const next = $("scene-plan-next");
+  if (previous) previous.onclick = () => shiftScene(-1);
+  if (next) next.onclick = () => shiftScene(1);
+  [$("scene-plan-open"), $("scene-plan-open-inline")].forEach((button) => {
+    if (button) button.onclick = openScenePlanModal;
+  });
+  const close = $("scene-plan-close");
+  if (close) close.onclick = closeScenePlanModal;
+  const modal = $("scene-plan-modal");
+  if (modal) {
+    modal.onclick = (event) => { if (event.target === modal) closeScenePlanModal(); };
+  }
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && scenePlanModalOpen) closeScenePlanModal();
+  });
+}
+
 function itemsForPrompt(items, prompt) {
   return (items || []).filter(
     (item) => String((item && (item.task || item.prompt)) || "") === prompt
@@ -939,6 +1257,8 @@ function renderCollect() {
     const progress = totalItems === 0
       ? 0 : Math.max(0, Math.min(1, (usableCount + rejectedCount) / totalItems));
 
+    renderScenePlan(usableCollected, prompt);
+
     const collectFps = S.CFG && S.CFG.collection ? S.CFG.collection.fps : null;
     $("collect-fps").textContent = collectFps ? `${collectFps} FPS` : "";
     $("collect-count").textContent = `${episodes.length}/${totalItems}`;
@@ -1487,5 +1807,5 @@ export {
   clearReviewPlayback, loadAnnotation, reviewActiveInCurrentTab, reviewEpisode,
   exportCollectionQuality, saveAnnotation, submitEpisodeNote, submitEpisodeQc, submitQc,
   installCollectKeyboardControls, renderCollectControls, uploadCollectionQuality,
-  changeCollectionExportFormat, invalidateEpisodeHistory, pollEpisodeHistory,
+  installScenePlan, renderScenePlan, changeCollectionExportFormat, invalidateEpisodeHistory, pollEpisodeHistory,
 };

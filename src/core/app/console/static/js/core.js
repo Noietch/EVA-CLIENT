@@ -57,6 +57,11 @@ export const RT_COLORS = ["#FF4D00", "#1F7A4D", "#2563EB", "#B0A14F", "#9B59B6",
 // Cross-module mutable state. Modules read/write via S.<name> so the binding is shared.
 export const S = {
   CFG: null,
+  SCENE_PLAN: null,
+  scenePlanTaskId: "",
+  scenePlanSceneIndex: 0,
+  scenePlanPositionId: "",
+  scenePlanTaskPromptKey: "",
   STATUS: {},
   ACTIVE_TAB: "debug",
   collectReplayEpisode: null,

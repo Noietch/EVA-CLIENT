@@ -11,12 +11,14 @@ from __future__ import annotations
 
 import concurrent.futures
 import copy
+import csv
 import dataclasses
 import datetime as _dt
 import gzip
 import hashlib
 import json
 import logging
+import mimetypes
 import multiprocessing
 import os
 import random
@@ -29,11 +31,12 @@ from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import cv2
 import imageio_ffmpeg
 import numpy as np
+import yaml
 from tqdm import tqdm
 
 from core.app.command_catalog import control_command_catalog
@@ -838,6 +841,258 @@ def _resolve_dataset_dir(dataset_dir: str) -> str:
     if not dataset_dir:
         return dataset_dir
     return str(_resolve_runtime_path(dataset_dir))
+
+
+def _scene_plan_root(config: ConfigDict | None = None) -> Path:
+    configured = os.environ.get("EVA_SCENE_PLAN_DIR", "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    if config is not None:
+        task_set_dir = str(
+            ((config.get("collection") or {}).get("task_set_dir", "")) or ""
+        ).strip()
+        if task_set_dir:
+            task_set_root = _resolve_runtime_path(task_set_dir).expanduser().resolve()
+            if task_set_root.is_dir():
+                return task_set_root
+    cwd_root = Path.cwd() / "work_dirs"
+    repo_root = Path(__file__).resolve().parents[4] / "work_dirs"
+    has_canonical_plan = any(
+        (cwd_root / filename).is_file()
+        for filename in ("layout.yaml", "scene.csv", "tasks.csv", "objects.csv")
+    )
+    return cwd_root if has_canonical_plan else repo_root
+
+
+def _read_scene_plan_csv(root: Path, filename: str) -> list[dict[str, str]]:
+    path = root / filename
+    if not path.is_file():
+        return []
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            return [dict(row) for row in csv.DictReader(handle)]
+    except (OSError, UnicodeError, csv.Error) as exc:
+        logger.warning("Unable to read scene plan %s: %s", path, exc)
+        return []
+
+
+def _read_scene_plan_yaml(root: Path, filename: str) -> dict[str, Any]:
+    path = root / filename
+    if not path.is_file():
+        return {}
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            payload = yaml.safe_load(handle)
+        return payload if isinstance(payload, dict) else {}
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        logger.warning("Unable to read scene plan %s: %s", path, exc)
+        return {}
+
+
+def _scene_photo_roots(root: Path) -> tuple[Path, ...]:
+    return (root / "scene_photos", root / "object_photos", root)
+
+
+def _resolve_scene_photo(root: Path, filename: str) -> Path | None:
+    safe_name = Path(filename).name
+    if not safe_name or safe_name != filename:
+        return None
+    for base in _scene_photo_roots(root):
+        candidate = (base / safe_name).resolve()
+        if base.resolve() in candidate.parents and candidate.is_file():
+            return candidate
+    return None
+
+
+def _scene_photo_url(root: Path, value: str) -> str:
+    filename = Path(value).name if value else ""
+    return f"/api/scene_photo/{quote(filename)}" if _resolve_scene_photo(root, filename) else ""
+
+
+def _optional_scene_float(value: Any) -> float | None:
+    try:
+        text = "" if value is None else str(value).strip()
+        return float(text) if text else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _scene_plan_placements(value: Any) -> list[dict[str, Any]]:
+    try:
+        payload = json.loads(str(value or "[]"))
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        logger.warning("Invalid scene placements JSON: %s", exc)
+        return []
+    if not isinstance(payload, list):
+        return []
+    placements = []
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        object_id = str(item.get("object_id", "") or "").strip()
+        position_ids = item.get("position_ids")
+        if not object_id or not isinstance(position_ids, list):
+            continue
+        position_ids = [str(position_id or "").strip() for position_id in position_ids]
+        position_ids = [position_id for position_id in position_ids if position_id]
+        if position_ids:
+            placements.append({"position_ids": position_ids, "object_id": object_id})
+    return placements
+
+
+def _load_scene_plan(config: ConfigDict | None = None) -> dict[str, Any]:
+    """Load the optional normalized scene catalogs used by the collection map."""
+    root = _scene_plan_root(config)
+    task_rows = _read_scene_plan_csv(root, "tasks.csv")
+    scene_rows = _read_scene_plan_csv(root, "scene.csv")
+    layout_doc = _read_scene_plan_yaml(root, "layout.yaml")
+    position_rows = []
+    layout_id = str(layout_doc.get("layout_id", "") or "")
+    layout_unit = str(layout_doc.get("unit", "") or "")
+    layout_frame = str(layout_doc.get("coordinate_frame", "") or "")
+    layout_status = str(layout_doc.get("calibration_status", "unverified") or "unverified")
+    for point in layout_doc.get("sampling_points", []):
+        if not isinstance(point, dict):
+            continue
+        position_rows.append(
+            {
+                "layout_id": str(point.get("layout_id", layout_id) or layout_id),
+                "position_id": str(point.get("position_id", point.get("id", "")) or ""),
+                "x": point.get("x"),
+                "y": point.get("y"),
+                "unit": str(point.get("unit", layout_unit) or layout_unit),
+                "coordinate_frame": str(
+                    point.get("coordinate_frame", layout_frame) or layout_frame
+                ),
+                "physical_reference": str(point.get("physical_reference", "") or ""),
+                "calibration_photo": str(point.get("calibration_photo", "") or ""),
+                "calibration_status": str(
+                    point.get("calibration_status", layout_status) or layout_status
+                ),
+            }
+        )
+    object_rows = _read_scene_plan_csv(root, "objects.csv")
+    objects = {
+        str(row.get("object_id", "")): row for row in object_rows if row.get("object_id")
+    }
+    object_payload = {
+        object_id: {
+            "object_id": object_id,
+            "name": str(
+                row.get("object_name_zh", "")
+                or row.get("object_name", "")
+                or object_id
+            ),
+            "name_zh": str(row.get("object_name_zh", "") or ""),
+            "name_en": str(row.get("object_name", "") or ""),
+            "photo_url": _scene_photo_url(
+                root, str(row.get("photo_path", "") or f"{object_id}.jpg")
+            ),
+        }
+        for object_id, row in objects.items()
+    }
+    scenes = {}
+    for row in scene_rows:
+        scene_id = str(row.get("scene_id", "")).strip()
+        if not scene_id:
+            continue
+        scene = scenes.setdefault(
+            scene_id,
+            {
+                "scene_id": scene_id,
+                "layout_id": str(row.get("layout_id", layout_id) or layout_id),
+                "placements": [],
+                "placement_groups": [],
+                "overview_photo": "",
+                "calibration_status": str(
+                    row.get("calibration_status", layout_status) or layout_status
+                ),
+                "notes": "",
+            },
+        )
+        placement_rows = _scene_plan_placements(row.get("placements"))
+        for group_index, placement in enumerate(placement_rows):
+            object_id = placement["object_id"]
+            position_ids = placement["position_ids"]
+            if not object_id or not position_ids:
+                continue
+            obj = object_payload.get(object_id, {"object_id": object_id, "name": object_id})
+            group_id = f"{scene_id}:{group_index}"
+            group = {
+                "group_id": group_id,
+                "position_ids": position_ids,
+                "object_id": object_id,
+                "name": obj["name"],
+                "photo_url": obj.get("photo_url", ""),
+            }
+            scene["placement_groups"].append(group)
+            for position_index, position_id in enumerate(position_ids):
+                scene["placements"].append(
+                    {
+                        "position_id": position_id,
+                        "object_id": object_id,
+                        "name": obj["name"],
+                        "photo_url": obj.get("photo_url", ""),
+                        "group_id": group_id,
+                        "group_position_index": position_index,
+                        "group_size": len(position_ids),
+                        "group_position_ids": position_ids,
+                    }
+                )
+        overview_photo = str(
+            row.get("overview_photo", row.get("scene_photo", "")) or f"{scene_id}.jpg"
+        )
+        scene["overview_photo"] = _scene_photo_url(root, overview_photo)
+        scene["notes"] = str(row.get("notes", "") or scene["notes"])
+    tasks = []
+    for row in task_rows:
+        task_id = str(row.get("task_id", "")).strip()
+        scene_ids = [value for value in str(row.get("scene_ids", "")).split(";") if value]
+        targets = [value for value in str(row.get("scene_targets", "")).split(";") if value]
+        if not task_id or not scene_ids:
+            continue
+        tasks.append(
+            {
+                "task_id": task_id,
+                "action": str(row.get("action", row.get("动作", "")) or ""),
+                "category": str(row.get("category", row.get("物体", "")) or ""),
+                "operation_object": str(
+                    row.get("operation_object", row.get("操作对象", "")) or ""
+                ),
+                "prompt_en": str(row.get("prompt_en", row.get("英文prompt", "")) or ""),
+                "scene_ids": scene_ids,
+                "scene_targets": [int(value) for value in targets if value.isdigit()],
+                "total_target": int(row.get("total_target", row.get("数量", 0)) or 0),
+            }
+        )
+    positions = []
+    for row in position_rows:
+        position_id = str(row.get("position_id", "")).strip()
+        if not position_id:
+            continue
+        positions.append(
+            {
+                "position_id": position_id,
+                "x": _optional_scene_float(row.get("x")),
+                "y": _optional_scene_float(row.get("y")),
+                "unit": str(row.get("unit", "") or ""),
+                "coordinate_frame": str(row.get("coordinate_frame", "") or ""),
+                "calibration_status": str(row.get("calibration_status", "unverified")),
+            }
+        )
+    return {
+        "ok": True,
+        "source": str(root / "tasks.csv") if task_rows else "",
+        "calibrated": bool(positions) and all(
+            row["x"] is not None and row["y"] is not None
+            and row["calibration_status"] == "verified"
+            for row in positions
+        ),
+        "positions": positions,
+        "objects": list(object_payload.values()),
+        "scenes": list(scenes.values()),
+        "tasks": tasks,
+    }
 
 
 def _serialize_config(ctx: ConsoleContext) -> dict:
@@ -1741,6 +1996,9 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         if path.startswith("/api/camera/"):
             self._stream_camera(unquote(path[len("/api/camera/") :]))
             return
+        if path.startswith("/api/scene_photo/"):
+            self._get_scene_photo(unquote(path[len("/api/scene_photo/") :]))
+            return
         if (
             path.startswith("/fonts/")
             or path.startswith("/vendor/")
@@ -1770,6 +2028,28 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
 
     def _get_config(self) -> None:
         self._send_json(200, _serialize_config(self.ctx))
+
+    def _get_scene_plan(self) -> None:
+        self._send_json(200, _load_scene_plan(self.ctx.config))
+
+    def _get_scene_photo(self, filename: str) -> None:
+        path = _resolve_scene_photo(_scene_plan_root(self.ctx.config), filename)
+        if path is None:
+            self._send_empty(404)
+            return
+        try:
+            body = path.read_bytes()
+        except OSError:
+            self._send_empty(404)
+            return
+        content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        self._response_status = 200
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
 
     def _get_status(self) -> None:
         # This poll doubles as the client-liveness heartbeat the main loop watches.
@@ -3049,6 +3329,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
 # do_GET because they own a path subtree). Values are unbound handler methods.
 _GET_ROUTES = {
     "/api/config": ConsoleRequestHandler._get_config,
+    "/api/scene_plan": ConsoleRequestHandler._get_scene_plan,
     "/api/status": ConsoleRequestHandler._get_status,
     "/api/episodes": ConsoleRequestHandler._get_episodes,
     "/api/dashboard": ConsoleRequestHandler._get_dashboard,

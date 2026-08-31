@@ -5,7 +5,7 @@ Choose the closest current adapter instead of inventing a new structure.
 | Template | Pattern | Useful paths |
 | --- | --- | --- |
 | YAM | ZMQ, external vendor SDK, mixed camera SDKs | `examples/hardware/yam`, `src/robots/zoo/dual_yam`, `configs/01_deploy/dual_yam` |
-| ARX X5 | ZMQ, Python 3.12, vendored X5 SDK | `examples/hardware/arx_x5`, `src/robots/zoo/arx_x5`, `configs/02_collection/arx_x5_vr.py` |
+| ARX X5 | ZMQ, Python 3.12, vendored X5 SDK | `examples/hardware/arx_x5`, `src/robots/zoo/arx_x5`, `configs/02_collection/arx_x5_vr.py`, `configs/02_collection/arx_x5_vr_tasks_set.py` |
 | ARX R5 | ZMQ, Python 3.11, vendored ARX R5 and Alicia-D SDKs | `examples/hardware/arx_r5`, `src/robots/zoo/arx_r5` |
 | AgiBot G2 | ZMQ, external GDK or mock | `examples/hardware/agibot_g2`, `src/robots/zoo/agibot_g2` |
 | AgileX Piper | Direct ROS 1 integration | `examples/hardware/agilex_piper`, `src/robots/zoo/agilex_piper` |

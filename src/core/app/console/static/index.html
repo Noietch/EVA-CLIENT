@@ -232,6 +232,20 @@
           </div>
         </div>
 
+        <div class="panel" id="collect-panel-scene" data-st="pending">
+          <div class="panel-h"><span class="step-badge">2D</span>SCENE MAP <span class="n" id="scene-plan-state">UNAVAILABLE</span><button class="chart-expand scene-plan-open" id="scene-plan-open" title="Open 2D scene map" aria-label="Open 2D scene map">⤢</button></div>
+          <div class="card">
+            <div class="scene-plan-select-row">
+              <select class="choice-select task-select" id="scene-plan-task" aria-label="Scene plan task"></select>
+              <button class="btn scene-plan-open" id="scene-plan-open-inline" title="Open large 2D scene map" aria-label="Open large 2D scene map">OPEN MAP</button>
+            </div>
+            <div class="scene-plan-summary" id="scene-plan-summary"></div>
+            <div class="scene-plan-scene-nav"><button class="btn" id="scene-plan-prev" title="Previous scene" aria-label="Previous scene">←</button><span id="scene-plan-scene-label">SCENE -- / --</span><button class="btn" id="scene-plan-next" title="Next scene" aria-label="Next scene">→</button></div>
+            <div class="scene-plan-map scene-plan-map-compact" id="scene-plan-map-preview" aria-label="2D scene map"></div>
+            <div class="scene-plan-hint" id="scene-plan-hint">Select a task plan to preview its object positions.</div>
+          </div>
+        </div>
+
         <div class="panel" id="collect-panel-record">
           <div class="panel-h"><span class="step-badge">2</span>RECORD</div>
           <div class="card">
@@ -400,6 +414,24 @@
           <button class="chart-modal-close" id="chart-modal-close">CLOSE ✕</button>
         </div>
         <div class="chart-modal-body"><canvas id="chart-modal-cv"></canvas></div>
+      </div>
+    </div>
+
+    <div class="scene-plan-modal" id="scene-plan-modal" aria-hidden="true">
+      <div class="scene-plan-modal-card" role="dialog" aria-modal="true" aria-labelledby="scene-plan-modal-title">
+        <div class="scene-plan-modal-head">
+          <div>
+            <span class="chart-title" id="scene-plan-modal-title">2D SCENE MAP</span>
+            <span class="scene-plan-modal-sub" id="scene-plan-modal-sub"></span>
+          </div>
+          <button class="chart-modal-close" id="scene-plan-close" title="Close 2D scene map">CLOSE ✕</button>
+        </div>
+        <div class="scene-plan-modal-layout">
+          <div class="scene-plan-map scene-plan-map-large" id="scene-plan-map-modal" aria-label="Expanded 2D scene map"></div>
+          <aside class="scene-plan-detail" id="scene-plan-position-detail">
+            <div class="scene-plan-detail-empty">Click a position to inspect its object.</div>
+          </aside>
+        </div>
       </div>
     </div>
 

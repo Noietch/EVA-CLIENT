@@ -1,0 +1,68 @@
+﻿task_id,action,category,operation_object,prompt_en,total_target,scene_ids,scene_targets
+TASK-001,insert/withdraw,餐具,盘子/盘子架,"use the left arm to pick up the plate and pass it to the right arm. use the right arm to receive the plate, rotate it to a vertical orientation, and insert it into the plate rack.",15,SC-001;SC-002;SC-003,5;5;5
+TASK-002,insert/withdraw,餐具,盘子/盘子架,"use the right arm to remove the plate from the plate rack and pass it to the left arm, then use the left arm to receive and hold it.",15,SC-001;SC-002;SC-003,5;5;5
+TASK-003,insert/withdraw,餐具,刀具/刀具架,"use the left arm to pass the knife and release it after the right arm receives it, then use the right arm to place it into the knife rack.",15,SC-004;SC-005;SC-006,5;5;5
+TASK-004,insert/withdraw,餐具,刀具/刀具架,"use the right arm to remove the knife from the knife rack and pass it to the left arm, then use the left arm to receive and hold it.",15,SC-004;SC-005;SC-006,5;5;5
+TASK-005,insert/withdraw,文具,笔/有笔的笔筒,use the left arm to place the pen into the pen holder with pens. keep the right arm still.,15,SC-007;SC-008;SC-009,5;5;5
+TASK-006,insert/withdraw,文具,笔/有笔的笔筒,use the left arm to stabilize the pen holder with pens and the right arm to remove the pen.,15,SC-007;SC-008;SC-009,5;5;5
+TASK-007,insert/withdraw,书籍,书/书架,"use the left arm to pass the book and release it after the right arm receives it, then use the right arm to place it into the bookshelf.",15,SC-010;SC-011;SC-012,5;5;5
+TASK-008,insert/withdraw,书籍,书/书架,"use the right arm to remove the book from the bookshelf and pass it to the left arm, then use the left arm to receive and hold it.",15,SC-010;SC-011;SC-012,5;5;5
+TASK-009,insert/withdraw,杯具,马克杯/带挂钩架子,use the left arm to place the mug into the hook rack. keep the right arm still.,15,SC-013;SC-014;SC-015,5;5;5
+TASK-010,insert/withdraw,杯具,马克杯/带挂钩架子,use the left arm to remove the mug from the hook rack. keep the right arm still.,15,SC-013;SC-014;SC-015,5;5;5
+TASK-011,insert/withdraw,玩具,积木/槽位,use the left arm to place the building block into the slot. keep the right arm still.,15,SC-016;SC-017;SC-018,5;5;5
+TASK-012,insert/withdraw,玩具,积木/槽位,use the left arm to remove the building block from the slot. keep the right arm still.,15,SC-016;SC-017;SC-018,5;5;5
+TASK-013,press,开关设备,三控面板开关,use the left arm to press the three-gang panel switch from front to back. keep the right arm still.,15,SC-019;SC-020;SC-021,5;5;5
+TASK-014,press,开关设备,插线板电源开关,use the left arm to press the power-strip switch from top to bottom. keep the right arm still.,15,SC-022;SC-023;SC-024,5;5;5
+TASK-015,press,开关设备,单控开关,use the left arm to press the single switch from front to back. keep the right arm still.,15,SC-025;SC-026;SC-027,5;5;5
+TASK-016,press,开关设备,双控开关,use the left arm to press the double switch from front to back. keep the right arm still.,15,SC-028;SC-029;SC-030,5;5;5
+TASK-017,press,开关设备,小夜灯,use the left arm to press the night light from top to bottom. keep the right arm still.,15,SC-031;SC-032;SC-033,5;5;5
+TASK-018,rotate,旋钮设备,旋钮,use the left arm to rotate the knob. keep the right arm still.,15,SC-034;SC-035;SC-036,5;5;5
+TASK-019,rotate,旋钮设备,风扇旋钮,use the left arm to rotate the fan knob. keep the right arm still.,15,SC-037;SC-038;SC-039,5;5;5
+TASK-020,rotate,容器,矮玻璃罐/杯盖,"use the left arm to hold the short glass jar body steady. use the right arm to grasp the lid, rotate it 90 degrees counterclockwise to unlock it, then lift and move the lid away.",15,SC-040;SC-041;SC-042,5;5;5
+TASK-021,rotate,容器,窄口饮料瓶/杯盖,"use the left arm to hold the narrow drink bottle body steady. use the right arm to grasp the lid, rotate it 90 degrees counterclockwise to unlock it, then lift and move the lid away.",15,SC-043;SC-044;SC-045,5;5;5
+TASK-022,rotate,容器,白色锥杯/杯盖,"use the left arm to hold the white tapered cup body steady. use the right arm to grasp the lid, rotate it 90 degrees counterclockwise to unlock it, then lift and move the lid away.",15,SC-046;SC-047;SC-048,5;5;5
+TASK-023,rotate,容器,透明宽口杯/杯盖,"use the left arm to hold the clear wide tumbler body steady. use the right arm to grasp the lid, rotate it 90 degrees counterclockwise to unlock it, then lift and move the lid away.",15,SC-049;SC-050;SC-051,5;5;5
+TASK-024,handover,餐具,盘子,use the left arm to pass the plate and release it after the right arm receives and securely grasps it.,15,SC-052;SC-053;SC-054,5;5;5
+TASK-025,handover,餐具,盘子,use the right arm to pass the plate and release it after the left arm receives and securely grasps it.,15,SC-052;SC-053;SC-054,5;5;5
+TASK-026,handover,餐具,刀具,use the left arm to pass the knife and release it after the right arm receives and securely grasps it.,15,SC-055;SC-056;SC-057,5;5;5
+TASK-027,handover,餐具,刀具,use the right arm to pass the knife and release it after the left arm receives and securely grasps it.,15,SC-055;SC-056;SC-057,5;5;5
+TASK-028,handover,书籍,书,use the left arm to pass the book and release it after the right arm receives and securely grasps it.,15,SC-058;SC-059;SC-060,5;5;5
+TASK-029,handover,书籍,书,use the right arm to pass the book and release it after the left arm receives and securely grasps it.,15,SC-058;SC-059;SC-060,5;5;5
+TASK-030,handover,办公用品,文件袋,use the left arm to pass the document pouch and release it after the right arm receives and securely grasps it.,15,SC-061;SC-062;SC-063,5;5;5
+TASK-031,handover,办公用品,文件袋,use the right arm to pass the document pouch and release it after the left arm receives and securely grasps it.,15,SC-061;SC-062;SC-063,5;5;5
+TASK-032,handover,容器,瓶子,use the left arm to pass the bottle and release it after the right arm receives and securely grasps it.,15,SC-064;SC-065;SC-066,5;5;5
+TASK-033,handover,容器,瓶子,use the right arm to pass the bottle and release it after the left arm receives and securely grasps it.,15,SC-064;SC-065;SC-066,5;5;5
+TASK-034,handover,容器,杯子,use the left arm to pass the cup and release it after the right arm receives and securely grasps it.,15,SC-067;SC-068;SC-069,5;5;5
+TASK-035,handover,容器,杯子,use the right arm to pass the cup and release it after the left arm receives and securely grasps it.,15,SC-067;SC-068;SC-069,5;5;5
+TASK-036,open/close,家电门体,翻盖式洗碗门,use the left arm to open the flip-down dishwasher door. keep the right arm still.,15,SC-070;SC-071;SC-072,5;5;5
+TASK-037,open/close,家电门体,翻盖式洗碗门,use the left arm to close the flip-down dishwasher door. keep the right arm still.,15,SC-070;SC-071;SC-072,5;5;5
+TASK-038,open/close,家电门体,旋转式洗碗门,use the left arm to open the side-hinged dishwasher door. keep the right arm still.,15,SC-073;SC-074;SC-075,5;5;5
+TASK-039,open/close,家电门体,旋转式洗碗门,use the left arm to close the side-hinged dishwasher door. keep the right arm still.,15,SC-073;SC-074;SC-075,5;5;5
+TASK-040,open/close,办公用品,文件袋,use the left arm to pick up and hold the document pouch while the right arm pulls the zipper open.,15,SC-061;SC-062;SC-063,5;5;5
+TASK-041,pour,容器及内容物,大米/塑料杯、塑料碗,use the right arm to hold the plastic cup and pour the rice into the plastic bowl. keep the left arm still.,15,SC-076;SC-077;SC-078,5;5;5
+TASK-042,pour,容器及内容物,大米/塑料杯、塑料碗,"use the left arm to hold and tilt the plastic cup to pour the rice, while the right arm stabilizes the plastic bowl.",15,SC-079;SC-080;SC-081,5;5;5
+TASK-043,pour,容器及内容物,大米/塑料杯、塑料碗,use the left arm to hold the plastic cup and pour the rice into the plastic bowl. keep the right arm still.,15,SC-079;SC-080;SC-081,5;5;5
+TASK-044,pour,容器及内容物,大米/高塑料杯、塑料盒,use the left arm to hold the tall plastic cup and pour the rice into the plastic container. keep the right arm still.,15,SC-082;SC-083;SC-084,5;5;5
+TASK-045,pour,容器及内容物,大米/高塑料杯、塑料盒,use the right arm to hold the tall plastic cup and pour the rice into the plastic container. keep the left arm still.,15,SC-085;SC-086;SC-087,5;5;5
+TASK-046,pour,容器及内容物,大米/高塑料杯、塑料盒,"use the left arm to hold and tilt the tall plastic cup to pour the rice, while the right arm stabilizes the plastic container.",15,SC-082;SC-083;SC-084,5;5;5
+TASK-047,fold/unfold,衣物,衣服,use the left arm to arrange and fold the left side of the garment while the right arm arranges and folds the right side.,15,SC-088;SC-089;SC-090,5;5;5
+TASK-048,flip,杯具,倒扣杯子,"use the left arm to grasp the left side of the inverted cup and the right arm to grasp the right side, then flip it over together.",15,SC-091;SC-092;SC-093,5;5;5
+TASK-049,flip,办公用品,文件袋,"use the left arm to grasp the left side of the document pouch and the right arm to grasp the right side, then flip it over together.",15,SC-094;SC-095;SC-096,5;5;5
+TASK-050,tool use-wipe,清洁场景,板擦/黑板,use the left arm to pick up the blackboard eraser and wipe the blackboard vertically. keep the right arm still.,10,SC-097;SC-098,5;5
+TASK-051,tool use-wipe,清洁场景,板擦/黑板,keep the left arm still while the right arm picks up the blackboard eraser and wipes the blackboard vertically.,10,SC-097;SC-098,5;5
+TASK-052,tool use-sweep,清扫物,纸团/收集容器,use the left arm to sweep the paper ball with a broom while the right arm holds the collection container.,15,SC-099;SC-100;SC-101,5;5;5
+TASK-053,tool use-sweep,清扫物,纸团/收集容器,use the right arm to sweep the paper ball with a broom while the left arm holds the collection container.,15,SC-102;SC-103;SC-104,5;5;5
+TASK-054,tool use-sweep,清扫物,黄豆/收集容器,use the left arm to sweep the soybeans with a broom while the right arm holds the collection container.,15,SC-105;SC-106;SC-107,5;5;5
+TASK-055,tool use-sweep,清扫物,黄豆/收集容器,use the right arm to sweep the soybeans with a broom while the left arm holds the collection container.,15,SC-108;SC-109;SC-110,5;5;5
+TASK-056,tool use-sweep,清扫物,积木/收集容器,use the left arm to sweep the building block with a broom while the right arm holds the collection container.,15,SC-111;SC-112;SC-113,5;5;5
+TASK-057,tool use-sweep,清扫物,积木/收集容器,use the right arm to sweep the building block with a broom while the left arm holds the collection container.,15,SC-114;SC-115;SC-116,5;5;5
+TASK-058,tool use-scoop,颗粒物及容器,黄豆/塑料碗,"use the left arm to pick up the metal spoon at p9, scoop soybeans from the filled plastic bowl at p7, and place them into the empty plastic bowl at p8. use the right arm to stabilize the filled plastic bowl at p7.",5,SC-117,5
+TASK-059,tool use-scoop,颗粒物及容器,黄豆/塑料碗,"use the right arm to pick up the metal spoon at p7, scoop soybeans from the filled plastic bowl at p9, and place them into the empty plastic bowl at p8. use the left arm to stabilize the filled plastic bowl at p9.",5,SC-118,5
+TASK-060,tool use-scoop,颗粒物及容器,黄豆/塑料碗,"use the left arm to pick up the ceramic spoon at p9, scoop soybeans from the filled plastic bowl at p7, and place them into the empty plastic bowl at p8. use the right arm to stabilize the filled plastic bowl at p7.",5,SC-119,5
+TASK-061,tool use-scoop,颗粒物及容器,黄豆/塑料碗,"use the right arm to pick up the ceramic spoon at p7, scoop soybeans from the filled plastic bowl at p9, and place them into the empty plastic bowl at p8. use the left arm to stabilize the filled plastic bowl at p9.",5,SC-120,5
+TASK-062,tool use-scoop,颗粒物及容器,黄豆/塑料碗,"use the left arm to pick up the plastic formula scoop at p9, scoop soybeans from the filled plastic bowl at p7, and place them into the empty plastic bowl at p8. use the right arm to stabilize the filled plastic bowl at p7.",5,SC-121,5
+TASK-063,tool use-scoop,颗粒物及容器,黄豆/塑料碗,"use the right arm to pick up the plastic formula scoop at p7, scoop soybeans from the filled plastic bowl at p9, and place them into the empty plastic bowl at p8. use the left arm to stabilize the filled plastic bowl at p9.",5,SC-122,5
+TASK-064,tool use-cut,食材,芹菜,use the left arm to cut the celery while the right arm holds it steady.,15,SC-123;SC-124;SC-125,5;5;5
+TASK-065,tool use-cut,食材,芹菜,use the right arm to cut the celery while the left arm holds it steady.,15,SC-123;SC-124;SC-125,5;5;5
+TASK-066,tool use-cut,食材,黄瓜,use the left arm to cut the cucumber while the right arm holds it steady.,15,SC-126;SC-127;SC-128,5;5;5
+TASK-067,tool use-cut,食材,黄瓜,use the right arm to cut the cucumber while the left arm holds it steady.,15,SC-126;SC-127;SC-128,5;5;5

@@ -1,0 +1,75 @@
+schema_version: 1
+layout_id: desktop_layout_v1
+coordinate_frame: table_top_left
+unit: mm
+orientation: x_right_y_down
+calibration_status: unverified
+bounds:
+  width: 500
+  height: 500
+notes: Approximate 3x3 reference grid over 500 x 500 mm; measure and update coordinates
+  before verified collection.
+sampling_points:
+- position_id: P1
+  x: 0
+  y: 0
+  physical_reference: ''
+  calibration_photo: ''
+  calibration_status: unverified
+  notes: Approximate grid point; update after physical calibration.
+- position_id: P2
+  x: 250
+  y: 0
+  physical_reference: ''
+  calibration_photo: ''
+  calibration_status: unverified
+  notes: Approximate grid point; update after physical calibration.
+- position_id: P3
+  x: 500
+  y: 0
+  physical_reference: ''
+  calibration_photo: ''
+  calibration_status: unverified
+  notes: Approximate grid point; update after physical calibration.
+- position_id: P4
+  x: 0
+  y: 250
+  physical_reference: ''
+  calibration_photo: ''
+  calibration_status: unverified
+  notes: Approximate grid point; update after physical calibration.
+- position_id: P5
+  x: 250
+  y: 250
+  physical_reference: ''
+  calibration_photo: ''
+  calibration_status: unverified
+  notes: Approximate grid point; update after physical calibration.
+- position_id: P6
+  x: 500
+  y: 250
+  physical_reference: ''
+  calibration_photo: ''
+  calibration_status: unverified
+  notes: Approximate grid point; update after physical calibration.
+- position_id: P7
+  x: 0
+  y: 500
+  physical_reference: ''
+  calibration_photo: ''
+  calibration_status: unverified
+  notes: Approximate grid point; update after physical calibration.
+- position_id: P8
+  x: 250
+  y: 500
+  physical_reference: ''
+  calibration_photo: ''
+  calibration_status: unverified
+  notes: Approximate grid point; update after physical calibration.
+- position_id: P9
+  x: 500
+  y: 500
+  physical_reference: ''
+  calibration_photo: ''
+  calibration_status: unverified
+  notes: Approximate grid point; update after physical calibration.

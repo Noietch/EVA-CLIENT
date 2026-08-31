@@ -121,6 +121,10 @@ collection = dict(
         ros1=dict(primary_camera="", max_frame_skew_sec=0.1, groups={}),
         ros2=dict(primary_camera="", max_frame_skew_sec=0.1, groups={}),
     ),
+    # Optional normalized task-set directory containing tasks.csv plus the
+    # collection scene files (layout.yaml, scene.csv, objects.csv).
+    task_set_dir="",
+    task_set_name="",
     # Dataset directory name -> (prompt, target) pairs in one shared LeRobot dataset.
     # Use target=-1 when collection has no episode limit.
     tasks={},

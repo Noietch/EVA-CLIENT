@@ -519,6 +519,62 @@
   .chart-modal-close:hover { border-color: var(--rule-strong); color: var(--ink); }
   .chart-modal-body { flex: 1 1 auto; min-height: 0; position: relative; }
   .chart-modal-body canvas { width: 100%; height: 100%; display: block; }
+
+  /* 2D collection scene map: coordinates are supplied by the scene plan; the
+     compact view is only a preview and the modal provides room for object photos. */
+  .scene-plan-open { margin-left: auto; flex: 0 0 auto; }
+  .scene-plan-select-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 7px; align-items: stretch; }
+  .scene-plan-summary { display: flex; flex-wrap: wrap; gap: 7px 12px; min-height: 22px; margin: 9px 0 7px; font: 700 9px/1.3 var(--mono); color: var(--ink-dim); letter-spacing: .05em; text-transform: uppercase; }
+  .scene-plan-summary b { color: var(--ink); font-size: 12px; }
+  .scene-plan-scene-nav { display: grid; grid-template-columns: 32px minmax(0, 1fr) 32px; gap: 6px; align-items: center; margin: 0 0 7px; }
+  .scene-plan-scene-nav .btn { width: 32px; height: 28px; padding: 0; font-size: 16px; line-height: 1; }
+  .scene-plan-scene-nav span { overflow: hidden; text-overflow: ellipsis; text-align: center; color: var(--ink-dim); font: 700 9px/1 var(--mono); letter-spacing: .08em; }
+  .scene-plan-hint { min-height: 15px; margin-top: 7px; font: 9px/1.4 var(--mono); color: var(--ink-faint); }
+  .scene-plan-map { position: relative; min-width: 0; overflow: hidden; border: 1px solid var(--rule); background: var(--surface-2); background-image: linear-gradient(to right, rgba(31,30,28,.06) 1px, transparent 1px), linear-gradient(to bottom, rgba(31,30,28,.06) 1px, transparent 1px); background-size: 32px 32px; }
+  .scene-plan-map-compact { min-height: 256px; aspect-ratio: 1.35; }
+  .scene-plan-map-large { min-height: min(68vh, 650px); height: min(68vh, 650px); }
+  .scene-plan-map[data-unverified="true"]::after { content: "POSITION CALIBRATION REQUIRED"; position: absolute; inset: 8px auto auto 8px; z-index: 1; padding: 4px 6px; color: var(--accent); background: rgba(255,255,255,.86); border: 1px solid rgba(176,161,79,.45); font: 700 8px/1 var(--mono); letter-spacing: .08em; pointer-events: none; }
+  .scene-plan-group-link { position: absolute; z-index: 1; height: 5px; transform-origin: 0 50%; border-radius: 3px; background: var(--accent); opacity: .58; pointer-events: none; }
+  .scene-plan-group-link.selected { height: 7px; opacity: .9; box-shadow: 0 0 0 2px rgba(176,161,79,.18); }
+  .scene-plan-node { position: absolute; z-index: 2; display: flex; flex-direction: column; align-items: stretch; justify-content: flex-start; gap: 4px; width: clamp(96px, 17%, 176px); min-height: 104px; padding: 7px; transform: translate(-50%, -50%); border: 1px solid var(--rule-strong); border-radius: var(--radius-sm); background: var(--paper); color: var(--ink); box-shadow: var(--shadow); cursor: pointer; text-align: left; transition: transform .14s ease, border-color .14s ease, box-shadow .14s ease; }
+  .scene-plan-node:hover, .scene-plan-node:focus-visible { z-index: 4; transform: translate(-50%, -50%) scale(1.035); border-color: var(--ink); box-shadow: var(--shadow-pop); outline: none; }
+  .scene-plan-node.selected { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(176,161,79,.34), var(--shadow-pop); }
+  .scene-plan-node-id { display: flex; align-items: baseline; justify-content: space-between; gap: 5px; font: 700 10px/1 var(--mono); color: var(--ink); letter-spacing: .08em; }
+  .scene-plan-node-coord { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-faint); font: 8px/1 var(--mono); letter-spacing: 0; }
+  .scene-plan-object-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px; min-width: 0; }
+  .scene-plan-object { min-width: 0; display: flex; flex-direction: column; align-items: center; gap: 3px; padding: 3px; background: var(--surface-2); border: 1px solid var(--rule); }
+  .scene-plan-object-photo { width: 42px; height: 42px; flex: 0 0 auto; object-fit: cover; border: 1px solid var(--rule-strong); background: var(--paper); }
+  .scene-plan-object-placeholder { display: grid; place-items: center; width: 42px; height: 42px; flex: 0 0 auto; border: 1px dashed var(--rule-strong); background: var(--paper); color: var(--ink-dim); font: 700 10px/1 var(--sans); text-align: center; }
+  .scene-plan-object-continuation { color: var(--accent); font-size: 18px; }
+  .scene-plan-object-name { width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-dim); font: 8px/1.1 var(--sans); text-align: center; }
+  .scene-plan-node-empty { padding: 6px 3px; color: var(--ink-faint); font: 8px/1.2 var(--mono); text-align: center; }
+  .scene-plan-modal { position: fixed; inset: 0; z-index: 70; display: none; align-items: center; justify-content: center; padding: 20px; background: rgba(20,20,22,.58); backdrop-filter: blur(3px); }
+  .scene-plan-modal.on { display: flex; }
+  .scene-plan-modal-card { width: min(94vw, 1280px); height: min(88vh, 820px); display: flex; flex-direction: column; padding: 15px 18px 18px; border: 1px solid var(--rule); border-radius: var(--radius); background: var(--paper); box-shadow: var(--shadow-pop); }
+  .scene-plan-modal-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex: 0 0 auto; margin-bottom: 10px; }
+  .scene-plan-modal-sub { display: block; margin-top: 4px; color: var(--ink-dim); font: 9px/1.2 var(--mono); letter-spacing: .06em; text-transform: uppercase; }
+  .scene-plan-modal-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(210px, 280px); gap: 12px; min-height: 0; flex: 1 1 auto; }
+  .scene-plan-detail { min-width: 0; overflow: auto; padding: 10px; border: 1px solid var(--rule); background: var(--surface-2); }
+  .scene-plan-detail-empty { color: var(--ink-faint); font: 10px/1.5 var(--mono); }
+  .scene-plan-detail h3 { margin: 0 0 5px; color: var(--ink); font: 700 14px/1.2 var(--sans); }
+  .scene-plan-detail .scene-plan-detail-coord { margin-bottom: 12px; color: var(--ink-dim); font: 10px/1.3 var(--mono); }
+  .scene-plan-detail-item { display: grid; grid-template-columns: 76px minmax(0, 1fr); gap: 8px; align-items: center; padding: 8px 0; border-top: 1px dotted var(--rule); }
+  .scene-plan-detail-item img, .scene-plan-detail-item .scene-plan-object-placeholder { width: 68px; height: 68px; }
+  .scene-plan-detail-item b { display: block; color: var(--ink); font: 700 11px/1.25 var(--sans); overflow-wrap: anywhere; }
+  .scene-plan-detail-item small { display: block; margin-top: 4px; color: var(--ink-dim); font: 9px/1.2 var(--mono); }
+  .scene-plan-modal .scene-plan-node { width: clamp(132px, 18%, 200px); min-height: 150px; padding: 10px; }
+  .scene-plan-modal .scene-plan-object-photo, .scene-plan-modal .scene-plan-object-placeholder { width: 68px; height: 68px; font-size: 14px; }
+  .scene-plan-modal .scene-plan-object-name { font-size: 10px; }
+  @media (max-width: 720px) {
+    .scene-plan-modal { padding: 8px; }
+    .scene-plan-modal-card { width: 100%; height: min(94vh, 760px); padding: 12px; }
+    .scene-plan-modal-layout { grid-template-columns: 1fr; grid-template-rows: minmax(310px, 1fr) auto; }
+    .scene-plan-map-large { min-height: 310px; height: auto; }
+    .scene-plan-detail { max-height: 180px; }
+    .scene-plan-node { width: 92px; min-height: 96px; padding: 5px; }
+    .scene-plan-modal .scene-plan-node { width: 112px; min-height: 126px; padding: 7px; }
+    .scene-plan-modal .scene-plan-object-photo, .scene-plan-modal .scene-plan-object-placeholder { width: 52px; height: 52px; }
+  }
   .chart-head {
     flex: 0 0 auto; display: flex; align-items: center; gap: 10px;
     margin-bottom: 4px; height: 28px; overflow: hidden;

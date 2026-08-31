@@ -9,7 +9,7 @@ import pytest
 import robots  # noqa: F401  (registers robots)
 import transport  # noqa: F401  (registers transport backends)
 from core.app import rl as app_rl
-from core.config import ConfigDict, load_config, resolve_video_key
+from core.config import ConfigDict, load_collection_task_set, load_config, resolve_video_key
 from core.registry import TRANSPORT_REGISTRY
 from transport.base import resolve_topics
 
@@ -30,6 +30,47 @@ def test_resolve_video_key_default_convention():
 def test_resolve_video_key_explicit_override():
     keys = ConfigDict(video_keys={"cam_high": "videos.top"})
     assert resolve_video_key(keys, "cam_high") == "videos.top"
+
+
+def test_load_collection_task_set_reads_prompt_targets(tmp_path):
+    task_set = tmp_path / "task_set"
+    task_set.mkdir()
+    (task_set / "tasks.csv").write_text(
+        "task_id,prompt_en,total_target\n"
+        "TASK-001,place the cup,5\n"
+        "TASK-002,remove the cup,10\n",
+        encoding="utf-8",
+    )
+
+    assert load_collection_task_set(task_set, "demo_set") == {
+        "demo_set": [("place the cup", 5), ("remove the cup", 10)]
+    }
+
+
+def test_load_collection_task_set_rejects_missing_columns(tmp_path):
+    task_set = tmp_path / "task_set"
+    task_set.mkdir()
+    (task_set / "tasks.csv").write_text("task_id,prompt_en\nTASK-001,place\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="total_target"):
+        load_collection_task_set(task_set)
+
+
+def test_load_config_uses_configured_collection_task_set(tmp_path):
+    task_set = tmp_path / "task_set"
+    task_set.mkdir()
+    (task_set / "tasks.csv").write_text(
+        "task_id,prompt_en,total_target\nTASK-001,place the cup,5\n",
+        encoding="utf-8",
+    )
+    config_path = _write_config(
+        tmp_path / "collection.py",
+        f"collection = dict(task_set_dir={str(task_set)!r}, task_set_name='demo_set')\n",
+    )
+
+    cfg = load_config(config_path)
+
+    assert dict(cfg.collection.tasks) == {"demo_set": [("place the cup", 5)]}
 
 
 def test_resolve_topics_builds_camera_and_group_maps():
@@ -526,6 +567,15 @@ def test_arx_x5_vr_defines_scene_task_set():
     assert len(tasks) == 6
     assert tasks[0] == ("pick up the yellow cup and place it on the green plate with left hand.", 1)
     assert tasks[-1] == ("pick up the gray cup and place it on the green plate with left hand.", 1)
+
+
+def test_arx_x5_vr_tasks_set_config_points_to_normalized_directory():
+    cfg = load_config(_CONFIGS_DIR / "02_collection" / "arx_x5_vr_tasks_set.py")
+
+    assert cfg.collection.task_set_dir == "work_dirs/tasks_set"
+    assert cfg.collection.task_set_name == "ArxKine_PnP_DivObj_Norm_Sngl_Base_v1_scene_1_20260828"
+    assert list(cfg.collection.tasks) == [cfg.collection.task_set_name]
+    assert cfg.collection.tasks[cfg.collection.task_set_name]
 
 
 @pytest.mark.parametrize(

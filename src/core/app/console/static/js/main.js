@@ -3,7 +3,7 @@
 import { $, LIVE, S, apiGet, apiPost, setCommandMetadata } from "./core.js";
 import { closeChartModal, drawLiveCharts, liveDimsAll, onScrubInput, openChartModal, resetLiveSeries } from "./charts.js";
 import { applyTune, applyManualTune, renderConfig, manualConnect, manualDisconnect, manualDispatchToggle, enterManualSim, applyStatus, pauseSetup, replayIsLocalMode, resumeSetup, retrySetup, startRunFromDebug, updateGuide } from "./run.js";
-import { changeCollectionExportFormat, clearReviewPlayback, collectConfigured, exportCollectionQuality, installCollectKeyboardControls, pollEpisodeHistory, renderCollect, renderRolloutSave, returnReviewToLive, reviewActiveInCurrentTab, saveAnnotation, startCollectFromTab, submitEpisodeNote, submitEpisodeQc, submitQc, uploadCollectionQuality } from "./collect.js";
+import { changeCollectionExportFormat, clearReviewPlayback, collectConfigured, exportCollectionQuality, installCollectKeyboardControls, installScenePlan, pollEpisodeHistory, renderCollect, renderRolloutSave, returnReviewToLive, reviewActiveInCurrentTab, saveAnnotation, startCollectFromTab, submitEpisodeNote, submitEpisodeQc, submitQc, uploadCollectionQuality } from "./collect.js";
 import { evalReset, evalSetup, evalRunToggle, evalResumeOnEnter, submitEvalScore, loadEvalResults, renderEvalSelectors, loadResultsAll, tpSeek, tpToggle, trialPopClose } from "./eval.js";
 import { handleVisibilityChange, replayPlay, replayStop, replayToggle, seekReplay, loop, pollFrame, pollScene, refreshCameraStreams, exitReplayMode } from "./replay.js";
 import { pollRlSeries, renderRlConfig, renderRlStatus } from "./rl.js";
@@ -202,8 +202,14 @@ Object.assign(window, { tpToggle, tpSeek, trialPopClose, replayToggle });
 
 async function boot() {
     S.CFG = await apiGet("/api/config");
+    try {
+      S.SCENE_PLAN = await apiGet("/api/scene_plan");
+    } catch {
+      S.SCENE_PLAN = { ok: false, tasks: [], scenes: [], positions: [], objects: [] };
+    }
     initDashboard();
     installCollectKeyboardControls();
+    installScenePlan();
     renderConfig();
     // EVAL/RESULT use inline onclick handlers; expose them.
     window.tpToggle = tpToggle; window.tpSeek = tpSeek;

@@ -16,6 +16,7 @@ The returned ConfigDict supports dotted attribute access
 
 from __future__ import annotations
 
+import csv
 import math
 import posixpath
 import re
@@ -54,6 +55,56 @@ _CONSOLE_INITIAL_TABS = frozenset(
 _SCENE_DATASET_RE = re.compile(
     r"^(?P<base>.+)_scene_(?P<index>[1-9][0-9]*)(?:_(?P<date>[0-9]{8}))?$"
 )
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _resolve_collection_task_set_path(path: str | Path) -> Path:
+    root = Path(path).expanduser()
+    if not root.is_absolute():
+        root = _PROJECT_ROOT / root
+    return root.resolve()
+
+
+def load_collection_task_set(
+    path: str | Path,
+    dataset_name: str | None = None,
+) -> dict[str, list[tuple[str, int]]]:
+    """Load normalized collection tasks from a task-set directory."""
+    root = _resolve_collection_task_set_path(path)
+    tasks_path = root / "tasks.csv"
+    if not tasks_path.is_file():
+        raise FileNotFoundError(f"collection task-set is missing {tasks_path}")
+
+    prompts: list[tuple[str, int]] = []
+    try:
+        with tasks_path.open("r", encoding="utf-8-sig", newline="") as handle:
+            rows = csv.DictReader(handle)
+            required = {"prompt_en", "total_target"}
+            missing = sorted(required - set(rows.fieldnames or ()))
+            if missing:
+                raise ValueError(
+                    f"{tasks_path} is missing required columns: {', '.join(missing)}"
+                )
+            for row_number, row in enumerate(rows, start=2):
+                prompt = str(row.get("prompt_en", "") or "").strip()
+                if not prompt:
+                    raise ValueError(f"{tasks_path}:{row_number} prompt_en must not be empty")
+                try:
+                    target = int(str(row.get("total_target", "") or "").strip())
+                except ValueError as error:
+                    raise ValueError(
+                        f"{tasks_path}:{row_number} total_target must be an integer"
+                    ) from error
+                prompts.append((prompt, target))
+    except (OSError, UnicodeError, csv.Error) as error:
+        raise ValueError(f"unable to read collection task-set {tasks_path}") from error
+
+    if not prompts:
+        raise ValueError(f"{tasks_path} must contain at least one task")
+    name = str(dataset_name or root.name).strip()
+    if not _is_safe_dataset_name_component(name):
+        raise ValueError("collection task-set dataset_name must be a safe path component")
+    return {name: prompts}
 
 
 def _is_safe_dataset_name_component(value: str) -> bool:
@@ -85,12 +136,33 @@ def load_config(path: str | Path) -> ConfigDict:
     cfg = ConfigDict(cfg)
     _normalize_eval_cfg(cfg)
     _normalize_rl_cfg(cfg)
+    _normalize_collection_task_set(cfg)
     _coerce_spaces(cfg)
     _apply_derived(cfg, p)
     _validate(cfg)
     _resolve_eval_checkpoints(cfg, p)
     _resolve_rl_policies(cfg, p)
     return cfg
+
+
+def _normalize_collection_task_set(cfg: ConfigDict) -> None:
+    """Use ``tasks.csv`` as the source of prompts when a task-set is configured.
+
+    An authored ``collection.tasks`` value remains a fallback when the
+    machine-local task-set directory has not been mounted yet.
+    """
+    collection = cfg.get("collection") or {}
+    task_set_dir = str(collection.get("task_set_dir", "") or "").strip()
+    if not task_set_dir:
+        return
+    root = _resolve_collection_task_set_path(task_set_dir)
+    if not root.is_dir():
+        return
+    authored_tasks = collection.get("tasks") or {}
+    dataset_name = str(collection.get("task_set_name", "") or "").strip()
+    if not dataset_name and len(authored_tasks) == 1:
+        dataset_name = str(next(iter(authored_tasks)))
+    collection.tasks = load_collection_task_set(root, dataset_name or None)
 
 
 def resolve_video_key(dataset_keys: ConfigDict | dict, cam_key: str) -> str | None:
