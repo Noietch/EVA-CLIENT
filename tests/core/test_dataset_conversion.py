@@ -135,6 +135,7 @@ def _source_dataset(
     # Build a minimal v2.1 source dataset that conversion can split and rewrite.
     info = {
         "codebase_version": "v2.1",
+        "collection_started_at": "2026-08-31T09:30:00+08:00",
         "robot_type": "test",
         "total_episodes": 2,
         "total_frames": 6,
@@ -414,6 +415,7 @@ def test_embedded_formats_rewrite_common_metadata(
     rejected_rows = _read_jsonl(rejected / "meta/episodes.jsonl")
 
     for info in (accepted_info, rejected_info):
+        assert info["collection_started_at"] == "2026-08-31T09:30:00+08:00"
         assert info["dataset_format"] == dataset_format
         assert info["embedded_images"] is True
         assert info["total_videos"] == 0

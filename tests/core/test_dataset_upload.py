@@ -9,13 +9,21 @@ from core.utils import dataset_upload
 from core.utils.dataset_upload import DatasetUploadProgress
 
 
-def _result(local_dir: Path, remote_dir: str, files: int, bytes_count: int):
+def _result(
+    local_dir: Path,
+    remote_dir: str,
+    files: int,
+    bytes_count: int,
+    *,
+    skipped: bool = False,
+):
     return SimpleNamespace(
         local_dir=str(local_dir),
         remote_dir=remote_dir,
         destination=remote_dir,
         files=files,
         bytes=bytes_count,
+        skipped=skipped,
     )
 
 
@@ -85,7 +93,7 @@ def test_upload_dataset_directory_reports_sftp_progress_and_actual_remote_dir(
     def fake_sftp_upload(path, *, remote_dir, progress_callback, **_kwargs):
         calls.append((path, remote_dir))
         progress_callback(DatasetUploadProgress(2, 2, 5, 5, "two"))
-        return _result(path, "/root/accepted.copy_20260828T060553123456Z", 2, 5)
+        return _result(path, "/root/accepted", 2, 5)
 
     monkeypatch.setattr(dataset_upload, "upload_directory_sftp", fake_sftp_upload)
 
@@ -96,11 +104,35 @@ def test_upload_dataset_directory_reports_sftp_progress_and_actual_remote_dir(
     )
 
     assert calls == [(local_dir.resolve(), "/root/accepted")]
-    assert result.remote_dir == "/root/accepted.copy_20260828T060553123456Z"
+    assert result.remote_dir == "/root/accepted"
     assert result.files == 2
     assert result.bytes == 5
+    assert result.skipped is False
     assert progress[0] == DatasetUploadProgress(0, 2, 0, 5, "")
     assert progress[-1] == DatasetUploadProgress(2, 2, 5, 5, "sftp: two")
+
+
+def test_upload_dataset_directory_reports_when_all_remote_targets_are_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    local_dir = tmp_path / "accepted"
+    local_dir.mkdir()
+    specs = dataset_upload.resolve_dataset_uploads(
+        {"sftp": {"host": "host", "remote_dir": "/root"}},
+        local_dir.name,
+    )
+    monkeypatch.setattr(
+        dataset_upload,
+        "upload_directory_sftp",
+        lambda path, **_kwargs: _result(path, "/root/accepted", 0, 0, skipped=True),
+    )
+
+    result = dataset_upload.upload_dataset_directory(local_dir, specs)
+
+    assert result.remote_dir == "/root/accepted"
+    assert result.files == 0
+    assert result.bytes == 0
+    assert result.skipped is True
 
 
 def test_upload_dataset_directory_names_failed_sftp(

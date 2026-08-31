@@ -248,7 +248,7 @@
     color: #F5572F; font: 500 11px/1.4 var(--mono);
   }
   .dashboard-metrics {
-    display: grid; grid-template-columns: repeat(5, minmax(130px, 1fr));
+    display: grid; grid-template-columns: repeat(6, minmax(130px, 1fr));
     border: 1px solid var(--rule); border-radius: 8px; overflow: hidden;
     background: var(--paper); box-shadow: var(--shadow-sm);
   }
@@ -276,7 +276,7 @@
   }
   .dashboard-section-head h2 { margin: 3px 0 0; font-size: 14px; line-height: 1.2; letter-spacing: 0; }
   .dashboard-section-note { color: var(--ink-dim); font: 10px/1.2 var(--mono); letter-spacing: 0; }
-  .dashboard-trend { position: relative; min-height: 228px; padding: 10px 16px 0; display: flex; flex-direction: column; justify-content: center; overflow: hidden; }
+  .dashboard-trend { position: relative; min-height: 250px; padding: 10px 16px 12px; display: flex; flex-direction: column; justify-content: center; row-gap: 8px; overflow: hidden; }
   .dashboard-calendar-scroll { flex: 0 0 auto; width: 100%; overflow-x: auto; overflow-y: hidden; }
   .dashboard-calendar { display: block; width: 100%; height: 200px; overflow: visible; font-family: var(--mono); shape-rendering: geometricPrecision; }
   .dashboard-calendar-month { fill: var(--ink-dim); font-size: 8px; font-weight: 700; letter-spacing: 0; }
@@ -294,8 +294,8 @@
   .dashboard-calendar-cell.level-3 { fill: #30A14E; }
   .dashboard-calendar-cell.level-4 { fill: #216E39; }
   .dashboard-calendar-legend {
-    flex: 0 0 18px; display: flex; align-items: center; justify-content: flex-end; gap: 4px;
-    padding: 2px 4px 0; color: var(--ink-faint); font: 600 7px/1 var(--mono);
+    flex: 0 0 18px; height: 18px; display: flex; align-items: center; justify-content: flex-end; gap: 4px;
+    padding: 0 4px; color: var(--ink-faint); font: 600 7px/1 var(--mono);
   }
   .dashboard-calendar-legend-cell { flex: 0 0 12px; width: 12px; height: 12px; border: 1px solid rgba(31,30,28,.08); border-radius: 3px; }
   .dashboard-calendar-legend-cell.level-0 { background: #EBEDF0; }
@@ -360,7 +360,7 @@
   .dashboard-empty { padding: 28px; color: var(--ink-faint); text-align: center; font: 11px/1.4 var(--mono); }
   @media (max-width: 1180px) {
     .dashboard-metrics { grid-template-columns: repeat(3, 1fr); }
-    .dashboard-metric:nth-child(3) { border-right: 0; }
+    .dashboard-metric:nth-child(3), .dashboard-metric:nth-child(6) { border-right: 0; }
     .dashboard-metric:nth-child(-n+3) { border-bottom: 1px solid var(--rule); }
   }
   @media (max-width: 760px) {

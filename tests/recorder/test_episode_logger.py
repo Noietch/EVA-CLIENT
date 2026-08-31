@@ -11,6 +11,7 @@ import json
 import os
 import threading
 import weakref
+from datetime import datetime
 
 import numpy as np
 import pyarrow as pa
@@ -1784,6 +1785,32 @@ def test_collection_info_fps_uses_target_fps_not_measured(tmp_path, monkeypatch)
     np.testing.assert_allclose(info["fps"], 10.0)
     np.testing.assert_allclose(video_info["video.fps"], 10.0)
     np.testing.assert_allclose(writer_fps, [10.0, 10.0])
+
+
+def test_collection_info_records_and_preserves_dataset_start_time(tmp_path):
+    logger = _collection_logger(tmp_path, save_video=False)
+    image = np.zeros((8, 8, 3), dtype=np.uint8)
+
+    task_dir = _collection_task_dir(tmp_path)
+    info_path = task_dir / "meta" / "info.json"
+    logger.start_episode("t")
+    info = json.loads(info_path.read_text())
+    initial_started_at = info["collection_started_at"]
+    assert datetime.fromisoformat(initial_started_at).tzinfo is not None
+    assert info["total_episodes"] == 0
+    logger.cancel_episode()
+
+    _record_one_collection_episode(logger, image)
+    info = json.loads(info_path.read_text())
+    assert info["collection_started_at"] == initial_started_at
+
+    original_started_at = "2026-08-31T09:30:00+08:00"
+    info["collection_started_at"] = original_started_at
+    info_path.write_text(json.dumps(info))
+    _record_one_collection_episode(logger, image)
+
+    updated_info = json.loads(info_path.read_text())
+    assert updated_info["collection_started_at"] == original_started_at
 
 
 def test_image_episode_stats_does_not_stack_all_frames_as_float64(monkeypatch):

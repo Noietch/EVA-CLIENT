@@ -334,6 +334,7 @@ class EpisodeLogger:
             collection_min_capture_time: Collection-only source timestamp cutoff
                 used to drop frames cached before START RECORD.
         """
+        episode_started_at = _dt.datetime.now().astimezone()
         dataset_dir = None
         if self._collection_writer is not None:
             dataset_dir = self._collection_dataset_dir(task, collection_dataset)
@@ -349,9 +350,14 @@ class EpisodeLogger:
         self._raw_episode_batch = CollectionRawBatch()
         self._raw_episode_frame_labels = []
         self._raw_episode_snapshots = []
-        self._episode_started_at = _dt.datetime.now().astimezone()
+        self._episode_started_at = episode_started_at
         self._episode_started_wall_time = time.time()
         if self._collection_writer is not None:
+            assert dataset_dir is not None
+            self._collection_writer.ensure_collection_started_at(
+                dataset_dir,
+                episode_started_at.isoformat(timespec="seconds"),
+            )
             self._collection_writer.start_episode(collection_min_capture_time)
             return
 

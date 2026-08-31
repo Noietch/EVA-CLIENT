@@ -1193,8 +1193,10 @@ async function uploadCollectionQuality() {
         if (job.state === "completed") {
           if (status) {
             const remoteDir = job.remote_dir || "remote target";
-            status.textContent = `${formatLabel} accepted upload complete · ` +
-              `${job.files_total || 0} files · ${remoteDir}`;
+            status.textContent = job.skipped
+              ? `${formatLabel} accepted upload skipped · target already exists · ${remoteDir}`
+              : `${formatLabel} accepted upload complete · ` +
+                `${job.files_total || 0} files · ${remoteDir}`;
           }
           return;
         }

@@ -12,7 +12,6 @@ import shutil
 import subprocess
 import uuid
 from collections.abc import Callable
-from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
 
@@ -23,6 +22,7 @@ class SftpUploadResult:
     destination: str
     files: int
     bytes: int
+    skipped: bool = False
 
 
 @dataclasses.dataclass(frozen=True)
@@ -178,14 +178,23 @@ def _remote_cleanup_script() -> str:
     )
 
 
+def _remote_target_exists_script() -> str:
+    return (
+        "set -eu\n"
+        'target="$1"\n'
+        'if [ -e "$target" ] || [ -L "$target" ]; then\n'
+        '    printf "exists\\n"\n'
+        "else\n"
+        '    printf "missing\\n"\n'
+        "fi\n"
+    )
+
+
 def _remote_publish_script() -> str:
     return (
         "set -eu\n"
         'preferred="$1"\n'
         'staging="$2"\n'
-        'copy_base="$3"\n'
-        "copy_index=1\n"
-        'choose="$preferred"\n'
         "cleanup() {\n"
         "    status=$?\n"
         '    if [ "$status" -ne 0 ] && [ -d "$staging" ]; then\n'
@@ -197,40 +206,45 @@ def _remote_publish_script() -> str:
         'if [ -L "$staging" ] || [ ! -d "$staging" ]; then\n'
         "    exit 45\n"
         "fi\n"
-        "while :; do\n"
-        '    if [ -e "$choose" ] || [ -L "$choose" ]; then\n'
-        '        choose="$copy_base"\n'
-        '        if [ "$copy_index" -gt 1 ]; then\n'
-        '            choose="${copy_base}_$(printf "%02d" "$copy_index")"\n'
-        "        fi\n"
-        "        copy_index=$((copy_index + 1))\n"
-        "        continue\n"
+        'if [ -e "$preferred" ] || [ -L "$preferred" ]; then\n'
+        '    rm -rf -- "$staging"\n'
+        '    printf "skipped\\n%s\\n" "$preferred"\n'
+        "    trap - EXIT INT TERM\n"
+        "    exit 0\n"
+        "fi\n"
+        'if mv -T -n -- "$staging" "$preferred" 2>/dev/null; then\n'
+        '    if [ ! -e "$staging" ] && [ ! -L "$staging" ]; then\n'
+        '        printf "published\\n%s\\n" "$preferred"\n'
+        "        trap - EXIT INT TERM\n"
+        "        exit 0\n"
         "    fi\n"
-        '    if mv -T -n -- "$staging" "$choose" 2>/dev/null; then\n'
-        '        if [ ! -e "$staging" ] && [ ! -L "$staging" ]; then\n'
-        '            printf "%s\n" "$choose"\n'
-        "            trap - EXIT INT TERM\n"
-        "            exit 0\n"
-        "        fi\n"
-        "    fi\n"
-        '    if [ ! -d "$staging" ]; then\n'
-        "        exit 45\n"
-        "    fi\n"
-        '    if [ -e "$choose" ] || [ -L "$choose" ]; then\n'
-        '        choose="$copy_base"\n'
-        '        if [ "$copy_index" -gt 1 ]; then\n'
-        '            choose="${copy_base}_$(printf "%02d" "$copy_index")"\n'
-        "        fi\n"
-        "        copy_index=$((copy_index + 1))\n"
-        "        continue\n"
-        "    fi\n"
-        "    exit 46\n"
-        "done\n"
+        "fi\n"
+        'if [ -e "$preferred" ] || [ -L "$preferred" ]; then\n'
+        '    rm -rf -- "$staging"\n'
+        '    printf "skipped\\n%s\\n" "$preferred"\n'
+        "    trap - EXIT INT TERM\n"
+        "    exit 0\n"
+        "fi\n"
+        "exit 46\n"
     )
 
 
-def _copy_timestamp() -> str:
-    return datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+def _remote_target_exists(
+    destination: str,
+    port: int,
+    identity_file: Path | None,
+    target: PurePosixPath,
+) -> bool:
+    state = _run_ssh_script(
+        destination,
+        port,
+        identity_file,
+        _remote_target_exists_script(),
+        target.as_posix(),
+    ).strip()
+    if state not in {"exists", "missing"}:
+        raise RuntimeError("remote target check returned an invalid result")
+    return state == "exists"
 
 
 def _publish_remote_dataset(
@@ -239,27 +253,21 @@ def _publish_remote_dataset(
     identity_file: Path | None,
     preferred: PurePosixPath,
     staging: PurePosixPath,
-) -> str:
-    copy_target = preferred.parent / f"{preferred.name}.copy_{_copy_timestamp()}"
-    published_target = _run_ssh_script(
+) -> tuple[str, bool]:
+    publish_output = _run_ssh_script(
         destination,
         port,
         identity_file,
         _remote_publish_script(),
         preferred.as_posix(),
         staging.as_posix(),
-        copy_target.as_posix(),
-    ).strip()
-    if not published_target:
-        raise RuntimeError("remote dataset publish returned no destination")
-    published_path = _remote_dataset_path(published_target)
-    published_value = published_path.as_posix()
-    preferred_value = preferred.as_posix()
-    copy_value = copy_target.as_posix()
-    copy_pattern = rf"^{re.escape(copy_value)}(?:_\d+)?$"
-    if published_value != preferred_value and re.fullmatch(copy_pattern, published_value) is None:
+    ).splitlines()
+    if len(publish_output) != 2 or publish_output[0] not in {"published", "skipped"}:
+        raise RuntimeError("remote dataset publish returned an invalid result")
+    published_value = _remote_dataset_path(publish_output[1]).as_posix()
+    if published_value != preferred.as_posix():
         raise RuntimeError("remote dataset publish returned an invalid destination")
-    return published_value
+    return published_value, publish_output[0] == "skipped"
 
 
 def _cleanup_remote_staging(
@@ -418,7 +426,7 @@ def upload_directory_sftp(
     identity_file: Path | None = None,
     progress_callback: Callable[[SftpUploadProgress], None] | None = None,
 ) -> SftpUploadResult:
-    """Recursively upload one directory and publish it without replacing older data."""
+    """Recursively upload one directory unless its remote target already exists."""
     local_dir = _validate_local_directory(local_dir)
     if not 1 <= int(port) <= 65535:
         raise ValueError("SFTP port must be in [1, 65535]")
@@ -429,6 +437,16 @@ def upload_directory_sftp(
         if not identity.is_file():
             raise FileNotFoundError("SFTP identity file not found")
         identity_file = identity
+
+    if _remote_target_exists(destination, port, identity_file, remote_path):
+        return SftpUploadResult(
+            local_dir=str(local_dir),
+            remote_dir=remote_path.as_posix(),
+            destination=destination,
+            files=0,
+            bytes=0,
+            skipped=True,
+        )
 
     sftp = shutil.which("sftp")
     if sftp is None:
@@ -457,7 +475,7 @@ def upload_directory_sftp(
             files,
             progress_callback,
         )
-        actual_remote_dir = _publish_remote_dataset(
+        actual_remote_dir, skipped = _publish_remote_dataset(
             destination,
             port,
             identity_file,
@@ -471,8 +489,9 @@ def upload_directory_sftp(
         local_dir=str(local_dir),
         remote_dir=actual_remote_dir,
         destination=destination,
-        files=len(files),
-        bytes=sum(path.stat().st_size for path in files),
+        files=0 if skipped else len(files),
+        bytes=0 if skipped else sum(path.stat().st_size for path in files),
+        skipped=skipped,
     )
 
 

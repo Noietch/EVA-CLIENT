@@ -696,7 +696,7 @@ def test_collect_quality_upload_uses_config_and_accepts_only_accepted_export(tmp
     assert status.json["remote_dir"] == "/datasets/arx_x5/cup_set"
 
 
-def test_collect_quality_upload_returns_actual_remote_copy_dir_and_never_uses_rejected_export(
+def test_collect_quality_upload_reports_existing_remote_target_and_never_uses_rejected_export(
     tmp_path,
     monkeypatch,
 ):
@@ -707,19 +707,19 @@ def test_collect_quality_upload_returns_actual_remote_copy_dir_and_never_uses_re
     _write_quality_split_marker(accepted, source, dataset_format="lerobot_v21")
     rejected.mkdir(parents=True)
     calls = []
-    copied_remote_dir = "/datasets/arx_x5/cup_set.copy_20260828T120000Z"
+    existing_remote_dir = "/datasets/arx_x5/cup_set"
 
     def upload(local_dir, specs, *, progress_callback):
         calls.append((local_dir, specs))
         assert local_dir == accepted.resolve()
         assert local_dir != rejected.resolve()
-        progress_callback(DatasetUploadProgress(2, 2, 20, 20, "data/chunk-000/file"))
         return DatasetUploadResult(
             local_dir=str(local_dir),
-            remote_dir=copied_remote_dir,
+            remote_dir=existing_remote_dir,
             destination="sftp",
-            files=2,
-            bytes=20,
+            files=0,
+            bytes=0,
+            skipped=True,
         )
 
     monkeypatch.setattr(console_server, "upload_dataset_directory", upload)
@@ -744,7 +744,10 @@ def test_collect_quality_upload_returns_actual_remote_copy_dir_and_never_uses_re
 
     assert status.status == 200
     assert status.json["state"] == "completed"
-    assert status.json["remote_dir"] == copied_remote_dir
+    assert status.json["remote_dir"] == existing_remote_dir
+    assert status.json["skipped"] is True
+    assert status.json["files_completed"] == 0
+    assert status.json["bytes_completed"] == 0
     assert len(calls) == 1
     assert calls[0][0] == accepted.resolve()
     assert calls[0][1][0].target == "/datasets/arx_x5/cup_set"

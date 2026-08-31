@@ -4,6 +4,7 @@ import { $, apiGet } from "./core.js";
 let dashboardData = null;
 let dashboardLoading = null;
 let dateRangeInitialized = false;
+let dateRangeApplied = false;
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -51,7 +52,19 @@ function dayKey(value) {
   return value.toISOString().slice(0, 10);
 }
 
-function renderTrend(mode, rows) {
+function localToday() {
+  const now = new Date();
+  return new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()));
+}
+
+function defaultEndDate(data) {
+  const availableEnd = parseDay(data?.available_range?.end);
+  const today = localToday();
+  if (!availableEnd) return dayKey(today);
+  return dayKey(new Date(Math.max(availableEnd.getTime(), today.getTime())));
+}
+
+function renderTrend(mode, rows, filters = {}) {
   const host = $(`${mode}-trend`);
   const datedRows = rows.filter((row) => parseDay(row.date));
   if (!datedRows.length) {
@@ -61,8 +74,13 @@ function renderTrend(mode, rows) {
 
   const values = new Map(datedRows.map((row) => [row.date, row]));
   const rowDates = datedRows.map((row) => parseDay(row.date));
-  const minDate = new Date(Math.min(...rowDates.map((value) => value.getTime())));
-  const maxDate = new Date(Math.max(...rowDates.map((value) => value.getTime())));
+  const filterStart = parseDay(filters.start);
+  const filterEnd = parseDay(filters.end);
+  const minDate = filterStart || new Date(Math.min(...rowDates.map((value) => value.getTime())));
+  const maxDate = filterEnd || new Date(Math.max(
+    ...rowDates.map((value) => value.getTime()),
+    localToday().getTime(),
+  ));
   const firstMonth = new Date(Date.UTC(minDate.getUTCFullYear(), minDate.getUTCMonth(), 1));
   const lastMonth = new Date(Date.UTC(maxDate.getUTCFullYear(), maxDate.getUTCMonth() + 1, 0));
   let start = addDays(firstMonth, -((firstMonth.getUTCDay() + 6) % 7));
@@ -208,6 +226,7 @@ function renderMode(mode) {
   const view = dashboardData.views[mode];
   $(`${mode}-duration`).textContent = duration(view.duration_seconds);
   $(`${mode}-episodes`).textContent = String(view.episodes || 0);
+  $(`${mode}-frames`).textContent = Number(view.frames || 0).toLocaleString();
   $(`${mode}-valid-count`).textContent = `${view.valid_episodes || 0} valid`;
   $(`${mode}-average`).textContent = duration(view.average_duration_seconds);
   $(`${mode}-efficiency`).textContent = percent(view.efficiency);
@@ -217,8 +236,8 @@ function renderMode(mode) {
   $(`${mode}-health-fill`).style.width = `${Math.min(100, Math.max(0, Number(view.valid_rate) * 100 || 0))}%`;
   $(`${mode}-active-span`).textContent = duration(view.active_span_seconds);
   $(`${mode}-sources`).textContent = String(dashboardData.sources.filter((source) => source.mode === mode).length);
-  $(`${mode}-trend-total`).textContent = `${view.episodes || 0} episodes / ${duration(view.duration_seconds)}`;
-  renderTrend(mode, view.trend || []);
+  $(`${mode}-trend-total`).textContent = `${view.episodes || 0} episodes / ${Number(view.frames || 0).toLocaleString()} frames / ${duration(view.duration_seconds)}`;
+  renderTrend(mode, view.trend || [], dashboardData.filters || {});
   renderRecent(mode, view.recent || []);
   if (mode === "collection") renderDemand(view.tasks || []);
 }
@@ -227,14 +246,16 @@ function renderDashboard() {
   if (!dashboardData) return;
   renderMode("collection");
   renderMode("eval");
-  $("dash-date-result").textContent = `${dashboardData.views.all.episodes || 0} episodes in range`;
+  $("dash-date-result").textContent = `${dashboardData.views.all.episodes || 0} episodes / ${Number(dashboardData.views.all.frames || 0).toLocaleString()} frames in range`;
 }
 
 export function initDashboard() {
-  $("dash-date-apply").addEventListener("click", () => loadDashboard(true));
+  $("dash-date-apply").addEventListener("click", () => {
+    dateRangeApplied = Boolean($("dash-date-from").value || $("dash-date-to").value);
+    loadDashboard(true);
+  });
   $("dash-date-reset").addEventListener("click", () => {
-    $("dash-date-from").value = dashboardData?.available_range?.start || "";
-    $("dash-date-to").value = dashboardData?.available_range?.end || "";
+    dateRangeApplied = false;
     loadDashboard(true);
   });
 }
@@ -247,15 +268,15 @@ export async function loadDashboard(force = false) {
   if (dashboardLoading) return dashboardLoading;
   $("dashboard-error").style.display = "none";
   const params = new URLSearchParams();
-  if (dateRangeInitialized && $("dash-date-from").value) params.set("from", $("dash-date-from").value);
-  if (dateRangeInitialized && $("dash-date-to").value) params.set("to", $("dash-date-to").value);
+  if (dateRangeInitialized && dateRangeApplied && $("dash-date-from").value) params.set("from", $("dash-date-from").value);
+  if (dateRangeInitialized && dateRangeApplied && $("dash-date-to").value) params.set("to", $("dash-date-to").value);
   const endpoint = `/api/dashboard${params.size ? `?${params.toString()}` : ""}`;
   dashboardLoading = apiGet(endpoint)
     .then((data) => {
       dashboardData = data;
-      if (!dateRangeInitialized) {
+      if (!dateRangeInitialized || !dateRangeApplied) {
         $("dash-date-from").value = data.available_range?.start || "";
-        $("dash-date-to").value = data.available_range?.end || "";
+        $("dash-date-to").value = defaultEndDate(data);
         dateRangeInitialized = true;
       }
       renderDashboard();

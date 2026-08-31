@@ -82,6 +82,21 @@ def _duration(row: dict[str, Any], fps: float) -> float:
         return 0.0
 
 
+def _frame_count(row: dict[str, Any]) -> int:
+    """Return the recorded frame count used by LeRobot episode metadata."""
+    value = row.get("length", row.get("frames", row.get("frame_count", 0)))
+    try:
+        return max(0, int(float(value)))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _local_date(value: dt.datetime | None) -> dt.date | None:
+    if value is None:
+        return None
+    return value.astimezone().date() if value.tzinfo is not None else value.date()
+
+
 def _dataset_mode(raw_dir: Path) -> str | None:
     if raw_dir.parent.name == "episodes":
         return "eval"
@@ -165,6 +180,7 @@ def _episode_record(
         "started_at": _iso(started),
         "ended_at": _iso(ended),
         "duration_seconds": round(duration, 3),
+        "frames": _frame_count(row),
         "session_id": str(row.get("session_id") or ""),
         "valid": valid,
         "quality": quality,
@@ -224,7 +240,8 @@ def _summary(episodes: list[dict[str, Any]]) -> dict[str, Any]:
         ended = _parse_time(row["ended_at"])
         if started is None or ended is None or ended < started:
             continue
-        fallback = f"{row['dataset']}:{started.date().isoformat()}"
+        local_started_date = _local_date(started)
+        fallback = f"{row['dataset']}:{local_started_date.isoformat()}"
         key = (str(row["mode"]), str(row["robot_id"]), str(row["session_id"] or fallback))
         sessions[key].append((started, ended))
     active_span = sum(
@@ -235,7 +252,8 @@ def _summary(episodes: list[dict[str, Any]]) -> dict[str, Any]:
     by_day: dict[str, dict[str, Any]] = {}
     for row in episodes:
         started = _parse_time(row["started_at"])
-        day = started.date().isoformat() if started is not None else "unknown"
+        local_started_date = _local_date(started)
+        day = local_started_date.isoformat() if local_started_date is not None else "unknown"
         bucket = by_day.setdefault(
             day,
             {"date": day, "episodes": 0, "valid_episodes": 0, "duration_seconds": 0.0},
@@ -274,6 +292,7 @@ def _summary(episodes: list[dict[str, Any]]) -> dict[str, Any]:
     recent = sorted(episodes, key=lambda row: row["started_at"], reverse=True)[:100]
     return {
         "episodes": len(episodes),
+        "frames": sum(_frame_count(row) for row in episodes),
         "valid_episodes": len(valid_rows),
         "duration_seconds": round(duration, 3),
         "average_duration_seconds": round(duration / len(episodes), 3) if episodes else 0.0,
@@ -316,7 +335,9 @@ def build_dashboard(
             }
         )
     dated = [
-        parsed.date() for row in episodes if (parsed := _parse_time(row["started_at"])) is not None
+        local_date
+        for row in episodes
+        if (local_date := _local_date(_parse_time(row["started_at"]))) is not None
     ]
     available_range = {
         "start": min(dated).isoformat() if dated else "",
@@ -328,9 +349,9 @@ def build_dashboard(
         episodes = [
             row
             for row in episodes
-            if (parsed := _parse_time(row["started_at"])) is not None
-            and (start is None or parsed.date() >= start)
-            and (end is None or parsed.date() <= end)
+            if (local_date := _local_date(_parse_time(row["started_at"]))) is not None
+            and (start is None or local_date >= start)
+            and (end is None or local_date <= end)
         ]
     return {
         "raw_only": True,

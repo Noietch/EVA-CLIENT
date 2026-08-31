@@ -23,6 +23,7 @@ def _dataset(root: Path) -> None:
     (root / "meta").mkdir(parents=True)
     info = {
         "codebase_version": "v2.1",
+        "collection_started_at": "2026-08-31T09:30:00+08:00",
         "total_episodes": 3,
         "total_frames": 9,
         "total_videos": 3,
@@ -158,9 +159,11 @@ def test_split_dataset_exports_contiguous_accepted_and_rejected_subsets(tmp_path
     assert accepted_info["total_episodes"] == 1
     assert accepted_info["total_frames"] == 3
     assert accepted_info["total_tasks"] == 1
+    assert accepted_info["collection_started_at"] == "2026-08-31T09:30:00+08:00"
     assert rejected_info["total_episodes"] == 2
     assert rejected_info["total_frames"] == 6
     assert rejected_info["total_tasks"] == 2
+    assert rejected_info["collection_started_at"] == "2026-08-31T09:30:00+08:00"
     assert len(list(rejected.glob("videos/**/*.mp4"))) == 2
 
     first_rejected = pq.read_table(rejected / "data/chunk-000/episode_000000.parquet")

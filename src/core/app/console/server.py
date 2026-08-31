@@ -129,6 +129,7 @@ class _QualityUploadJob:
     current_file: str = ""
     destination: str = ""
     error: str = ""
+    skipped: bool = False
 
     def payload(self) -> dict[str, Any]:
         if self.bytes_total > 0:
@@ -639,6 +640,7 @@ def _run_quality_upload(
             job.current_file = ""
             job.destination = result.destination
             job.remote_dir = result.remote_dir
+            job.skipped = result.skipped
 
 
 def _quality_export_paths(dataset_dir: Path, dataset_format: str) -> tuple[Path, Path]:

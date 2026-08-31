@@ -18,11 +18,15 @@ class _FakeSshRunner:
     def __init__(
         self,
         *,
+        target_exists: bool = False,
         published_target: str = "/datasets/accepted",
+        publish_state: str = "published",
         publish_error: int = 0,
     ) -> None:
+        self.target_exists = target_exists
         self.publish_error = publish_error
         self.published_target = published_target
+        self.publish_state = publish_state
         self.calls: list[_SshCall] = []
 
     def __call__(self, args, *, check, capture_output, input, text):
@@ -31,9 +35,15 @@ class _FakeSshRunner:
         assert text is True
         call = {"args": list(args), "input": input}
         self.calls.append(call)
-        if "copy_base" in str(input) and self.publish_error:
-            raise subprocess.CalledProcessError(self.publish_error, args, stderr="publish")
-        return subprocess.CompletedProcess(args, 0, stdout=self.published_target + "\n", stderr="")
+        if 'target="$1"' in str(input):
+            stdout = "exists\n" if self.target_exists else "missing\n"
+        elif 'preferred="$1"' in str(input):
+            if self.publish_error:
+                raise subprocess.CalledProcessError(self.publish_error, args, stderr="publish")
+            stdout = f"{self.publish_state}\n{self.published_target}\n"
+        else:
+            stdout = ""
+        return subprocess.CompletedProcess(args, 0, stdout=stdout, stderr="")
 
 
 def test_remote_mkdir_paths_include_all_parent_directories() -> None:
@@ -51,7 +61,7 @@ def test_remote_mkdir_paths_include_all_parent_directories() -> None:
     ]
 
 
-def test_upload_directory_uses_copy_target_when_publish_detects_existing_dataset(
+def test_upload_directory_skips_upload_when_remote_dataset_exists(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     local = tmp_path / "accepted"
@@ -59,9 +69,7 @@ def test_upload_directory_uses_copy_target_when_publish_detects_existing_dataset
     (local / "file.txt").write_text("data")
     uploaded: list[PurePosixPath] = []
     remote_dir = "/datasets/accepted ;semi space"
-    fake_ssh = _FakeSshRunner(
-        published_target="/datasets/accepted ;semi space.copy_20260828T060553123456Z"
-    )
+    fake_ssh = _FakeSshRunner(target_exists=True)
 
     monkeypatch.setattr(
         sftp_upload.shutil,
@@ -69,7 +77,6 @@ def test_upload_directory_uses_copy_target_when_publish_detects_existing_dataset
         lambda name: f"/tmp/fake-{name}" if name in {"ssh", "sftp"} else None,
     )
     monkeypatch.setattr(sftp_upload.subprocess, "run", fake_ssh)
-    monkeypatch.setattr(sftp_upload, "_copy_timestamp", lambda: "20260828T060553123456Z")
     monkeypatch.setattr(
         sftp_upload,
         "_upload_files_sftp",
@@ -86,21 +93,17 @@ def test_upload_directory_uses_copy_target_when_publish_detects_existing_dataset
         remote_dir=remote_dir,
     )
 
-    assert result.remote_dir == "/datasets/accepted ;semi space.copy_20260828T060553123456Z"
+    assert result.remote_dir == remote_dir
     assert result.destination == "robot@10.0.0.8"
-    assert len(uploaded) == 1
-    assert uploaded[0].parent == PurePosixPath("/datasets")
-    assert uploaded[0].name.startswith(".accepted ;semi space.staging-")
-    publish_call = fake_ssh.calls[0]
-    assert publish_call["args"][-3:] == ["10.0.0.8", "sh", "-s", "--"][-3:]
-    assert remote_dir not in publish_call["args"]
-    assert str(uploaded[0]) not in publish_call["args"]
-    assert "/datasets/accepted ;semi space.copy_20260828T060553123456Z" not in publish_call["args"]
-    assert (
-        "set -- '/datasets/accepted ;semi space' "
-        f"{sftp_upload.shlex.quote(str(uploaded[0]))} "
-        "'/datasets/accepted ;semi space.copy_20260828T060553123456Z'"
-    ) in publish_call["input"]
+    assert result.files == 0
+    assert result.bytes == 0
+    assert result.skipped is True
+    assert uploaded == []
+    assert len(fake_ssh.calls) == 1
+    check_call = fake_ssh.calls[0]
+    assert check_call["args"][-3:] == ["10.0.0.8", "sh", "-s", "--"][-3:]
+    assert remote_dir not in check_call["args"]
+    assert f"set -- {sftp_upload.shlex.quote(remote_dir)}" in check_call["input"]
 
 
 @pytest.mark.parametrize(
@@ -182,8 +185,8 @@ def test_upload_directory_cleans_up_staging_after_publish_failure(
             remote_dir="/datasets/accepted",
         )
 
-    assert len(fake_ssh.calls) == 2
-    cleanup_call = fake_ssh.calls[1]
+    assert len(fake_ssh.calls) == 3
+    cleanup_call = fake_ssh.calls[2]
     assert cleanup_call["args"][-3:] == ["sh", "-s", "--"]
     assert str(uploaded[0]) not in cleanup_call["args"]
     assert f"set -- {sftp_upload.shlex.quote(str(uploaded[0]))}" in cleanup_call["input"]
@@ -196,9 +199,8 @@ def test_publish_remote_dataset_rejects_unexpected_destination(
     monkeypatch.setattr(
         sftp_upload,
         "_run_ssh_script",
-        lambda *_args, **_kwargs: "/datasets/accepted-not-copy",
+        lambda *_args, **_kwargs: "published\n/datasets/accepted-not-target\n",
     )
-    monkeypatch.setattr(sftp_upload, "_copy_timestamp", lambda: "20260828T060553123456Z")
 
     with pytest.raises(RuntimeError, match="invalid destination"):
         sftp_upload._publish_remote_dataset(
@@ -210,17 +212,14 @@ def test_publish_remote_dataset_rejects_unexpected_destination(
         )
 
 
-def test_remote_publish_script_chooses_numeric_copy_suffix_without_touching_existing_dirs(
+def test_remote_publish_script_skips_existing_target_and_removes_staging(
     tmp_path: Path,
 ) -> None:
     preferred = (tmp_path / "accepted").resolve()
-    copy_base = Path(str(preferred) + ".copy_20260828T060553123456Z")
     staging = tmp_path / ".accepted.staging-token"
     preferred.mkdir()
-    copy_base.mkdir()
     staging.mkdir()
     (preferred / "old.txt").write_text("old")
-    (copy_base / "copy.txt").write_text("copy")
     (staging / "new.txt").write_text("new")
 
     result = subprocess.run(
@@ -231,16 +230,35 @@ def test_remote_publish_script_chooses_numeric_copy_suffix_without_touching_exis
             sftp_upload._remote_publish_script(),
             str(preferred),
             str(staging),
-            str(copy_base),
         ),
         text=True,
     )
 
-    published = Path(result.stdout.strip())
-    assert published == Path(str(copy_base) + "_02")
+    assert result.stdout.splitlines() == ["skipped", str(preferred)]
     assert (preferred / "old.txt").read_text() == "old"
-    assert (copy_base / "copy.txt").read_text() == "copy"
-    assert (published / "new.txt").read_text() == "new"
+    assert not staging.exists()
+
+
+def test_remote_publish_script_publishes_missing_target(tmp_path: Path) -> None:
+    preferred = (tmp_path / "accepted").resolve()
+    staging = tmp_path / ".accepted.staging-token"
+    staging.mkdir()
+    (staging / "new.txt").write_text("new")
+
+    result = subprocess.run(
+        ["sh", "-s", "--"],
+        check=True,
+        capture_output=True,
+        input=sftp_upload._ssh_payload(
+            sftp_upload._remote_publish_script(),
+            str(preferred),
+            str(staging),
+        ),
+        text=True,
+    )
+
+    assert result.stdout.splitlines() == ["published", str(preferred)]
+    assert (preferred / "new.txt").read_text() == "new"
     assert not staging.exists()
 
 
@@ -278,7 +296,6 @@ def test_upload_directory_uses_configured_sftp_and_reports_progress(
 
     monkeypatch.setattr(sftp_upload.shutil, "which", find_executable)
     monkeypatch.setattr(sftp_upload.subprocess, "run", fake_ssh)
-    monkeypatch.setattr(sftp_upload, "_copy_timestamp", lambda: "20260828T060553123456Z")
 
     result = sftp_upload.upload_directory_sftp(
         local,
@@ -293,6 +310,7 @@ def test_upload_directory_uses_configured_sftp_and_reports_progress(
     assert result.destination == "robot@10.0.0.8"
     assert result.files == 1
     assert result.bytes == 4
+    assert result.skipped is False
     assert progress[0].bytes_completed == 0
     assert any(item.bytes_completed == 1 for item in progress)
     assert any(item.bytes_completed == 3 for item in progress)

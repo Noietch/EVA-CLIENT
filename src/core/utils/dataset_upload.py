@@ -28,6 +28,7 @@ class DatasetUploadResult:
     destination: str
     files: int
     bytes: int
+    skipped: bool = False
 
 
 @dataclasses.dataclass(frozen=True)
@@ -188,6 +189,8 @@ def upload_dataset_directory(
         destination=", ".join(str(result.destination) for result in completed_results),
         files=sum(int(result.files) for result in completed_results),
         bytes=sum(int(result.bytes) for result in completed_results),
+        skipped=bool(completed_results)
+        and all(bool(getattr(result, "skipped", False)) for result in completed_results),
     )
 
 

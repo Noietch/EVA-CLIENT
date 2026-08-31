@@ -226,6 +226,7 @@ def test_quality_export_and_upload_ui_wiring_supports_format_switch_and_remote_d
     assert "export required before upload" in html
     assert "export complete ·" in html
     assert "accepted upload complete ·" in html
+    assert "accepted upload skipped · target already exists ·" in html
     assert "`✗ ${formatLabel} export · ${message}`" in html
     assert "`✗ ${formatLabel} upload · ${message}`" in html
     assert (
