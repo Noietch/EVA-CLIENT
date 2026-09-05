@@ -151,6 +151,12 @@ function updateScrub() {
     const range = $("scrub-range"), stateEl = $("scrub-state"), bar = $("stage-scrub");
     if (!range) return;
     const stage = $("stage");
+    if (stage) {
+      stage.classList.toggle(
+        "collect-review",
+        S.ACTIVE_TAB === "collect" && LIVE.replayOwner === "collect"
+      );
+    }
     if (stage && S.ACTIVE_TAB === "collect") {
       stage.classList.toggle("no-series", LIVE.replayOwner !== "collect");
     } else if (stage && S.ACTIVE_TAB === "debug") {
@@ -174,6 +180,12 @@ function updateScrub() {
     const returnLive = $("review-return-live");
     if (returnLive) {
       returnLive.style.display = ["collect", "rollout", "rl"].includes(LIVE.replayOwner) ? "" : "none";
+    }
+    const robotReplay = $("review-robot-replay");
+    if (robotReplay) {
+      const collectReview = LIVE.replayOwner === "collect" && S.collectReplayEpisode != null;
+      robotReplay.style.display = collectReview ? "" : "none";
+      robotReplay.disabled = !collectReview || LIVE.replayLoading || !S.STATUS.transport_connected;
     }
     if (LIVE.replayMode) {
       bar.classList.remove("live");

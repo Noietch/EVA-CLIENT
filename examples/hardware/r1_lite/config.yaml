@@ -1,0 +1,5 @@
+robot:
+  r1_lite:
+    label: Galaxea R1 Lite
+    client_config: configs/01_deploy/r1lite/_base.py
+    settings: {}

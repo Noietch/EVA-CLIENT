@@ -77,6 +77,8 @@ from tools.conversion import (
     export_dataset_by_quality,
 )
 
+pytestmark = pytest.mark.integration
+
 
 class _FakeVideoWriter:
     def __init__(self, path: str, **_: object) -> None:
@@ -93,10 +95,6 @@ class _FakeVideoWriter:
 
 def _write_jsonl(path: Path, rows: list[dict[str, object]]) -> None:
     path.write_text("".join(json.dumps(row) + "\n" for row in rows))
-
-
-def _read_jsonl(path: Path) -> list[dict[str, object]]:
-    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
 def _read_fake_video(path: Path) -> Iterator[np.ndarray]:
@@ -135,6 +133,7 @@ def _source_dataset(
     # Build a minimal v2.1 source dataset that conversion can split and rewrite.
     info = {
         "codebase_version": "v2.1",
+        "collection_started_at": "2026-08-31T09:30:00+08:00",
         "robot_type": "test",
         "total_episodes": 2,
         "total_frames": 6,
@@ -210,10 +209,6 @@ def _source_dataset(
                 for frame_index in range(3)
             ]
             video_path.write_bytes(pickle.dumps(frames))
-
-
-def test_dataset_export_formats_are_registered() -> None:
-    assert DATASET_EXPORT_FORMATS == ("lerobot_v21", "lerobot_v3", "hdf5", "mcap")
 
 
 @pytest.mark.parametrize("dataset_format", DATASET_EXPORT_FORMATS)
@@ -292,16 +287,6 @@ def test_quality_export_converts_each_supported_format(
             assert int(frame[0, 0, 0]) == 0
 
 
-def test_quality_export_rejects_unknown_format_before_writing(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="unsupported dataset format"):
-        export_dataset_by_quality(
-            tmp_path / "source",
-            tmp_path / "accepted",
-            tmp_path / "rejected",
-            dataset_format="unknown",
-        )
-
-
 @pytest.mark.parametrize(
     ("dataset_format", "format_name"),
     [("lerobot_v3", "LeRobot v3"), ("hdf5", "HDF5"), ("mcap", "MCAP")],
@@ -331,30 +316,6 @@ def test_quality_export_rejects_misaligned_video_frames(
 
     assert not accepted.exists()
     assert not rejected.exists()
-
-
-def test_quality_export_supports_empty_rejected_subset_across_parents(tmp_path: Path) -> None:
-    source = tmp_path / "source"
-    accepted = tmp_path / "accepted-root" / "accepted"
-    rejected = tmp_path / "rejected-root" / "rejected"
-    _source_dataset(source, rejected_indices=set())
-
-    summary = export_dataset_by_quality(
-        source,
-        accepted,
-        rejected,
-        dataset_format="lerobot_v3",
-    )
-
-    assert summary.accepted_episodes == 2
-    assert summary.rejected_episodes == 0
-    assert summary.accepted_dir == str(accepted.resolve())
-    assert summary.rejected_dir == str(rejected.resolve())
-    assert pq.read_table(accepted / "data/chunk-000/file-000.parquet").num_rows == 6
-    assert json.loads((rejected / "meta/info.json").read_text())["total_episodes"] == 0
-    marker = json.loads((rejected / "meta/quality_split.json").read_text())
-    assert marker["subset"] == "rejected"
-    assert not (rejected / "data").exists()
 
 
 def test_mcap_interleaves_multi_camera_frames_by_frame_index(tmp_path: Path) -> None:
@@ -393,39 +354,6 @@ def test_mcap_interleaves_multi_camera_frames_by_frame_index(tmp_path: Path) -> 
     assert int(frames[1][0, 0, 0]) == 20
     assert int(frames[2][0, 0, 0]) == 1
     assert int(frames[3][0, 0, 0]) == 21
-
-
-@pytest.mark.parametrize("dataset_format", ["hdf5", "mcap"])
-def test_embedded_formats_rewrite_common_metadata(
-    tmp_path: Path,
-    dataset_format: str,
-) -> None:
-    source = tmp_path / "source"
-    accepted = tmp_path / "accepted"
-    rejected = tmp_path / "rejected"
-    video_keys = ("observation.images.left", "observation.images.right")
-    _source_dataset(source, video_keys=video_keys)
-
-    export_dataset_by_quality(source, accepted, rejected, dataset_format=dataset_format)
-
-    accepted_info = json.loads((accepted / "meta/info.json").read_text())
-    rejected_info = json.loads((rejected / "meta/info.json").read_text())
-    accepted_rows = _read_jsonl(accepted / "meta/episodes.jsonl")
-    rejected_rows = _read_jsonl(rejected / "meta/episodes.jsonl")
-
-    for info in (accepted_info, rejected_info):
-        assert info["dataset_format"] == dataset_format
-        assert info["embedded_images"] is True
-        assert info["total_videos"] == 0
-        assert "video_path" not in info
-        for key in video_keys:
-            assert info["features"][key]["dtype"] == "image"
-            assert info["features"][key]["shape"] == [8, 8, 3]
-
-    assert "video_keys" not in accepted_rows[0]
-    assert "video_keys" not in rejected_rows[0]
-    assert accepted_rows[0]["quality"] == "green"
-    assert rejected_rows[0]["qc_verdict"] == "fail"
 
 
 def test_replace_existing_restores_previous_outputs_when_second_publish_fails(

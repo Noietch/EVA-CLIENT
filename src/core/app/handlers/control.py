@@ -70,6 +70,7 @@ _MOTION_INTERRUPTING_VERBS = frozenset(
         "switch_ckpt",
         "reset",
         "console_reset",
+        "eval_cancel",
     }
 )
 

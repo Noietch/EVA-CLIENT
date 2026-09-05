@@ -18,6 +18,19 @@ class CameraSpec:
     rotation: int = 0
 
 
+class CameraCache:
+    def __init__(self, specs: tuple[CameraSpec, ...]) -> None:
+        self.specs = specs
+        self.captures = open_cameras(specs)
+
+    def snapshot(self) -> dict[str, np.ndarray]:
+        return read_camera_images(self.captures, self.specs)
+
+    def close(self) -> None:
+        for capture in self.captures.values():
+            capture.release()
+
+
 def parse_camera_source(source: str) -> int | str:
     return int(source) if source.isdigit() else source
 

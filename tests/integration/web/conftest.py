@@ -10,7 +10,8 @@ from __future__ import annotations
 from collections.abc import Generator
 
 import pytest
-from _harness import WebHarness, console_config, serve_console
+
+from tests.integration.web._harness import WebHarness, console_config, serve_console
 
 
 @pytest.fixture

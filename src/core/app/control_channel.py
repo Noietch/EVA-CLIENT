@@ -47,7 +47,7 @@ def _handle_query(runtime: RuntimeState, query: str) -> dict:
     if ctx is None:
         return _reject("console context not ready")
     if query == "status":
-        return {"ok": True, "data": _serialize_status(ctx)}
+        return {"ok": True, "data": _serialize_status(ctx, include_history=True)}
     if query == "config":
         return {"ok": True, "data": _serialize_config(ctx)}
     if query == "frame":
@@ -98,6 +98,15 @@ def _handle_command(runtime: RuntimeState, message: dict) -> dict:
         assert runtime.command_queue is not None
         runtime.command_queue.put(f"web:tab_switch:{tab}")
         return {"ok": True, "tab": tab}
+
+    # Bind trial metadata before starting evaluation
+    if verb == "start" and message.get("clip_id"):
+        clip_id = str(message["clip_id"])
+        runtime.current_clip_id = clip_id
+        runtime.current_cell = {
+            "prompt": message.get("prompt"),
+            "trial": message.get("trial"),
+        }
 
     assert runtime.command_queue is not None
     runtime.command_queue.put(command)

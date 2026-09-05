@@ -14,7 +14,7 @@ import io
 import logging
 import threading
 import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from PIL import Image, UnidentifiedImageError
@@ -26,14 +26,15 @@ from core.types import (
     Observation,
     RawCollectionSnapshot,
 )
-from robots.base import Robot
 from transport.base import (
-    _COLLECTION_DEQUE_MAX,
     HilStatus,
     _RosTransportBase,
     resolve_topics,
 )
 from transport.utils import ImageRateTracker, StreamFreshness
+
+if TYPE_CHECKING:
+    from robots.base import Robot
 
 logger = logging.getLogger(__name__)
 
@@ -284,20 +285,10 @@ class Ros2Transport(_RosTransportBase):
             timestamp=max(state_timestamps),
         )
 
-    def _append_collection_camera_msg(self, collection_deque: collections.deque, msg: Any) -> None:
-        """Append one image only while collection capture is active."""
-        with self._deque_guard():
-            if not self._collection_capture_active:
-                return
-            if len(collection_deque) >= _COLLECTION_DEQUE_MAX:
-                collection_deque.popleft()
-            collection_deque.append(msg)
-
     def _init_ros(self) -> None:
         schema = self._robot.observation_schema
         live_qos = _make_live_qos()
         camera_qos = _make_live_qos(depth=_CAMERA_QOS_DEPTH)
-        collection_camera_qos = _make_live_qos(depth=1)
         collection_qos = _make_live_qos(depth=1)
         hil_qos = _make_live_qos(depth=1)
 
@@ -310,9 +301,12 @@ class Ros2Transport(_RosTransportBase):
             # cannot retain an unbounded number of full image messages. Collection
             # uses a separate deque below and keeps its existing capture bound.
             deque: collections.deque = collections.deque(maxlen=_CAMERA_QOS_DEPTH)
-            collection_deque: collections.deque = collections.deque()
             self._camera_deques[camera.name] = deque
-            self._collection_camera_deques[camera.name] = collection_deque
+            if (
+                camera.observation_key in self._config.collection.schema.cameras
+                or camera.name in self._config.collection.schema.cameras
+            ):
+                self._collection_camera_deques[camera.name] = collections.deque()
             is_compressed = topic.endswith("/compressed")
             self._camera_is_compressed[camera.name] = is_compressed
             msg_type = self._CompressedImage if is_compressed else self._Image
@@ -322,13 +316,6 @@ class Ros2Transport(_RosTransportBase):
                 lambda msg, c=camera.name, d=deque: self._append_camera_msg(c, d, msg),
                 camera_qos,
             )
-            if camera.observation_key in self._config.collection.schema.cameras:
-                self._node.create_subscription(
-                    msg_type,
-                    topic,
-                    lambda msg, d=collection_deque: self._append_collection_camera_msg(d, msg),
-                    collection_camera_qos,
-                )
 
         for group in self._robot.actuator_groups:
             group_cfg = self._group_topics.get(group.name)
@@ -461,7 +448,7 @@ class Ros2Transport(_RosTransportBase):
         self._node.create_subscription(
             msg_type,
             topic,
-            lambda msg, d=deque: self._append_msg(d, msg),
+            lambda msg, d=deque: self._append_collection_msg(d, msg),
             qos,
         )
 
@@ -480,9 +467,17 @@ class Ros2Transport(_RosTransportBase):
 
     def stop_collection(self) -> None:
         """Stop collection-only camera capture and release cached ROS images."""
+        self.finish_collection_capture()
+
+    def finish_collection_capture(self) -> None:
+        """Stop buffering collection-only samples between episodes."""
         with self._deque_guard():
             self._collection_capture_active = False
-            for deque in self._collection_camera_deques.values():
+            for _kind, _field, _source, _spec, deque in self._collection_raw_streams():
+                deque.clear()
+            for deque in self._collection_qpos_gripper_deques.values():
+                deque.clear()
+            for deque in self._collection_action_qpos_gripper_deques.values():
                 deque.clear()
             self._collection_raw_cursors().clear()
 
@@ -503,12 +498,17 @@ class Ros2Transport(_RosTransportBase):
         return snapshot
 
     def clear_collection_backlog(self) -> float | None:
-        """Advance raw cursors and drop collection images captured before START."""
-        self.start_collection()
+        """Clear pre-episode samples and open a fresh collection boundary."""
         with self._deque_guard():
+            self._collection_capture_active = False
             cutoff = super().clear_collection_backlog()
-            for deque in self._collection_camera_deques.values():
+            for _kind, _field, _source, _spec, deque in self._collection_raw_streams():
                 deque.clear()
+            for deque in self._collection_qpos_gripper_deques.values():
+                deque.clear()
+            for deque in self._collection_action_qpos_gripper_deques.values():
+                deque.clear()
+        self.start_collection()
         return cutoff
 
     def record_collection_gripper_action(
@@ -519,7 +519,7 @@ class Ros2Transport(_RosTransportBase):
         if group is None or not self._uses_operator_action_gripper(group):
             return
         deque = self._collection_action_qpos_gripper_deques.get(group_name)
-        if deque is None:
+        if deque is None or not self._collection_capture_active:
             return
         if stamp is None:
             stamp = self._node.get_clock().now().to_msg()

@@ -27,6 +27,8 @@ robot = dict(
 transport = dict(
     type="ros1",  # "ros1" | "ros2" | "zmq" | "dataset"
     node_name="eva_client",
+    image_mode="stream",
+    image_request_timeout_s=2.0,
     dataset_dir="",
     episode_id=0,
     convert_bgr_to_rgb=True,
@@ -121,6 +123,8 @@ collection = dict(
         ros1=dict(primary_camera="", max_frame_skew_sec=0.1, groups={}),
         ros2=dict(primary_camera="", max_frame_skew_sec=0.1, groups={}),
     ),
+    task_set_dir="",
+    task_set_name="",
     # Dataset directory name -> (prompt, target) pairs in one shared LeRobot dataset.
     # Use target=-1 when collection has no episode limit.
     tasks={},

@@ -1,0 +1,27 @@
+robot:
+  dual_franka:
+    label: Dual Franka
+    client_config: configs/01_deploy/dual_franka/_base.py
+    launch:
+      python: examples/hardware/franka/.venv/bin/python
+      module: examples.hardware.franka.node
+      disable_camera_option: disabled_camera
+    settings:
+      obs_endpoint: tcp://127.0.0.1:5555
+      action_endpoint: tcp://127.0.0.1:5556
+      camera_endpoint: tcp://127.0.0.1:5557
+      left_robot_ip: 127.0.0.2
+      right_robot_ip: 127.0.0.3
+      left_gripper_ip: ""
+      right_gripper_ip: ""
+      rate: 30
+camera:
+  franka_orbbec:
+    separate: true
+    label: Orbbec
+    robots: [dual_franka]
+    repeat: [orbbec_camera]
+    settings:
+      orbbec_camera: [cam_high=index:0, cam_left_wrist=index:1, cam_right_wrist=index:2]
+      orbbec_resolution: 640x480
+      orbbec_fps: 30

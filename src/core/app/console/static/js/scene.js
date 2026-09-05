@@ -60,9 +60,11 @@ const Scene3D = (() => {
 
   function resize() {
     const r = canvas.parentElement.getBoundingClientRect();
+    if (r.width < 1 || r.height < 1) return;
     renderer.setSize(r.width, r.height, false);
     camera.aspect = r.width / Math.max(r.height, 1);
     camera.updateProjectionMatrix();
+    if (_framed) fitCameraToArm();
   }
 
   // Smoothing time constant (seconds). Each render frame the meshes ease toward
@@ -329,9 +331,9 @@ const Scene3D = (() => {
     if (_fitBox.isEmpty()) return;
     _fitBox.getCenter(_fitCtr);
     _fitBox.getSize(_fitSz);
-    const maxDim = Math.max(_fitSz.x, _fitSz.y, _fitSz.z) || 1;
     const fov = camera.fov * Math.PI / 180;
-    let dist = (maxDim / 2) / Math.tan(fov / 2) * 1.6;   // 1.6 = breathing room
+    const halfFov = Math.atan(Math.tan(fov / 2) * Math.min(1, camera.aspect));
+    const dist = (_fitSz.length() / 2 || 0.5) / Math.sin(halfFov) * 1.1;
     _fitDir.copy(camera.position).sub(controls.target);
     if (_fitDir.lengthSq() < 1e-6) _fitDir.set(0.9, -0.9, 0.7);
     _fitDir.normalize();

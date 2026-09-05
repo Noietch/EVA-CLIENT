@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import dataclasses
 import errno
 import os
 import pty
@@ -12,26 +11,16 @@ import shutil
 import subprocess
 import uuid
 from collections.abc import Callable
-from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
-
-@dataclasses.dataclass(frozen=True)
-class SftpUploadResult:
-    local_dir: str
-    remote_dir: str
-    destination: str
-    files: int
-    bytes: int
-
-
-@dataclasses.dataclass(frozen=True)
-class SftpUploadProgress:
-    files_completed: int
-    files_total: int
-    bytes_completed: int
-    bytes_total: int
-    current_file: str
+from core.utils.upload_plan import (
+    DirectoryUploadPlan,
+    RemoteFilePlan,
+    UploadFilePlan,
+    UploadProgress,
+    UploadResult,
+    file_digest,
+)
 
 
 def _destination(host: str, user: str) -> str:
@@ -178,14 +167,35 @@ def _remote_cleanup_script() -> str:
     )
 
 
+def _remote_target_exists_script() -> str:
+    return (
+        "set -eu\n"
+        'target="$1"\n'
+        'if [ -e "$target" ] || [ -L "$target" ]; then\n'
+        '    printf "exists\\n"\n'
+        "else\n"
+        '    printf "missing\\n"\n'
+        "fi\n"
+    )
+
+
+def _remote_file_manifest_script() -> str:
+    """Print md5 and absolute path for every regular file below a dataset."""
+    return (
+        "set -eu\n"
+        'root="$1"\n'
+        'if [ -L "$root" ] || [ ! -d "$root" ]; then\n'
+        "    exit 44\n"
+        "fi\n"
+        'find "$root" -type f -exec md5sum -- {} +\n'
+    )
+
+
 def _remote_publish_script() -> str:
     return (
         "set -eu\n"
         'preferred="$1"\n'
         'staging="$2"\n'
-        'copy_base="$3"\n'
-        "copy_index=1\n"
-        'choose="$preferred"\n'
         "cleanup() {\n"
         "    status=$?\n"
         '    if [ "$status" -ne 0 ] && [ -d "$staging" ]; then\n'
@@ -197,40 +207,78 @@ def _remote_publish_script() -> str:
         'if [ -L "$staging" ] || [ ! -d "$staging" ]; then\n'
         "    exit 45\n"
         "fi\n"
-        "while :; do\n"
-        '    if [ -e "$choose" ] || [ -L "$choose" ]; then\n'
-        '        choose="$copy_base"\n'
-        '        if [ "$copy_index" -gt 1 ]; then\n'
-        '            choose="${copy_base}_$(printf "%02d" "$copy_index")"\n'
-        "        fi\n"
-        "        copy_index=$((copy_index + 1))\n"
-        "        continue\n"
-        "    fi\n"
-        '    if mv -T -n -- "$staging" "$choose" 2>/dev/null; then\n'
+        'if [ ! -e "$preferred" ] && [ ! -L "$preferred" ]; then\n'
+        '    if mv -T -n -- "$staging" "$preferred" 2>/dev/null; then\n'
         '        if [ ! -e "$staging" ] && [ ! -L "$staging" ]; then\n'
-        '            printf "%s\n" "$choose"\n'
+        '            printf "published\\n%s\\n" "$preferred"\n'
         "            trap - EXIT INT TERM\n"
         "            exit 0\n"
         "        fi\n"
         "    fi\n"
-        '    if [ ! -d "$staging" ]; then\n'
-        "        exit 45\n"
-        "    fi\n"
-        '    if [ -e "$choose" ] || [ -L "$choose" ]; then\n'
-        '        choose="$copy_base"\n'
-        '        if [ "$copy_index" -gt 1 ]; then\n'
-        '            choose="${copy_base}_$(printf "%02d" "$copy_index")"\n'
-        "        fi\n"
-        "        copy_index=$((copy_index + 1))\n"
-        "        continue\n"
-        "    fi\n"
+        "fi\n"
+        'if [ -L "$preferred" ] || [ ! -d "$preferred" ]; then\n'
         "    exit 46\n"
+        "fi\n"
+        'if find "$preferred" -type l -print -quit | grep -q .; then\n'
+        "    exit 47\n"
+        "fi\n"
+        "validate_delete_target() {\n"
+        '    expected_digest="$1"\n'
+        '    relative_path="$2"\n'
+        '    case "$relative_path" in\n'
+        '        ""|.|/*|./*|../*|*/../*|*/..) exit 48 ;;\n'
+        "    esac\n"
+        '    delete_target="$preferred/$relative_path"\n'
+        '    if [ -L "$delete_target" ] || [ ! -f "$delete_target" ]; then\n'
+        "        exit 48\n"
+        "    fi\n"
+        '    actual_digest=$(md5sum -- "$delete_target")\n'
+        "    actual_digest=${actual_digest%% *}\n"
+        '    if [ "$actual_digest" != "$expected_digest" ]; then\n'
+        "        exit 49\n"
+        "    fi\n"
+        "}\n"
+        "(\n"
+        '    while [ "$#" -gt 2 ]; do\n'
+        '        validate_delete_target "$3" "$4"\n'
+        "        shift 2\n"
+        "    done\n"
+        '    if [ "$#" -ne 2 ]; then\n'
+        "        exit 48\n"
+        "    fi\n"
+        ")\n"
+        'cp -a -- "$staging"/. "$preferred"/\n'
+        'while [ "$#" -gt 2 ]; do\n'
+        '    validate_delete_target "$3" "$4"\n'
+        '    rm -f -- "$delete_target"\n'
+        "    shift 2\n"
         "done\n"
+        'if [ "$#" -ne 2 ]; then\n'
+        "    exit 48\n"
+        "fi\n"
+        'rm -rf -- "$staging"\n'
+        'printf "merged\\n%s\\n" "$preferred"\n'
+        "trap - EXIT INT TERM\n"
+        "exit 0\n"
     )
 
 
-def _copy_timestamp() -> str:
-    return datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+def _remote_target_exists(
+    destination: str,
+    port: int,
+    identity_file: Path | None,
+    target: PurePosixPath,
+) -> bool:
+    state = _run_ssh_script(
+        destination,
+        port,
+        identity_file,
+        _remote_target_exists_script(),
+        target.as_posix(),
+    ).strip()
+    if state not in {"exists", "missing"}:
+        raise RuntimeError("remote target check returned an invalid result")
+    return state == "exists"
 
 
 def _publish_remote_dataset(
@@ -239,27 +287,26 @@ def _publish_remote_dataset(
     identity_file: Path | None,
     preferred: PurePosixPath,
     staging: PurePosixPath,
-) -> str:
-    copy_target = preferred.parent / f"{preferred.name}.copy_{_copy_timestamp()}"
-    published_target = _run_ssh_script(
+    remote_only_files: tuple[RemoteFilePlan, ...] = (),
+) -> tuple[str, bool]:
+    delete_args = [
+        value for item in remote_only_files for value in (item.digest, item.relative_path)
+    ]
+    publish_output = _run_ssh_script(
         destination,
         port,
         identity_file,
         _remote_publish_script(),
         preferred.as_posix(),
         staging.as_posix(),
-        copy_target.as_posix(),
-    ).strip()
-    if not published_target:
-        raise RuntimeError("remote dataset publish returned no destination")
-    published_path = _remote_dataset_path(published_target)
-    published_value = published_path.as_posix()
-    preferred_value = preferred.as_posix()
-    copy_value = copy_target.as_posix()
-    copy_pattern = rf"^{re.escape(copy_value)}(?:_\d+)?$"
-    if published_value != preferred_value and re.fullmatch(copy_pattern, published_value) is None:
+        *delete_args,
+    ).splitlines()
+    if len(publish_output) != 2 or publish_output[0] not in {"published", "merged"}:
+        raise RuntimeError("remote dataset publish returned an invalid result")
+    published_value = _remote_dataset_path(publish_output[1]).as_posix()
+    if published_value != preferred.as_posix():
         raise RuntimeError("remote dataset publish returned an invalid destination")
-    return published_value
+    return published_value, False
 
 
 def _cleanup_remote_staging(
@@ -296,8 +343,158 @@ def _collect_local_files(local_dir: Path) -> list[Path]:
         if path.is_symlink():
             raise ValueError("upload directory must not contain symlinks")
         if path.is_file():
+            relative = path.relative_to(local_dir)
+            if any(char in relative.as_posix() for char in "\r\n\t"):
+                raise ValueError("upload file paths must not contain control characters")
             files.append(path)
     return files
+
+
+def _remote_file_digests(
+    destination: str,
+    port: int,
+    identity_file: Path | None,
+    remote_path: PurePosixPath,
+) -> dict[str, str]:
+    output = _run_ssh_script(
+        destination,
+        port,
+        identity_file,
+        _remote_file_manifest_script(),
+        remote_path.as_posix(),
+    )
+    prefix = remote_path.as_posix() + "/"
+    digests: dict[str, str] = {}
+    for line in output.splitlines():
+        if not line:
+            continue
+        if len(line) < 35 or line[32:34] not in {"  ", " *"}:
+            raise RuntimeError("remote file manifest returned an invalid record")
+        digest = line[:32].lower()
+        absolute_path = line[34:]
+        if not re.fullmatch(r"[0-9a-f]{32}", digest) or not absolute_path.startswith(prefix):
+            raise RuntimeError("remote file manifest returned an invalid path")
+        relative_path = absolute_path[len(prefix) :]
+        if (
+            not relative_path
+            or any(char in relative_path for char in "\r\n\t")
+            or any(part in {"", ".", ".."} for part in PurePosixPath(relative_path).parts)
+        ):
+            raise RuntimeError("remote file manifest returned an invalid path")
+        digests[relative_path] = digest
+    return digests
+
+
+def scan_directory_sftp(
+    local_dir: Path,
+    *,
+    host: str,
+    port: int,
+    remote_dir: str,
+    user: str = "",
+    identity_file: Path | None = None,
+) -> DirectoryUploadPlan:
+    """Scan all local files and compare them with the remote dataset."""
+    local_root = _validate_local_directory(local_dir)
+    if not 1 <= int(port) <= 65535:
+        raise ValueError("SFTP port must be in [1, 65535]")
+    remote_path = _remote_dataset_path(remote_dir)
+    destination = _destination(host, user)
+    if identity_file is not None:
+        identity = Path(identity_file).expanduser().resolve()
+        if not identity.is_file():
+            raise FileNotFoundError("SFTP identity file not found")
+        identity_file = identity
+
+    local_files = _collect_local_files(local_root)
+    remote_exists = _remote_target_exists(destination, port, identity_file, remote_path)
+    remote_digests = (
+        _remote_file_digests(destination, port, identity_file, remote_path) if remote_exists else {}
+    )
+    planned_files: list[UploadFilePlan] = []
+    for path in local_files:
+        relative_path = path.relative_to(local_root).as_posix()
+        digest = file_digest(path)
+        remote_digest = remote_digests.get(relative_path)
+        planned_files.append(
+            UploadFilePlan(
+                relative_path=relative_path,
+                size=path.stat().st_size,
+                digest=digest,
+                action=(
+                    "new"
+                    if remote_digest is None
+                    else "same"
+                    if remote_digest == digest
+                    else "changed"
+                ),
+            )
+        )
+    return DirectoryUploadPlan(
+        local_dir=str(local_root),
+        remote_dir=remote_path.as_posix(),
+        destination=destination,
+        remote_exists=remote_exists,
+        files=tuple(planned_files),
+        remote_only_files=tuple(
+            RemoteFilePlan(relative_path, remote_digests[relative_path])
+            for relative_path in sorted(
+                remote_digests.keys() - {item.relative_path for item in planned_files}
+            )
+        ),
+    )
+
+
+def _validate_upload_plan(
+    plan: DirectoryUploadPlan,
+    local_root: Path,
+    remote_path: PurePosixPath,
+    destination: str,
+    port: int,
+    identity_file: Path | None,
+) -> list[Path]:
+    if (
+        Path(plan.local_dir) != local_root
+        or plan.remote_dir != remote_path.as_posix()
+        or plan.destination != destination
+    ):
+        raise ValueError("SFTP upload plan does not match the requested upload")
+
+    local_files = _collect_local_files(local_root)
+    local_by_relative = {path.relative_to(local_root).as_posix(): path for path in local_files}
+    if set(local_by_relative) != {item.relative_path for item in plan.files}:
+        raise ValueError("local upload directory changed after scan; scan again")
+    for item in plan.files:
+        path = local_by_relative[item.relative_path]
+        if path.stat().st_size != item.size or file_digest(path) != item.digest:
+            raise ValueError("local upload directory changed after scan; scan again")
+
+    remote_exists = _remote_target_exists(destination, port, identity_file, remote_path)
+    remote_digests = (
+        _remote_file_digests(destination, port, identity_file, remote_path) if remote_exists else {}
+    )
+    if remote_exists != plan.remote_exists:
+        raise ValueError("remote upload directory changed after scan; scan again")
+    for item in plan.files:
+        remote_digest = remote_digests.get(item.relative_path)
+        action = (
+            "new"
+            if remote_digest is None
+            else "same"
+            if remote_digest == item.digest
+            else "changed"
+        )
+        if action != item.action:
+            raise ValueError("remote upload directory changed after scan; scan again")
+    planned_remote_only = {item.relative_path: item.digest for item in plan.remote_only_files}
+    current_remote_only = {
+        relative_path: digest
+        for relative_path, digest in remote_digests.items()
+        if relative_path not in local_by_relative
+    }
+    if current_remote_only != planned_remote_only:
+        raise ValueError("remote upload directory changed after scan; scan again")
+    return [local_by_relative[item.relative_path] for item in plan.files_to_upload]
 
 
 def _upload_files_sftp(
@@ -306,7 +503,7 @@ def _upload_files_sftp(
     local_dir: Path,
     remote_path: PurePosixPath,
     files: list[Path],
-    progress_callback: Callable[[SftpUploadProgress], None] | None,
+    progress_callback: Callable[[UploadProgress], None] | None,
 ) -> None:
     master_fd, slave_fd = pty.openpty()
     process: subprocess.Popen[bytes] | None = None
@@ -336,7 +533,7 @@ def _upload_files_sftp(
         bytes_total = sum(path.stat().st_size for path in files)
         bytes_completed = 0
         if progress_callback is not None:
-            progress_callback(SftpUploadProgress(0, len(files), 0, bytes_total, ""))
+            progress_callback(UploadProgress(0, len(files), 0, bytes_total, ""))
         for index, local_path in enumerate(files, start=1):
             relative_path = local_path.relative_to(local_dir).as_posix()
             remote_file = str(remote_path / relative_path)
@@ -365,7 +562,7 @@ def _upload_files_sftp(
                         continue
                     percent_state[0] = percent
                     progress_callback(
-                        SftpUploadProgress(
+                        UploadProgress(
                             file_index - 1,
                             len(files),
                             bytes_before + (current_file_size * percent // 100),
@@ -383,7 +580,7 @@ def _upload_files_sftp(
             bytes_completed += file_size
             if progress_callback is not None:
                 progress_callback(
-                    SftpUploadProgress(
+                    UploadProgress(
                         index,
                         len(files),
                         bytes_completed,
@@ -416,9 +613,10 @@ def upload_directory_sftp(
     remote_dir: str,
     user: str = "",
     identity_file: Path | None = None,
-    progress_callback: Callable[[SftpUploadProgress], None] | None = None,
-) -> SftpUploadResult:
-    """Recursively upload one directory and publish it without replacing older data."""
+    plan: DirectoryUploadPlan | None = None,
+    progress_callback: Callable[[UploadProgress], None] | None = None,
+) -> UploadResult:
+    """Upload only files selected by a current directory scan."""
     local_dir = _validate_local_directory(local_dir)
     if not 1 <= int(port) <= 65535:
         raise ValueError("SFTP port must be in [1, 65535]")
@@ -430,10 +628,39 @@ def upload_directory_sftp(
             raise FileNotFoundError("SFTP identity file not found")
         identity_file = identity
 
+    if plan is None:
+        plan = scan_directory_sftp(
+            local_dir,
+            host=host,
+            port=port,
+            remote_dir=remote_dir,
+            user=user,
+            identity_file=identity_file,
+        )
+    files = _validate_upload_plan(
+        plan,
+        local_dir,
+        remote_path,
+        destination,
+        port,
+        identity_file,
+    )
+    if not files and plan.files_to_delete == 0:
+        if progress_callback is not None:
+            progress_callback(UploadProgress(0, 0, 0, 0, ""))
+        return UploadResult(
+            local_dir=str(local_dir),
+            remote_dir=remote_path.as_posix(),
+            destination=destination,
+            files=0,
+            bytes=0,
+            skipped=True,
+            files_deleted=0,
+        )
+
     sftp = shutil.which("sftp")
     if sftp is None:
         raise RuntimeError("OpenSSH sftp executable is required")
-    files = _collect_local_files(local_dir)
     parent = remote_path.parent
     token = uuid.uuid4().hex
     staging_path = parent / f".{remote_path.name}.staging-{token}"
@@ -457,27 +684,33 @@ def upload_directory_sftp(
             files,
             progress_callback,
         )
-        actual_remote_dir = _publish_remote_dataset(
+        actual_remote_dir, skipped = _publish_remote_dataset(
             destination,
             port,
             identity_file,
             remote_path,
             staging_path,
+            plan.remote_only_files,
         )
     except Exception as error:
         _cleanup_remote_staging(destination, port, identity_file, staging_path)
         raise RuntimeError("SFTP upload failed; the new remote target was not published") from error
-    return SftpUploadResult(
+    return UploadResult(
         local_dir=str(local_dir),
         remote_dir=actual_remote_dir,
         destination=destination,
-        files=len(files),
-        bytes=sum(path.stat().st_size for path in files),
+        files=0 if skipped else len(files),
+        bytes=0 if skipped else sum(path.stat().st_size for path in files),
+        skipped=skipped,
+        files_deleted=len(plan.remote_only_files),
     )
 
 
 __all__ = [
-    "SftpUploadProgress",
-    "SftpUploadResult",
+    "UploadProgress",
+    "UploadResult",
+    "DirectoryUploadPlan",
+    "RemoteFilePlan",
+    "scan_directory_sftp",
     "upload_directory_sftp",
 ]

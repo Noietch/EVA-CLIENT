@@ -1,0 +1,7 @@
+robot:
+  agibot_g2:
+    label: AgiBot G2
+    client_config: configs/01_deploy/agibot_g2/_base.py
+    settings:
+      obs_endpoint: tcp://127.0.0.1:5555
+      action_endpoint: tcp://127.0.0.1:5556

@@ -40,7 +40,6 @@ the robot zoo needs:
 from __future__ import annotations
 
 import logging
-import time
 from collections.abc import Callable, Sequence
 from functools import partial
 from pathlib import Path
@@ -63,8 +62,6 @@ from robots.kinematics.solver import (
 
 # jaxls logs an INFO block on every problem.analyze(); silence it for streaming.
 logging.getLogger("jaxls").setLevel(logging.WARNING)
-
-_logger = logging.getLogger(__name__)
 
 
 @partial(jax.jit, static_argnames=("max_iterations",))
@@ -347,9 +344,7 @@ class PyrokiSingleArm:
 
         sol = np.empty((n_frames, self._n_act), dtype=np.float64)
         prev_cfg = start_full
-        t_start = time.perf_counter()
         for t in range(n_frames):
-            t0 = time.perf_counter()
             cfg = np.asarray(
                 _solve_frame_jax(
                     self._robot,
@@ -368,19 +363,8 @@ class PyrokiSingleArm:
                     self._max_iterations,
                 )
             )
-            _logger.info(
-                "ik frame %d/%d solved in %.1f ms",
-                t + 1,
-                n_frames,
-                (time.perf_counter() - t0) * 1e3,
-            )
             sol[t] = cfg
             prev_cfg = cfg
-        _logger.info(
-            "ik chunk: %d frames in %.1f ms",
-            n_frames,
-            (time.perf_counter() - t_start) * 1e3,
-        )
         return sol[:, self._arm_cols]
 
 

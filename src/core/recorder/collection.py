@@ -707,7 +707,28 @@ class CollectionEpisodeWriter:
             ).exists()
         )
 
-    def _write_info_json(self, dataset_dir: Path) -> None:
+    def ensure_collection_started_at(self, dataset_dir: Path, started_at: str) -> None:
+        info_path = self._logger._meta_path("info.json", dataset_dir)
+        existing_started_at = self._existing_collection_started_at(info_path)
+        if existing_started_at:
+            return
+        episodes = _read_jsonl(self._logger._meta_path("episodes.jsonl", dataset_dir))
+        if episodes:
+            logger.warning(
+                "Collection dataset %s predates collection_started_at metadata; "
+                "leaving it unset until explicitly backfilled",
+                dataset_dir,
+            )
+            return
+        info_path.parent.mkdir(parents=True, exist_ok=True)
+        self._write_info_json(dataset_dir, collection_started_at=started_at)
+
+    def _write_info_json(
+        self,
+        dataset_dir: Path,
+        *,
+        collection_started_at: str = "",
+    ) -> None:
         episodes = _read_jsonl(self._logger._meta_path("episodes.jsonl", dataset_dir))
         total_episodes = len(episodes)
         total_frames = sum(int(e.get("length", 0)) for e in episodes)
@@ -730,8 +751,25 @@ class CollectionEpisodeWriter:
             fps=fps,
             features=self._build_features(fps, video_keys),
         )
-        with self._logger._meta_path("info.json", dataset_dir).open("w") as f:
+        info_path = self._logger._meta_path("info.json", dataset_dir)
+        started_at = (
+            self._existing_collection_started_at(info_path) or collection_started_at.strip()
+        )
+        if started_at:
+            info["collection_started_at"] = started_at
+        with info_path.open("w") as f:
             json.dump(info, f, indent=2, ensure_ascii=False)
+
+    @staticmethod
+    def _existing_collection_started_at(info_path: Path) -> str:
+        try:
+            existing_info = json.loads(info_path.read_text())
+        except (OSError, ValueError):
+            existing_info = {}
+        existing_value = existing_info.get("collection_started_at")
+        if isinstance(existing_value, str) and existing_value.strip():
+            return existing_value.strip()
+        return ""
 
     def _build_features(self, fps: float, video_keys: Iterable[str] = ()) -> dict[str, Any]:
         features: dict[str, Any] = {}

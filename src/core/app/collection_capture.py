@@ -149,10 +149,10 @@ class CollectionCaptureRunner:
             self._runtime.last_collection_timestamp = float(snapshot.timestamp)
             if rollout_mode:
                 self._runtime.rollout_raw_snapshots.put(snapshot)
-                self._captured += 1
             else:
                 assert episode_logger is not None
                 episode_logger.ingest_collection_snapshot(snapshot)
+            self._captured += 1
             recorded = True
         return recorded
 
@@ -177,10 +177,10 @@ class CollectionCaptureRunner:
             self._runtime.last_collection_timestamp = float(snapshot.timestamp)
             if rollout_mode:
                 self._runtime.rollout_raw_snapshots.put(snapshot)
-                self._captured += 1
             else:
                 assert episode_logger is not None
                 episode_logger.ingest_collection_snapshot(snapshot)
+            self._captured += 1
             recorded = True
         return recorded
 

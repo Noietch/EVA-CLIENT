@@ -1,0 +1,37 @@
+robot:
+  arx_r5:
+    label: ARX R5
+    client_config: configs/01_deploy/arx_r5/_base.py
+    launch:
+      python: examples/hardware/arx_r5/.venv/bin/python
+      module: examples.hardware.arx_r5.node
+      fixed: [--passive-collection]
+      disable_camera_option: disabled_camera
+    settings:
+      obs_endpoint: tcp://127.0.0.1:5555
+      action_endpoint: tcp://127.0.0.1:5556
+      camera_endpoint: tcp://127.0.0.1:5557
+      left_can_port: can0
+      right_can_port: can1
+      rate: 30
+camera:
+  r5_orbbec:
+    separate: true
+    label: Orbbec
+    robots: [arx_r5]
+    profile_field: orbbec_white_balance_file
+    profile_loader: examples.hardware.arx_r5.camera:load_orbbec_white_balances
+    repeat: [orbbec_camera]
+    profiles: [examples/hardware/arx_r5/utils/white_balance.yaml]
+    settings:
+      orbbec_camera: [cam_high=index:0, cam_left_wrist=index:1, cam_right_wrist=index:2]
+      orbbec_resolution: 640x480
+      orbbec_fps: 30
+      orbbec_white_balance_file: examples/hardware/arx_r5/utils/white_balance.yaml
+teleop:
+  r5_leader:
+    label: Alicia leaders
+    robots: [arx_r5]
+    settings:
+      left_alicia_port: /dev/ttyUSB0
+      right_alicia_port: /dev/ttyUSB1

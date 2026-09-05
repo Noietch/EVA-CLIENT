@@ -1,0 +1,50 @@
+robot:
+  dual_yam:
+    label: Dual YAM
+    repeat: [follower_can]
+    client_config: configs/01_deploy/dual_yam/_base.py
+    launch:
+      python: examples/hardware/yam/.venv/bin/python
+      module: examples.hardware.yam.node
+      fixed: [--startup-position, current, --idle-mode, hold_position]
+    settings:
+      obs_endpoint: tcp://127.0.0.1:5555
+      action_endpoint: tcp://127.0.0.1:5556
+      camera_endpoint: tcp://127.0.0.1:5557
+      follower_can: [left_arm=can1, right_arm=can2]
+      gripper_limits_override: []
+      rate: 30
+camera:
+  yam_d405:
+    separate: true
+    label: RealSense D405
+    robots: [dual_yam]
+    profile_field: camera_profile
+    serial_mapping: camera
+    profile_loader: examples.hardware.yam.camera:load_camera_profiles
+    repeat: [camera]
+    profiles: [examples/hardware/yam/profiles/d405_workcell.json]
+    settings:
+      camera: [cam_high=index:0, cam_left_wrist=index:1, cam_right_wrist=index:2]
+      camera_width: 640
+      camera_height: 480
+      camera_fps: 30
+      camera_profile: ""
+  yam_orbbec:
+    separate: true
+    label: Orbbec
+    repeat: [orbbec_camera]
+    robots: [dual_yam]
+    settings:
+      orbbec_camera: [cam_high=index:0, cam_left_wrist=index:1, cam_right_wrist=index:2]
+      orbbec_width: 640
+      orbbec_height: 480
+      orbbec_fps: 30
+teleop:
+  yam_leader:
+    label: YAM leaders
+    repeat: [leader_gripper_endpoint]
+    robots: [dual_yam]
+    settings:
+      leader_cans: [can0, can3]
+      leader_gripper_endpoint: ["left_arm=-0.698132,0.0", "right_arm=-0.698132,0.0"]

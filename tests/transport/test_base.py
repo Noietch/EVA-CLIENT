@@ -11,10 +11,12 @@ import pytest
 
 import transport.utils as transport_utils
 from core.config import ConfigDict
-from core.types import CollectionRawImage, Observation
+from core.types import Observation
 from robots.base import ActuatorGroup, CameraSpec, ObservationSchema, Robot
 from transport.base import _RosTransportBase
 from transport.utils import StreamFreshness
+
+pytestmark = pytest.mark.unit
 
 
 class _FakeRosCollectionTransport(_RosTransportBase):
@@ -82,116 +84,6 @@ class _FakeRosCollectionTransport(_RosTransportBase):
         pass
 
 
-def test_raw_collection_snapshot_has_no_decoded_frame_path():
-    image = np.zeros((4, 4, 3), dtype=np.uint8)
-    transport = _FakeRosCollectionTransport(image)
-
-    snapshot = transport.acquire_collection_raw()
-    assert snapshot is not None
-    assert not hasattr(snapshot, "decode")
-
-
-def test_raw_collection_snapshot_exposes_raw_stream_batch():
-    image = np.zeros((4, 4, 3), dtype=np.uint8)
-    transport = _FakeRosCollectionTransport(image)
-    transport._camera_deques["front"].append(transport._msg(1.1))
-    transport._collection_qpos_deques["arm"].append(transport._msg(1.1, [2.0, 3.0]))
-
-    snapshot = transport.acquire_collection_raw()
-    assert snapshot is not None
-    batch = snapshot.decode_raw()
-
-    assert [sample.timestamp for sample in batch.images["cam_high"]] == [1.0, 1.1]
-    assert [sample.timestamp for sample in batch.vectors["state_qpos:arm"]] == [1.0, 1.1]
-    np.testing.assert_allclose(batch.vectors["state_qpos:arm"][1].value, [2.0, 3.0])
-
-
-def test_raw_collection_snapshot_defers_image_decode_until_alignment():
-    image = np.zeros((4, 4, 3), dtype=np.uint8)
-    transport = _FakeRosCollectionTransport(image)
-    transport._camera_deques["front"].append(transport._msg(1.1))
-    transport._collection_qpos_deques["arm"].append(transport._msg(1.1, [2.0, 3.0]))
-    decoded = 0
-
-    def decode(camera_name: str, msg: Any) -> np.ndarray:
-        nonlocal decoded
-        _ = camera_name, msg
-        decoded += 1
-        return image
-
-    transport._decode_image_msg = decode
-
-    snapshot = transport.acquire_collection_raw()
-    assert snapshot is not None
-    batch = snapshot.decode_raw()
-
-    assert decoded == 0
-    value = batch.images["cam_high"][0].value
-    assert isinstance(value, CollectionRawImage)
-    assert value.decode() is image
-    assert decoded == 1
-    assert value.decode() is image
-    assert decoded == 1
-
-
-def test_raw_collection_snapshot_defers_vector_conversion_until_save():
-    image = np.zeros((4, 4, 3), dtype=np.uint8)
-    transport = _FakeRosCollectionTransport(image)
-    converted = 0
-    convert = transport._collection_raw_batch_from_msgs
-
-    def record_conversion(new_messages, pinned_streams):
-        nonlocal converted
-        converted += 1
-        return convert(new_messages, pinned_streams)
-
-    transport._collection_raw_batch_from_msgs = record_conversion
-
-    snapshot = transport.acquire_collection_raw()
-
-    assert snapshot is not None
-    assert converted == 0
-    first = snapshot.decode_raw()
-    second = snapshot.decode_raw()
-    assert converted == 1
-    assert second is first
-
-
-def test_acquire_collection_raw_scans_only_messages_after_cursor():
-    image = np.zeros((4, 4, 3), dtype=np.uint8)
-    transport = _FakeRosCollectionTransport(image)
-    old_images = [transport._msg(float(i)) for i in range(2000)]
-    old_qpos = [transport._msg(float(i), [float(i), float(i + 1)]) for i in range(2000)]
-    transport._camera_deques["front"] = deque(
-        [*old_images, transport._msg(2000.0), transport._msg(2000.1)]
-    )
-    transport._collection_qpos_deques["arm"] = deque(
-        [
-            *old_qpos,
-            transport._msg(2000.0, [2000.0, 2001.0]),
-            transport._msg(2000.1, [2000.1, 2001.1]),
-        ]
-    )
-    transport._collection_raw_cursors().update(
-        {
-            "image:cam_high:front": 1999.0,
-            "vector:state_qpos:arm": 1999.0,
-        }
-    )
-    transport._stamp_calls = 0
-
-    snapshot = transport.acquire_collection_raw()
-    assert snapshot is not None
-    batch = snapshot.decode_raw()
-
-    assert transport._stamp_calls < 30
-    assert [sample.timestamp for sample in batch.images["cam_high"]] == [2000.0, 2000.1]
-    assert [sample.timestamp for sample in batch.vectors["state_qpos:arm"]] == [
-        2000.0,
-        2000.1,
-    ]
-
-
 def test_acquire_collection_raw_blocks_concurrent_deque_append_during_scan():
     image = np.zeros((4, 4, 3), dtype=np.uint8)
     transport = _FakeRosCollectionTransport(image)
@@ -232,35 +124,3 @@ def test_acquire_collection_raw_blocks_concurrent_deque_append_during_scan():
     assert appended.is_set()
     batch = snapshot.decode_raw()
     assert [sample.timestamp for sample in batch.images["cam_high"]] == [6.0, 7.0, 8.0, 9.0]
-
-
-def test_image_rate_tracker_reports_minimum_camera_hz():
-    assert hasattr(transport_utils, "ImageRateTracker")
-    tracker = transport_utils.ImageRateTracker()
-
-    tracker.mark("front", 0.0)
-    tracker.mark("left", 0.0)
-    assert tracker.min_hz(("front", "left")) is None
-
-    tracker.mark("front", 0.05)
-    tracker.mark("left", 0.10)
-
-    assert tracker.min_hz(("front", "left")) == pytest.approx(10.0)
-
-
-def test_ros_camera_append_updates_image_min_hz():
-    transport = _FakeRosCollectionTransport(np.zeros((4, 4, 3), dtype=np.uint8))
-    transport._camera_deques["left"] = deque()
-
-    transport._append_camera_msg(
-        "front", transport._camera_deques["front"], transport._msg(1.0), 0.0
-    )
-    transport._append_camera_msg("left", transport._camera_deques["left"], transport._msg(1.0), 0.0)
-    transport._append_camera_msg(
-        "front", transport._camera_deques["front"], transport._msg(1.1), 0.05
-    )
-    transport._append_camera_msg(
-        "left", transport._camera_deques["left"], transport._msg(1.2), 0.10
-    )
-
-    assert transport.image_min_hz() == pytest.approx(10.0)

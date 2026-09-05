@@ -6,12 +6,14 @@ import bisect
 import dataclasses
 import math
 from collections.abc import Iterable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 from core.types import CollectionRawBatch, CollectionRawImage, CollectionRawSample, Observation
-from robots.base import Robot
+
+if TYPE_CHECKING:
+    from robots.base import Robot
 
 
 @dataclasses.dataclass(frozen=True)

@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>EVA Collection Dataset</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='editor.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='review.css') }}">
+  <script type="importmap">
+    {"imports":{"three":"/vendor/three/three.module.min.js","three/addons/":"/vendor/three/addons/"}}
+  </script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><img src="/assets/eva-logo.svg" alt="EVA Client"><span>Collection Dataset</span></div>
+    <div class="dataset-path" title="计划文件目录">
+      <span class="status-dot" id="dataset-dot"></span>
+      <span id="dataset-path">正在读取计划批次...</span>
+    </div>
+    <div class="topbar-actions">
+      <label class="edit-mode-toggle" title="开启后才能修改计划、物体和 QC">
+        <input id="edit-mode" type="checkbox">
+        <span class="toggle-track"></span>
+        <span id="edit-mode-label">只读</span>
+      </label>
+      <button class="icon-btn" id="import-trigger" data-edit-only title="导入计划 ZIP" aria-label="导入计划 ZIP" hidden>&#8593;</button>
+      <a class="icon-btn disabled" id="export-trigger" title="导出计划 ZIP" aria-label="导出计划 ZIP">&#8595;</a>
+      <button class="button primary" id="validate-button">检查计划</button>
+    </div>
+  </header>
+
+  <nav class="tabs" aria-label="数据管理">
+    <span class="tab-thumb" id="tab-thumb"></span>
+    <button class="tab active" data-tab="tasks"><span>01</span>Tasks <b id="task-count">0</b></button>
+    <button class="tab" data-tab="scenes"><span>02</span>Scenes <b id="scene-count">0</b></button>
+    <button class="tab" data-tab="objects"><span>03</span>Objects <b id="object-count">0</b></button>
+    <button class="tab" data-tab="dataset"><span>04</span>Dataset <b id="issue-count">0</b></button>
+  </nav>
+
+  <div class="notice error" id="global-error" role="alert" hidden>
+    <span id="global-error-text"></span>
+    <button class="text-button" id="retry-button">重试</button>
+  </div>
+
+  <main>
+    <section class="loading-state" id="loading-state" aria-live="polite">
+      <span class="spinner"></span><strong>正在载入计划与采集数据</strong>
+    </section>
+
+    <div id="app" hidden>
+      <section class="view active" id="view-tasks" data-view="tasks">
+        <aside class="list-panel task-sidebar">
+          <div class="list-head">
+            <div><span class="eyebrow">Task Collection</span><h1>任务</h1></div>
+            <button class="icon-btn dark" data-action="new-task" data-edit-only title="新增任务" aria-label="新增任务" hidden>+</button>
+          </div>
+          <label class="batch-field"><span>计划批次</span><select id="batch-select"><option value="">全部批次</option></select></label>
+          <div class="collection-summary" aria-live="polite">
+            <div class="collection-total">
+              <strong><span id="collected-count">0</span> / <span id="slot-total-count">0</span></strong>
+              <small>完成</small>
+            </div>
+            <div class="collection-legend">
+              <span class="collected">采集完成</span>
+              <span class="pending">未采集 <b id="pending-count">0</b></span>
+            </div>
+          </div>
+          <label class="search-field"><span aria-hidden="true">&#8981;</span><input id="task-search" type="search" placeholder="搜索任务、动作或提示词"></label>
+          <div class="filter-row">
+            <select id="task-action-filter" aria-label="按动作筛选"><option value="">全部动作</option></select>
+            <select id="task-category-filter" aria-label="按分类筛选"><option value="">全部分类</option></select>
+          </div>
+          <div class="entity-list task-list" id="task-list"></div>
+        </aside>
+        <article class="editor-panel task-review-panel" id="task-editor">
+          <div class="empty-state"><strong>选择任务并展开 episode slot</strong><span>有数据和无数据的 slot 都会保留</span></div>
+        </article>
+      </section>
+
+      <section class="view" id="view-scenes" data-view="scenes">
+        <aside class="list-panel">
+          <div class="list-head">
+            <div><span class="eyebrow">Scene Library</span><h1>场景</h1></div>
+            <button class="icon-btn dark" data-action="new-scene" data-edit-only title="新增场景" aria-label="新增场景" hidden>+</button>
+          </div>
+          <label class="search-field"><span aria-hidden="true">&#8981;</span><input id="scene-search" type="search" placeholder="搜索 scene ID"></label>
+          <div class="entity-list" id="scene-list"></div>
+        </aside>
+        <article class="editor-panel" id="scene-editor"><div class="empty-state"><strong>未选择场景</strong></div></article>
+      </section>
+
+      <section class="view object-catalog-view" id="view-objects" data-view="objects">
+        <header class="object-catalog-head">
+          <div><span class="eyebrow">Shared Assets</span><h1>公用物体表</h1></div>
+          <div class="object-toolbar">
+            <label class="search-field"><span aria-hidden="true">&#8981;</span><input id="object-search" type="search" placeholder="搜索 ID 或名称"></label>
+            <select id="object-photo-filter" aria-label="按照片状态筛选">
+              <option value="">全部物体</option>
+              <option value="missing">未拍照片</option>
+              <option value="ready">已有照片</option>
+            </select>
+            <span id="object-filter-count">0 / 0</span>
+            <button class="icon-btn dark" data-action="new-object" data-edit-only title="新增物体" aria-label="新增物体" hidden>+</button>
+          </div>
+        </header>
+        <div class="object-grid" id="object-list"></div>
+      </section>
+
+      <section class="view dataset-view" id="view-dataset" data-view="dataset">
+        <header class="page-head">
+          <div><span class="eyebrow">Plan Control</span><h1>计划与数据</h1></div>
+          <div class="metric-strip">
+            <span><small>Batches</small><b id="metric-batches">0</b></span>
+            <span><small>Tasks</small><b id="metric-tasks">0</b></span>
+            <span><small>Objects</small><b id="metric-objects">0</b></span>
+            <span><small>Collected</small><b id="metric-episodes">0</b></span>
+          </div>
+        </header>
+        <div class="dataset-grid">
+          <section class="surface">
+            <div class="section-head"><div><span class="eyebrow">Metadata</span><h2>当前批次</h2></div></div>
+            <form id="info-form" class="form-grid"></form>
+          </section>
+          <section class="surface issues-surface">
+            <div class="section-head"><div><span class="eyebrow">Validation</span><h2>检查结果</h2></div><button class="button" data-action="validate">重新检查</button></div>
+            <div class="issues" id="issues-list"></div>
+          </section>
+          <section class="surface transfer-surface">
+            <div class="section-head"><div><span class="eyebrow">Transfer</span><h2>计划导入与导出</h2></div></div>
+            <div class="transfer-actions">
+              <button class="transfer-button" data-action="import" data-edit-only hidden><b>&#8593;</b><span><strong>导入 ZIP</strong></span></button>
+              <a class="transfer-button disabled" id="dataset-export"><b>&#8595;</b><span><strong>导出 ZIP</strong></span></a>
+            </div>
+          </section>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <input id="import-file" type="file" accept=".zip,application/zip" hidden>
+  <input id="photo-file" type="file" accept="image/jpeg,image/png,image/webp" multiple hidden>
+
+  <dialog id="object-dialog"><div class="object-dialog-card"><button class="dialog-close" data-close-object aria-label="关闭">&times;</button><div id="object-dialog-body"></div></div></dialog>
+  <dialog id="confirm-dialog">
+    <form method="dialog" class="dialog-card">
+      <span class="dialog-icon">!</span><h2 id="confirm-title">确认操作</h2><p id="confirm-message"></p>
+      <div class="dialog-actions"><button class="button" value="cancel">取消</button><button class="button danger" id="confirm-accept" value="confirm">确认</button></div>
+    </form>
+  </dialog>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script type="module" src="{{ url_for('static', filename='editor.js') }}"></script>
+</body>
+</html>

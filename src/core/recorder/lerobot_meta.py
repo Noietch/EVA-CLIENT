@@ -91,7 +91,7 @@ def history_row(row: dict[str, Any], fallback_index: int) -> dict[str, Any]:
     """
     quality_issues, quality_issue_count = summarize_quality_issues(row.get("quality_issues"))
     tasks = row.get("tasks") or []
-    return {
+    history = {
         "episode_index": int(row.get("episode_index", fallback_index)),
         "task": str(row.get("prompt") or (tasks[0] if tasks else "")),
         "length": int(row.get("length", 0)),
@@ -103,3 +103,13 @@ def history_row(row: dict[str, Any], fallback_index: int) -> dict[str, Any]:
         "quality_issue_count": quality_issue_count,
         "error": "",
     }
+    for key in (
+        "scene_id",
+        "scene_round",
+        "random_seed",
+        "slot_id",
+        "task_id",
+    ):
+        if key in row:
+            history[key] = row[key]
+    return history

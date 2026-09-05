@@ -3,8 +3,8 @@
 import { $, LIVE, S, apiGet, apiPost, clientTrace } from "./core.js";
 import { updateScrub } from "./charts.js";
 import {
-  advanceCollectTask, collectTaskIndexValue, collectSetValue, collectTaskSelectionKey,
-  collectTaskTarget, collectTaskValue, setPanel, applyStatus, uiMode,
+  applyCollectTaskSelection, collectTaskIndexValue, collectSetValue, collectTaskValue,
+  setPanel, applyStatus, uiMode,
 } from "./run.js";
 import {
   exitReplayMode, loadReviewPlayback, refreshCameraStreams, replayStop,
@@ -23,28 +23,555 @@ const qualityTransfer = {
   uploading: false,
   acceptedDir: "",
   uploadJobId: "",
+  uploadPlanId: "",
   uploadState: "idle",
   datasetFormat: "",
   filesCompleted: 0,
   filesTotal: 0,
   bytesCompleted: 0,
   bytesTotal: 0,
+  localFiles: 0,
+  localBytes: 0,
+  filesSkipped: 0,
+  bytesSkipped: 0,
+  newFiles: 0,
+  changedFiles: 0,
+  filesToDelete: 0,
+  filesDeleted: 0,
 };
 
 // Saved episode history is review data, not heartbeat data. Fetch only the
 // visible collection/RL scope and retain the last complete snapshot locally.
 const EPISODE_HISTORY_POLL_MS = 5000;
 const EPISODE_HISTORY_PAGE_SIZE = 128;
+const COLLECTION_SLOT_POLL_MS = 2000;
 let episodeHistoryPolling = false;
+let collectionSlotsPolling = false;
 let collectItemsRenderKey = "";
 let rolloutItemsRenderKey = "";
-const collectAutoAdvanceState = {
-  selectionKey: "",
-  historyReady: false,
-  usableCollected: null,
-  completionPending: false,
-  scheduledKey: "",
-};
+
+function scenePlanTasks() {
+  return (S.SCENE_PLAN && Array.isArray(S.SCENE_PLAN.tasks)) ? S.SCENE_PLAN.tasks : [];
+}
+
+function scenePlanTask() {
+  return scenePlanTasks().find((task) => task.task_id === S.scenePlanTaskId) || null;
+}
+
+function scenePlanScene() {
+  const task = scenePlanTask();
+  const scenes = (S.SCENE_PLAN && Array.isArray(S.SCENE_PLAN.scenes))
+    ? S.SCENE_PLAN.scenes : [];
+  if (!task || !task.scene_ids.length) return null;
+  const preferredIndex = task.scene_ids.indexOf(S.scenePlanSceneId);
+  const index = preferredIndex >= 0
+    ? preferredIndex
+    : Math.max(0, Math.min(S.scenePlanSceneIndex, task.scene_ids.length - 1));
+  S.scenePlanSceneIndex = index;
+  S.scenePlanSceneId = task.scene_ids[index];
+  const scene = scenes.find((item) => item.scene_id === task.scene_ids[index]);
+  return scene
+    ? { ...scene, index, target: Number(task.scene_epsiodes_count[index] || 0) }
+    : null;
+}
+
+function scenePlanStartMetadata() {
+  const scene = scenePlanScene();
+  const task = scenePlanTask();
+  const slot = S.collectionSlots && S.collectionSlots.active;
+  if (!task || !scene || !slot || task.prompt_en !== collectTaskValue()) return {};
+  const recommendation = scenePlanSceneRecommendation(scene, S.scenePlanRoundIndex);
+  const metadata = {
+    scene_id: scene.scene_id,
+    scene_round: S.scenePlanRoundIndex,
+    slot_id: slot.slot_id,
+    task_id: slot.task_id,
+  };
+  if (recommendation && recommendation.seed !== null) {
+    metadata.random_seed = recommendation.seed;
+  }
+  return metadata;
+}
+
+function syncScenePlanTask(prompt) {
+  if (S.scenePlanTaskPromptKey === prompt) return;
+  const linked = scenePlanTasks().find((task) => task.prompt_en === prompt);
+  S.scenePlanTaskId = linked ? linked.task_id : "";
+  const preferredIndex = linked && S.scenePlanSceneId
+    ? linked.scene_ids.indexOf(S.scenePlanSceneId) : -1;
+  S.scenePlanSceneIndex = preferredIndex >= 0 ? preferredIndex : 0;
+  S.scenePlanSceneId = linked ? linked.scene_ids[S.scenePlanSceneIndex] || "" : "";
+  S.scenePlanRoundIndex = 0;
+  S.scenePlanTaskPromptKey = prompt;
+}
+
+function adoptCollectionSlot(slot) {
+  if (!slot) return;
+  const task = scenePlanTasks().find((entry) => entry.task_id === slot.task_id);
+  S.scenePlanTaskId = slot.task_id;
+  S.scenePlanTaskPromptKey = slot.task;
+  S.scenePlanSceneId = slot.scene_id;
+  S.scenePlanSceneIndex = task ? Math.max(0, task.scene_ids.indexOf(slot.scene_id)) : 0;
+  S.scenePlanRoundIndex = Number(slot.round_index) || 0;
+  S.scenePlanSelectionManual = false;
+}
+
+function collectionSlotQuery(dataset) {
+  const state = S.collectionSlots;
+  const params = new URLSearchParams({ dataset, page: String(state.page || 1) });
+  if (state.sceneFilter) params.set("scene", state.sceneFilter);
+  if (state.taskFilter) params.set("task", state.taskFilter);
+  if (state.showAll) params.set("all", "1");
+  return `/api/collection_slots?${params.toString()}`;
+}
+
+function applyCollectionSlotsPayload(payload) {
+  const state = S.collectionSlots;
+  state.loaded = true;
+  state.dataset = String(payload.dataset || state.dataset || "");
+  state.datasetDir = String(payload.dataset_dir || "");
+  state.active = payload.active || null;
+  state.counts = payload.counts || {};
+  state.scenes = Array.isArray(payload.scenes) ? payload.scenes : [];
+  state.tasks = Array.isArray(payload.tasks) ? payload.tasks : [];
+  state.slots = Array.isArray(payload.slots) ? payload.slots : [];
+  state.page = Number(payload.page) || 1;
+  state.pageCount = Number(payload.page_count) || 1;
+  state.filteredTotal = Number(payload.filtered_total) || 0;
+  state.viewerActive = !!payload.viewer_active;
+  if (state.active) adoptCollectionSlot(state.active);
+  if (!state.slots.some((slot) => slot.slot_id === state.selectedSlotId)) {
+    state.selectedSlotId = "";
+  }
+}
+
+function setCollectError(message = "") {
+  const node = $("collect-err");
+  if (node) node.textContent = message;
+}
+
+async function activateCollectionSlot(slot, { manual = false } = {}) {
+  if (!slot || S.collectTaskSelectionPending) return false;
+  if (S.STATUS.collect && S.STATUS.collect.collecting) return false;
+  const state = S.collectionSlots;
+  if (manual) state.followActivePage = false;
+  const previousActive = state.active;
+  const previousSelectedSlotId = state.selectedSlotId;
+  const previousStatus = {
+    task: S.STATUS.selected_collect_task,
+    dataset: S.STATUS.selected_collect_set,
+    taskIndex: S.STATUS.selected_collect_task_index,
+    slotId: S.STATUS.collection_slot_id,
+    taskId: S.STATUS.collection_task_id,
+  };
+  setCollectError();
+  S.collectTaskSelectionPending = true;
+  state.active = { ...slot, state: "active" };
+  state.selectedSlotId = "";
+  adoptCollectionSlot(state.active);
+  renderCollect();
+  try {
+    const response = await apiPost("/api/select_collection_slot", {
+      dataset: slot.dataset,
+      slot_id: slot.slot_id,
+    }, { concurrent: true, timeoutMs: 5000 });
+    if (!response.ok || !response.active) {
+      setCollectError(response.error || "Unable to select this slot");
+      return false;
+    }
+    const taskApplied = applyCollectTaskSelection(
+      response.active.task,
+      response.active.dataset,
+      Number(response.active.task_index),
+      response.active.scene_id
+    );
+    if (!taskApplied) {
+      setCollectError("The selected slot is not present in this dataset");
+      return false;
+    }
+    state.active = response.active;
+    state.counts = response.counts || state.counts;
+    S.STATUS.collection_slot_id = response.active.slot_id;
+    S.STATUS.collection_task_id = response.active.task_id;
+    adoptCollectionSlot(response.active);
+    return true;
+  } catch (error) {
+    setCollectError(error.message || "Unable to select this slot");
+    return false;
+  } finally {
+    if (S.STATUS.collection_slot_id !== slot.slot_id) {
+      state.active = previousActive;
+      state.selectedSlotId = previousSelectedSlotId;
+      S.STATUS.selected_collect_task = previousStatus.task;
+      S.STATUS.selected_collect_set = previousStatus.dataset;
+      S.STATUS.selected_collect_task_index = previousStatus.taskIndex;
+      S.STATUS.collection_slot_id = previousStatus.slotId;
+      S.STATUS.collection_task_id = previousStatus.taskId;
+      if (previousActive) adoptCollectionSlot(previousActive);
+    }
+    S.collectTaskSelectionPending = false;
+    renderCollect();
+  }
+}
+
+async function pollCollectionSlots(force = false) {
+  const state = S.collectionSlots;
+  const dataset = state.dataset || collectSetValue();
+  if (!dataset || collectionSlotsPolling) return;
+  const now = performance.now();
+  if (!force && now - Number(state.lastAttemptAt || 0) < COLLECTION_SLOT_POLL_MS) return;
+  state.lastAttemptAt = now;
+  collectionSlotsPolling = true;
+  const previousActiveId = String((state.active && state.active.slot_id) || "");
+  try {
+    let payload = await apiGet(collectionSlotQuery(dataset));
+    if (!payload || payload.ok === false) return;
+    const activeChanged = String((payload.active && payload.active.slot_id) || "") !== previousActiveId;
+    if (state.followActivePage && activeChanged && payload.active_page &&
+        Number(payload.active_page) !== Number(payload.page)) {
+      state.page = Number(payload.active_page);
+      payload = await apiGet(collectionSlotQuery(dataset));
+      if (!payload || payload.ok === false) return;
+    }
+    applyCollectionSlotsPayload(payload);
+    renderCollect();
+    const active = state.active;
+    const collecting = !!(S.STATUS.collect && S.STATUS.collect.collecting);
+    if (active && !collecting && !S.collectTaskSelectionPending &&
+        S.STATUS.collection_slot_id !== active.slot_id) {
+      queueMicrotask(() => activateCollectionSlot(active));
+    }
+  } catch {
+    // Keep the last complete plan while the low-frequency endpoint recovers.
+  } finally {
+    collectionSlotsPolling = false;
+  }
+}
+
+async function selectCollectionDataset(dataset) {
+  const value = String(dataset || "").trim();
+  if (!value || (S.STATUS.collect && S.STATUS.collect.collecting)) return false;
+  const state = S.collectionSlots;
+  state.dataset = value;
+  state.loaded = false;
+  state.page = 1;
+  state.sceneFilter = "";
+  state.taskFilter = "";
+  state.showAll = true;
+  state.selectedSlotId = "";
+  state.followActivePage = true;
+  const select = $("collect-set-list");
+  if (select) select.value = value;
+  await pollCollectionSlots(true);
+  return !!state.active;
+}
+
+function changeCollectionSlotFilter(kind, value) {
+  const state = S.collectionSlots;
+  if (kind === "scene") state.sceneFilter = String(value || "");
+  if (kind === "task") state.taskFilter = String(value || "");
+  state.showAll = !state.sceneFilter && !state.taskFilter;
+  state.page = 1;
+  state.selectedSlotId = "";
+  state.followActivePage = false;
+  pollCollectionSlots(true);
+  renderCollect();
+}
+
+function toggleCollectionSlotAll() {
+  const state = S.collectionSlots;
+  state.showAll = !state.showAll;
+  state.sceneFilter = "";
+  state.taskFilter = "";
+  state.selectedSlotId = "";
+  state.followActivePage = false;
+  state.page = state.showAll && state.active
+    ? Math.floor(Number(state.active.ordinal) / 50) + 1 : 1;
+  pollCollectionSlots(true);
+  renderCollect();
+}
+
+function changeCollectionSlotPage(delta) {
+  const state = S.collectionSlots;
+  const page = Math.max(1, Math.min(state.pageCount, Number(state.page) + delta));
+  if (page === state.page) return;
+  state.page = page;
+  state.selectedSlotId = "";
+  state.followActivePage = false;
+  pollCollectionSlots(true);
+  renderCollect();
+}
+
+function scenePlanRng(seed) {
+  let state = (Number(seed) >>> 0) || 1;
+  return () => {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    return state / 4294967296;
+  };
+}
+
+function scenePlanTextSeed(value) {
+  return Array.from(String(value || "")).reduce(
+    (total, character, index) => total + (index + 1) * character.charCodeAt(0), 0
+  ) >>> 0;
+}
+
+function scenePlanBalancedOffset(randomization, placementKey, roundIndex) {
+  if (roundIndex % 5 === 0) return { x: 0.5, y: 0.5 };
+  const [jitterMin, jitterMax] = randomization.jitterBounds;
+  const cycle = Math.floor(roundIndex / 5);
+  const jitter = scenePlanRng(
+    randomization.seed + scenePlanTextSeed(placementKey) + cycle * 7919
+  );
+  const edges = ["top", "right", "bottom", "left"];
+  for (let index = edges.length - 1; index > 0; index -= 1) {
+    const target = Math.floor(jitter() * (index + 1));
+    [edges[index], edges[target]] = [edges[target], edges[index]];
+  }
+  const along = jitterMin + (jitterMax - jitterMin) * jitter();
+  const edge = edges[(roundIndex - 1) % edges.length];
+  if (edge === "top") return { x: along, y: jitterMin };
+  if (edge === "right") return { x: jitterMax, y: along };
+  if (edge === "bottom") return { x: along, y: jitterMax };
+  return { x: jitterMin, y: along };
+}
+
+function scenePlanSceneRandomization(scene) {
+  const configured = scene && scene.randomization && typeof scene.randomization === "object"
+    ? scene.randomization : {};
+  const groups = scene && Array.isArray(scene.placement_groups)
+    ? scene.placement_groups : [];
+  if (!groups.some((group) => group.random) || configured.enabled === false) return null;
+  const configuredBounds = Array.isArray(configured.jitter_bounds)
+    ? configured.jitter_bounds.map((value) => Number(value)) : [];
+  const jitterBounds = configuredBounds.length === 2 && configuredBounds.every((value) =>
+    Number.isFinite(value) && value >= 0 && value <= 1
+  ) && configuredBounds[0] <= configuredBounds[1]
+    ? configuredBounds : [0.2, 0.8];
+  return {
+    seed: Number(configured.seed) >>> 0,
+    jitterBounds,
+  };
+}
+
+function scenePlanCandidatePositions(randomization, group, roundIndex) {
+  const positions = Array.isArray(group.position_ids)
+    ? group.position_ids.map((value) => String(value)).filter(Boolean) : [];
+  if (positions.length <= 1) return positions;
+  const cycle = Math.floor(roundIndex / positions.length);
+  const choices = positions.slice();
+  const random = scenePlanRng(
+    randomization.seed + scenePlanTextSeed(group.group_id) + cycle * 104729
+  );
+  for (let index = choices.length - 1; index > 0; index -= 1) {
+    const target = Math.floor(random() * (index + 1));
+    [choices[index], choices[target]] = [choices[target], choices[index]];
+  }
+  const offset = roundIndex % choices.length;
+  return choices.slice(offset).concat(choices.slice(0, offset));
+}
+
+function scenePlanAssignPositions(groups, reservedPositions = []) {
+  const assignments = new Map();
+  const occupied = new Set(reservedPositions);
+  const assign = (groupIndex) => {
+    if (groupIndex >= groups.length) return true;
+    const entry = groups[groupIndex];
+    for (const candidate of entry.candidates) {
+      if (occupied.has(candidate)) continue;
+      occupied.add(candidate);
+      assignments.set(entry.index, candidate);
+      if (assign(groupIndex + 1)) return true;
+      assignments.delete(entry.index);
+      occupied.delete(candidate);
+    }
+    return false;
+  };
+  assign(0);
+  groups.forEach((entry) => {
+    if (!assignments.has(entry.index)) {
+      assignments.set(entry.index, entry.candidates[0]);
+    }
+  });
+  return assignments;
+}
+
+function scenePlanSceneRecommendation(scene, roundIndex) {
+  const placementGroups = scene && Array.isArray(scene.placement_groups)
+    ? scene.placement_groups : [];
+  if (!placementGroups.length) return null;
+  const randomization = scenePlanSceneRandomization(scene);
+  const fixedGroups = placementGroups.map((group, index) => ({ group, index })).filter(
+    ({ group }) => !group.random
+  );
+  const reservedPositions = fixedGroups.flatMap(({ group }) => group.position_ids || []);
+  const groups = placementGroups.map((group, index) => ({ group, index })).filter(
+    ({ group }) => group.random
+  ).map(({ group, index }) => ({
+    group,
+    index,
+    candidates: scenePlanCandidatePositions(randomization, group, roundIndex),
+  })).sort((left, right) => (
+    left.candidates.length - right.candidates.length || left.index - right.index
+  ));
+  const assignments = scenePlanAssignPositions(groups, reservedPositions);
+  const randomizedPlacements = groups.map(({ group, index }) => {
+    const point = scenePlanBalancedOffset(randomization, group.group_id, roundIndex);
+    return {
+      index,
+      object_id: group.object_id,
+      name: group.name,
+      color: group.color,
+      positionId: assignments.get(index),
+      x: point.x,
+      y: point.y,
+      randomized: true,
+    };
+  });
+  const fixedPlacements = fixedGroups.flatMap(({ group, index }) => (
+    group.position_ids.map((positionId) => ({
+      index,
+      object_id: group.object_id,
+      name: group.name,
+      color: group.color,
+      positionId,
+      x: 0.5,
+      y: 0.5,
+      randomized: false,
+    }))
+  ));
+  const placements = fixedPlacements.concat(randomizedPlacements).sort(
+    (left, right) => left.index - right.index
+  );
+  return {
+    roundIndex,
+    seed: randomization
+      ? (randomization.seed + roundIndex * 1000003) >>> 0
+      : null,
+    randomizedCount: groups.length,
+    placements,
+  };
+}
+
+function scenePlanGridPositions(scene) {
+  const configured = S.SCENE_PLAN && Array.isArray(S.SCENE_PLAN.positions)
+    ? S.SCENE_PLAN.positions : [];
+  const positions = configured.map((position) => ({
+    positionId: String(position.position_id || ""),
+    x: position.x === null || position.x === "" ? NaN : Number(position.x),
+    y: position.y === null || position.y === "" ? NaN : Number(position.y),
+  })).filter((position) => position.positionId);
+  const known = new Set(positions.map((position) => position.positionId));
+  const groups = scene && Array.isArray(scene.placement_groups)
+    ? scene.placement_groups : [];
+  groups.flatMap((group) => group.position_ids || []).forEach((value) => {
+    const positionId = String(value || "");
+    if (!positionId || known.has(positionId)) return;
+    known.add(positionId);
+    positions.push({ positionId, x: NaN, y: NaN });
+  });
+  return positions;
+}
+
+function scenePlanGridGeometry(positions) {
+  const count = Math.max(1, positions.length);
+  const fallbackColumns = Math.ceil(Math.sqrt(count));
+  const fallback = {
+    columns: fallbackColumns,
+    rows: Math.ceil(count / fallbackColumns),
+    cells: positions.map((position, index) => ({
+      ...position,
+      column: index % fallbackColumns + 1,
+      row: Math.floor(index / fallbackColumns) + 1,
+    })),
+  };
+  if (!positions.length || positions.some((position) => (
+    !Number.isFinite(position.x) || !Number.isFinite(position.y)
+  ))) return fallback;
+
+  const xValues = [...new Set(positions.map((position) => position.x))].sort((a, b) => a - b);
+  const yValues = [...new Set(positions.map((position) => position.y))].sort((a, b) => a - b);
+  if (xValues.length * yValues.length > positions.length * 2) return fallback;
+  return {
+    columns: xValues.length,
+    rows: yValues.length,
+    cells: positions.map((position) => ({
+      ...position,
+      column: xValues.indexOf(position.x) + 1,
+      row: yValues.indexOf(position.y) + 1,
+    })),
+  };
+}
+
+function renderSceneGridCells(host, scene) {
+  const geometry = scenePlanGridGeometry(scenePlanGridPositions(scene));
+  const bounds = S.SCENE_PLAN && S.SCENE_PLAN.bounds || {};
+  const physicalAspect = Number(bounds.width) / Number(bounds.height);
+  const gridAspect = geometry.columns / geometry.rows;
+  const aspect = Number.isFinite(physicalAspect) && physicalAspect > 0
+    ? physicalAspect : Math.max(0.5, Math.min(2, gridAspect));
+  const layoutKey = geometry.cells.map((cell) => (
+    `${cell.positionId}:${cell.column}:${cell.row}`
+  )).join("|");
+  host.style.setProperty("--scene-grid-columns", String(geometry.columns));
+  host.style.setProperty("--scene-grid-rows", String(geometry.rows));
+  host.style.setProperty("--scene-grid-aspect", String(aspect));
+  if (host.dataset.layoutKey === layoutKey) return;
+  host.dataset.layoutKey = layoutKey;
+  host.replaceChildren(...geometry.cells.map((position) => {
+    const cell = document.createElement("div");
+    const label = document.createElement("span");
+    const target = document.createElement("i");
+    const object = document.createElement("b");
+    cell.className = "collect-scene-cell empty";
+    cell.dataset.positionId = position.positionId;
+    cell.style.gridColumn = String(position.column);
+    cell.style.gridRow = String(position.row);
+    cell.title = position.positionId;
+    label.textContent = position.positionId;
+    target.className = "collect-scene-target";
+    target.setAttribute("aria-hidden", "true");
+    cell.append(label, target, object);
+    return cell;
+  }));
+}
+
+function renderCurrentSceneGrid(scene, roundIndex) {
+  const host = $("collect-current-scene-grid");
+  if (!host) return;
+  renderSceneGridCells(host, scene);
+  const recommendation = scenePlanSceneRecommendation(scene, roundIndex);
+  const byPosition = new Map();
+  (recommendation && recommendation.placements || []).forEach((placement) => {
+    const positionId = String(placement.positionId || "");
+    if (!positionId) return;
+    const values = byPosition.get(positionId) || [];
+    values.push(placement);
+    byPosition.set(positionId, values);
+  });
+  host.querySelectorAll(".collect-scene-cell").forEach((cell) => {
+    const placements = byPosition.get(cell.dataset.positionId) || [];
+    const names = [...new Set(placements.map((placement) => String(placement.name || "")))]
+      .filter(Boolean);
+    const movablePlacement = placements.find((placement) => placement.randomized);
+    const movable = !!movablePlacement;
+    cell.classList.toggle("empty", placements.length === 0);
+    cell.classList.toggle("fixed", placements.length > 0 && !movable);
+    cell.classList.toggle("movable", movable);
+    if (movablePlacement) {
+      cell.style.setProperty("--movable-x", `${Number(movablePlacement.x) * 100}%`);
+      cell.style.setProperty("--movable-y", `${Number(movablePlacement.y) * 100}%`);
+    } else {
+      cell.style.removeProperty("--movable-x");
+      cell.style.removeProperty("--movable-y");
+    }
+    const object = cell.querySelector("b");
+    object.textContent = names.join(" / ");
+    object.title = names.join(" / ");
+    cell.title = names.length
+      ? `${cell.dataset.positionId} · ${names.join(" / ")}` : cell.dataset.positionId;
+  });
+}
 
 function itemsForPrompt(items, prompt) {
   return (items || []).filter(
@@ -219,7 +746,10 @@ async function pollEpisodeHistory(force = false) {
     }
     cache.version = String(payload.version || "");
     cache.cursor = nextCursor;
-    if (scope === "collect") renderCollect();
+    if (scope === "collect") {
+      renderCollect();
+      pollCollectionSlots(force);
+    }
     else renderRolloutSave();
   } catch {
     // Keep the last complete snapshot while the low-frequency endpoint recovers.
@@ -263,12 +793,21 @@ function changeCollectionExportFormat() {
   qualityTransfer.acceptedDir = "";
   qualityTransfer.exportJobId = "";
   qualityTransfer.uploadJobId = "";
+  qualityTransfer.uploadPlanId = "";
   qualityTransfer.episodesCompleted = 0;
   qualityTransfer.episodesTotal = 0;
   qualityTransfer.filesCompleted = 0;
   qualityTransfer.filesTotal = 0;
   qualityTransfer.bytesCompleted = 0;
   qualityTransfer.bytesTotal = 0;
+  qualityTransfer.localFiles = 0;
+  qualityTransfer.localBytes = 0;
+  qualityTransfer.filesSkipped = 0;
+  qualityTransfer.bytesSkipped = 0;
+  qualityTransfer.newFiles = 0;
+  qualityTransfer.changedFiles = 0;
+  qualityTransfer.filesToDelete = 0;
+  qualityTransfer.filesDeleted = 0;
   qualityTransfer.datasetFormat = select.value;
   const status = $("collect-quality-status");
   if (status) {
@@ -573,22 +1112,32 @@ async function startCollectFromTab() {
     const task = collectTaskValue();
     const collectionSet = collectSetValue();
     const taskIndex = collectTaskIndexValue();
-    const needsSelection = task && (
-      task !== S.STATUS.selected_collect_task ||
-      collectionSet !== S.STATUS.selected_collect_set ||
-      taskIndex !== S.STATUS.selected_collect_task_index
-    );
-    if (needsSelection) {
-      S.STATUS.selected_collect_task = task;
-      S.STATUS.selected_collect_set = collectionSet;
-      S.STATUS.selected_collect_task_index = taskIndex;
-      await apiPost("/api/select_collect_task", {
-        task,
-        dataset: collectionSet,
-        task_index: taskIndex,
-      });
+    const slot = S.collectionSlots && S.collectionSlots.active;
+    if (!task || !slot || S.collectTaskSelectionPending) {
+      S.collectToggleBusy = null;
+      renderCollect();
+      return;
     }
-    await apiPost("/api/operator_action", { intent: "start" });
+    const confirmed = S.STATUS.collection_slot_id === slot.slot_id ||
+      await activateCollectionSlot(slot);
+    if (!confirmed) {
+      S.collectToggleBusy = null;
+      renderCollect();
+      return;
+    }
+    S.STATUS.selected_collect_task = task;
+    S.STATUS.selected_collect_set = collectionSet;
+    S.STATUS.selected_collect_task_index = taskIndex;
+    let started;
+    try {
+      started = await apiPost("/api/collect_start", scenePlanStartMetadata());
+    } catch {
+      started = null;
+    }
+    if (!started || !started.ok) {
+      S.collectToggleBusy = null;
+      renderCollect();
+    }
   }
 
 function fmtEta(sec) {
@@ -644,9 +1193,30 @@ function savedEpisodeId(item) {
     return Number.isFinite(episode) ? episode : null;
   }
 
+function syncScenePlanToEpisode(item) {
+    const prompt = String((item && (item.task || item.prompt)) || "");
+    const task = scenePlanTasks().find((entry) => (
+      entry.task_id === String((item && item.task_id) || "") || entry.prompt_en === prompt
+    ));
+    if (!task) return;
+    S.scenePlanTaskId = task.task_id;
+    const sceneIndex = task.scene_ids.indexOf(String((item && item.scene_id) || ""));
+    if (sceneIndex >= 0) {
+      S.scenePlanSceneIndex = sceneIndex;
+      S.scenePlanSceneId = task.scene_ids[sceneIndex];
+    }
+    const roundIndex = Number(item && item.scene_round);
+    if (Number.isInteger(roundIndex) && roundIndex >= 0) {
+      S.scenePlanRoundIndex = roundIndex;
+    }
+    S.scenePlanTaskPromptKey = prompt;
+    S.scenePlanSelectionManual = true;
+  }
+
 function selectCollectEpisode(item) {
     const episode = savedEpisodeId(item);
     if (episode == null) return;
+    syncScenePlanToEpisode(item);
     S.collectReplayEpisode = episode;
     reviewEpisode("collect", item);
     renderCollect();
@@ -669,77 +1239,87 @@ function selectedCollectEpisodeItem() {
     const episode = S.collectReplayEpisode;
     if (episode == null) return null;
     if (!collectReviewMatchesSelection()) return null;
+    const slotEpisode = (S.collectionSlots.slots || []).map((slot) => slot.episode).find(
+      (item) => savedEpisodeId(item) === episode
+    );
+    if (slotEpisode) return slotEpisode;
     const collect = S.STATUS.collect || {};
     const history = historyFor("collect", collect);
     const items = history.episodes.concat(history.queue);
     return items.find((item) => savedEpisodeId(item) === episode) || null;
   }
 
+function renderCollectionSlotFilters() {
+    const state = S.collectionSlots;
+    const scene = $("collect-slot-scene-filter");
+    const task = $("collect-slot-task-filter");
+    const sceneKey = JSON.stringify(state.scenes || []);
+    const taskKey = JSON.stringify(state.tasks || []);
+    if (scene.dataset.options !== sceneKey) {
+      scene.innerHTML = '<option value="">ALL SCENES</option>';
+      (state.scenes || []).forEach((entry) => {
+        const option = document.createElement("option");
+        option.value = entry.id;
+        option.textContent = entry.label;
+        scene.appendChild(option);
+      });
+      scene.dataset.options = sceneKey;
+    }
+    if (task.dataset.options !== taskKey) {
+      task.innerHTML = '<option value="">ALL TASKS</option>';
+      (state.tasks || []).forEach((entry) => {
+        const option = document.createElement("option");
+        option.value = entry.id;
+        option.textContent = entry.label;
+        task.appendChild(option);
+      });
+      task.dataset.options = taskKey;
+    }
+    scene.value = state.sceneFilter || "";
+    task.value = state.taskFilter || "";
+    scene.disabled = !state.loaded;
+    task.disabled = !state.loaded;
+  }
+
 function renderCollectTiles(items) {
     const host = $("collect-queue-tiles");
     host.innerHTML = "";
-    const hint = $("collect-tiles-hint");
-    const anyReplayable = items.some((item) => savedEpisodeId(item) != null);
-    if (hint) hint.style.display = anyReplayable ? "block" : "none";
     if (!items.length) {
       const empty = document.createElement("span");
       empty.className = "collect-empty";
-      empty.textContent = "no episodes";
+      empty.textContent = S.collectionSlots.viewerActive ? "NO MATCHING SLOTS" : "FILTER OFF";
       host.appendChild(empty);
       return;
     }
-    items.forEach((item) => {
+    items.forEach((slot) => {
       const tile = document.createElement("button");
       tile.type = "button";
-      tile.className = `collect-tile ${collectTone(item)}`;
-      const episode = savedEpisodeId(item);
-      if (episode != null) {
-        tile.classList.add("replayable");
-        tile.title = `episode ${item.episode_index}`;
-        if (collectReviewMatchesSelection() && episode === S.collectReplayEpisode) {
-          tile.classList.add("selected");
-        }
-        tile.onpointerdown = (event) => selectCollectEpisodePointer(event, item);
-        tile.onclick = () => selectCollectEpisode(item);
-      } else {
-        tile.title = `episode ${item.episode_index} · ${item.status}`;
-      }
-      const episodeIndex = Number(item.episode_index);
-      tile.textContent = Number.isFinite(episodeIndex)
-        ? String(episodeIndex).padStart(3, "0")
-        : "---";
+      tile.title = `${slot.scene_label} · ${slot.task_zh || slot.task} · ` +
+        `round ${Number(slot.round_index) + 1}/${slot.round_total}`;
+      tile.textContent = String(Number(slot.ordinal) + 1);
       tile.setAttribute("aria-label", tile.title);
+      const saved = savedEpisodeId(slot.episode) != null;
+      const current = S.collectionSlots.active &&
+        S.collectionSlots.active.slot_id === slot.slot_id;
+      const visibleState = current ? "active" : (slot.state === "active" ? "pending" : slot.state);
+      tile.className = `collect-tile slot-${visibleState}` +
+        `${current && slot.repair ? " slot-active-repair" : ""}`;
+      if (slot.slot_id === S.collectionSlots.selectedSlotId) tile.classList.add("selected");
+      const locked = slot.state === "saving" || S.collectTaskSelectionPending ||
+        !!(S.STATUS.collect && S.STATUS.collect.collecting);
+      tile.disabled = locked || (current && !saved);
+      tile.classList.toggle("actionable", !tile.disabled);
+      tile.onclick = () => {
+        S.collectionSlots.followActivePage = false;
+        if (slot.state === "complete" && saved) {
+          S.collectionSlots.selectedSlotId = slot.slot_id;
+          renderCollectTiles(S.collectionSlots.slots || []);
+          selectCollectEpisode(slot.episode);
+        } else {
+          activateCollectionSlot(slot, { manual: true });
+        }
+      };
       host.appendChild(tile);
-    });
-  }
-
-function renderCollectList(items) {
-    const host = $("collect-queue-list");
-    host.style.display = S.collectQueueExpanded ? "block" : "none";
-    $("collect-queue-toggle").textContent = S.collectQueueExpanded ? "COLLAPSE" : "EXPAND";
-    host.innerHTML = "";
-    if (!items.length) return;
-    items.slice().reverse().forEach((item) => {
-      const row = document.createElement("div");
-      const episode = savedEpisodeId(item);
-      const selected = collectReviewMatchesSelection() && episode === S.collectReplayEpisode;
-      row.className = `collect-row ${episode != null ? "replayable" : ""}${selected ? " selected" : ""}`;
-      const ep = document.createElement("span");
-      const frames = document.createElement("span");
-      const issue = document.createElement("span");
-      ep.textContent = `#${String(item.episode_index).padStart(3, "0")}`;
-      frames.textContent = `${item.length || 0}f`;
-      issue.className = "issue";
-      issue.textContent = collectIssueText(item);
-      row.appendChild(ep);
-      row.appendChild(frames);
-      row.appendChild(issue);
-      if (episode != null) {
-        row.title = "select episode";
-        row.onpointerdown = (event) => selectCollectEpisodePointer(event, item);
-        row.onclick = () => selectCollectEpisode(item);
-      }
-      host.appendChild(row);
     });
   }
 
@@ -856,59 +1436,95 @@ function renderRolloutSave() {
     }
   }
 
-function collectHistoryReadyFor(collectionSet, prompt) {
-    const cache = S.episodeHistory && S.episodeHistory.collect;
-    return !!(
-      cache && cache.loaded &&
-      cache.collectionSet === collectionSet && cache.task === prompt
+function renderCollectionTransfer(enabled, usableCount, rejectedCount) {
+  const exportButton = $("b-collect-quality-export");
+  const uploadButton = $("b-collect-quality-upload");
+  const exportFormat = $("collect-export-format");
+  const selectedFormat = exportFormat ? exportFormat.value : "";
+  const selectedExportReady = !!qualityTransfer.acceptedDir &&
+    qualityTransfer.datasetFormat === selectedFormat;
+  const upload = (S.CFG && S.CFG.collection && S.CFG.collection.upload) || {};
+  if (exportButton) {
+    exportButton.disabled = !enabled || usableCount + rejectedCount === 0 ||
+      qualityTransfer.exporting || qualityTransfer.uploading;
+  }
+  if (uploadButton) {
+    const uploadPlanReady = qualityTransfer.uploadState === "ready" &&
+      !!qualityTransfer.uploadPlanId;
+    uploadButton.disabled = !upload.configured || !selectedExportReady ||
+      qualityTransfer.exporting || qualityTransfer.uploading;
+    const backendLabel = (upload.backends || []).map((value) => String(value).toUpperCase());
+    const targetLabel = backendLabel.length ? backendLabel.join(" + ") : "TARGET";
+    const operationCount = qualityTransfer.filesTotal + qualityTransfer.filesToDelete;
+    uploadButton.textContent = uploadPlanReady
+      ? `CONFIRM ${targetLabel} · ${operationCount} CHANGES`
+      : `SCAN ${targetLabel}`;
+  }
+  if (exportFormat) {
+    exportFormat.disabled = qualityTransfer.exporting || qualityTransfer.uploading;
+  }
+  const transferProgressBar = $("collect-quality-progress-bar");
+  const transferProgressFill = $("collect-quality-progress-fill");
+  const transferProgressLabel = $("collect-quality-progress-label");
+  const transferProgressDetail = $("collect-quality-progress-detail");
+  const showingExport = qualityTransfer.phase !== "upload";
+  const formatLabel = qualityTransferFormatLabel(
+    qualityTransfer.datasetFormat || selectedFormat
+  );
+  const transferFraction = showingExport
+    ? (qualityTransfer.episodesTotal > 0
+        ? qualityTransfer.episodesCompleted / qualityTransfer.episodesTotal
+        : (qualityTransfer.exportState === "completed" ? 1 : 0))
+    : (qualityTransfer.bytesTotal > 0
+        ? qualityTransfer.bytesCompleted / qualityTransfer.bytesTotal
+        : (qualityTransfer.filesTotal > 0
+            ? qualityTransfer.filesCompleted / qualityTransfer.filesTotal
+            : (qualityTransfer.uploadState === "completed" ? 1 : 0)));
+  const transferPercent = Math.round(Math.max(0, Math.min(1, transferFraction)) * 100);
+  if (transferProgressBar) {
+    transferProgressBar.setAttribute("aria-valuenow", String(transferPercent));
+    transferProgressBar.setAttribute(
+      "aria-label", `${formatLabel} ${showingExport ? "export" : "upload"} progress`
     );
   }
-
-function maybeAutoAdvanceCollectTask(prompt, usableCollected, required, collecting) {
-    const selectionKey = collectTaskSelectionKey();
-    const historyReady = collectHistoryReadyFor(collectSetValue(), prompt);
-    if (collectAutoAdvanceState.selectionKey !== selectionKey) {
-      collectAutoAdvanceState.selectionKey = selectionKey;
-      collectAutoAdvanceState.historyReady = false;
-      collectAutoAdvanceState.usableCollected = null;
-      collectAutoAdvanceState.completionPending = false;
-      collectAutoAdvanceState.scheduledKey = "";
-    }
-    if (!historyReady) {
-      collectAutoAdvanceState.historyReady = false;
-      collectAutoAdvanceState.usableCollected = null;
-      return;
-    }
-    if (!collectAutoAdvanceState.historyReady) {
-      collectAutoAdvanceState.historyReady = true;
-      collectAutoAdvanceState.usableCollected = usableCollected;
-      return;
-    }
-    if (collectAutoAdvanceState.usableCollected === null) {
-      collectAutoAdvanceState.usableCollected = usableCollected;
-      return;
-    }
-    const crossedTarget = Number.isInteger(required) && required > 0 &&
-      collectAutoAdvanceState.usableCollected < required && usableCollected >= required;
-    collectAutoAdvanceState.usableCollected = usableCollected;
-    if (crossedTarget) collectAutoAdvanceState.completionPending = true;
-    if (usableCollected < required) collectAutoAdvanceState.completionPending = false;
-    if (!collectAutoAdvanceState.completionPending || collecting) return;
-    if (collectAutoAdvanceState.scheduledKey === selectionKey) return;
-    collectAutoAdvanceState.scheduledKey = selectionKey;
-    queueMicrotask(() => {
-      const stillCollecting = !!(S.STATUS.collect && S.STATUS.collect.collecting);
-      if (collectTaskSelectionKey() !== selectionKey || stillCollecting) return;
-      collectAutoAdvanceState.completionPending = false;
-      collectAutoAdvanceState.scheduledKey = "";
-      advanceCollectTask();
-    });
+  if (transferProgressFill) transferProgressFill.style.width = `${transferPercent}%`;
+  if (transferProgressLabel) transferProgressLabel.textContent = `${transferPercent}%`;
+  if (transferProgressDetail) {
+    transferProgressDetail.textContent = showingExport
+      ? `${qualityTransfer.episodesCompleted}/${qualityTransfer.episodesTotal} episodes · ${formatLabel}`
+      : (qualityTransfer.uploadState === "ready"
+          ? (`${qualityTransfer.filesTotal} upload · ${qualityTransfer.filesToDelete} remove · ` +
+            `${qualityTransfer.filesSkipped} same · ` +
+            `${qualityTransfer.localFiles} local · ${formatLabel}`)
+      : (`${qualityTransfer.filesCompleted}/${qualityTransfer.filesTotal} files · ` +
+        `${formatTransferBytes(qualityTransfer.bytesCompleted)}/` +
+        `${formatTransferBytes(qualityTransfer.bytesTotal)} · ${formatLabel}`));
   }
+}
+
+function renderCollectionReplayStatus(selectedEpisodeSaved) {
+  const replayStatus = $("collect-replay-status");
+  if (S.reviewKind === "collect" && LIVE.replayOwner === "collect") {
+    replayStatus.textContent = LIVE.replayError
+      ? `episode ${S.collectReplayEpisode} · error · ${LIVE.replayError}`
+      : (LIVE.replayLoading
+          ? `episode ${S.collectReplayEpisode} · loading`
+          : `episode ${S.collectReplayEpisode} · review`);
+    replayStatus.style.display = S.ACTIVE_TAB === "collect" ? "" : "none";
+  } else if (selectedEpisodeSaved) {
+    replayStatus.textContent = `episode ${S.collectReplayEpisode} selected`;
+    replayStatus.style.display = S.ACTIVE_TAB === "collect" ? "" : "none";
+  } else {
+    replayStatus.textContent = "";
+    replayStatus.style.display = "none";
+  }
+}
 
 function renderCollect() {
     if (!$("collect-control-col")) return;
     const collect = S.STATUS.collect || {};
     const history = historyFor("collect", collect);
+    const slotPlan = S.collectionSlots;
     const enabled = collectEnabled();
     const collecting = !!collect.collecting;
     // The toggle's action depends on the polled `collecting` flag, which lags the
@@ -918,44 +1534,54 @@ function renderCollect() {
       S.collectToggleBusy = null;
     }
     const toggleBusy = S.collectToggleBusy !== null;
-    const prompt = collectTaskValue();
-    const collectionSet = collectSetValue();
-    const hasPrompt = !!prompt;
+    const activeSlot = slotPlan.active;
+    const prompt = activeSlot ? activeSlot.task : collectTaskValue();
+    const collectionSet = slotPlan.dataset || collectSetValue();
+    const hasPrompt = !!activeSlot;
     const queueFull = collect.pipeline_state === "QUEUE_FULL";
-    // historyFor is the collection view's set+prompt scope boundary.
     const episodes = history.episodes;
     const queue = history.queue;
-    const totalItems = episodes.length + queue.length;
-    const required = collectTaskTarget(prompt);
-    const hasRequirement = Number.isInteger(required) && required > 0;
-    const unlimited = required === -1;
-    const usableCollected = history.summary.usable;
-    const requirementComplete = hasRequirement && usableCollected >= required;
-    maybeAutoAdvanceCollectTask(prompt, usableCollected, required, collecting);
-    const queueSummary = episodeItemsSummary(queue);
-    const usableCount = history.summary.usable + queueSummary.usable;
-    const rejectedCount = history.summary.rejected + queueSummary.rejected;
-    const pendingCount = history.summary.pending + queueSummary.pending;
-    const progress = totalItems === 0
-      ? 0 : Math.max(0, Math.min(1, (usableCount + rejectedCount) / totalItems));
+    const counts = slotPlan.counts || {};
+    const totalSlots = Number(counts.total) || 0;
+    const usableCount = Number(counts.complete) || 0;
+    const rejectedCount = (Number(counts.rejected) || 0) + (Number(counts.deferred) || 0);
+    const pendingCount = Math.max(0, totalSlots - usableCount - rejectedCount);
+    const progress = totalSlots > 0 ? usableCount / totalSlots : 0;
+    const requirementComplete = totalSlots > 0 && usableCount >= totalSlots;
 
+    if (activeSlot) adoptCollectionSlot(activeSlot);
     const collectFps = S.CFG && S.CFG.collection ? S.CFG.collection.fps : null;
     $("collect-fps").textContent = collectFps ? `${collectFps} FPS` : "";
-    $("collect-count").textContent = `${episodes.length}/${totalItems}`;
+    $("collect-count").textContent = `${usableCount}/${totalSlots}`;
     $("collect-usable-count").textContent = threeDigitCount(usableCount);
     $("collect-rejected-count").textContent = threeDigitCount(rejectedCount);
     $("collect-pending-count").textContent = threeDigitCount(pendingCount);
-    $("collect-requirement-count").textContent = `${usableCollected} / ${unlimited ? "∞" : (hasRequirement ? required : "--")}`;
-    $("collect-requirement-status").textContent = unlimited
-      ? "NO LIMIT"
-      : hasRequirement
-      ? (requirementComplete ? "COMPLETE" : `${required - usableCollected} REMAINING`)
-      : "TARGET NOT SET";
+    $("collect-requirement-count").textContent = `${usableCount} / ${totalSlots || "--"}`;
+    $("collect-requirement-status").textContent = requirementComplete
+      ? "COMPLETE" : `${Math.max(0, totalSlots - usableCount)} REMAINING`;
     $("collect-requirement").classList.toggle("complete", requirementComplete);
-    $("collect-requirement").classList.toggle("unset", !hasRequirement && !unlimited);
+    $("collect-requirement").classList.toggle("unset", totalSlots === 0);
     $("collect-progress-label").textContent = `${Math.round(progress * 100)}%`;
     $("collect-progress-fill").style.width = `${progress * 100}%`;
     $("collect-eta").textContent = fmtEta(collect.eta_sec);
+
+    $("collect-current-position").textContent = activeSlot
+      ? `${Number(activeSlot.ordinal) + 1} / ${totalSlots}` : `${totalSlots} / ${totalSlots}`;
+    renderCurrentSceneGrid(scenePlanScene(), activeSlot ? Number(activeSlot.round_index) : 0);
+    $("collect-current-task").textContent = activeSlot
+      ? (activeSlot.task_zh || activeSlot.task) : "--";
+    $("collect-current-task-en").textContent = activeSlot && activeSlot.task_zh
+      ? activeSlot.task : "";
+    $("collect-current-round").textContent = activeSlot
+      ? `ROUND ${Number(activeSlot.round_index) + 1} / ${activeSlot.round_total}` : "ROUND -- / --";
+    renderCollectionSlotFilters();
+    const allButton = $("collect-queue-toggle");
+    allButton.setAttribute("aria-pressed", slotPlan.showAll ? "true" : "false");
+    const page = $("collect-slot-page");
+    page.hidden = !slotPlan.viewerActive || slotPlan.pageCount <= 1;
+    $("collect-slot-page-label").textContent = `${slotPlan.page} / ${slotPlan.pageCount}`;
+    $("b-collect-slot-prev").disabled = slotPlan.page <= 1;
+    $("b-collect-slot-next").disabled = slotPlan.page >= slotPlan.pageCount;
 
     const armSwitch = $("collect-arm-enable");
     if (armSwitch) {
@@ -971,7 +1597,7 @@ function renderCollect() {
     if (armLabel) armLabel.textContent = S.collectArmEnabled ? "ENABLED" : "LOCKED";
 
     const toggle = $("b-collect-toggle");
-    toggle.disabled = toggleBusy ||
+    toggle.disabled = toggleBusy || S.collectTaskSelectionPending ||
       (collecting ? false : (!enabled || !hasPrompt || queueFull || !S.collectArmEnabled));
     toggle.classList.toggle("recording", collecting);
     toggle.classList.toggle("primary", !collecting);
@@ -986,102 +1612,37 @@ function renderCollect() {
     $("b-collect-qc-pass").disabled = !enabled || !selectedEpisodeSaved;
     $("b-goto-qc").disabled = !enabled || !selectedEpisodeSaved;
     $("b-collect-note-save").disabled = !selectedEpisodeSaved;
-    const exportButton = $("b-collect-quality-export");
-    const uploadButton = $("b-collect-quality-upload");
-    const exportFormat = $("collect-export-format");
-    const selectedFormat = exportFormat ? exportFormat.value : "";
-    const selectedExportReady = !!qualityTransfer.acceptedDir &&
-      qualityTransfer.datasetFormat === selectedFormat;
-    const upload = (S.CFG && S.CFG.collection && S.CFG.collection.upload) || {};
-    if (exportButton) {
-      exportButton.disabled = !enabled || !episodes.length ||
-        qualityTransfer.exporting || qualityTransfer.uploading;
-    }
-    if (uploadButton) {
-      uploadButton.disabled = !upload.configured || !selectedExportReady ||
-        qualityTransfer.exporting || qualityTransfer.uploading;
-      const backendLabel = (upload.backends || []).map((value) => String(value).toUpperCase());
-      uploadButton.textContent = backendLabel.length
-        ? `UPLOAD ${backendLabel.join(" + ")}`
-        : "UPLOAD ACCEPTED";
-    }
-    if (exportFormat) {
-      exportFormat.disabled = qualityTransfer.exporting || qualityTransfer.uploading;
-    }
-    const transferProgressBar = $("collect-quality-progress-bar");
-    const transferProgressFill = $("collect-quality-progress-fill");
-    const transferProgressLabel = $("collect-quality-progress-label");
-    const transferProgressDetail = $("collect-quality-progress-detail");
-    const showingExport = qualityTransfer.phase !== "upload";
-    const formatLabel = qualityTransferFormatLabel(
-      qualityTransfer.datasetFormat || selectedFormat
-    );
-    const transferFraction = showingExport
-      ? (qualityTransfer.episodesTotal > 0
-          ? qualityTransfer.episodesCompleted / qualityTransfer.episodesTotal
-          : (qualityTransfer.exportState === "completed" ? 1 : 0))
-      : (qualityTransfer.bytesTotal > 0
-          ? qualityTransfer.bytesCompleted / qualityTransfer.bytesTotal
-          : (qualityTransfer.filesTotal > 0
-              ? qualityTransfer.filesCompleted / qualityTransfer.filesTotal
-              : (qualityTransfer.uploadState === "completed" ? 1 : 0)));
-    const transferPercent = Math.round(Math.max(0, Math.min(1, transferFraction)) * 100);
-    if (transferProgressBar) {
-      transferProgressBar.setAttribute("aria-valuenow", String(transferPercent));
-      transferProgressBar.setAttribute(
-        "aria-label", `${formatLabel} ${showingExport ? "export" : "upload"} progress`
-      );
-    }
-    if (transferProgressFill) transferProgressFill.style.width = `${transferPercent}%`;
-    if (transferProgressLabel) transferProgressLabel.textContent = `${transferPercent}%`;
-    if (transferProgressDetail) {
-      transferProgressDetail.textContent = showingExport
-        ? `${qualityTransfer.episodesCompleted}/${qualityTransfer.episodesTotal} episodes · ${formatLabel}`
-        : (`${qualityTransfer.filesCompleted}/${qualityTransfer.filesTotal} files · ` +
-          `${formatTransferBytes(qualityTransfer.bytesCompleted)}/` +
-          `${formatTransferBytes(qualityTransfer.bytesTotal)} · ${formatLabel}`);
-    }
+    renderCollectionTransfer(enabled, usableCount, rejectedCount);
 
     const recordState = collecting || (hasPrompt && !S.collectArmEnabled)
       ? "active"
       : (hasPrompt ? "done" : "pending");
     setPanel("collect-panel-task", enabled && hasPrompt ? "done" : "active");
     setPanel("collect-panel-record", recordState);
-    const queueEnabled = enabled && (S.collectQueueEnabled || episodes.length > 0 || queue.length > 0);
-    setPanel("collect-panel-queue", queue.length ? "active" : (queueEnabled ? "done" : "pending"));
+    setPanel("collect-panel-queue", slotPlan.viewerActive ? "active" : (slotPlan.loaded ? "done" : "pending"));
     setPanel("collect-panel-replay", selectedEpisodeSaved ? "active" : "pending");
 
     const renderKey = [
       collectionSet,
-      prompt,
-      history.summary.signature,
-      queueSummary.signature,
-      selectedEpisodeSaved ? S.collectReplayEpisode : "",
-      S.collectQueueExpanded ? "expanded" : "collapsed",
+      activeSlot ? activeSlot.slot_id : "",
+      slotPlan.page,
+      slotPlan.sceneFilter,
+      slotPlan.taskFilter,
+      slotPlan.showAll,
+      slotPlan.selectedSlotId,
+      S.collectTaskSelectionPending,
+      JSON.stringify(slotPlan.slots || []),
     ].join("\n");
     if (renderKey !== collectItemsRenderKey) {
       collectItemsRenderKey = renderKey;
-      const items = episodes.concat(queue);
-      renderCollectTiles(items);
-      renderCollectList(items);
+      renderCollectTiles(slotPlan.slots || []);
     }
     renderCollectControls();
-
-    const replayStatus = $("collect-replay-status");
-    if (S.reviewKind === "collect" && LIVE.replayOwner === "collect") {
-      replayStatus.textContent = LIVE.replayError
-        ? `episode ${S.collectReplayEpisode} · error · ${LIVE.replayError}`
-        : (LIVE.replayLoading
-            ? `episode ${S.collectReplayEpisode} · loading`
-            : `episode ${S.collectReplayEpisode} · review`);
-      replayStatus.style.display = S.ACTIVE_TAB === "collect" ? "" : "none";
-    } else if (selectedEpisodeSaved) {
-      replayStatus.textContent = `episode ${S.collectReplayEpisode} selected`;
-      replayStatus.style.display = S.ACTIVE_TAB === "collect" ? "" : "none";
-    } else {
-      replayStatus.textContent = "";
-      replayStatus.style.display = "none";
+    if (collectionSet && !collectionSlotsPolling) {
+      queueMicrotask(() => pollCollectionSlots(!slotPlan.loaded));
     }
+
+    renderCollectionReplayStatus(selectedEpisodeSaved);
   }
 
 async function exportCollectionQuality() {
@@ -1096,6 +1657,7 @@ async function exportCollectionQuality() {
     qualityTransfer.episodesCompleted = 0;
     qualityTransfer.episodesTotal = 0;
     qualityTransfer.acceptedDir = "";
+    qualityTransfer.uploadPlanId = "";
     qualityTransfer.datasetFormat = datasetFormat;
     if (status) status.textContent = `exporting ${formatLabel}…`;
     renderCollect();
@@ -1158,20 +1720,40 @@ async function uploadCollectionQuality() {
       return;
     }
     const formatLabel = qualityTransferFormatLabel(datasetFormat);
+    const confirmed = qualityTransfer.uploadState === "ready" &&
+      !!qualityTransfer.uploadPlanId;
+    const planId = confirmed ? qualityTransfer.uploadPlanId : "";
     qualityTransfer.phase = "upload";
     qualityTransfer.uploading = true;
     qualityTransfer.uploadJobId = "";
     qualityTransfer.uploadState = "queued";
     qualityTransfer.filesCompleted = 0;
-    qualityTransfer.filesTotal = 0;
     qualityTransfer.bytesCompleted = 0;
-    qualityTransfer.bytesTotal = 0;
-    if (status) status.textContent = `uploading ${formatLabel} accepted export…`;
+    if (!confirmed) {
+      qualityTransfer.uploadPlanId = "";
+      qualityTransfer.filesTotal = 0;
+      qualityTransfer.bytesTotal = 0;
+      qualityTransfer.localFiles = 0;
+      qualityTransfer.localBytes = 0;
+      qualityTransfer.filesSkipped = 0;
+      qualityTransfer.bytesSkipped = 0;
+      qualityTransfer.newFiles = 0;
+      qualityTransfer.changedFiles = 0;
+      qualityTransfer.filesToDelete = 0;
+      qualityTransfer.filesDeleted = 0;
+    }
+    if (status) {
+      status.textContent = confirmed
+        ? `uploading ${formatLabel} accepted export…`
+        : `scanning ${formatLabel} accepted export…`;
+    }
     renderCollect();
     try {
       const result = await apiPost("/api/collect_quality_upload", {
         task: collectTaskValue(),
         dataset_format: datasetFormat,
+        confirmed,
+        plan_id: planId,
       }, { concurrent: true });
       if (!result.ok) {
         qualityTransfer.uploadState = "failed";
@@ -1189,16 +1771,44 @@ async function uploadCollectionQuality() {
         qualityTransfer.filesTotal = Number(job.files_total || 0);
         qualityTransfer.bytesCompleted = Number(job.bytes_completed || 0);
         qualityTransfer.bytesTotal = Number(job.bytes_total || 0);
+        qualityTransfer.localFiles = Number(job.local_files || 0);
+        qualityTransfer.localBytes = Number(job.local_bytes || 0);
+        qualityTransfer.filesSkipped = Number(job.files_skipped || 0);
+        qualityTransfer.bytesSkipped = Number(job.bytes_skipped || 0);
+        qualityTransfer.newFiles = Number(job.new_files || 0);
+        qualityTransfer.changedFiles = Number(job.changed_files || 0);
+        qualityTransfer.filesToDelete = Number(job.files_to_delete || 0);
+        qualityTransfer.filesDeleted = Number(job.files_deleted || 0);
         renderCollect();
+        if (job.state === "ready") {
+          const operationCount = qualityTransfer.filesTotal + qualityTransfer.filesToDelete;
+          qualityTransfer.uploadPlanId = operationCount > 0
+            ? job.job_id || result.job_id || ""
+            : "";
+          if (status) {
+            status.textContent = operationCount > 0
+              ? `${formatLabel} scan complete · ${qualityTransfer.newFiles} new · ` +
+                `${qualityTransfer.changedFiles} changed · ` +
+                `${qualityTransfer.filesToDelete} remove · ` +
+                `${qualityTransfer.filesSkipped} same`
+              : `${formatLabel} scan complete · all ${qualityTransfer.filesSkipped} files same`;
+          }
+          return;
+        }
         if (job.state === "completed") {
           if (status) {
             const remoteDir = job.remote_dir || "remote target";
-            status.textContent = `${formatLabel} accepted upload complete · ` +
-              `${job.files_total || 0} files · ${remoteDir}`;
+            status.textContent = job.skipped
+              ? `${formatLabel} accepted upload skipped · all files same · ${remoteDir}`
+              : `${formatLabel} accepted upload complete · ` +
+                `${job.files_completed || 0} uploaded · ` +
+                `${job.files_deleted || 0} removed · ` +
+                `${job.files_skipped || 0} same · ${remoteDir}`;
           }
           return;
         }
         if (job.state === "failed") {
+          qualityTransfer.uploadPlanId = "";
           if (status) status.textContent = `✗ ${formatLabel} upload · ${job.error || "job failed"}`;
           return;
         }
@@ -1230,7 +1840,8 @@ let reviewRequestId = 0;
 
 function reviewDatasetFor(kind) {
     if (kind === "rollout") return (S.STATUS.rollout || {}).dataset_dir || "";
-    return (S.STATUS.collect || {}).dataset_dir ||
+    return (S.collectionSlots && S.collectionSlots.datasetDir) ||
+      (S.STATUS.collect || {}).dataset_dir ||
       (S.CFG && S.CFG.collection ? (S.CFG.collection.dataset_dir || "") : "");
   }
 
@@ -1254,7 +1865,7 @@ function episodeQcEndpoint(kind) {
   }
 
 function collectReviewMatchesSelection() {
-    return reviewTask === collectTaskValue() && reviewCollectionSet === collectSetValue();
+    return reviewCollectionSet === (S.collectionSlots.dataset || collectSetValue());
   }
 
 function reviewActiveInCurrentTab() {
@@ -1309,8 +1920,8 @@ async function reviewCollectEpisode(item) {
     });
     exitReplayMode();
     S.collectReplayEpisode = episode;
-    reviewTask = collectTaskValue();
-    reviewCollectionSet = collectSetValue();
+    reviewTask = String(item.task || item.prompt || collectTaskValue());
+    reviewCollectionSet = S.collectionSlots.dataset || collectSetValue();
     S.reviewKind = "collect";
     reviewDatasetDir = reviewDatasetFor("collect");
     reviewEpisodeId = episode;
@@ -1323,10 +1934,13 @@ async function reviewCollectEpisode(item) {
     if (title) title.textContent = `episode ${episode} · loading`;
     const err = reviewErrorFor("collect");
     if (err) err.textContent = "";
-    const r = await apiPost("/api/review_episode", {
-      dataset_dir: reviewDatasetDir,
-      episode: String(reviewEpisodeId),
-    });
+    const r = await apiPost("/api/review_episode",
+      {
+        dataset_dir: reviewDatasetDir,
+        episode: String(reviewEpisodeId),
+      },
+      { timeoutMs: 0 },
+    );
     if (requestId !== reviewRequestId) return;
     if (!r.ok) {
       clientTrace("review.collect.error", { episode, request_id: requestId, error: r.error || "review failed" });
@@ -1366,10 +1980,13 @@ async function reviewRolloutEpisode(item) {
     const err = reviewErrorFor("rollout");
     if (title) title.textContent = `episode ${episode} · loading`;
     if (err) err.textContent = "";
-    const r = await apiPost("/api/review_episode", {
-      dataset_dir: reviewDatasetDir,
-      episode: String(reviewEpisodeId),
-    });
+    const r = await apiPost("/api/review_episode",
+      {
+        dataset_dir: reviewDatasetDir,
+        episode: String(reviewEpisodeId),
+      },
+      { timeoutMs: 0 },
+    );
     if (requestId !== reviewRequestId) return;
     if (!r.ok) {
       showReviewError("rollout", r.error || "review failed");
@@ -1386,7 +2003,12 @@ async function reviewRolloutEpisode(item) {
 
 async function submitEpisodeQc(kind, verdict) {
     const episode = kind === "rollout" ? S.rolloutSaveEpisode : S.collectReplayEpisode;
-    if (episode == null) return;
+    if (episode == null) return false;
+    const rejectedSlot = kind === "collect" && verdict === "fail"
+      ? (S.collectionSlots.slots || []).find(
+          (item) => savedEpisodeId(item.episode) === episode
+        )
+      : null;
     S.reviewKind = kind;
     reviewDatasetDir = reviewDatasetFor(kind);
     reviewEpisodeId = episode;
@@ -1407,13 +2029,16 @@ async function submitEpisodeQc(kind, verdict) {
     if (!r.ok) {
       if (title) title.textContent = `episode ${episode} · QC failed`;
       if (status) status.textContent = `✗ ${r.error || "QC failed"}`;
-      return;
+      return false;
     }
     if (title) title.textContent = `episode ${episode} · ${verdict}`;
     if (status) status.textContent = `episode ${episode} marked ${verdict}`;
     invalidateEpisodeHistory(kind);
-    pollEpisodeHistory(true);
+    await pollEpisodeHistory(true);
     applyStatus(await apiGet("/api/status"));
+    if (kind === "collect") await pollCollectionSlots(true);
+    if (rejectedSlot) await activateCollectionSlot(rejectedSlot);
+    return true;
   }
 
 async function submitEpisodeNote(kind) {
@@ -1454,9 +2079,11 @@ async function saveAnnotation() {
     const dir = ($("replay-dataset-input").value || "").trim();
     const ep = S.qcEpisode;
     $("replay-anno-status").textContent = "saving…";
-    const r = await apiPost("/api/annotate", {
-      dataset_dir: dir, episode: ep, annotation: $("replay-anno-text").value || "",
-    });
+    const r = await apiPost(
+      "/api/annotate",
+      { dataset_dir: dir, episode: ep, annotation: $("replay-anno-text").value || "" },
+      { timeoutMs: 0 },
+    );
     $("replay-anno-status").textContent = r.ok ? `episode ${ep} annotation saved` : `✗ ${r.error || "save failed"}`;
   }
 
@@ -1486,4 +2113,6 @@ export {
   exportCollectionQuality, saveAnnotation, submitEpisodeNote, submitEpisodeQc, submitQc,
   installCollectKeyboardControls, renderCollectControls, uploadCollectionQuality,
   changeCollectionExportFormat, invalidateEpisodeHistory, pollEpisodeHistory,
+  pollCollectionSlots, selectCollectionDataset,
+  changeCollectionSlotFilter, changeCollectionSlotPage, toggleCollectionSlotAll,
 };

@@ -7,6 +7,7 @@ import logging
 import os
 import threading
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 # Silence ffmpeg's stderr spam (e.g. "av1 ... Missing Sequence Header") emitted
 # while OpenCV probes a codec it cannot decode before falling back to PyAV. Must be
@@ -24,8 +25,10 @@ from core.config import ConfigDict, resolve_video_key
 from core.registry import TRANSPORT_REGISTRY
 from core.types import Observation
 from core.utils.lerobot import LeRobotDatasetIO
-from robots.base import ActuatorGroup, Robot
 from transport.base import TransportBridge
+
+if TYPE_CHECKING:
+    from robots.base import ActuatorGroup, Robot
 
 av.logging.set_level(av.logging.PANIC)
 

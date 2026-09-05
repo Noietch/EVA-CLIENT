@@ -1,0 +1,29 @@
+robot:
+  ur5e:
+    label: UR5e
+    client_config: configs/01_deploy/ur5e/_base.py
+    launch:
+      python: examples/hardware/ur5e/.venv/bin/python
+      module: examples.hardware.ur5e.node
+    settings:
+      obs_endpoint: tcp://127.0.0.1:5555
+      action_endpoint: tcp://127.0.0.1:5556
+      camera_endpoint: tcp://127.0.0.1:5557
+      robot_ip: 127.0.0.1
+      gripper_port: /dev/ttyUSB1
+      rate: 25
+camera:
+  ur5e_opencv:
+    separate: true
+    label: USB cameras
+    repeat: [camera]
+    robots: [ur5e]
+    settings:
+      camera: [wrist_image:2:1280:720:25:0, exterior_image:0:1280:720:25:0]
+teleop:
+  ur5e_leader:
+    label: UR5e master arm
+    robots: [ur5e]
+    settings:
+      teleop_port: /dev/ttyACM0
+      teleop_joint_coef: 1,-1,-1,-1,-1,-1

@@ -3,7 +3,7 @@
 import { $, LIVE, S, apiGet, apiPost, setCommandMetadata } from "./core.js";
 import { closeChartModal, drawLiveCharts, liveDimsAll, onScrubInput, openChartModal, resetLiveSeries } from "./charts.js";
 import { applyTune, applyManualTune, renderConfig, manualConnect, manualDisconnect, manualDispatchToggle, enterManualSim, applyStatus, pauseSetup, replayIsLocalMode, resumeSetup, retrySetup, startRunFromDebug, updateGuide } from "./run.js";
-import { changeCollectionExportFormat, clearReviewPlayback, collectConfigured, exportCollectionQuality, installCollectKeyboardControls, pollEpisodeHistory, renderCollect, renderRolloutSave, returnReviewToLive, reviewActiveInCurrentTab, saveAnnotation, startCollectFromTab, submitEpisodeNote, submitEpisodeQc, submitQc, uploadCollectionQuality } from "./collect.js";
+import { changeCollectionExportFormat, changeCollectionSlotFilter, changeCollectionSlotPage, clearReviewPlayback, collectConfigured, exportCollectionQuality, installCollectKeyboardControls, pollEpisodeHistory, renderCollect, renderRolloutSave, returnReviewToLive, reviewActiveInCurrentTab, saveAnnotation, startCollectFromTab, submitEpisodeNote, submitEpisodeQc, submitQc, toggleCollectionSlotAll, uploadCollectionQuality } from "./collect.js";
 import { evalReset, evalSetup, evalRunToggle, evalResumeOnEnter, submitEvalScore, loadEvalResults, renderEvalSelectors, loadResultsAll, tpSeek, tpToggle, trialPopClose } from "./eval.js";
 import { handleVisibilityChange, replayPlay, replayStop, replayToggle, seekReplay, loop, pollFrame, pollScene, refreshCameraStreams, exitReplayMode } from "./replay.js";
 import { pollRlSeries, renderRlConfig, renderRlStatus } from "./rl.js";
@@ -28,7 +28,7 @@ const FIXED_COMMANDS = {
   "bm-connect": "web:connect",
   "bm-send": "web:manual_send",
   "bm-home": "web:manual_home",
-  "b-collect-toggle": "web:operator_action:{intent}:ui",
+  "b-collect-toggle": "web:collect_start|web:operator_action:accept:ui",
   "b-collect-cancel": "web:collect_cancel",
   "b-collect-home": "web:collect_home",
   "rl-b-setup": "web:rl_setup",
@@ -51,7 +51,6 @@ function annotateFixedCommands() {
   setCommandMetadata($("mode-list"), "web:select_mode:{mode}", true);
   setCommandMetadata($("strategy-list"), "web:select_strategy:{strategy}", true);
   setCommandMetadata($("prompt-list"), "web:switch_task:{task}", true);
-  setCommandMetadata($("collect-prompt-list"), "web:select_collect_task:{task}", true);
   setCommandMetadata($("rl-task-list"), "web:rl_select_task:{task}", true);
   setCommandMetadata($("rl-policy-list"), "web:rl_select_policy:{slot}", true);
   setCommandMetadata($("rl-critic-list"), "web:rl_select_critic:{slot}", true);
@@ -66,6 +65,13 @@ function moveTabThumb() {
     thumb.style.setProperty("--thumb-x", active.offsetLeft + "px");
     thumb.style.setProperty("--thumb-w", active.offsetWidth + "px");
     thumb.classList.add("ready");
+    const tabs = active.parentElement;
+    if (tabs && tabs.scrollWidth > tabs.clientWidth) {
+      tabs.scrollTo({
+        left: active.offsetLeft - (tabs.clientWidth - active.offsetWidth) / 2,
+        behavior: "smooth",
+      });
+    }
   }
 
 function relocateCanvas(tab) {
@@ -80,10 +86,11 @@ function relocateCanvas(tab) {
     else if (tab === "rl") host = $("rl-stage-col");
     else host = $("view-" + tab);
     if (host && stage.parentElement !== host) host.appendChild(stage);
-    const showSeries = tab === "rl" || tab === "replay" ||
-      (tab === "collect" && LIVE.replayOwner === "collect") ||
+    const collectReview = tab === "collect" && LIVE.replayOwner === "collect";
+    const showSeries = tab === "rl" || tab === "replay" || collectReview ||
       (tab === "debug" && LIVE.replayOwner === "rollout");
     stage.classList.toggle("no-series", !showSeries);
+    stage.classList.toggle("collect-review", collectReview);
     const rlReplay = tab === "rl" && LIVE.replayMode && LIVE.replayOwner === "rl";
     stage.classList.toggle("rl-live", tab === "rl" && !rlReplay);
     stage.classList.toggle("rl-replay", rlReplay);
@@ -193,6 +200,29 @@ function setActiveTab(tab) {
     pollEpisodeHistory(true);
   }
 
+async function openCollectRobotReplay() {
+    const episode = S.collectReplayEpisode;
+    const datasetDir = (S.collectionSlots.datasetDir || (S.STATUS.collect || {}).dataset_dir || "").trim();
+    if (episode == null || !datasetDir || !S.STATUS.transport_connected) return;
+    const button = $("review-robot-replay");
+    if (button) button.disabled = true;
+    S.pendingQcLoad = { dir: datasetDir, episode };
+    S.qcMode = false;
+    S._setupFired = false;
+    S._setupPaused = false;
+    try {
+      await apiPost("/api/tab_switch", { tab: "replay" });
+      await apiPost("/api/select_mode", { mode: "real" });
+      S.STATUS.cli_mode = "real";
+      setActiveTab("replay");
+    } catch (error) {
+      S.pendingQcLoad = null;
+      const status = $("collect-err");
+      if (status) status.textContent = error.message || "Unable to open robot replay";
+      if (button) button.disabled = false;
+    }
+  }
+
 // ===== main =====
 
 "use strict";
@@ -202,6 +232,11 @@ Object.assign(window, { tpToggle, tpSeek, trialPopClose, replayToggle });
 
 async function boot() {
     S.CFG = await apiGet("/api/config");
+    try {
+      S.SCENE_PLAN = await apiGet("/api/scene_plan");
+    } catch {
+      S.SCENE_PLAN = { ok: false, tasks: [], scenes: [], positions: [], objects: [] };
+    }
     initDashboard();
     installCollectKeyboardControls();
     renderConfig();
@@ -241,6 +276,7 @@ async function boot() {
         drawLiveCharts();
       });
       ro.observe($("stage"));
+      ro.observe($("canvas-col"));
     }
     resetLiveSeries();
     requestAnimationFrame(moveTabThumb);
@@ -340,7 +376,6 @@ $("b-collect-toggle").onclick = () => {
       updateGuide();
       return;
     }
-    if (live) S.collectQueueEnabled = true;
     S.collectToggleBusy = !live;
     renderCollect();
     // Normal release is by the status poll once `collecting` matches the target. This
@@ -360,7 +395,6 @@ $("collect-arm-enable").onchange = () => {
     apiPost("/api/collect_arm", { enabled: S.collectArmEnabled });
   };
 $("b-collect-cancel").onclick = () => {
-    S.collectQueueEnabled = false;
     renderCollect();
     return apiPost("/api/operator_action", { intent: "cancel" });
   };
@@ -376,16 +410,30 @@ $("b-collect-home").onclick = () => {
 $("b-collect-qc-pass").onclick = () => submitEpisodeQc("collect", "pass");
 $("b-goto-qc").onclick = () => submitEpisodeQc("collect", "fail");
 $("b-collect-note-save").onclick = () => submitEpisodeNote("collect");
+$("collect-slot-scene-filter").onchange = (event) => {
+  changeCollectionSlotFilter("scene", event.target.value);
+};
+
+$("control-arm-enable").onchange = async () => {
+    const toggle = $("control-arm-enable");
+    toggle.disabled = true;
+    await apiPost("/api/control_arm", { enabled: toggle.checked });
+};
+$("collect-slot-task-filter").onchange = (event) => {
+  changeCollectionSlotFilter("task", event.target.value);
+};
+$("b-collect-slot-prev").onclick = () => changeCollectionSlotPage(-1);
+$("b-collect-slot-next").onclick = () => changeCollectionSlotPage(1);
 $("b-collect-quality-export").onclick = exportCollectionQuality;
 $("b-collect-quality-upload").onclick = uploadCollectionQuality;
 $("collect-export-format").onchange = changeCollectionExportFormat;
 $("review-return-live").onclick = returnReviewToLive;
+$("review-robot-replay").onclick = openCollectRobotReplay;
 $("replay-b-qc-pass").onclick = () => submitQc("pass");
 $("replay-b-qc-fail").onclick = () => submitQc("fail");
 $("replay-b-anno-save").onclick = () => saveAnnotation();
 $("collect-queue-toggle").onclick = () => {
-    S.collectQueueExpanded = !S.collectQueueExpanded;
-    renderCollect();
+    toggleCollectionSlotAll();
   };
 document.querySelector("#panel-setup .auto-setup-row").onclick = () => {
     if ($("panel-setup").dataset.st === "error") retrySetup();

@@ -22,6 +22,7 @@ from examples.hardware.yam.camera import (
     load_camera_profiles,
     parse_camera_specs,
 )
+from core.devices.camera import CameraPublisher, CameraSource
 from examples.hardware.yam.orbbec_camera import (
     OrbbecCameraCache,
     OrbbecCameraSpec,
@@ -187,7 +188,7 @@ def _parse_leader_gripper_endpoints(
 class YamZmqNode:
     """Bridge EVA wire messages to YAM follower and leader YAM arms."""
 
-    def __init__(self, config: YamZmqConfig) -> None:
+    def __init__(self, config: YamZmqConfig, camera_endpoint: str = "") -> None:
         self._config = config
         self._stop = threading.Event()
         self._ctx = zmq.Context.instance()
@@ -204,11 +205,17 @@ class YamZmqNode:
         self._leaders = YamLeaders(config)
         robot = ROBOT_REGISTRY.build(config.robot_name)
         self._fk_solver = robot.build_kinematics(initial_qpos_groups=robot.initial_qpos_by_group())
-        self._camera_caches = (RealSenseCameraCache(config.cameras),)
+        self._camera_endpoint = camera_endpoint
+        self._camera_caches = (
+            CameraSource(camera_endpoint)
+            if camera_endpoint
+            else RealSenseCameraCache(config.cameras),
+        )
         self._orbbec_camera_cache: OrbbecCameraCache | None = None
         self._collection_active = False
         self._hil_active = False
         self._direct_leader_control = config.direct_leader_control
+        self._collection_control_source = "transport"
         self._hil_mode = "relative"
         self._hil_error = ""
         self._leader_anchor: np.ndarray | None = None
@@ -268,12 +275,20 @@ class YamZmqNode:
         logger.info("YAM direct dual-leader control started with relative anchors")
         return True
 
-    def _start_collection(self) -> None:
+    def _start_collection(self, control_source: str = "transport") -> None:
+        if control_source not in {"transport", "client"}:
+            raise ValueError(f"Unsupported YAM control source: {control_source}")
+        if control_source == "client" and self._direct_leader_control:
+            raise ValueError("Disable direct leader control before using VR")
         if self._collection_active:
+            if self._collection_control_source != control_source:
+                raise ValueError("Stop collection before switching control source")
             return
-        self._capture_leader_anchors()
+        if control_source == "transport":
+            self._capture_leader_anchors()
+        self._collection_control_source = control_source
         self._collection_active = True
-        logger.info("YAM dual-leader collection started")
+        logger.info("YAM collection started: %s", control_source)
 
     def _stop_collection(self) -> None:
         self._collection_active = False
@@ -325,7 +340,7 @@ class YamZmqNode:
                 continue
             if action.target == COLLECTION_START_TARGET:
                 try:
-                    self._start_collection()
+                    self._start_collection(action.mode or "transport")
                 except Exception as exc:
                     logger.exception("Could not start YAM collection")
                     self._hil_error = str(exc)
@@ -343,7 +358,7 @@ class YamZmqNode:
                 action.target == "sim"
                 or self._direct_leader_control
                 or self._hil_active
-                or self._collection_active
+                or (self._collection_active and self._collection_control_source == "transport")
             ):
                 continue
             try:
@@ -353,6 +368,8 @@ class YamZmqNode:
                 logger.warning("Dropped invalid YAM action: %s", exc)
 
     def _leader_action(self) -> np.ndarray | None:
+        if self._collection_active and self._collection_control_source == "client":
+            return None
         if not self._direct_leader_control and not self._collection_active and not self._hil_active:
             return None
         if not self._ensure_direct_leader_control() and (
@@ -532,7 +549,7 @@ class YamZmqNode:
                 publisher.close(linger=0)
 
     def serve_forever(self) -> None:
-        if self._config.orbbec_cameras:
+        if self._config.orbbec_cameras and not self._camera_endpoint:
             self._orbbec_camera_cache = OrbbecCameraCache(self._config.orbbec_cameras)
             self._camera_caches += (self._orbbec_camera_cache,)
             if not self._orbbec_camera_cache.wait_until_online(timeout_s=30.0):
@@ -615,6 +632,8 @@ class YamZmqNode:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
+    parser.add_argument("--camera-only", action="store_true")
+    parser.add_argument("--camera-endpoint", default="")
     parser.add_argument("--obs-endpoint", default="tcp://127.0.0.1:5555")
     parser.add_argument("--action-endpoint", default="tcp://127.0.0.1:5556")
     parser.add_argument(
@@ -930,7 +949,11 @@ def build_config(args: argparse.Namespace) -> YamZmqConfig:
                 "--gripper-limits-override values must be distinct and within [-20, 20]"
             )
         gripper_limits_override = (float(closed), float(opened))
-    if args.gripper_limits_override is None and not args.allow_gripper_calibration:
+    if (
+        args.gripper_limits_override is None
+        and not args.allow_gripper_calibration
+        and not args.camera_only
+    ):
         raise ValueError(
             "motorized gripper startup requires calibrated --gripper-limits-override "
             "or explicit --allow-gripper-calibration"
@@ -1011,7 +1034,13 @@ def main() -> None:
         config = build_config(args)
     except ValueError as exc:
         parser.error(str(exc))
-    node = YamZmqNode(config)
+    if args.camera_only:
+        caches = (RealSenseCameraCache(config.cameras),)
+        if config.orbbec_cameras:
+            caches += (OrbbecCameraCache(config.orbbec_cameras),)
+        CameraPublisher(caches, args.camera_endpoint).run()
+        return
+    node = YamZmqNode(config, args.camera_endpoint)
 
     def stop(*_args: object) -> None:
         node.stop()

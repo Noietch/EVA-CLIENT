@@ -123,8 +123,9 @@ def parse_realsense_camera_specs(
     fps: int,
     timeout_ms: int,
     profile: str = "night",
+    profile_path: Path = DEFAULT_ARX_X5_D405_PROFILE_PATH,
 ) -> tuple[RealSenseCameraSpec, ...]:
-    color_profiles = load_realsense_color_profiles(profile=profile)
+    color_profiles = load_realsense_color_profiles(profile_path, profile)
     cameras: list[RealSenseCameraSpec] = []
     for raw in specs:
         if "=" not in raw:
@@ -161,8 +162,9 @@ def default_realsense_camera_specs(
     fps: int,
     timeout_ms: int,
     profile: str = "night",
+    profile_path: Path = DEFAULT_ARX_X5_D405_PROFILE_PATH,
 ) -> tuple[RealSenseCameraSpec, ...]:
-    color_profiles = load_realsense_color_profiles(profile=profile)
+    color_profiles = load_realsense_color_profiles(profile_path, profile)
     return tuple(
         RealSenseCameraSpec(
             image_key=image_key,

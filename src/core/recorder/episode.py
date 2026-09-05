@@ -334,6 +334,7 @@ class EpisodeLogger:
             collection_min_capture_time: Collection-only source timestamp cutoff
                 used to drop frames cached before START RECORD.
         """
+        episode_started_at = _dt.datetime.now().astimezone()
         dataset_dir = None
         if self._collection_writer is not None:
             dataset_dir = self._collection_dataset_dir(task, collection_dataset)
@@ -349,9 +350,14 @@ class EpisodeLogger:
         self._raw_episode_batch = CollectionRawBatch()
         self._raw_episode_frame_labels = []
         self._raw_episode_snapshots = []
-        self._episode_started_at = _dt.datetime.now().astimezone()
+        self._episode_started_at = episode_started_at
         self._episode_started_wall_time = time.time()
         if self._collection_writer is not None:
+            assert dataset_dir is not None
+            self._collection_writer.ensure_collection_started_at(
+                dataset_dir,
+                episode_started_at.isoformat(timespec="seconds"),
+            )
             self._collection_writer.start_episode(collection_min_capture_time)
             return
 
@@ -1596,6 +1602,8 @@ class EpisodeLogger:
                 ffmpeg_params=[
                     "-preset",
                     "ultrafast",
+                    "-threads",
+                    "1",
                     "-g",
                     str(max(1, round(video_fps))),
                     "-movflags",
@@ -1743,7 +1751,14 @@ class EpisodeLogger:
                 fps=video_fps,
                 codec="libx264",
                 macro_block_size=1,
-                ffmpeg_params=["-preset", "ultrafast", "-movflags", "+faststart"],
+                ffmpeg_params=[
+                    "-preset",
+                    "ultrafast",
+                    "-threads",
+                    "1",
+                    "-movflags",
+                    "+faststart",
+                ],
             )
             try:
                 for frame in frames:
@@ -2021,7 +2036,7 @@ class EpisodeLogger:
         pending_length = 0
         if payload is not None:
             pending_length = max(len(payload.frame_labels), len(payload.raw_snapshots))
-        return {
+        summary = {
             "episode_index": job.episode_index,
             "task": str(row.get("prompt") or job.task),
             "clip_id": job.episode_meta.get("clip_id"),
@@ -2036,6 +2051,16 @@ class EpisodeLogger:
             "quality_issue_count": quality_issue_count,
             "error": "" if job.error is None else str(job.error),
         }
+        for key in (
+            "scene_id",
+            "scene_round",
+            "random_seed",
+            "slot_id",
+            "task_id",
+        ):
+            if key in row:
+                summary[key] = row[key]
+        return summary
 
     def finalize(self) -> None:
         """Write meta/stats.json (per-feature min/max/mean/std) and meta/info.json."""

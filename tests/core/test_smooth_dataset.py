@@ -1,6 +1,9 @@
 import numpy as np
+import pytest
 
 from core.utils.smooth_dataset import smooth_arm_qpos
+
+pytestmark = pytest.mark.unit
 
 
 def normalized_acceleration(values: np.ndarray) -> float:

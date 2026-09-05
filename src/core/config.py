@@ -16,6 +16,7 @@ The returned ConfigDict supports dotted attribute access
 
 from __future__ import annotations
 
+import csv
 import math
 import posixpath
 import re
@@ -23,6 +24,7 @@ from pathlib import Path, PurePosixPath
 from typing import TypedDict
 
 from core.cfg import Config, ConfigDict
+from core.utils.s3_upload import S3UploadConfig
 
 
 class StrategyYamlArgs(TypedDict, total=False):
@@ -54,6 +56,60 @@ _CONSOLE_INITIAL_TABS = frozenset(
 _SCENE_DATASET_RE = re.compile(
     r"^(?P<base>.+)_scene_(?P<index>[1-9][0-9]*)(?:_(?P<date>[0-9]{8}))?$"
 )
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _resolve_collection_task_set_path(path: str | Path) -> Path:
+    root = Path(path).expanduser()
+    if not root.is_absolute():
+        root = _PROJECT_ROOT / root
+    return root.resolve()
+
+
+def load_collection_task_set(
+    path: str | Path,
+    dataset_name: str | None = None,
+) -> dict[str, list[tuple[str, int]]]:
+    """Load normalized collection tasks from a task-set directory."""
+    root = _resolve_collection_task_set_path(path)
+    tasks_path = root / "tasks.csv"
+    if not tasks_path.is_file():
+        raise FileNotFoundError(f"collection task-set is missing {tasks_path}")
+
+    prompt_targets: dict[str, int] = {}
+    try:
+        with tasks_path.open("r", encoding="utf-8-sig", newline="") as handle:
+            rows = csv.DictReader(handle)
+            required = {"prompt_en", "total_epsiodes_count"}
+            missing = sorted(required - set(rows.fieldnames or ()))
+            if missing:
+                raise ValueError(f"{tasks_path} is missing required columns: {', '.join(missing)}")
+            for row_number, row in enumerate(rows, start=2):
+                prompt = str(row.get("prompt_en", "") or "").strip()
+                if not prompt:
+                    raise ValueError(f"{tasks_path}:{row_number} prompt_en must not be empty")
+                try:
+                    target = int(str(row.get("total_epsiodes_count", "") or "").strip())
+                except ValueError as error:
+                    raise ValueError(
+                        f"{tasks_path}:{row_number} total_epsiodes_count must be an integer"
+                    ) from error
+                previous_target = prompt_targets.get(prompt)
+                if previous_target is None:
+                    prompt_targets[prompt] = target
+                elif previous_target == -1 or target == -1:
+                    prompt_targets[prompt] = -1
+                else:
+                    prompt_targets[prompt] = previous_target + target
+    except (OSError, UnicodeError, csv.Error) as error:
+        raise ValueError(f"unable to read collection task-set {tasks_path}") from error
+
+    if not prompt_targets:
+        raise ValueError(f"{tasks_path} must contain at least one task")
+    name = str(dataset_name or root.name).strip()
+    if not _is_safe_dataset_name_component(name):
+        raise ValueError("collection task-set dataset_name must be a safe path component")
+    return {name: list(prompt_targets.items())}
 
 
 def _is_safe_dataset_name_component(value: str) -> bool:
@@ -66,6 +122,19 @@ def _is_safe_posix_directory(value: str) -> bool:
     normalized = posixpath.normpath(value)
     canonical = value == "/" or normalized == value.rstrip("/")
     return path.is_absolute() and canonical and all(part not in {".", ".."} for part in path.parts)
+
+
+def _is_safe_loopback_directory(value: str) -> bool:
+    path = Path(value)
+    if (
+        not value
+        or path == Path(".")
+        or any(char in value for char in "\r\n")
+        or any(part in {".", ".."} for part in path.parts)
+        or path.as_posix() != value.rstrip("/")
+    ):
+        return False
+    return path.expanduser().resolve() != Path("/")
 
 
 def load_config(path: str | Path) -> ConfigDict:
@@ -85,12 +154,29 @@ def load_config(path: str | Path) -> ConfigDict:
     cfg = ConfigDict(cfg)
     _normalize_eval_cfg(cfg)
     _normalize_rl_cfg(cfg)
+    _normalize_collection_task_set(cfg)
     _coerce_spaces(cfg)
     _apply_derived(cfg, p)
     _validate(cfg)
     _resolve_eval_checkpoints(cfg, p)
     _resolve_rl_policies(cfg, p)
     return cfg
+
+
+def _normalize_collection_task_set(cfg: ConfigDict) -> None:
+    """Load a mounted task set; otherwise retain configured tasks."""
+    collection = cfg.get("collection") or {}
+    task_set_dir = str(collection.get("task_set_dir", "") or "").strip()
+    if not task_set_dir:
+        return
+    root = _resolve_collection_task_set_path(task_set_dir)
+    if not root.is_dir():
+        return
+    authored_tasks = collection.get("tasks") or {}
+    dataset_name = str(collection.get("task_set_name", "") or "").strip()
+    if not dataset_name and len(authored_tasks) == 1:
+        dataset_name = str(next(iter(authored_tasks)))
+    collection["tasks"] = load_collection_task_set(root, dataset_name or None)
 
 
 def resolve_video_key(dataset_keys: ConfigDict | dict, cam_key: str) -> str | None:
@@ -163,7 +249,17 @@ def _apply_derived(cfg: ConfigDict, path: Path) -> None:
 
 
 def _validate(cfg: ConfigDict) -> None:
-    """Validate configured collection and RL storage contracts."""
+    """Validate configured transport, collection, and RL storage contracts."""
+    transport = cfg.get("transport") or {}
+    image_mode = str(transport.get("image_mode", "stream"))
+    if image_mode not in {"stream", "on_demand"}:
+        raise ValueError(
+            f"transport.image_mode must be 'stream' or 'on_demand', got {image_mode!r}"
+        )
+    timeout = float(transport.get("image_request_timeout_s", 2.0))
+    if timeout <= 0.0:
+        raise ValueError("transport.image_request_timeout_s must be positive")
+
     console = cfg.get("console") or {}
     initial_tab = str(console.get("initial_tab", "auto"))
     if initial_tab not in _CONSOLE_INITIAL_TABS:
@@ -239,6 +335,25 @@ def _validate(cfg: ConfigDict) -> None:
         remote_dir = str(sftp.get("remote_dir", "")).strip()
         if not _is_safe_posix_directory(remote_dir):
             raise ValueError("collection.storage.sftp.remote_dir must be a canonical absolute path")
+    s3 = (coll.get("storage") or {}).get("s3") or {}
+    if s3:
+        try:
+            S3UploadConfig(
+                endpoint=str(s3.get("endpoint", "")),
+                bucket=str(s3.get("bucket", "")),
+                prefix=str(s3.get("prefix", "")),
+                sign_service=str(s3.get("sign_service", "")),
+                secure=s3.get("secure", False),
+            )
+        except ValueError as error:
+            raise ValueError(f"collection.storage.s3: {error}") from error
+    loopback = (coll.get("storage") or {}).get("loopback") or {}
+    if loopback:
+        remote_dir = str(loopback.get("remote_dir", "")).strip()
+        if not _is_safe_loopback_directory(remote_dir):
+            raise ValueError(
+                "collection.storage.loopback.remote_dir must be a canonical non-root path"
+            )
     rl_cfg = cfg.get("rl_cfg")
     columns = set(schema.get("columns") or {})
     if columns:
@@ -259,27 +374,6 @@ def _validate(cfg: ConfigDict) -> None:
 
     if rl_cfg and str(rl_cfg.data.format) != "lerobot":
         raise ValueError("rl.data.format must be 'lerobot' in this version")
-    rollout_source = str(((cfg.get("rollout") or {}).get("intervention") or {}).get("source", ""))
-    if rollout_source and rollout_source not in _ROLLOUT_INTERVENTION_SOURCES:
-        raise ValueError(
-            "rollout.intervention.source must be one of "
-            f"{sorted(_ROLLOUT_INTERVENTION_SOURCES)}, got {rollout_source!r}"
-        )
-    if rl_cfg is not None:
-        rl_source = str((rl_cfg.get("intervention") or {}).get("source", ""))
-        if rl_source and rl_source not in _ROLLOUT_INTERVENTION_SOURCES:
-            raise ValueError(
-                "rl.intervention.source must be one of "
-                f"{sorted(_ROLLOUT_INTERVENTION_SOURCES)}, got {rl_source!r}"
-            )
-        if (
-            rl_source == "teleop_client"
-            and str((coll.get("teleop") or {}).get("control_source", "")) != "client"
-        ):
-            raise ValueError(
-                "rl.intervention.source='teleop_client' requires "
-                "collection.teleop.control_source='client'"
-            )
 
     # Validate rollout intervention input source
     for field, section in (("rollout", cfg.get("rollout") or {}), ("rl", rl_cfg or {})):

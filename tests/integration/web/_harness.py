@@ -15,7 +15,6 @@ import dataclasses
 import http.client
 import json
 import queue
-import socket
 import threading
 import time
 from collections.abc import Generator
@@ -25,6 +24,7 @@ from typing import Any
 import numpy as np
 
 from core.app import run as app
+from core.app.console.episode_preview import EpisodePreview
 from core.app.console.server import (
     ConsoleContext,
     ConsoleRequestHandler,
@@ -54,6 +54,7 @@ class _DebugTransport(TransportBridge):
         self._qpos = np.asarray(robot.initial_qpos, dtype=np.float32).copy()
         self._camera_names = [cam.observation_key for cam in robot.observation_schema.cameras]
         self._raw_index = 0
+        self._rng = np.random.default_rng(0)
 
     def get_frame(self) -> Observation | None:
         if self._shutdown.is_set():
@@ -61,7 +62,7 @@ class _DebugTransport(TransportBridge):
         h = self._config.transport.image_height
         w = self._config.transport.image_width
         images = {
-            name: np.random.randint(0, 256, (h, w, 3), dtype=np.uint8)
+            name: self._rng.integers(0, 256, (h, w, 3), dtype=np.uint8)
             for name in self._camera_names
         }
         return Observation(images=images, state_qpos=self._qpos.copy())
@@ -74,7 +75,7 @@ class _DebugTransport(TransportBridge):
         timestamp = float(self._raw_index)
         self._raw_index += 1
         images = {
-            name: np.random.randint(0, 256, (h, w, 3), dtype=np.uint8)
+            name: self._rng.integers(0, 256, (h, w, 3), dtype=np.uint8)
             for name in self._camera_names
         }
         state = self._qpos.copy()
@@ -113,14 +114,6 @@ MULTI_STRATEGY = {
     "sync": {"type": "BaseInferStrategy", "args": {"execute_horizon": 5}},
     "rtc": {"type": "RtcInferStrategy", "args": {}},
 }
-
-
-def free_port() -> int:
-    s = socket.socket()
-    s.bind(("127.0.0.1", 0))
-    port = s.getsockname()[1]
-    s.close()
-    return port
 
 
 @dataclasses.dataclass
@@ -283,7 +276,7 @@ def console_config(**overrides: Any) -> ConfigDict:
 
 
 @contextlib.contextmanager
-def serve_console(config: ConfigDict) -> Generator[WebHarness]:
+def serve_console(config: ConfigDict, output_dir: Path | None = None) -> Generator[WebHarness]:
     """Run a console server on an ephemeral port for the duration of the block.
 
     Builds the server directly (not via start_console_server) so the test owns the
@@ -291,21 +284,31 @@ def serve_console(config: ConfigDict) -> Generator[WebHarness]:
     irrelevant to the API contract).
     """
     runtime, session = build_runtime(config)
-    port = free_port()
     ctx = ConsoleContext(
         config=config,
         runtime=runtime,
         session=session,
         obs_reader=runtime.transport.create_observation_reader(),
         scene=None,
+        output_dir=str(output_dir) if output_dir is not None else "",
+        preview=EpisodePreview(config, output_dir) if output_dir is not None else None,
     )
-    ConsoleRequestHandler.ctx = ctx
-    server = ThreadingHTTPServer(("127.0.0.1", port), ConsoleRequestHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+
+    class Handler(ConsoleRequestHandler):
+        pass
+
+    Handler.ctx = ctx
+    runtime.console_ctx = ctx
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(
+        target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
+    )
     thread.start()
     try:
-        yield WebHarness(config, runtime, session, port)
+        yield WebHarness(config, runtime, session, server.server_port)
     finally:
         server.shutdown()
         server.server_close()
         runtime.transport.close()
+        thread.join(timeout=5)
+        assert not thread.is_alive()

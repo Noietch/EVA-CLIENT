@@ -10,6 +10,11 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
+from core.utils.dataset_upload import (
+    uploaded_source_episode_indices,
+    uploaded_source_episode_indices_for_export,
+)
+
 _DATASET_CACHE_MAX = 32
 _DATASET_CACHE_LOCK = threading.RLock()
 _DATASET_CACHE: OrderedDict[
@@ -82,6 +87,21 @@ def _duration(row: dict[str, Any], fps: float) -> float:
         return 0.0
 
 
+def _frame_count(row: dict[str, Any]) -> int:
+    """Return the recorded frame count used by LeRobot episode metadata."""
+    value = row.get("length", row.get("frames", row.get("frame_count", 0)))
+    try:
+        return max(0, int(float(value)))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _local_date(value: dt.datetime | None) -> dt.date | None:
+    if value is None:
+        return None
+    return value.astimezone().date() if value.tzinfo is not None else value.date()
+
+
 def _dataset_mode(raw_dir: Path) -> str | None:
     if raw_dir.parent.name == "episodes":
         return "eval"
@@ -110,6 +130,50 @@ def discover_raw_datasets(roots: Iterable[Path]) -> list[tuple[Path, str]]:
             if mode is not None and (resolved / "meta" / "episodes.jsonl").is_file():
                 found[resolved] = mode
     return sorted(found.items(), key=lambda item: str(item[0]))
+
+
+def _accepted_export(raw_dir: Path, marker_path: Path) -> dict[str, Any] | None:
+    accepted_dir = marker_path.parent.parent.resolve()
+    dataset_format = accepted_dir.parent.name
+    marker = _read_json(marker_path)
+    indices = marker.get("source_episode_indices")
+    try:
+        marker_source = Path(str(marker.get("source_dir") or "")).resolve()
+    except (OSError, ValueError):
+        return None
+    if (
+        marker.get("subset") != "accepted"
+        or marker.get("dataset_format") != dataset_format
+        or marker_source != raw_dir
+        or not isinstance(indices, list)
+        or any(type(value) is not int or value < 0 for value in indices)
+    ):
+        return None
+    source_indices = set(indices)
+    uploaded_indices = uploaded_source_episode_indices_for_export(accepted_dir, raw_dir)
+    return {
+        "dataset": _dataset_name(raw_dir, "collection"),
+        "source_dir": str(raw_dir),
+        "accepted_dir": str(accepted_dir),
+        "dataset_format": dataset_format,
+        "accepted_episodes": len(source_indices),
+        "uploaded_episodes": len(source_indices & uploaded_indices),
+        "not_uploaded_episodes": len(source_indices - uploaded_indices),
+    }
+
+
+def discover_dashboard_upload_candidates(roots: Iterable[Path]) -> list[dict[str, Any]]:
+    """Find validated accepted exports belonging to discovered collection datasets."""
+    candidates: list[dict[str, Any]] = []
+    for raw_dir, mode in discover_raw_datasets(roots):
+        if mode != "collection":
+            continue
+        export_root = raw_dir.parent / "export"
+        for marker_path in sorted(export_root.glob("*/accepted/meta/quality_split.json")):
+            candidate = _accepted_export(raw_dir, marker_path)
+            if candidate is not None:
+                candidates.append(candidate)
+    return candidates
 
 
 def _episode_record(
@@ -165,6 +229,7 @@ def _episode_record(
         "started_at": _iso(started),
         "ended_at": _iso(ended),
         "duration_seconds": round(duration, 3),
+        "frames": _frame_count(row),
         "session_id": str(row.get("session_id") or ""),
         "valid": valid,
         "quality": quality,
@@ -212,7 +277,7 @@ def _load_dataset_records(
     return value
 
 
-def _summary(episodes: list[dict[str, Any]]) -> dict[str, Any]:
+def _metrics(episodes: list[dict[str, Any]]) -> dict[str, Any]:
     duration = sum(float(row["duration_seconds"]) for row in episodes)
     valid_rows = [row for row in episodes if row["valid"]]
     valid_duration = sum(float(row["duration_seconds"]) for row in valid_rows)
@@ -224,7 +289,10 @@ def _summary(episodes: list[dict[str, Any]]) -> dict[str, Any]:
         ended = _parse_time(row["ended_at"])
         if started is None or ended is None or ended < started:
             continue
-        fallback = f"{row['dataset']}:{started.date().isoformat()}"
+        local_started_date = _local_date(started)
+        if local_started_date is None:
+            continue
+        fallback = f"{row['dataset']}:{local_started_date.isoformat()}"
         key = (str(row["mode"]), str(row["robot_id"]), str(row["session_id"] or fallback))
         sessions[key].append((started, ended))
     active_span = sum(
@@ -232,25 +300,54 @@ def _summary(episodes: list[dict[str, Any]]) -> dict[str, Any]:
         for values in sessions.values()
     )
 
-    by_day: dict[str, dict[str, Any]] = {}
-    for row in episodes:
-        started = _parse_time(row["started_at"])
-        day = started.date().isoformat() if started is not None else "unknown"
-        bucket = by_day.setdefault(
-            day,
-            {"date": day, "episodes": 0, "valid_episodes": 0, "duration_seconds": 0.0},
-        )
-        bucket["episodes"] += 1
-        bucket["valid_episodes"] += int(bool(row["valid"]))
-        bucket["duration_seconds"] += float(row["duration_seconds"])
-    trend = []
-    for day in sorted(by_day):
-        bucket = by_day[day]
-        bucket["duration_seconds"] = round(bucket["duration_seconds"], 3)
-        trend.append(bucket)
-
     eval_rows = [row for row in episodes if row["mode"] == "eval" and row["result"]]
     eval_success = sum(row["result"] == "success" for row in eval_rows)
+    uploaded_episodes = sum(bool(row.get("uploaded")) for row in episodes)
+    return {
+        "episodes": len(episodes),
+        "frames": sum(_frame_count(row) for row in episodes),
+        "valid_episodes": len(valid_rows),
+        "duration_seconds": round(duration, 3),
+        "average_duration_seconds": round(duration / len(episodes), 3) if episodes else 0.0,
+        "robots": robots,
+        "robot_count": len(robots),
+        "valid_rate": round(len(valid_rows) / len(episodes), 4) if episodes else 0.0,
+        "efficiency": round(valid_duration / active_span, 4) if active_span > 0 else None,
+        "active_span_seconds": round(active_span, 3),
+        "eval_success_rate": round(eval_success / len(eval_rows), 4) if eval_rows else None,
+        "uploaded_episodes": uploaded_episodes,
+        "not_uploaded_episodes": len(episodes) - uploaded_episodes,
+    }
+
+
+def _summary(
+    episodes: list[dict[str, Any]], *, include_today: bool = False, today: dt.date | None = None
+) -> dict[str, Any]:
+    metrics = _metrics(episodes)
+
+    by_day: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in episodes:
+        started = _parse_time(row["started_at"])
+        local_started_date = _local_date(started)
+        day = local_started_date.isoformat() if local_started_date is not None else "unknown"
+        by_day[day].append(row)
+    if include_today and episodes:
+        today_key = (today or dt.datetime.now().astimezone().date()).isoformat()
+        by_day.setdefault(today_key, [])
+    trend = []
+    daily = []
+    for day in sorted(by_day):
+        day_metrics = _metrics(by_day[day])
+        trend.append(
+            {
+                "date": day,
+                "episodes": day_metrics["episodes"],
+                "valid_episodes": day_metrics["valid_episodes"],
+                "duration_seconds": day_metrics["duration_seconds"],
+            }
+        )
+        daily.append({"date": day, **day_metrics})
+
     task_groups: dict[tuple[str, str, str], dict[str, Any]] = {}
     for row in episodes:
         key = (str(row["robot_id"]), str(row["dataset"]), str(row["task"]))
@@ -273,18 +370,10 @@ def _summary(episodes: list[dict[str, Any]]) -> dict[str, Any]:
     tasks = sorted(task_groups.values(), key=lambda row: (-row["episodes"], row["task"]))
     recent = sorted(episodes, key=lambda row: row["started_at"], reverse=True)[:100]
     return {
-        "episodes": len(episodes),
-        "valid_episodes": len(valid_rows),
-        "duration_seconds": round(duration, 3),
-        "average_duration_seconds": round(duration / len(episodes), 3) if episodes else 0.0,
-        "robots": robots,
-        "robot_count": len(robots),
-        "valid_rate": round(len(valid_rows) / len(episodes), 4) if episodes else 0.0,
-        "efficiency": round(valid_duration / active_span, 4) if active_span > 0 else None,
-        "active_span_seconds": round(active_span, 3),
-        "eval_success_rate": round(eval_success / len(eval_rows), 4) if eval_rows else None,
+        **metrics,
         "tasks": tasks,
         "trend": trend,
+        "daily": daily,
         "recent": recent,
     }
 
@@ -302,21 +391,29 @@ def build_dashboard(
     roots: Iterable[Path], *, start_date: str | None = None, end_date: str | None = None
 ) -> dict[str, Any]:
     """Aggregate collection/eval metrics from explicit raw datasets under roots."""
+    roots = tuple(Path(root) for root in roots)
     episodes: list[dict[str, Any]] = []
     sources: list[dict[str, Any]] = []
     for raw_dir, mode in discover_raw_datasets(roots):
         _, _, records = _load_dataset_records(raw_dir, mode)
-        episodes.extend(records)
+        uploaded_indices = uploaded_source_episode_indices(raw_dir)
+        dataset_records = [
+            {**row, "uploaded": row["episode_index"] in uploaded_indices} for row in records
+        ]
+        episodes.extend(dataset_records)
         sources.append(
             {
                 "dataset": _dataset_name(raw_dir, mode),
                 "dataset_dir": str(raw_dir),
                 "mode": mode,
-                "episodes": len(records),
+                "episodes": len(dataset_records),
+                "uploaded_episodes": sum(row["uploaded"] for row in dataset_records),
             }
         )
     dated = [
-        parsed.date() for row in episodes if (parsed := _parse_time(row["started_at"])) is not None
+        local_date
+        for row in episodes
+        if (local_date := _local_date(_parse_time(row["started_at"]))) is not None
     ]
     available_range = {
         "start": min(dated).isoformat() if dated else "",
@@ -328,10 +425,12 @@ def build_dashboard(
         episodes = [
             row
             for row in episodes
-            if (parsed := _parse_time(row["started_at"])) is not None
-            and (start is None or parsed.date() >= start)
-            and (end is None or parsed.date() <= end)
+            if (local_date := _local_date(_parse_time(row["started_at"]))) is not None
+            and (start is None or local_date >= start)
+            and (end is None or local_date <= end)
         ]
+    today = dt.datetime.now().astimezone().date()
+    include_today = (start is None or start <= today) and (end is None or end >= today)
     return {
         "raw_only": True,
         "generated_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -341,9 +440,18 @@ def build_dashboard(
             "end": end.isoformat() if end else "",
         },
         "sources": sources,
+        "upload_candidates": discover_dashboard_upload_candidates(roots),
         "views": {
-            "all": _summary(episodes),
-            "collection": _summary([row for row in episodes if row["mode"] == "collection"]),
-            "eval": _summary([row for row in episodes if row["mode"] == "eval"]),
+            "all": _summary(episodes, include_today=include_today, today=today),
+            "collection": _summary(
+                [row for row in episodes if row["mode"] == "collection"],
+                include_today=include_today,
+                today=today,
+            ),
+            "eval": _summary(
+                [row for row in episodes if row["mode"] == "eval"],
+                include_today=include_today,
+                today=today,
+            ),
         },
     }

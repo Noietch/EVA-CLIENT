@@ -698,6 +698,15 @@ def discard_rollout_episode(runtime: RuntimeState) -> None:
     runtime.rollout_policy_actions = []
 
 
+def cancel_eval_episode(runtime: RuntimeState) -> None:
+    """Cancel the active evaluation episode without resetting its execution endpoint."""
+    stop_collection_capture(runtime)
+    logger_obj = runtime.episode_logger
+    if logger_obj is not None and logger_obj.is_evaluation and logger_obj.has_active_episode:
+        logger_obj.cancel_episode("external eval cancel")
+    runtime.transport.stop_collection()
+
+
 def _load_saved_episode_history(dataset_dir: Path) -> list[dict[str, Any]]:
     """Return the complete projected history, cached by ``episodes.jsonl`` signature."""
     return load_episode_history(dataset_dir)["episodes"]
@@ -1157,6 +1166,18 @@ def collect_stop_teleop(config: ConfigDict, runtime: RuntimeState, session: Sess
     deactivate_teleop(config, runtime, session)
 
 
+def _collection_target_meta(session: SessionState) -> dict[str, object]:
+    """Return the optional scene randomization target for the next episode."""
+    fields = {
+        "scene_id": session.collection_scene_id,
+        "scene_round": session.collection_scene_round,
+        "random_seed": session.collection_random_seed,
+        "slot_id": session.collection_slot_id,
+        "task_id": session.collection_task_id,
+    }
+    return {key: value for key, value in fields.items() if value is not None and value != ""}
+
+
 def collect_start(config: ConfigDict, runtime: RuntimeState, session: SessionState) -> bool:
     """Begin one teleop collection episode. Backpressure: refuse to start when the
     async save queue is full so we never grow memory unbounded. Returns True when
@@ -1181,6 +1202,9 @@ def collect_start(config: ConfigDict, runtime: RuntimeState, session: SessionSta
                 collection_min_capture_time=collection_min_capture_time,
                 collection_dataset=session.selected_collect_set,
             )
+            target_meta = _collection_target_meta(session)
+            if target_meta:
+                logger_obj.set_episode_meta(**target_meta)
             control_source = str(
                 (config.collection.teleop or {}).get("control_source", "transport")
             )
@@ -1226,6 +1250,9 @@ def collect_start(config: ConfigDict, runtime: RuntimeState, session: SessionSta
             return False
     else:
         runtime.episode_logger.start_episode(task=format_task_label(session.selected_collect_task))
+        target_meta = _collection_target_meta(session)
+        if target_meta:
+            runtime.episode_logger.set_episode_meta(**target_meta)
     session.step_index = 0
     session.mode = SessionMode.COLLECT
     session.status = SessionStatus.RUNNING
@@ -1421,6 +1448,7 @@ __all__ = [
     "mark_rollout_save_ready",
     "save_rollout_episode",
     "discard_rollout_episode",
+    "cancel_eval_episode",
     "_load_saved_episode_history",
     "rollout_save_status",
     "enable_default_recording",

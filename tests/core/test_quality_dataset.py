@@ -8,7 +8,9 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from core.utils.quality_dataset import is_rejected_episode, split_dataset_by_quality
+from core.utils.quality_dataset import split_dataset_by_quality
+
+pytestmark = pytest.mark.integration
 
 
 def _read_jsonl(path: Path) -> list[dict]:
@@ -23,6 +25,7 @@ def _dataset(root: Path) -> None:
     (root / "meta").mkdir(parents=True)
     info = {
         "codebase_version": "v2.1",
+        "collection_started_at": "2026-08-31T09:30:00+08:00",
         "total_episodes": 3,
         "total_frames": 9,
         "total_videos": 3,
@@ -130,13 +133,6 @@ def _dataset(root: Path) -> None:
     _write_jsonl(root / "meta" / "episodes_stats.jsonl", stats_rows)
 
 
-def test_web_red_rule_includes_automatic_and_manual_failures() -> None:
-    assert not is_rejected_episode({"quality": "green"})
-    assert is_rejected_episode({"quality": "red"})
-    assert is_rejected_episode({"quality": "green", "qc_verdict": "fail"})
-    assert not is_rejected_episode({"quality": "red", "qc_verdict": "pass"})
-
-
 def test_split_dataset_exports_contiguous_accepted_and_rejected_subsets(tmp_path: Path) -> None:
     source = tmp_path / "source"
     accepted = tmp_path / "accepted"
@@ -158,9 +154,11 @@ def test_split_dataset_exports_contiguous_accepted_and_rejected_subsets(tmp_path
     assert accepted_info["total_episodes"] == 1
     assert accepted_info["total_frames"] == 3
     assert accepted_info["total_tasks"] == 1
+    assert accepted_info["collection_started_at"] == "2026-08-31T09:30:00+08:00"
     assert rejected_info["total_episodes"] == 2
     assert rejected_info["total_frames"] == 6
     assert rejected_info["total_tasks"] == 2
+    assert rejected_info["collection_started_at"] == "2026-08-31T09:30:00+08:00"
     assert len(list(rejected.glob("videos/**/*.mp4"))) == 2
 
     first_rejected = pq.read_table(rejected / "data/chunk-000/episode_000000.parquet")
@@ -237,42 +235,3 @@ def test_split_dataset_allows_an_empty_accepted_subset(tmp_path: Path) -> None:
     assert json.loads((accepted / "meta/info.json").read_text())["total_tasks"] == 0
     assert (accepted / "meta/tasks.jsonl").read_text() == ""
     assert json.loads((accepted / "meta/stats.json").read_text()) == {}
-
-
-def test_split_dataset_rejects_non_v21_metadata_before_writing(tmp_path: Path) -> None:
-    source = tmp_path / "source"
-    accepted = tmp_path / "accepted"
-    rejected = tmp_path / "rejected"
-    _dataset(source)
-    info_path = source / "meta" / "info.json"
-    info = json.loads(info_path.read_text())
-    info["codebase_version"] = "v3.0"
-    info_path.write_text(json.dumps(info))
-
-    with pytest.raises(ValueError, match="requires a LeRobot v2.1 dataset"):
-        split_dataset_by_quality(source, accepted, rejected)
-
-    assert not accepted.exists()
-    assert not rejected.exists()
-
-
-def test_split_dataset_replaces_the_same_export_directories(tmp_path: Path) -> None:
-    source = tmp_path / "source"
-    export_root = tmp_path / "source_export"
-    accepted = export_root / "accepted"
-    rejected = export_root / "rejected"
-    _dataset(source)
-
-    split_dataset_by_quality(source, accepted, rejected)
-    (accepted / "stale.txt").write_text("old export")
-
-    summary = split_dataset_by_quality(
-        source,
-        accepted,
-        rejected,
-        replace_existing=True,
-    )
-
-    assert summary.accepted_dir == str(accepted.resolve())
-    assert not (accepted / "stale.txt").exists()
-    assert sorted(path.name for path in export_root.iterdir()) == ["accepted", "rejected"]

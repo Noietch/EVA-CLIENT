@@ -12,6 +12,7 @@ import logging
 
 from core.app.run import run
 from core.config import ConfigDict, load_config
+from core.devices import REPOSITORY_ROOT, DeviceWorkspace
 
 
 def parse_args() -> tuple[ConfigDict, int, str | None, bool]:
@@ -26,7 +27,7 @@ def parse_args() -> tuple[ConfigDict, int, str | None, bool]:
     parser = argparse.ArgumentParser(
         description="EVA - Unified robot VLA inference debugging client"
     )
-    parser.add_argument("--config", type=str, required=True, help="Path to .py configuration file")
+    parser.add_argument("--config", type=str, help="Path to business workflow configuration")
     parser.add_argument("--web-port", type=int, default=8080, help="Web server port (default 8080)")
     parser.add_argument(
         "--headless",
@@ -35,13 +36,24 @@ def parse_args() -> tuple[ConfigDict, int, str | None, bool]:
     )
     args = parser.parse_args()
 
-    config = load_config(args.config)
+    import robots  # noqa: F401
+
+    config = load_config(args.config or REPOSITORY_ROOT / "configs/00_base/defaults.py")
+    if config.transport.type != "dataset":
+        config = DeviceWorkspace().configure(config)
+    if not args.config:
+        config.console.initial_tab = "manual"
 
     return config, args.web_port, args.config, args.headless
 
 
 def main() -> None:
     """Configure logging, parse CLI arguments, and launch the web application."""
+    if sys.argv[1:2] == ["device"]:
+        from core.devices.cli import main as device_main
+
+        device_main(sys.argv[2:])
+        return
     logging.addLevelName(logging.WARNING, "WARN")
     logging.basicConfig(
         level=logging.INFO,
@@ -50,7 +62,8 @@ def main() -> None:
         force=True,
     )
     config, web_port, config_path, headless = parse_args()
-    run(config, web_port=web_port, config_path=config_path, headless=headless)
+    if run(config, web_port=web_port, config_path=config_path, headless=headless):
+        os.execv(sys.executable, [sys.executable, *sys.argv])
 
 
 if __name__ == "__main__":

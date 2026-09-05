@@ -2,6 +2,7 @@
 """Franka execution-layer node for EVA's ZMQ transport."""
 
 from __future__ import annotations
+from core.devices.camera import CameraPublisher, CameraSource
 
 import argparse
 import dataclasses
@@ -122,7 +123,7 @@ def _configure_logging(log_level: str, log_file: str) -> None:
 class FrankaZmqNode:
     """Bridge EVA ZMQ wire messages to a Franky-controlled dual Franka pair."""
 
-    def __init__(self, config: FrankaZmqConfig) -> None:
+    def __init__(self, config: FrankaZmqConfig, camera_endpoint: str = "") -> None:
         import zmq
 
         self._config = config
@@ -136,7 +137,9 @@ class FrankaZmqNode:
         self._action_sub.setsockopt(zmq.SUBSCRIBE, b"")
         self._action_sub.setsockopt(zmq.RCVTIMEO, 0)
         self._robot = FrankyDualArm(config)
-        self._cameras = self._build_camera_cache(config)
+        self._cameras = (
+            CameraSource(camera_endpoint) if camera_endpoint else self._build_camera_cache(config)
+        )
         self._received_actions = 0
         self._published_observations = 0
         self._last_published_camera_seqs: dict[str, int] = {}
@@ -235,6 +238,8 @@ class FrankaZmqNode:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--camera-only", action="store_true")
+    parser.add_argument("--camera-endpoint", default="")
     parser.add_argument("--obs-endpoint", default="tcp://127.0.0.1:5555")
     parser.add_argument("--action-endpoint", default="tcp://127.0.0.1:5556")
     parser.add_argument("--left-robot-ip", default=DEFAULT_LEFT_ROBOT_IP)
@@ -338,7 +343,10 @@ def main() -> None:
     args = parser.parse_args()
     _configure_logging(args.log_level, args.log_file)
     config = build_config(args)
-    node = FrankaZmqNode(config)
+    if args.camera_only:
+        CameraPublisher((OrbbecCameraCache(config.orbbec_cameras),), args.camera_endpoint).run()
+        return
+    node = FrankaZmqNode(config, args.camera_endpoint)
 
     def _stop(_signum: int, _frame: Any) -> None:
         node.stop()

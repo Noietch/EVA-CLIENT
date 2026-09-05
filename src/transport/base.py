@@ -12,7 +12,7 @@ import dataclasses
 import importlib.util
 import logging
 import threading
-from typing import Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import numpy as np
 
@@ -24,8 +24,10 @@ from core.types import (
     Observation,
     RawCollectionSnapshot,
 )
-from robots.base import Robot
 from transport.utils import ImageRateTracker, StreamFreshness, _SimpleRate
+
+if TYPE_CHECKING:
+    from robots.base import Robot
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +52,10 @@ class ObservationSource(Protocol):
     def get_frame(self) -> Observation | None:
         """Return the latest observation (cameras + state), or None if none yet."""
         ...
+
+    def get_policy_frame(self) -> Observation | None:
+        """Return a policy observation, requesting fresh images when needed."""
+        return self.get_frame()
 
     def get_latest_qpos(self) -> np.ndarray | None:
         """Return the most recent joint positions [qpos_dim] float32, or None."""
@@ -436,6 +442,15 @@ class _RosTransportBase(TransportBridge):
             deque.append(msg)
         self._freshness.mark()
 
+    def _append_collection_msg(self, deque: collections.deque, msg: Any) -> None:
+        with self._deque_guard():
+            if not self._collection_capture_active:
+                return
+            if len(deque) >= _COLLECTION_DEQUE_MAX:
+                deque.popleft()
+            deque.append(msg)
+        self._freshness.mark()
+
     def _append_camera_msg(
         self,
         camera_name: str,
@@ -444,7 +459,16 @@ class _RosTransportBase(TransportBridge):
         timestamp: float | None = None,
     ) -> None:
         self._image_rate.mark(camera_name, timestamp)
-        self._append_msg(deque, msg)
+        with self._deque_guard():
+            if len(deque) >= _COLLECTION_DEQUE_MAX:
+                deque.popleft()
+            deque.append(msg)
+            collection_deque = getattr(self, "_collection_camera_deques", {}).get(camera_name)
+            if getattr(self, "_collection_capture_active", False) and collection_deque is not None:
+                if len(collection_deque) >= _COLLECTION_DEQUE_MAX:
+                    collection_deque.popleft()
+                collection_deque.append(msg)
+        self._freshness.mark()
 
     def image_min_hz(self) -> float | None:
         """Minimum camera topic receive rate across subscribed cameras."""

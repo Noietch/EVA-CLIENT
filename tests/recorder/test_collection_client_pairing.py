@@ -12,6 +12,8 @@ from core.recorder.episode import EpisodeLogger
 from core.types import CollectionRawBatch, CollectionRawSample, RawCollectionSnapshot
 from robots.base import ActuatorGroup, CameraSpec, ObservationSchema, Robot
 
+pytestmark = pytest.mark.integration
+
 _STATE_QPOS = np.asarray([1.0, 2.0, 3.0, 0.1], dtype=np.float32)
 _REMOTE_ACTION_QPOS = np.asarray([9.0, 9.0, 9.0, 0.9], dtype=np.float32)
 _CLIENT_ACTION_QPOS = np.asarray([4.0, 5.0, 6.0, 0.2], dtype=np.float32)

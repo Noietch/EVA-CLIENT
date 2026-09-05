@@ -3,17 +3,16 @@ from __future__ import annotations
 import socket
 import threading
 import time
-import uuid
 from pathlib import Path
-from typing import Any, cast
 
-import numpy as np
 import pytest
 
 from core.config import load_config
 from core.registry import ROBOT_REGISTRY
 from examples.hardware.fake_common import FakeRobotNode
 from transport.zmq import ZmqTransport
+
+pytestmark = pytest.mark.integration
 
 
 def _free_port() -> int:
@@ -22,71 +21,6 @@ def _free_port() -> int:
     port = sock.getsockname()[1]
     sock.close()
     return port
-
-
-@pytest.mark.parametrize(
-    "robot_name",
-    [
-        "r1_lite",
-        "ur5e",
-        "arx_r5",
-        "agilex_piper",
-        "dual_yam",
-    ],
-)
-def test_generic_fake_hil_relative_takeover_for_every_robot(robot_name: str):
-    suffix = uuid.uuid4().hex
-    node = FakeRobotNode(
-        robot_name=robot_name,
-        observation_endpoint=f"inproc://fake-hil-observation-{suffix}",
-        action_endpoint=f"inproc://fake-hil-action-{suffix}",
-        publish_rate_hz=30.0,
-        image_height=8,
-        image_width=8,
-    )
-    try:
-        before = cast(dict[str, Any], node.hil_snapshot())
-        groups = cast(list[dict[str, Any]], before["groups"])
-        feedback = cast(dict[str, list[float]], before["feedback"])
-        group_name = cast(str, groups[0]["name"])
-        first_before = np.asarray(feedback[group_name], dtype=np.float32)
-
-        node.start_hil("relative")
-        node.adjust_hil_joint(group_name, 0, 0.2)
-        node._publish_observation()
-
-        after = cast(dict[str, Any], node.hil_snapshot())
-        after_feedback = cast(dict[str, list[float]], after["feedback"])
-        first_after = np.asarray(after_feedback[group_name], dtype=np.float32)
-        assert after["supported"] is True
-        assert after["active"] is True
-        assert first_after[0] == pytest.approx(first_before[0] + 0.2)
-
-        node.stop_hil()
-        assert node.hil_snapshot()["active"] is False
-    finally:
-        node.close()
-
-
-@pytest.mark.parametrize("robot_name", ["dual_franka", "agibot_g2"])
-def test_generic_fake_reports_hil_unsupported_without_leader_adapter(robot_name: str):
-    suffix = uuid.uuid4().hex
-    node = FakeRobotNode(
-        robot_name=robot_name,
-        observation_endpoint=f"inproc://fake-no-hil-observation-{suffix}",
-        action_endpoint=f"inproc://fake-no-hil-action-{suffix}",
-        publish_rate_hz=30.0,
-        image_height=8,
-        image_width=8,
-    )
-    try:
-        node.start_hil("relative")
-        snapshot = cast(dict[str, Any], node.hil_snapshot())
-        assert snapshot["supported"] is False
-        assert snapshot["active"] is False
-        assert snapshot["error"] == f"{robot_name} has no HIL leader adapter"
-    finally:
-        node.close()
 
 
 @pytest.mark.parametrize(

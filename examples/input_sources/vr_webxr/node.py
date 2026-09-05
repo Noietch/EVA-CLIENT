@@ -1043,9 +1043,7 @@ class WebXrNode:
             bound = next(iter(server.sockets), None)
             if bound is not None:
                 self.port = int(bound.getsockname()[1])
-            logger.info("WebXR node ready: %s", self.public_url)
-            reverse, launch = self.pico_commands
-            logger.info("PICO commands:\n%s\n%s", reverse, launch)
+            logger.info("WebXR node ready: %s", self.public_url.partition("?")[0])
             await self._forward_acks()
 
 
@@ -1055,6 +1053,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=8443)
     parser.add_argument("--public-host", default="")
     parser.add_argument("--token", default="")
+    parser.add_argument("--token-stdin", action="store_true")
     parser.add_argument("--tls-cert", default="")
     parser.add_argument("--tls-key", default="")
     parser.add_argument("--endpoint", default="tcp://127.0.0.1:8765")
@@ -1077,6 +1076,10 @@ def _parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = _parser().parse_args()
+    if args.token_stdin:
+        args.token = sys.stdin.readline().strip()
+        if not args.token:
+            raise ValueError("VR access token is missing from stdin")
     logging.basicConfig(
         level=getattr(logging, str(args.log_level).upper()),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",

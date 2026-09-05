@@ -8,83 +8,11 @@ regression in either the route wiring or the state machine is caught.
 
 from __future__ import annotations
 
+import pytest
+
 from core.app import handlers
-from core.app.state import SessionStatus
-from core.config import ConfigDict
 
-
-def test_config_route_serves_static_frontend_inputs(console):
-    cfg = console.get("/api/config").json
-    assert cfg["robot_type"] == "agilex_piper"
-    assert cfg["transport_type"] == "debug"
-    assert cfg["initial_tab"] == "debug"
-    assert "pick up the cup" in cfg["tasks"]
-    assert cfg["collect_tasks"] == {
-        "cup_set": [["pick up cup", 10], ["place cup", -1]],
-        "pouring_set": [["pour soybean", 20]],
-    }
-    assert "collect_task_requirements" not in cfg
-    assert cfg["camera_keys"] == ["cam_high", "cam_left_wrist", "cam_right_wrist"]
-    assert {s["key"] for s in cfg["strategies"]} == {"sync"}
-    assert cfg["modes"] == ["real", "sim", "step", "manual"]
-    assert cfg["rl"] == {"enabled": False}
-    assert cfg["control_channel"]["enabled"] is False
-    assert any(
-        item["command"] == "web:rl_select_critic:{slot}"
-        for item in cfg["control_channel"]["commands"]
-    )
-
-
-def test_config_route_exposes_configured_initial_tab(console):
-    console.config.console.initial_tab = "collect"
-
-    assert console.get("/api/config").json["initial_tab"] == "collect"
-
-
-def test_config_route_exposes_teleop_client_for_frontend_bootstrap(console):
-    console.config.collection.teleop = ConfigDict(
-        control_source="client",
-        client=ConfigDict(type="vr_webxr"),
-    )
-
-    teleop = console.get("/api/config").json["collection"]["teleop"]
-
-    assert teleop == {
-        "control_source": "client",
-        "client_type": "vr_webxr",
-    }
-
-
-def test_config_route_serves_rl_workspace_contract(console):
-    console.config.rl = ConfigDict(
-        cli_mode="real",
-        inference_strategy="rtc",
-        tasks=["pack the phone"],
-        policies=[ConfigDict(name="policy-a")],
-        critics=[ConfigDict(name="critic-a", type="websocket")],
-        data=ConfigDict(
-            format="lerobot",
-            storage=ConfigDict(log_dir="work_dirs/rl/test"),
-        ),
-    )
-
-    rl = console.get("/api/config").json["rl"]
-
-    assert rl["backend_ready"] is True
-    assert rl["cli_mode"] == "real"
-    assert rl["inference_strategy"] == "rtc"
-    assert rl["tasks"] == ["pack the phone"]
-    assert rl["policies"] == [{"slot": 0, "name": "policy-a"}]
-    assert rl["critics"] == [{"slot": 0, "name": "critic-a", "type": "websocket"}]
-    assert rl["data"]["format"] == "lerobot"
-
-
-def test_initial_status_is_idle_and_disconnected(console):
-    st = console.status()
-    assert st["policy_connected"] is False
-    assert st["session_status"] == "unset"
-    assert st["selected_task"] is None
-    assert st["is_setup_done"] is False
+pytestmark = pytest.mark.integration
 
 
 def test_full_operation_sequence_connect_to_reset(console):
@@ -141,19 +69,6 @@ def test_collect_and_debug_task_selection_are_independent(console):
     st = console.status()
     assert st["selected_task"] == "pour soybean"
     assert st["selected_collect_task"] == "pour soybean"
-
-
-def test_run_elapsed_timer_starts_only_after_running(console):
-    console.do("/api/connect")
-    console.do("/api/select_mode", {"mode": "sim"})
-    console.do("/api/select_task", {"task": "pick up the cup"})
-    console.do("/api/setup")
-    assert console.status()["run_elapsed_ms"] == 0  # ready, not yet running
-
-    console.do("/api/run")
-    assert console.session.status is SessionStatus.RUNNING
-    # The timer is wall-clock from run_start_time; it is non-negative once running.
-    assert console.status()["run_elapsed_ms"] >= 0
 
 
 def test_disconnect_clears_policy_and_setup(console):

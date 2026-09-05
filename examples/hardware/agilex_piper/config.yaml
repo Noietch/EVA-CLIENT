@@ -1,0 +1,5 @@
+robot:
+  agilex_piper:
+    label: Dual AgileX Piper
+    client_config: configs/01_deploy/dual_agilex_piper/_base.py
+    settings: {}

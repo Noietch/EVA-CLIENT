@@ -42,7 +42,7 @@ JSON request → JSON reply (REQ/REP). Every reply carries `ok: true|false`.
 |---|---|
 | `{"cmd": "web:run"}` | `{"ok": true, "cmd": "web:run"}` |
 | `{"cmd": "web:tab_switch:collect", "armed": true}` | `{"ok": true, "tab": "collect", "armed": true}` |
-| `{"cmd": "web:select_collect_task", "task": "pick apple"}` | `{"ok": true, "selected_collect_task": "pick apple"}` |
+| `{"cmd": "web:select_collect_task", "dataset": "pick_place", "task": "pick apple"}` | `{"ok": true, "selected_collect_dataset": "pick_place", "selected_collect_task": "pick apple"}` |
 | `{"query": "status"}` | `{"ok": true, "data": { …status… }}` |
 | unknown / disallowed | `{"ok": false, "error": "…"}` |
 
@@ -81,7 +81,7 @@ below come from [`_handle_web_command`](../src/core/app/run.py).
 ### Collection (COLLECT) — full teleop capture
 | Command | Extra keys | Notes |
 |---|---|---|
-| `web:select_collect_task` | `{"task": "..."}` | sets the collect task (mirrors HTTP; no queue) |
+| `web:select_collect_task` | `{"dataset": "...", "task": "..."}` | sets the collect dataset and task (mirrors HTTP; no queue) |
 | `web:tab_switch:collect` | `{"armed": true}` | enter COLLECT and arm teleop (required before start) |
 | `web:collect_start` | — | begin recording an episode (needs armed COLLECT) |
 | `web:collect_stop` | — | finish + save the episode |

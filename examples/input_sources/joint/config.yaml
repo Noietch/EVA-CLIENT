@@ -1,0 +1,19 @@
+teleop:
+  joint:
+    manual: true
+    default: true
+    label: Joint control
+    settings: {}
+  transport:
+    label: External teleop
+    settings: {}
+camera:
+  none:
+    default: true
+    disabled: true
+    label: None
+    settings: {}
+  external:
+    initial: true
+    label: Robot camera stream
+    settings: {}

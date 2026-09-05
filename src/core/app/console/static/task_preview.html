@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>EVA · TASK PREVIEW</title>
+  <link rel="stylesheet" href="css/console.css">
+  <style>
+    #view-debug { display: grid; }
+    #view-debug .scene-plan-stage { display: flex; flex: 1 1 61%; flex-direction: column; overflow: hidden; }
+    #view-debug .stage-visual-stack .col-canvas { flex: 0 0 35%; min-height: 150px; }
+    .preview-canvas { position: relative; display: flex; flex-direction: column; justify-content: space-between; min-height: 0; padding: 16px; background: var(--paper); border: 1px solid var(--rule); border-radius: var(--radius); box-shadow: var(--shadow); }
+    .preview-canvas .ticks { position: absolute; inset: 16px; pointer-events: none; }
+    .preview-canvas h3 { margin: 0; font: 600 11px/1 var(--mono); letter-spacing: .14em; color: var(--ink-dim); }
+    .preview-canvas p { margin: 8px 0 0; color: var(--ink-dim); font: 11px/1.45 var(--sans); }
+    .preview-readout { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: auto; }
+    .preview-readout div { padding: 9px; border: 1px solid var(--rule); background: var(--surface-2); }
+    .preview-readout span { display: block; color: var(--ink-faint); font: 9px/1 var(--mono); }
+    .preview-readout b { display: block; margin-top: 6px; color: var(--ink); font: 700 14px/1 var(--mono); }
+    .preview-camera { flex: 1 1 0; min-width: 130px; display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid var(--rule); border-radius: var(--radius-sm); background: var(--surface-2); }
+    .preview-camera strong { font: 700 10px/1 var(--mono); letter-spacing: .08em; color: var(--ink-dim); }
+    .preview-camera .camera-frame { flex: 1 1 auto; min-height: 100px; display: grid; place-items: center; border: 1px solid var(--rule-strong); background: repeating-linear-gradient(135deg, #f6f5f2 0, #f6f5f2 8px, #efeeeb 8px, #efeeeb 16px); color: var(--ink-faint); font: 10px/1 var(--mono); }
+    .preview-stat-list { display: grid; gap: 7px; padding: 12px; }
+    .preview-stat { display: flex; justify-content: space-between; gap: 12px; padding-bottom: 7px; border-bottom: 1px solid var(--rule); font: 11px/1.2 var(--sans); }
+    .preview-stat:last-child { border-bottom: 0; padding-bottom: 0; }
+    .preview-stat span { color: var(--ink-dim); }
+    .preview-stat b { color: var(--ink); font: 700 10px/1 var(--mono); }
+    .preview-side-card { min-width: 0; padding: 14px; background: var(--paper); border: 1px solid var(--rule); border-radius: var(--radius); box-shadow: var(--shadow); }
+    .preview-side-card h3 { margin: 0 0 13px; font: 600 11px/1 var(--mono); letter-spacing: .14em; color: var(--ink-dim); }
+    .preview-metric-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+    .preview-metric { min-width: 0; padding: 12px; background: var(--surface-2); border: 1px solid var(--rule); }
+    .preview-metric span { display: block; color: var(--ink-faint); font: 9px/1.2 var(--mono); letter-spacing: .06em; }
+    .preview-metric b { display: block; margin-top: 8px; color: var(--ink); font: 700 22px/1 var(--mono); }
+    .preview-chart-body { display: flex; align-items: end; gap: 7px; height: 100%; min-height: 115px; padding: 18px 8px 8px; }
+    .preview-chart-body i { flex: 1 1 0; min-width: 8px; height: var(--h); background: var(--accent); opacity: .85; }
+    .preview-chart-body.state i { background: var(--ink); opacity: .7; }
+    @media (max-width: 720px) {
+      #view-debug { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto; overflow-y: auto; }
+      #view-debug #collect-control-col { overflow: visible; }
+      #view-debug .stage { min-height: 1100px; overflow: visible; }
+      #view-debug .stage-top { height: auto; flex-direction: column; }
+      #view-debug .stage-visual-stack { flex: 0 0 650px; width: 100%; height: 650px; max-width: none; }
+      #view-debug .scene-plan-stage { flex: 0 0 410px; }
+      #view-debug .cam-strip { flex: 0 0 330px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="telemetry">
+    <span class="brand">EVA <b>CONSOLE</b></span>
+    <span class="tele-seg"><span class="lbl">robot</span><span class="val">arx_x5</span></span>
+    <span class="tele-seg"><span class="dot ok"></span><span class="lbl">tx</span><span class="val">preview</span></span>
+    <span class="tele-seg"><span class="dot ok"></span><span class="lbl">state</span><span class="val">ready</span></span>
+    <span class="spacer"></span>
+    <span class="tele-metric"><span class="lbl">infer</span> <span class="val tnum">0ms</span></span>
+    <span class="tele-metric"><span class="lbl">step</span> <span class="val tnum">preview</span></span>
+    <span class="tele-metric"><span class="lbl">t+</span> <span class="val tnum">0.0s</span></span>
+    <span class="tele-metric"><span class="lbl">image</span> <span class="val tnum">— hz</span></span>
+  </div>
+  <div class="tabs">
+    <span class="tab-thumb ready" style="--thumb-x: 424px; --thumb-w: 81px"></span>
+    <button class="tab"><span class="idx">00</span> DASHBOARD</button>
+    <button class="tab"><span class="idx">01</span> DEBUG</button>
+    <button class="tab"><span class="idx">02</span> MANUAL</button>
+    <button class="tab active"><span class="idx">03</span> COLLECT</button>
+    <button class="tab"><span class="idx">04</span> REPLAY</button>
+    <button class="tab"><span class="idx">05</span> RL</button>
+    <button class="tab"><span class="idx">06</span> EVAL</button>
+    <button class="tab"><span class="idx">07</span> RESULT</button>
+  </div>
+  <div class="guidebar done">
+    <span class="gb-step">REVIEW</span>
+    <span class="gb-msg">Task preview · scene plan is ready</span>
+    <span class="gb-hint">STATIC PREVIEW · NO ROBOT COMMANDS</span>
+  </div>
+  <div class="workspace">
+    <div class="view active collect-mode" id="view-debug">
+      <div class="col col-control" id="collect-control-col">
+        <div class="panel">
+          <div class="panel-h"><span class="step-badge">1</span>TASK <span class="n">PREVIEW</span></div>
+          <div class="card">
+            <div class="collect-task-field-label">DATASET NAME</div>
+            <select class="choice-select task-select"><option>arx_x5_tasks_set</option></select>
+            <div class="collect-task-field-label">TASK / PROMPT</div>
+            <select class="choice-select task-select"><option>pick up the orange block and place it at the marked point</option></select>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-h">SET OVERVIEW</div>
+          <div class="card preview-stat-list"><div class="preview-stat"><span>TASKS</span><b>12</b></div><div class="preview-stat"><span>SCENES</span><b>24</b></div><div class="preview-stat"><span>EPISODES</span><b>120</b></div><div class="preview-stat"><span>OBJECTS</span><b>38</b></div><div class="preview-stat"><span>GRID</span><b>3 × 3</b></div></div>
+        </div>
+      </div>
+      <div class="stage no-series" id="stage">
+        <div class="stage-top">
+          <div class="stage-visual-stack">
+            <section class="scene-plan-stage" id="collect-panel-scene">
+              <div class="scene-plan-stage-head"><span class="chart-title">SCENE MAP</span><span class="n">READY</span></div>
+              <div class="scene-plan-display-row"><span class="scene-plan-task-label">pick up the orange block</span><div class="scene-plan-selectors"><label class="scene-plan-select-label"><span>SCENE</span><select><option>SCENE-001</option></select></label><label class="scene-plan-select-label"><span>ROUND</span><select><option>01 / 05</option></select></label></div></div>
+              <div class="scene-plan-summary"><span>SCENE <b>1/2</b></span><span>TARGET <b>5</b></span><span>PLAN PREVIEW</span></div>
+              <div class="scene-plan-map" id="scene-plan-map-preview">
+                <div class="scene-plan-grid">
+                  <div class="scene-plan-node" style="grid-column:1;grid-row:1"><span class="scene-plan-node-empty">EMPTY</span></div>
+                  <div class="scene-plan-node" style="grid-column:2;grid-row:1"><span class="scene-plan-node-empty">EMPTY</span></div>
+                  <div class="scene-plan-node" style="grid-column:3;grid-row:1"><span class="scene-plan-object-list"><span class="scene-plan-object-entry"><i class="scene-plan-color-swatch" style="--scene-object-color:#F08C46"></i><span class="scene-plan-object-name">orange block with a very long object name</span></span></span><span class="scene-plan-target-dot" style="left:50%;top:50%" title="orange block target"></span></div>
+                  <div class="scene-plan-node" style="grid-column:1;grid-row:2"><span class="scene-plan-node-empty">EMPTY</span></div>
+                  <div class="scene-plan-node" style="grid-column:2;grid-row:2"><span class="scene-plan-node-empty">EMPTY</span></div>
+                  <div class="scene-plan-node" style="grid-column:3;grid-row:2"><span class="scene-plan-node-empty">EMPTY</span></div>
+                  <div class="scene-plan-node" style="grid-column:1;grid-row:3"><span class="scene-plan-node-empty">EMPTY</span></div>
+                  <div class="scene-plan-node" style="grid-column:2;grid-row:3"><span class="scene-plan-node-empty">EMPTY</span></div>
+                  <div class="scene-plan-node" style="grid-column:3;grid-row:3"><span class="scene-plan-node-empty">EMPTY</span></div>
+                </div>
+              </div>
+              <div class="scene-plan-hint">RANDOMIZE 1 OBJECT · ROUND 1 · CALIBRATION VERIFIED</div>
+            </section>
+            <div class="col-canvas preview-canvas"><div class="ticks"><i></i></div><span class="canvas-tag">PREVIEW · STATIC</span><div><h3>TASK SUMMARY</h3><p>Review the selected task and its scene target before collection.</p></div><div class="preview-readout"><div><span>TASK ID</span><b>TASK-001</b></div><div><span>SCENE</span><b>SCENE-001</b></div><div><span>TARGET</span><b>5 EPS</b></div></div></div>
+          </div>
+          <div class="preview-side-card"><h3>SET SUMMARY</h3><div class="preview-metric-grid"><div class="preview-metric"><span>TASKS</span><b>12</b></div><div class="preview-metric"><span>SCENES</span><b>24</b></div><div class="preview-metric"><span>EPISODES</span><b>120</b></div><div class="preview-metric"><span>OBJECTS</span><b>38</b></div></div></div>
+        </div>
+        <div class="stage-charts">
+          <div class="stage-chart"><div class="chart-head"><span class="chart-title">TASK SET <span class="chart-sub">coverage</span></span><span class="critic-latest tnum">12 TASKS</span></div><div class="preview-chart-body"><i style="--h:24%"></i><i style="--h:38%"></i><i style="--h:48%"></i><i style="--h:65%"></i><i style="--h:78%"></i><i style="--h:92%"></i></div></div>
+          <div class="stage-chart"><div class="chart-head"><span class="chart-title">SCENE SET <span class="chart-sub">coverage</span></span><span class="critic-latest tnum">24 SCENES</span></div><div class="preview-chart-body state"><i style="--h:36%"></i><i style="--h:44%"></i><i style="--h:52%"></i><i style="--h:64%"></i><i style="--h:72%"></i><i style="--h:86%"></i></div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

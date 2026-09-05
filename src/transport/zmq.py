@@ -20,10 +20,12 @@ from __future__ import annotations
 import collections
 import dataclasses
 import logging
+import queue
 import tempfile
 import threading
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import msgpack
 import numpy as np
@@ -32,20 +34,24 @@ from openpi_client import msgpack_numpy
 from core.config import ConfigDict
 from core.registry import TRANSPORT_REGISTRY
 from core.types import CollectionRawBatch, CollectionRawSample, Observation, RawCollectionSnapshot
-from robots.base import Robot
 from transport.base import HilStatus, TransportBridge
 from transport.utils import ImageRateTracker, StreamFreshness
+
+if TYPE_CHECKING:
+    from robots.base import Robot
 
 logger = logging.getLogger(__name__)
 
 _PACKER = msgpack_numpy.Packer()
 COLLECTION_START_TARGET = "collect_start"
 COLLECTION_STOP_TARGET = "collect_stop"
+IMAGE_REQUEST_TARGET = "image_request"
 HIL_START_TARGET = "hil_start"
 HIL_STOP_TARGET = "hil_stop"
 COLLECTION_CONTROL_REPEATS = 5
 COLLECTION_CONTROL_INTERVAL_S = 0.02
 COLLECTION_SOCKET_DRAIN_MAX = 64
+COLLECTION_RECEIVE_HWM = 64
 HIL_ACK_TIMEOUT_S = 1.0
 
 
@@ -223,31 +229,75 @@ def unpack_action(payload: bytes) -> WireAction:
 
 
 class _WireCaptureJournal:
-    """Byte-preserving disk journal for selected collection snapshots awaiting save."""
+    """Byte-preserving journal whose file writes stay off the capture thread."""
 
     def __init__(self, directory: Path | None = None) -> None:
         if directory is not None:
             directory.mkdir(parents=True, exist_ok=True)
-        self._file = tempfile.TemporaryFile(
+        self._file = tempfile.NamedTemporaryFile(
             prefix="eva-zmq-wire-",
             dir=directory,
             buffering=0,
         )
-        self._lock = threading.Lock()
+        self._state = threading.Condition()
+        self._file_lock = threading.Lock()
+        self._pending: queue.SimpleQueue[bytes | None] = queue.SimpleQueue()
         self._size = 0
+        self._written_size = 0
+        self._error: BaseException | None = None
+        self._finished = False
+        self._writer = threading.Thread(
+            target=self._write_pending,
+            name="eva-zmq-wire-journal",
+            daemon=True,
+        )
+        self._writer.start()
 
     def append(self, payload: bytes) -> _WireJournalEntry:
-        with self._lock:
+        with self._state:
+            if self._finished:
+                raise RuntimeError("ZMQ wire journal is already finished")
+            if self._error is not None:
+                raise RuntimeError("ZMQ wire journal writer failed") from self._error
             offset = self._size
-            self._file.seek(offset)
-            written = self._file.write(payload)
-            if written != len(payload):
-                raise OSError(f"short write to ZMQ wire journal: {written}/{len(payload)}")
-            self._size += written
-        return _WireJournalEntry(self, offset, written)
+            self._size += len(payload)
+            self._pending.put(payload)
+        return _WireJournalEntry(self, offset, len(payload))
+
+    def finish(self) -> None:
+        with self._state:
+            if self._finished:
+                return
+            self._finished = True
+            self._pending.put(None)
+
+    def _write_pending(self) -> None:
+        try:
+            while True:
+                payload = self._pending.get()
+                if payload is None:
+                    return
+                with self._file_lock:
+                    self._file.seek(self._written_size)
+                    written = self._file.write(payload)
+                if written != len(payload):
+                    raise OSError(f"short write to ZMQ wire journal: {written}/{len(payload)}")
+                with self._state:
+                    self._written_size += written
+                    self._state.notify_all()
+        except BaseException as error:
+            with self._state:
+                self._error = error
+                self._state.notify_all()
 
     def read(self, offset: int, size: int) -> bytes:
-        with self._lock:
+        with self._state:
+            self._state.wait_for(
+                lambda: self._error is not None or self._written_size >= offset + size
+            )
+            if self._error is not None:
+                raise RuntimeError("ZMQ wire journal writer failed") from self._error
+        with self._file_lock:
             self._file.seek(offset)
             payload = self._file.read(size)
         if len(payload) != size:
@@ -281,11 +331,14 @@ class _ObservationReader:
         robot: Robot,
         zmq_mod,
         preserve_collection_backlog: bool = False,
-        conflate: bool = False,
     ) -> None:
         self._robot = robot
         self._zmq = zmq_mod
+        self._ctx = zmq_mod.Context.instance()
+        self._sub_endpoint = config.transport.sub_endpoint
         self._latest: WireObservation | None = None
+        self._latest_complete_image: WireObservation | None = None
+        self._image_revision = 0
         self._latest_images: dict[str, np.ndarray] = {}
         self._preserve_collection_backlog = preserve_collection_backlog
         self._collection_queue: collections.deque[WireObservation] = collections.deque()
@@ -300,6 +353,7 @@ class _ObservationReader:
 
         self._disabled_cameras = set(config.transport.disabled_cameras)
         self._disabled_groups = set(config.transport.disabled_groups)
+        self._image_mode = str(getattr(config.transport, "image_mode", "stream"))
         # Per-group slice of the robot's initial qpos, used to fill state for
         # groups disabled in this deployment (e.g. an unused arm).
         self._group_initial_qpos: dict[str, np.ndarray] = {}
@@ -310,16 +364,16 @@ class _ObservationReader:
             )
             offset += group.dof
 
-        ctx = zmq_mod.Context.instance()
-        self._sub = ctx.socket(zmq_mod.SUB)
-        if conflate:
-            # Collection capture only consumes the freshest complete observation.
-            # Conflation prevents an idle reader from replaying pre-START frames
-            # that are still buffered below the application-level drain.
-            self._sub.setsockopt(zmq_mod.CONFLATE, 1)
-        self._sub.setsockopt(zmq_mod.SUBSCRIBE, b"")
-        self._sub.setsockopt(zmq_mod.RCVTIMEO, 0)  # non-blocking drain
-        self._sub.connect(config.transport.sub_endpoint)
+        self._sub = self._create_subscriber()
+
+    def _create_subscriber(self) -> Any:
+        subscriber = self._ctx.socket(self._zmq.SUB)
+        if self._preserve_collection_backlog:
+            subscriber.setsockopt(self._zmq.RCVHWM, COLLECTION_RECEIVE_HWM)
+        subscriber.setsockopt(self._zmq.SUBSCRIBE, b"")
+        subscriber.setsockopt(self._zmq.RCVTIMEO, 0)
+        subscriber.connect(self._sub_endpoint)
+        return subscriber
 
     def _drain_latest(self) -> WireObservation | None:
         """Pop all queued SUB messages, keeping only the newest by timestamp."""
@@ -335,12 +389,38 @@ class _ObservationReader:
                 obs = unpack_observation(payload)
                 self._image_rate.mark_many(obs.images.keys(), obs.t)
                 self._cache_images_locked(obs)
+                if self._has_complete_images(obs):
+                    self._latest_complete_image = obs
+                    self._image_revision += 1
                 if newest is None or obs.t >= newest.t:
                     newest = obs
             if got_message:
                 self._freshness.mark()
             self._latest = newest
             return newest
+
+    def _has_complete_images(self, obs: WireObservation) -> bool:
+        disabled_cameras = getattr(self, "_disabled_cameras", set())
+        required = {
+            camera.observation_key
+            for camera in self._robot.observation_schema.cameras
+            if camera.observation_key not in disabled_cameras
+        }
+        return required.issubset(obs.images)
+
+    def image_revision(self) -> int:
+        """Return the number of complete image observations received by this reader."""
+        with self._lock:
+            return self._image_revision
+
+    def get_frame_after_image_revision(self, revision: int) -> Observation | None:
+        """Return a complete image observation newer than ``revision``."""
+        self._drain_latest()
+        with self._lock:
+            if self._image_revision <= revision or self._latest_complete_image is None:
+                return None
+            wire_obs = self._latest_complete_image
+        return self._wire_to_observation(wire_obs)
 
     def _drain_collection_queue(self) -> WireObservation | None:
         with self._lock:
@@ -407,9 +487,12 @@ class _ObservationReader:
         return observation.operator_event
 
     def clear_collection_backlog(self) -> float | None:
-        """Drain the socket and drop queued collection frames captured pre-recording."""
+        """Drain the bounded socket backlog without reconnecting the hot reader."""
         with self._lock:
+            journal = getattr(self, "_collection_journal", None)
             self._collection_journal = None
+            if journal is not None:
+                journal.finish()
             cutoff = None
             if self._collection_queue:
                 cutoff = max(obs.t for obs in self._collection_queue)
@@ -600,14 +683,25 @@ class _ObservationReader:
                 payload = self._raw_collection_queue.pop() if self._raw_collection_queue else None
                 self._raw_collection_queue.clear()
                 got_message = payload is not None
+                on_demand = self._image_mode == "on_demand"
+                latest_complete = None
                 while True:
                     try:
                         payload = self._sub.recv(self._zmq.NOBLOCK)
                     except self._zmq.Again:
                         break
                     got_message = True
+                    if on_demand:
+                        try:
+                            observation = unpack_observation(payload)
+                        except Exception:
+                            observation = None
+                        if observation is not None and self._has_complete_images(observation):
+                            latest_complete = payload
                 if not got_message or payload is None:
                     return None
+                if on_demand and latest_complete is not None:
+                    payload = latest_complete
             self._freshness.mark()
             return payload
 
@@ -676,13 +770,18 @@ class _ObservationReader:
     def finish_collection_capture(self) -> None:
         """Detach the active journal; queued snapshots retain it until save completes."""
         with self._lock:
+            journal = self._collection_journal
             self._collection_journal = None
+            if journal is not None:
+                journal.finish()
 
     def close(self) -> None:
         """Close this reader's SUB socket (idempotent)."""
         if self._closed:
             return
         self._closed = True
+        if self._collection_journal is not None:
+            self._collection_journal.finish()
         self._collection_journal = None
         self._sub.close(linger=0)
 
@@ -852,6 +951,39 @@ class ZmqTransport(TransportBridge):
         """
         message = WireAction(t=time.monotonic(), action=np.asarray(action), target=target)
         self._pub.send(pack_action(message))
+
+    def _publish_image_request(self) -> None:
+        action = np.zeros(self._robot.total_action_dim, dtype=np.float32)
+        self._pub.send(
+            pack_action(
+                WireAction(
+                    t=time.monotonic(),
+                    action=action,
+                    target=IMAGE_REQUEST_TARGET,
+                )
+            )
+        )
+
+    def get_policy_frame(self) -> Observation | None:
+        """Return a policy frame, requesting a fresh image in on-demand mode."""
+        mode = str(getattr(self._config.transport, "image_mode", "stream"))
+        if mode == "stream":
+            return self._reader.get_frame()
+        if mode != "on_demand":
+            raise ValueError(f"unsupported transport.image_mode: {mode!r}")
+
+        revision = self._reader.image_revision()
+        self._publish_image_request()
+        deadline = time.monotonic() + float(
+            getattr(self._config.transport, "image_request_timeout_s", 2.0)
+        )
+        while not self.is_shutdown() and time.monotonic() < deadline:
+            frame = self._reader.get_frame_after_image_revision(revision)
+            if frame is not None:
+                return frame
+            time.sleep(0.001)
+        logger.warning("Timed out waiting for on-demand image observation")
+        return None
 
     def _send_collection_control(self, target: str, mode: str | None = None) -> None:
         action = np.zeros(self._robot.total_action_dim, dtype=np.float32)

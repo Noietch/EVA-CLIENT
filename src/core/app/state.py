@@ -16,10 +16,8 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from core.config import ConfigDict
-from core.recorder.episode import EpisodeLogger
 from core.types import RawCollectionSnapshot, RolloutInterventionSegment
 from policy_client.base import PolicyClient
-from robots.base import Robot
 from strategy.base_strategy import BaseInferStrategy
 from transport.base import TransportBridge
 
@@ -27,7 +25,9 @@ if TYPE_CHECKING:
     from tqdm import tqdm
 
     from core.app.collection_capture import CollectionCaptureRunner
+    from core.recorder.episode import EpisodeLogger
     from critic_client.runner import CriticRunner
+    from robots.base import Robot
     from transport.dataset import DatasetTransport
 
 logger = logging.getLogger(__name__)
@@ -95,6 +95,11 @@ class SessionState:
         selected_collect_task: Operator-selected COLLECT task; None until chosen.
         selected_collect_set: Dataset set containing the selected collection task.
         selected_collect_task_index: Task position within the selected collection set.
+        collection_scene_id: Scene selected for the next collection episode.
+        collection_scene_round: Randomization round shared by all tasks in the scene.
+        collection_random_seed: Seed used to place every object for the scene round.
+        collection_slot_id: Stable Scene + Task + Round slot selected for capture.
+        collection_task_id: Scene-plan task identifier for the selected slot.
         interrupt_requested: True when a motion interrupt has been requested.
         follow_human_gripper: When True, mirror the human teleop gripper state.
         gripper_locks: Per-arm gripper override values keyed by arm name.
@@ -120,6 +125,11 @@ class SessionState:
     selected_collect_task: str | None = None
     selected_collect_set: str | None = None
     selected_collect_task_index: int | None = None
+    collection_scene_id: str | None = None
+    collection_scene_round: int | None = None
+    collection_random_seed: int | None = None
+    collection_slot_id: str | None = None
+    collection_task_id: str | None = None
     interrupt_requested: bool = False
     follow_human_gripper: bool = False
     gripper_locks: dict[str, float] = dataclasses.field(default_factory=dict)

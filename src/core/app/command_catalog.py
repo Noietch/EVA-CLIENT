@@ -12,6 +12,7 @@ _COMMANDS = (
     ("rl_setup", "web:rl_setup", ("rl-b-setup",)),
     ("start", "web:start", ("be-run",)),
     ("stop", "web:stop", ()),
+    ("eval_cancel", "web:eval_cancel", ()),
     ("run", "web:run", ("b-run", "b-replay-run", "rl-b-run")),
     ("halt", "web:halt", ("b-step-halt", "b-replay-step-halt", "rl-b-intervene")),
     ("reset", "web:reset", ("be-reset",)),

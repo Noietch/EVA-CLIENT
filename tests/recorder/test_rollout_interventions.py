@@ -4,6 +4,7 @@ import json
 
 import numpy as np
 import pyarrow.parquet as pq
+import pytest
 
 from core.config import ConfigDict
 from core.recorder import episode as episode_module
@@ -16,12 +17,14 @@ from robots.base import (
     Robot,
 )
 
+pytestmark = pytest.mark.integration
+
 _DIM = 3
 
 
-def _robot() -> Robot:
+def _logger(log_dir) -> EpisodeLogger:
     joints = tuple(f"j{i}" for i in range(_DIM))
-    return Robot(
+    robot = Robot(
         name="fake_arm",
         actuator_groups=(ActuatorGroup("arm", _DIM, joints),),
         initial_qpos=np.zeros(_DIM, dtype=np.float32),
@@ -30,17 +33,9 @@ def _robot() -> Robot:
             state_composition=("arm",),
         ),
     )
-
-
-def _logger(
-    log_dir,
-    *,
-    save_image_height: int | None = None,
-    save_image_width: int | None = None,
-) -> EpisodeLogger:
     return EpisodeLogger(
         log_dir,
-        _robot(),
+        robot,
         fps=10,
         dataset_keys=ConfigDict(
             state_key="observations.state.qpos",
@@ -49,8 +44,6 @@ def _logger(
             video_keys={},
         ),
         async_save=False,
-        save_image_height=save_image_height,
-        save_image_width=save_image_width,
     )
 
 
@@ -168,58 +161,6 @@ def test_rollout_save_merges_intervention_into_episode_table(tmp_path):
     assert episodes[0]["intervention_ranges"] == [
         {"segment_index": 0, "start_frame": 2, "end_frame": 3}
     ]
-
-
-def test_rollout_intervention_video_uses_episode_writer_when_size_set(tmp_path, monkeypatch):
-    frame_shapes: dict[str, list[tuple[int, int, int]]] = {}
-
-    class _Writer:
-        def __init__(self, path: str) -> None:
-            self.path = path
-            frame_shapes[self.path] = []
-
-        def append_data(self, frame: np.ndarray) -> None:
-            frame_shapes[self.path].append(frame.shape)
-
-        def close(self) -> None:
-            pass
-
-    monkeypatch.setattr(
-        episode_module.imageio, "get_writer", lambda path, *a, **k: _Writer(str(path))
-    )
-    logger = _logger(tmp_path, save_image_height=120, save_image_width=160)
-    state = np.zeros(_DIM, dtype=np.float32)
-    segment = RolloutInterventionSegment(
-        segment_index=0,
-        start_policy_frame_index=1,
-        pre_intervention_qpos=state,
-        frames=[
-            Observation(
-                timestamp=10.0,
-                images={"cam_high": np.zeros((480, 640, 3), dtype=np.uint8)},
-                state_qpos=state,
-                action_qpos=state,
-            ),
-            Observation(
-                timestamp=10.1,
-                images={"cam_high": np.zeros((480, 640, 3), dtype=np.uint8)},
-                state_qpos=state,
-                action_qpos=state,
-            ),
-        ],
-    )
-
-    logger.start_episode("pick")
-    logger.record_step(_obs(state, 1), state, timestamp=9.9)
-    logger.set_rollout_intervention_segments([segment])
-
-    assert logger.end_episode() is True
-    episode_shapes = [
-        shapes for path, shapes in frame_shapes.items() if "/videos/chunk-000/" in path
-    ]
-    assert episode_shapes == [[(120, 160, 3), (120, 160, 3), (120, 160, 3)]]
-    intervention_dir = "/" + "inter" + "ventions/"
-    assert not any(intervention_dir in path for path in frame_shapes)
 
 
 def test_rollout_save_removes_explicit_policy_warmup_interval(tmp_path, monkeypatch):

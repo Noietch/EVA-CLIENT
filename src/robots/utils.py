@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
+from trimesh.graph import smooth_shade
 
 from core.utils.math import quaternion_wxyz_to_matrix
 
@@ -329,6 +330,7 @@ class UrdfScene:
         if geom not in self._mesh_bytes:
             urdf_key, raw = source
             mesh = self._urdfs[urdf_key].scene.geometry[raw]  # type: ignore[attr-defined]
+            mesh = smooth_shade(mesh, angle=np.radians(30), facet_minarea=None)
             vertices = np.ascontiguousarray(mesh.vertices, dtype="<f4")
             normals = np.ascontiguousarray(mesh.vertex_normals, dtype="<f4")
             faces = np.ascontiguousarray(mesh.faces, dtype="<u4")

@@ -2,6 +2,7 @@
 """ARX R5 execution-layer node for EVA's ZMQ transport."""
 
 from __future__ import annotations
+from core.devices.camera import CameraPublisher, CameraSource
 
 import argparse
 import dataclasses
@@ -284,7 +285,7 @@ class ArxR5TeleopSource:
 class ArxR5ZmqNode:
     """Bridge EVA ZMQ wire messages to an ARX-SDK-controlled dual R5 pair."""
 
-    def __init__(self, config: ArxR5ZmqConfig) -> None:
+    def __init__(self, config: ArxR5ZmqConfig, camera_endpoint: str = "") -> None:
         import zmq
 
         self._config = config
@@ -298,7 +299,9 @@ class ArxR5ZmqNode:
         self._action_sub.setsockopt(zmq.SUBSCRIBE, b"")
         self._action_sub.setsockopt(zmq.RCVTIMEO, 0)
         self._robot = ArxR5DualArm(cast(Any, config))
-        self._cameras = self._build_camera_cache(config)
+        self._cameras = (
+            CameraSource(camera_endpoint) if camera_endpoint else self._build_camera_cache(config)
+        )
         self._teleop_source = ArxR5TeleopSource(config)
         self._collection_active = False
         self._collection_control_source = COLLECTION_CONTROL_TRANSPORT
@@ -530,6 +533,8 @@ class ArxR5ZmqNode:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--camera-only", action="store_true")
+    parser.add_argument("--camera-endpoint", default="")
     parser.add_argument("--obs-endpoint", default="tcp://127.0.0.1:5555")
     parser.add_argument("--action-endpoint", default="tcp://127.0.0.1:5556")
     parser.add_argument("--left-can-port", default=DEFAULT_LEFT_CAN_PORT)
@@ -688,7 +693,10 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     config = build_config(args)
-    node = ArxR5ZmqNode(config)
+    if args.camera_only:
+        CameraPublisher((OrbbecCameraCache(config.orbbec_cameras),), args.camera_endpoint).run()
+        return
+    node = ArxR5ZmqNode(config, args.camera_endpoint)
 
     def _stop(_signum: int, _frame: Any) -> None:
         node.stop()

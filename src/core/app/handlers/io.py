@@ -378,7 +378,10 @@ def fetch_action_chunk(
     while not runtime.transport.is_shutdown():
         observation = prebuilt_observation
         if observation is None:
-            frame = runtime.transport.get_frame()
+            get_policy_frame = getattr(
+                runtime.transport, "get_policy_frame", runtime.transport.get_frame
+            )
+            frame = get_policy_frame()
             if frame is None:
                 rate.sleep()
                 continue
@@ -423,7 +426,8 @@ def fetch_action_chunk(
 
 def _loop_observation(config: ConfigDict, runtime: RuntimeState, prompt: str) -> dict | None:
     """Build a policy observation from the latest frame; None if none is available."""
-    frame = runtime.transport.get_frame()
+    get_policy_frame = getattr(runtime.transport, "get_policy_frame", runtime.transport.get_frame)
+    frame = get_policy_frame()
     if frame is None:
         return None
     return build_policy_observation(frame, prompt, config, runtime)
@@ -482,7 +486,7 @@ def run_warmup_and_start(config: ConfigDict, runtime: RuntimeState, session: Ses
         session.sim_preview_qpos = None
         return True
 
-    warmup_n = max(1, config.inference_cfg.setup_warmup_chunks)
+    warmup_n = max(0, config.inference_cfg.setup_warmup_chunks)
 
     skip_warmup = config.eval and config.eval.skip_warmup_after_first and runtime._eval_warmup_done
 
@@ -493,8 +497,10 @@ def run_warmup_and_start(config: ConfigDict, runtime: RuntimeState, session: Ses
     session.chunk_index = 0
     _anchor_buffer_to_current_qpos(runtime)
 
-    if skip_warmup:
-        logger.info("Eval fast-path: skipping per-trial warmup")
+    if skip_warmup or warmup_n == 0:
+        logger.info(
+            "Eval fast-path: skipping per-trial warmup" if skip_warmup else "Warmup disabled"
+        )
         start_inference_loop(config, runtime, session)
         return True
 

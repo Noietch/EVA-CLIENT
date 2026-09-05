@@ -24,6 +24,7 @@ from core.app.handlers import (
     activate_teleop,
     begin_rollout_save_episode,
     build_policy_observation,
+    cancel_eval_episode,
     clear_replay,
     close_teleop,
     collect_cancel,
@@ -579,6 +580,32 @@ def _handle_web_command(
             set_phase(runtime, "ready")
         return
 
+    if verb == "eval_cancel":
+        logger_obj = runtime.episode_logger
+        active_eval_episode = bool(
+            config.eval
+            and logger_obj is not None
+            and logger_obj.is_evaluation
+            and logger_obj.has_active_episode
+        )
+        starting_eval = bool(
+            config.eval and runtime.web_phase == "starting" and runtime.current_clip_id is not None
+        )
+        if not active_eval_episode and not starting_eval:
+            logger.info("Ignored eval cancel: no active evaluation Episode")
+            return
+        # SIM cleanup/reset is owned by the Task Orchestrator and never happens here.
+        if runtime.web_phase in {"starting", "running", "stopping", "cancelling"}:
+            set_phase(runtime, "cancelling")
+            _dispatch_halt(config, runtime, session)
+        cancel_eval_episode(runtime)
+        runtime.needs_pre_start_reset = True
+        runtime.current_clip_id = None
+        runtime.current_cell = None
+        set_phase(runtime, "ready")
+        logger.info("Evaluation cancelled; active Client Episode discarded")
+        return
+
     if verb == "reset":
         # Manual reset: allowed whenever the arm isn't actively moving under policy control.
         if runtime.web_phase in {"starting", "running", "stopping"}:
@@ -927,6 +954,11 @@ def _handle_web_command(
             clear_replay(config, session, runtime)
         if arg != "collect":
             runtime.collection_teleop_armed = False
+            session.collection_scene_id = None
+            session.collection_scene_round = None
+            session.collection_random_seed = None
+            session.collection_slot_id = None
+            session.collection_task_id = None
         runtime.collection_replay_qpos = None
         runtime.collection_replay_episode = None
         stop_rollout_intervention(config, runtime, session, required=False)
@@ -958,14 +990,57 @@ def _handle_web_command(
             session.mode = SessionMode.SELECT
         return
 
-    if verb == "collect_arm":
+    if verb == "device_selection":
+        runtime.console_ctx.device_settings.save_selection(json.loads(arg), runtime, session)
+        return
+
+    if verb in {"device_start", "device_stop"}:
+        if verb == "device_start" and (
+            runtime.collection_teleop_armed
+            or session.manual_publish_active
+            or session.status is SessionStatus.RUNNING
+        ):
+            session.last_error = "Stop control before starting devices"
+            return
+        if verb == "device_stop":
+            _handle_web_command("web:collect_arm:off", config, runtime, session)
+            _dispatch_halt(config, runtime, session)
+        try:
+            session.last_error = ""
+            runtime.console_ctx.device_settings.service.request(
+                verb.removeprefix("device_"), {"component": arg or None}
+            )
+        except (ValueError, OSError) as error:
+            session.last_error = str(error)
+        return
+
+    if verb == "device_control":
+        if arg != "on":
+            _handle_web_command("web:collect_arm:off", config, runtime, session)
+            _dispatch_halt(config, runtime, session)
+            return
+        workspace = runtime.console_ctx.device_settings.workspace
+        selected = workspace.initial_selection(config)
+        if workspace.catalog["teleop"][selected["teleop"]].get("manual"):
+            select_mode(SessionMode.MANUAL, config, session, runtime)
+            manual_send(config, runtime, session)
+        else:
+            _handle_web_command("web:control_arm:on", config, runtime, session)
+        return
+
+    if verb in {"collect_arm", "control_arm"}:
+        if verb == "control_arm" and (
+            runtime.console_ctx is None or runtime.console_ctx.active_tab != "manual"
+        ):
+            session.last_error = "Open DEVICE before enabling teleop"
+            return
         enabled = arg.strip().lower() in {"1", "true", "on"}
         if enabled:
             if runtime.collection_teleop_armed and runtime.collection_teleop_active:
                 return
             prewarm_teleop_ik(config, runtime)
             runtime.collection_teleop_armed = True
-            if runtime.console_ctx is not None:
+            if runtime.console_ctx is not None and verb == "collect_arm":
                 runtime.console_ctx.active_tab = "collect"
             if not activate_teleop(config, runtime, session):
                 runtime.collection_teleop_armed = False
@@ -1238,7 +1313,7 @@ def run(
     web_port: int,
     config_path: str | None = None,
     headless: bool = False,
-) -> None:
+) -> bool:
     """Main entry. Runs the unified console web server.
 
     The console hosts every workflow as a tab (DEBUG/REPLAY/COLLECT/MANUAL/EVAL/RESULT).
@@ -1250,6 +1325,8 @@ def run(
     control channel (forced on), and status is surfaced via structured logs + a
     periodic heartbeat — for low-power / simulator-driven evaluation.
     """
+    import robots  # noqa: F401  (register robot types before registry construction)
+
     robot = ROBOT_REGISTRY.build(config.robot.type)
     if config.robot.initial_qpos is not None:
         override = np.asarray(config.robot.initial_qpos, dtype=np.float32)
@@ -1614,3 +1691,4 @@ def run(
             stop_ssh_forward(ssh_proc)
         if result_syncer is not None:
             result_syncer.stop()
+    return bool(runtime.console_ctx and runtime.console_ctx.device_settings.restart_requested)

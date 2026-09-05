@@ -8,6 +8,7 @@ requires-python = ">=3.11,<3.12"
 dependencies = [
     "addict>=2.4.0",
     "av>=17.1.0",
+    "flask>=3.1,<4",
     "h5py==3.13.0",
     "imageio==2.37.3",
     "imageio-ffmpeg==0.6.0",
@@ -17,6 +18,7 @@ dependencies = [
     "msgpack==1.1.2",
     "msgpack-numpy==0.4.8",
     "mcap==1.4.0",
+    "matplotlib>=3.8,<4",
     "numpy==1.26.4",
     "opencv-python==4.10.0.84",
     "openpi-client==0.1.2",
@@ -48,6 +50,7 @@ dev = [
 viz = [
     "fast-simplification==0.1.13",
 ]
+test-browser = ["playwright==1.62.0"]
 
 [project.scripts]
 eva = "main:main"
@@ -88,9 +91,7 @@ ignore = ["UP042"]
 [tool.ruff.lint.per-file-ignores]
 "tests/manual/*.py" = ["E402"]
 "tests/ik/test_solver.py" = ["E402"]
-# Asserts exact HTML/JS substrings from the console template; wrapping them would
-# break the literal match, so long lines are unavoidable here.
-"tests/integration/web/test_console_static.py" = ["E501"]
+"tools/openloop.py" = ["E402"]
 
 [tool.pyright]
 include = ["src", "tests"]
@@ -126,6 +127,8 @@ reportUnusedFunction = false
 
 [tool.pytest.ini_options]
 addopts = [
+    "-ra", "--strict-config", "--strict-markers",
+    "-m", "not slow and not e2e",
     "-p", "no:ament_lint",
     "-p", "no:ament_xmllint",
     "-p", "no:launch_testing",
@@ -137,5 +140,10 @@ addopts = [
 pythonpath = ["src", "."]
 testpaths = ["tests"]
 markers = [
-    "slow: requires heavy deps (pyroki/jax/URDF, HDF5)",
+    "unit: isolated logic with test doubles for external boundaries",
+    "integration: local component, file-format, socket or HTTP integration",
+    "static: source, asset and configuration structure checks",
+    "e2e: browser workflows against a running local application",
+    "slow: expensive solver or performance validation",
 ]
+junit_suite_name = "eva-client"

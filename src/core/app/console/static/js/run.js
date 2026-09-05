@@ -2,7 +2,11 @@
 // config & tuning panel (config); manual sim/connection control (manual).
 import { $, LIVE, RUN_CONTROLS, S, apiPost, setCommandMetadata } from "./core.js";
 import { updateScrub } from "./charts.js";
-import { collectEnabled, dotClass, renderCollect, renderRolloutSave, loadAnnotation } from "./collect.js";
+import { renderDeviceSettings } from "./device.js";
+import {
+  collectEnabled, dotClass, loadAnnotation, renderCollect, renderRolloutSave,
+  selectCollectionDataset,
+} from "./collect.js";
 import { applyEvalStatus, evalCfg, evalEnabled } from "./eval.js";
 import { maybeSyncReplayPlayer, loadMountedReplaySeries, replayStop } from "./replay.js";
 
@@ -52,6 +56,7 @@ function applyRunControlStatus(ids, s) {
       return;
     }
     const m = uiMode(s.cli_mode);
+    if (S.ACTIVE_TAB === "manual") renderControl();
     const isStep = m === "step";
     $(ids.runGroup).style.display = isStep ? "none" : "grid";
     $(ids.stepGroup).style.display = isStep ? "block" : "none";
@@ -167,6 +172,14 @@ function applyStatus(s) {
         ? s.selected_collect_task_index
         : null;
     }
+    if (collectTask == null) {
+      const defaultSet = collectTaskSets()[0];
+      if (defaultSet && defaultSet.tasks.length) {
+        collectSet = defaultSet.name;
+        collectTask = defaultSet.tasks[0].prompt;
+        collectTaskIndex = 0;
+      }
+    }
     syncCollectTaskNavigation();
     if (S.ACTIVE_TAB === "replay" || S.ACTIVE_TAB === "eval" || s.replay_loaded || S.CFG.is_replay) {
       const input = $("replay-episode-input");
@@ -237,7 +250,6 @@ function uiMode(m) { return m === "debug_sim_real" ? "step" : m; }
 // Map each selector list to the header chip that mirrors its current value.
 const SEL_CHIP = {
     "prompt-list": "prompt-chip",
-    "collect-prompt-list": "collect-prompt-chip",
     "mode-list": "mode-chip",
     "replay-mode-list": "replay-mode-chip",
     "strategy-list": "strategy-chip",
@@ -434,10 +446,13 @@ function updateGuide() {
       const enabled = collectEnabled();
       const collecting = !!collect.collecting;
       const hasPrompt = !!collectTaskValue();
-      const queue = collect.queue || [];
+      const activeQueue = (collect.queue || []).filter(
+        (item) => item.status === "queued" || item.status === "saving"
+      );
       let message = "";
       let hint = "";
-      const done = enabled && hasPrompt && S.collectArmEnabled && !collecting && queue.length === 0;
+      const done = enabled && hasPrompt && S.collectArmEnabled &&
+        !collecting && activeQueue.length === 0;
       const bar = $("guidebar");
       if (bar) bar.classList.toggle("done", done);
       if ($("gb-step")) $("gb-step").textContent = collectReplayActive ? "QUALITY CHECK" : "COLLECT";
@@ -453,8 +468,8 @@ function updateGuide() {
       } else if (collecting) {
         message = `Recording — <b>${collect.current_episode_frames || 0}</b> frames`;
         hint = "END/SAVE queues the episode · CANCEL discards it";
-      } else if (queue.length) {
-        message = `Converting — <b>${queue.length}</b> item(s) in queue`;
+      } else if (activeQueue.length) {
+        message = `Converting — <b>${activeQueue.length}</b> item(s) in queue`;
         hint = "Select a green item, then press REPLAY";
       } else {
         message = "Ready — click <b>START RECORD</b>";
@@ -465,7 +480,7 @@ function updateGuide() {
       return;
     }
     const isReplay = S.ACTIVE_TAB === "replay";
-    const isManual = uiMode(s.cli_mode) === "manual";
+    const isManual = S.ACTIVE_TAB === "manual" || uiMode(s.cli_mode) === "manual";
     const hasPrompt = isReplay
       ? !!(s.replay_loaded || (S.CFG.is_replay && s.current_episode != null))
       : !!s.selected_task;
@@ -493,10 +508,10 @@ function updateGuide() {
       setPanel(ids.setup, "done");
       setPanel(ids.control, "active");
       const bar = $("guidebar");
-      if (bar) bar.classList.add("done");
-      if ($("gb-step")) $("gb-step").textContent = "MANUAL";
-      if ($("gb-msg")) $("gb-msg").innerHTML = "Manual — drag the <b>qpos sliders</b>";
-      if ($("gb-hint")) $("gb-hint").textContent = "STAGE: adjust target, then SEND to publish";
+      if (bar) bar.classList.toggle("done", !!s.transport_connected);
+      if ($("gb-step")) $("gb-step").textContent = "DEVICE";
+      if ($("gb-msg")) $("gb-msg").textContent = s.transport_connected ? "ROBOT CONNECTED" : "ROBOT DISCONNECTED";
+      if ($("gb-hint")) $("gb-hint").textContent = s.collection_teleop_armed || s.manual_publish_active ? "CONTROL ENABLED" : "CONTROL LOCKED";
       return;
     }
 
@@ -621,20 +636,76 @@ function collectTaskIndexValue() {
   }
 
 function collectTaskSets() {
-    return Object.entries((S.CFG && S.CFG.collect_tasks) || {}).map(
-      ([name, entries]) => {
+    const sets = Object.entries((S.CFG && S.CFG.collect_tasks) || {}).map(
+      ([name, entries], sourceIndex) => {
         const tasks = (Array.isArray(entries) ? entries : [])
           .filter((entry) => Array.isArray(entry) && entry.length === 2)
           .map(([prompt, target]) => ({ prompt: String(prompt), target: Number(target) }));
-        return { name, tasks, prompts: tasks.map((task) => task.prompt) };
+        return {
+          name, tasks, prompts: tasks.map((task) => task.prompt), sourceIndex,
+        };
       }
     ).filter((entry) => entry.prompts.length);
+    return orderCollectTaskSets(sets);
   }
 
-function collectTaskTarget(prompt = collectTaskValue()) {
-    const { sets, setIndex, taskIndex } = collectTaskLocation(prompt);
-    if (setIndex < 0 || taskIndex < 0) return null;
-    return sets[setIndex].tasks[taskIndex].target;
+function collectTaskPlan(prompt) {
+    return ((S.SCENE_PLAN && S.SCENE_PLAN.tasks) || []).find(
+      (task) => task.prompt_en === prompt
+    ) || null;
+  }
+
+function collectSetSceneIds(set) {
+    const sceneIds = [];
+    (set.tasks || []).forEach((task) => {
+      const plan = collectTaskPlan(task.prompt);
+      (plan ? plan.scene_ids : []).forEach((sceneId) => {
+        if (!sceneIds.includes(sceneId)) sceneIds.push(sceneId);
+      });
+    });
+    const encoded = String(set.name || "").match(/(?:^|_)scene[_-]?([0-9]+)/i);
+    if (!sceneIds.length && encoded) sceneIds.push(`SC-${encoded[1].padStart(3, "0")}`);
+    return sceneIds;
+  }
+
+function collectSceneSortKey(sceneId) {
+    const value = String(sceneId || "");
+    const number = value.match(/(\d+)(?!.*\d)/);
+    return [value.replace(/\d+/g, "").toUpperCase(), number ? Number(number[1]) : Number.MAX_SAFE_INTEGER, value];
+  }
+
+function compareCollectSceneIds(left, right) {
+    const leftKey = collectSceneSortKey(left);
+    const rightKey = collectSceneSortKey(right);
+    return leftKey[0].localeCompare(rightKey[0]) || leftKey[1] - rightKey[1] ||
+      leftKey[2].localeCompare(rightKey[2]);
+  }
+
+function collectSceneDistance(left, right) {
+    if (!left || !right) return 0;
+    const leftKey = collectSceneSortKey(left);
+    const rightKey = collectSceneSortKey(right);
+    if (leftKey[0] !== rightKey[0]) return 1000000;
+    return Math.abs(leftKey[1] - rightKey[1]);
+  }
+
+function orderCollectTaskSets(sets) {
+    const remaining = sets.map((set) => ({ ...set, sceneIds: collectSetSceneIds(set) }));
+    const ordered = [];
+    let previousScene = "";
+    while (remaining.length) {
+      remaining.sort((left, right) => {
+        const leftScene = left.sceneIds[0] || "";
+        const rightScene = right.sceneIds[0] || "";
+        return (previousScene ? collectSceneDistance(previousScene, leftScene) : 0) -
+          (previousScene ? collectSceneDistance(previousScene, rightScene) : 0) ||
+          compareCollectSceneIds(leftScene, rightScene) || left.sourceIndex - right.sourceIndex;
+      });
+      const next = remaining.shift();
+      ordered.push(next);
+      previousScene = next.sceneIds[next.sceneIds.length - 1] || previousScene;
+    }
+    return ordered;
   }
 
 function collectTaskLocation(
@@ -660,142 +731,120 @@ function collectTaskLocation(
     return { sets, setIndex: -1, taskIndex: -1 };
   }
 
-function collectTaskSelectionKey() {
-    const { sets, setIndex, taskIndex } = collectTaskLocation();
-    return setIndex < 0 ? "" : `${sets[setIndex].name}:${taskIndex}`;
+function applyCollectTaskSelection(prompt, setName, taskIndex, preferredSceneId = "") {
+    const sets = collectTaskSets();
+    const selectedSet = sets.find((set) => set.name === setName);
+    const selectedTask = selectedSet && selectedSet.tasks[taskIndex];
+    if (!selectedTask || selectedTask.prompt !== prompt) return false;
+    collectTask = prompt;
+    collectSet = setName;
+    collectTaskIndex = taskIndex;
+    S.STATUS.selected_collect_task = prompt;
+    S.STATUS.selected_collect_set = setName;
+    S.STATUS.selected_collect_task_index = taskIndex;
+    const linked = collectTaskPlan(prompt);
+    if (linked) {
+      const sceneIndex = preferredSceneId ? linked.scene_ids.indexOf(preferredSceneId) : -1;
+      S.scenePlanTaskId = linked.task_id;
+      S.scenePlanSceneIndex = sceneIndex >= 0 ? sceneIndex : 0;
+      S.scenePlanSceneId = linked.scene_ids[S.scenePlanSceneIndex] || "";
+      S.scenePlanRoundIndex = 0;
+      S.scenePlanTaskPromptKey = prompt;
+    }
+    return true;
   }
 
-function selectCollectTask(prompt, setName = collectSet, taskIndex = null) {
-    if (!prompt || (S.STATUS.collect && S.STATUS.collect.collecting)) return;
+async function selectCollectTask(
+    prompt, setName = collectSet, taskIndex = null, preferredSceneId = null
+  ) {
+    if (!prompt || S.collectTaskSelectionPending) return false;
+    const currentPlan = ((S.SCENE_PLAN && S.SCENE_PLAN.tasks) || []).find(
+      (task) => task.task_id === S.scenePlanTaskId
+    );
+    const previousSceneId = preferredSceneId !== null ? String(preferredSceneId || "")
+      : S.scenePlanSceneId || (currentPlan && Array.isArray(currentPlan.scene_ids)
+        ? currentPlan.scene_ids[S.scenePlanSceneIndex] : "");
     const location = collectTaskLocation(prompt, setName, taskIndex);
-    if (location.setIndex < 0 || location.taskIndex < 0) return;
+    if (location.setIndex < 0 || location.taskIndex < 0) return false;
     const selectedSet = location.sets[location.setIndex];
-    collectTask = selectedSet.tasks[location.taskIndex].prompt;
-    collectSet = selectedSet.name;
-    collectTaskIndex = location.taskIndex;
-    S.STATUS.selected_collect_task = prompt;
-    S.STATUS.selected_collect_set = collectSet;
-    S.STATUS.selected_collect_task_index = collectTaskIndex;
-    apiPost("/api/select_collect_task", {
-      task: prompt,
-      dataset: collectSet,
-      task_index: collectTaskIndex,
-    });
-    syncCollectTaskNavigation();
-    renderCollect();
-    updateGuide();
+    const nextTask = selectedSet.tasks[location.taskIndex].prompt;
+    const nextSet = selectedSet.name;
+    const nextTaskIndex = location.taskIndex;
+    let confirmed = false;
+    S.collectTaskSelectionPending = true;
+    try {
+      syncCollectTaskNavigation();
+      renderCollect();
+      const response = await apiPost("/api/select_collect_task", {
+        task: nextTask,
+        dataset: nextSet,
+        task_index: nextTaskIndex,
+      }, { concurrent: true, timeoutMs: 5000 });
+      confirmed = !!response.ok && response.task === nextTask &&
+        response.dataset === nextSet && response.task_index === nextTaskIndex;
+      if (confirmed) {
+        confirmed = applyCollectTaskSelection(
+          nextTask, nextSet, nextTaskIndex, previousSceneId
+        );
+      }
+    } catch {
+      confirmed = false;
+    } finally {
+      S.collectTaskSelectionPending = false;
+      syncCollectTaskNavigation();
+      renderCollect();
+      updateGuide();
+    }
+    return confirmed;
   }
 
 function stepCollectSet(delta) {
     const { sets, setIndex } = collectTaskLocation();
     const nextIndex = setIndex + delta;
     if (nextIndex < 0 || nextIndex >= sets.length) return;
-    selectCollectTask(sets[nextIndex].tasks[0].prompt, sets[nextIndex].name, 0);
-  }
-
-function stepCollectTask(delta) {
-    const { sets, setIndex, taskIndex } = collectTaskLocation();
-    if (setIndex < 0) return;
-    const nextIndex = taskIndex + delta;
-    if (nextIndex < 0 || nextIndex >= sets[setIndex].tasks.length) return;
-    selectCollectTask(
-      sets[setIndex].tasks[nextIndex].prompt,
-      sets[setIndex].name,
-      nextIndex,
-    );
-  }
-
-function advanceCollectTask() {
-    const { sets, setIndex, taskIndex } = collectTaskLocation();
-    if (setIndex < 0 || taskIndex < 0) return false;
-    if (taskIndex + 1 < sets[setIndex].tasks.length) {
-      const nextIndex = taskIndex + 1;
-      selectCollectTask(sets[setIndex].tasks[nextIndex].prompt, sets[setIndex].name, nextIndex);
-      return true;
-    }
-    if (setIndex + 1 < sets.length) {
-      selectCollectTask(sets[setIndex + 1].tasks[0].prompt, sets[setIndex + 1].name, 0);
-      return true;
-    }
-    return false;
+    selectCollectionDataset(sets[nextIndex].name);
   }
 
 function syncCollectTaskNavigation() {
-    const { sets, setIndex, taskIndex } = collectTaskLocation();
+    const sets = collectTaskSets();
+    const setIndex = sets.findIndex((set) => set.name === collectSet);
     const currentSet = setIndex >= 0 ? sets[setIndex] : null;
     const collecting = !!(S.STATUS.collect && S.STATUS.collect.collecting);
+    const locked = collecting || S.collectTaskSelectionPending;
     const setSelect = $("collect-set-list");
-    const taskSelect = $("collect-prompt-list");
     if (setSelect) setSelect.value = currentSet ? currentSet.name : "";
-    const currentSetName = currentSet ? currentSet.name : "";
-    if (taskSelect && taskSelect.dataset.set !== currentSetName) {
-      taskSelect.innerHTML = "";
-      const placeholder = document.createElement("option");
-      placeholder.value = "";
-      placeholder.disabled = true;
-      placeholder.textContent = "SELECT TASK";
-      taskSelect.appendChild(placeholder);
-      if (currentSet) {
-        currentSet.prompts.forEach((prompt, index) => {
-          const option = document.createElement("option");
-          option.value = String(index);
-          option.dataset.prompt = prompt;
-          option.dataset.label = prompt;
-          option.textContent = `${String(index + 1).padStart(2, "0")} ${prompt}`;
-          taskSelect.appendChild(option);
-        });
-      }
-      taskSelect.dataset.set = currentSetName;
-    }
-    if (taskSelect) taskSelect.value = currentSet ? String(taskIndex) : "";
-    syncChip("collect-prompt-list");
     const controls = {
       "b-collect-prev-set": setIndex <= 0,
       "b-collect-next-set": setIndex < 0 || setIndex >= sets.length - 1,
-      "b-collect-prev-task": taskIndex <= 0,
-      "b-collect-next-task": !currentSet || taskIndex >= currentSet.prompts.length - 1,
     };
     Object.entries(controls).forEach(([id, atBoundary]) => {
       const button = $(id);
-      if (button) button.disabled = collecting || atBoundary;
+      if (button) button.disabled = locked || atBoundary;
     });
-    if (setSelect) setSelect.disabled = collecting || !sets.length;
-    if (taskSelect) taskSelect.disabled = collecting || !currentSet;
+    if (setSelect) setSelect.disabled = locked || !sets.length;
   }
 
 function renderCollectTaskButtons() {
-    const host = $("collect-prompt-list");
     const setHost = $("collect-set-list");
-    if (!host || !setHost) return;
-    host.innerHTML = "";
-    host.dataset.set = "__uninitialized__";
+    if (!setHost) return;
     setHost.innerHTML = "";
     const placeholder = document.createElement("option");
     placeholder.value = "";
     placeholder.disabled = true;
     placeholder.textContent = "SELECT SET";
     setHost.appendChild(placeholder);
-    collectTaskSets().forEach((set, index) => {
+    collectTaskSets().forEach((set) => {
       const option = document.createElement("option");
       option.value = set.name;
-      option.textContent = `${String(index + 1).padStart(2, "0")} ${set.name}`;
+      option.textContent = set.name;
       setHost.appendChild(option);
     });
     setHost.onchange = () => {
       const selected = collectTaskSets().find((set) => set.name === setHost.value);
-      if (selected) selectCollectTask(selected.tasks[0].prompt, selected.name, 0);
-    };
-    host.onchange = () => {
-      const index = Number(host.value);
-      const selected = collectTaskSets().find((set) => set.name === setHost.value);
-      if (selected && selected.tasks[index]) {
-        selectCollectTask(selected.tasks[index].prompt, selected.name, index);
-      }
+      if (selected) selectCollectionDataset(selected.name);
     };
     $("b-collect-prev-set").onclick = () => stepCollectSet(-1);
     $("b-collect-next-set").onclick = () => stepCollectSet(1);
-    $("b-collect-prev-task").onclick = () => stepCollectTask(-1);
-    $("b-collect-next-task").onclick = () => stepCollectTask(1);
     syncCollectTaskNavigation();
   }
 
@@ -1020,7 +1069,11 @@ function renderReplayConfig() {
 
     const inspectDataset = async (dir) => {
       $("replay-episode-task").textContent = `inspecting ${dir}…`;
-      const r = await apiPost("/api/inspect_dataset", { dataset_dir: dir });
+      const r = await apiPost(
+        "/api/inspect_dataset",
+        { dataset_dir: dir },
+        { timeoutMs: 0 },
+      );
       if (!r.ok) {
         if (S.pendingQcLoad && S.pendingQcLoad.dir === dir) S.pendingQcLoad = null;
         $("replay-episode-task").textContent = `✗ ${r.error || "cannot read dataset"}`;
@@ -1075,13 +1128,16 @@ function renderReplayConfig() {
       S.replayLoadPending = true;
       replayStop();
       try {
-        const load = await apiPost("/api/load_replay_dataset", {
-          dataset_dir: dir,
-          episode: id,
-          keys: loadKeys,
-          video_keys: loadVideoKeys,
-          action_mode: actionMode,
-        });
+        const load = await apiPost("/api/load_replay_dataset",
+          {
+            dataset_dir: dir,
+            episode: id,
+            keys: loadKeys,
+            video_keys: loadVideoKeys,
+            action_mode: actionMode,
+          },
+          { timeoutMs: 0 },
+        );
         if (!load.ok) {
           $("replay-episode-task").textContent = `✗ ${load.error || "cannot load episode"}`;
           return;
@@ -1214,9 +1270,37 @@ async function applyManualTune() {
 // ===== manual =====
 
 function enterManualSim() {
-    S.manualActive = true;
-    apiPost("/api/select_mode", { mode: "manual" });
-    renderManualConn();
+    const teleop = renderControl();
+    S.manualActive = !teleop;
+    if (!teleop) apiPost("/api/select_mode", { mode: "manual" });
+    if (!teleop) renderManualConn();
+  }
+
+function renderControl() {
+    const config = S.CFG;
+    if (!config) return false;
+    renderDeviceSettings();
+    const source = config.collection.teleop;
+    const teleop = config.device_selection.teleop !== "joint";
+    const name = source.client_type === "vr_webxr" ? "VR" : source.client_type || "LEADER";
+    $("control-robot").textContent = config.robot_type;
+    $("control-source").textContent = teleop ? name : "JOINT";
+    $("control-cameras").textContent = config.camera_keys.join(", ") || "NONE";
+    $("control-teleop").hidden = !teleop;
+    document.querySelectorAll(".control-joints").forEach(panel => { panel.hidden = teleop; });
+    if (!teleop) return false;
+    $("control-teleop-title").textContent = name;
+    const status = S.STATUS;
+    const input = status.teleop;
+    const armed = !!status.collection_teleop_armed;
+    $("control-arm-enable").checked = armed;
+    $("control-arm-enable").disabled = !armed && !status.transport_connected;
+    $("control-arm-label").textContent = armed ? "ENABLED" : "LOCKED";
+    $("control-teleop-status").textContent = status.last_error || input?.last_fault || input?.source_error ||
+      (input ? `${input.connected ? "CONNECTED" : "DISCONNECTED"} · ${input.condition}` :
+        (status.transport_connected ? "ROBOT CONNECTED" : "ROBOT DISCONNECTED"));
+    $("manual-conn").textContent = `${name} · ${armed ? "ENABLED" : "LOCKED"}`;
+    return true;
   }
 
 function renderManualConn() {
@@ -1339,15 +1423,26 @@ function buildManualSliders(qpos) {
     }
     const host = $("manual-sliders-m");
     host.innerHTML = "";
+    const joints = S.CFG.manual_joint_groups.flatMap(group =>
+      group.joints.map((name, index) => ({name, group: group.name, first: index === 0})));
     qpos.forEach((v, i) => {
       const limit = limits[i];
+      const joint = joints[i];
+      if (joint.first) {
+        const heading = document.createElement("div");
+        heading.className = "ms-group";
+        heading.textContent = joint.group;
+        host.appendChild(heading);
+      }
       const row = document.createElement("div"); row.className = "ms-row";
       row.innerHTML =
-        `<span class="ms-j">j${String(i).padStart(2, "0")}</span>` +
-        `<input type="range" min="${limit.min}" max="${limit.max}" step="${limit.step}" value="${v}" data-j="${i}">` +
+        `<label class="ms-j" for="ms-joint-${i}"></label>` +
+        `<input id="ms-joint-${i}" type="range" min="${limit.min}" max="${limit.max}" step="${limit.step}" value="${v}" data-j="${i}">` +
         `<span class="ms-x"><span id="ms-target-${i}">${v.toFixed(3)}</span>` +
         `<span class="ms-sep">/</span><span class="ms-current" id="ms-current-${i}">—</span></span>`;
       const range = row.querySelector("input");
+      row.querySelector("label").textContent = joint.name;
+      range.setAttribute("aria-label", `${joint.group}: ${joint.name}`);
       range.oninput = (e) => {
         const idx = i, val = parseFloat(e.target.value);
         _manualQpos[idx] = val;
@@ -1392,8 +1487,8 @@ function renderManualTarget(qpos) {
 export {
   applyRunControlStatus, applyStatus, mark, pauseSetup, replayIsLocalMode, resumeSetup,
   retrySetup, setPanel, startRunFromDebug, syncChip, uiMode, updateGuide,
-  advanceCollectTask, applyTune, applyManualTune, collectSetValue, collectTaskIndexValue,
-  collectTaskSelectionKey, collectTaskTarget, collectTaskValue, renderConfig,
+  applyTune, applyManualTune, collectSetValue, collectTaskIndexValue,
+  collectTaskValue, renderConfig, selectCollectTask, applyCollectTaskSelection,
   renderEvalGripper,
   renderRlGripper,
   enterManualSim, manualConnect, manualDisconnect, manualDispatchToggle,

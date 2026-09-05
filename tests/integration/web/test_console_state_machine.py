@@ -22,13 +22,12 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-from _harness import MULTI_STRATEGY, console_config, serve_console
 
 import robots  # noqa: F401  (registers ROBOT_REGISTRY incl. ur5e for single-arm UI tests)
 from core.app import handlers
 from core.app import run as app
 from core.app.console import server as console_server
-from core.app.console.server import ConsoleContext, _serialize_manual_scene, _serialize_scene
+from core.app.console.server import ConsoleContext
 from core.app.handlers import utils as handlers_utils
 from core.app.state import (
     OutputTarget,
@@ -38,9 +37,19 @@ from core.app.state import (
     SessionStatus,
 )
 from core.config import ConfigDict
-from core.types import CollectionRawBatch, RawCollectionSnapshot
-from core.utils.dataset_upload import DatasetUploadProgress, DatasetUploadResult
+from core.utils.dataset_upload import (
+    DatasetUploadPlan,
+    DatasetUploadResult,
+)
+from core.utils.upload_plan import (
+    DirectoryUploadPlan,
+    RemoteFilePlan,
+    UploadFilePlan,
+)
+from tests.integration.web._harness import MULTI_STRATEGY, console_config, serve_console
 from tools.conversion import DatasetExportSummary, QualityExportProgress
+
+pytestmark = pytest.mark.integration
 
 
 def test_run_before_setup_is_rejected(console):
@@ -52,48 +61,6 @@ def test_run_before_setup_is_rejected(console):
     st = console.status()
     assert st["session_status"] == "unset"
     assert st["last_error"] == "Setup is required before running the next step"
-
-
-def test_setup_without_prompt_or_mode_is_rejected(console):
-    console.do("/api/connect")
-    console.do("/api/select_mode", {"mode": "sim"})
-    # no prompt selected
-    console.do("/api/setup")
-    assert console.status()["is_setup_done"] is False
-
-
-@pytest.mark.parametrize("console", [console_config(robot_type="ur5e")], indirect=True)
-def test_single_gripper_config_exposes_one_gripper_control(console):
-    controls = console.get("/api/config").json["gripper_controls"]
-    assert controls == [{"side": "l", "label": "GRIPPER", "group": "arm"}]
-
-
-@pytest.mark.parametrize(
-    "console",
-    [console_config(robot=dict(type="r1_lite", gripper_open=100.0, gripper_close=0.0))],
-    indirect=True,
-)
-def test_r1lite_manual_qpos_limits_expose_full_gripper_range(console):
-    limits = console.get("/api/config").json["manual_qpos_limits"]
-
-    assert len(limits) == 14
-    assert limits[0] == {"min": -3.2, "max": 3.2, "step": 0.005}
-    assert limits[6] == {"min": 0.0, "max": 100.0, "step": 0.1}
-    assert limits[13] == {"min": 0.0, "max": 100.0, "step": 0.1}
-
-
-def test_reselecting_mode_clears_completed_setup(console):
-    console.do("/api/connect")
-    console.do("/api/select_mode", {"mode": "sim"})
-    console.do("/api/select_task", {"task": "pick up the cup"})
-    console.do("/api/setup")
-    assert console.status()["is_setup_done"] is True
-
-    # Changing mode invalidates the prepared state — setup must be redone.
-    console.do("/api/select_mode", {"mode": "real"})
-    st = console.status()
-    assert st["is_setup_done"] is False
-    assert st["session_status"] == "unset"
 
 
 @pytest.mark.parametrize(
@@ -117,83 +84,6 @@ def test_multi_strategy_setup_requires_explicit_choice(console):
     assert console.status()["is_setup_done"] is True
 
 
-def test_single_strategy_is_auto_selected_on_setup(console):
-    console.do("/api/connect")
-    console.do("/api/select_mode", {"mode": "sim"})
-    console.do("/api/select_task", {"task": "pick up the cup"})
-    console.do("/api/setup")
-    # Exactly one strategy configured -> chosen implicitly, no error.
-    assert console.runtime.selected_inference_strategy_key == "sync"
-    assert console.status()["is_setup_done"] is True
-
-
-def test_tab_switch_clears_collection_replay(console):
-    console.session.mode = SessionMode.COLLECT
-    console.session.last_error = "Setup failed"
-    console.runtime.collection_replay_qpos = np.zeros((2, 14), dtype=float)
-    console.runtime.collection_replay_episode = 0
-
-    console.post("/api/tab_switch", {"tab": "replay"})
-    assert console.session.last_error == ""
-    assert console.runtime.collection_replay_qpos is None
-    assert console.runtime.collection_replay_episode is None
-
-    console.pump()
-
-    assert console.session.mode is SessionMode.SELECT
-    assert console.session.last_error == ""
-    assert console.runtime.collection_replay_qpos is None
-    assert console.runtime.collection_replay_episode is None
-
-
-def test_tab_switch_away_from_collect_stops_armed_teleop():
-    calls = []
-
-    class _Transport:
-        def set_hil_relay_enabled(self, enabled):
-            calls.append(f"set_hil_relay_enabled:{enabled}")
-
-        def stop_collection(self):
-            calls.append("stop_collection")
-
-    runtime = SimpleNamespace(
-        replay_source=None,
-        collection_replay_qpos=None,
-        collection_replay_episode=None,
-        collection_teleop_active=True,
-        transport=_Transport(),
-        episode_logger=None,
-        infer_strategy=None,
-        policy=None,
-        ik_solver=None,
-        web_phase="idle",
-        rollout_intervention_active=False,
-        rl_active=False,
-    )
-    session = SessionState(mode=SessionMode.COLLECT, status=SessionStatus.READY)
-    config = ConfigDict(collection=ConfigDict(gate=ConfigDict(enabled=False)))
-
-    app.handle_command("web:tab_switch:manual", config, cast(RuntimeState, runtime), session)
-
-    assert calls == ["set_hil_relay_enabled:False", "stop_collection"]
-    assert runtime.collection_teleop_active is False
-    assert session.mode is SessionMode.SELECT
-
-
-@pytest.mark.parametrize(
-    "console",
-    [console_config(eval=ConfigDict(cli_mode="real", tasks=(), checkpoints=()))],
-    indirect=True,
-)
-def test_tab_switch_to_eval_restores_config_mode(console):
-    # An eval run is fixed to the config's cli_mode; the generic SELECT reset would make
-    # START reject with "select mode first" since EVAL never exposes a mode picker.
-    console.session.mode = SessionMode.SELECT
-    console.post("/api/tab_switch", {"tab": "eval"})
-    console.pump()
-    assert console.session.mode is SessionMode.REAL
-
-
 @pytest.mark.parametrize(
     "console",
     [
@@ -204,307 +94,144 @@ def test_tab_switch_to_eval_restores_config_mode(console):
                 reset_after_each_trial=False,
                 skip_warmup_after_first=False,
                 checkpoints=(),
-                tasks=(
-                    ConfigDict(prompt_en="pick up the cup"),
-                    ConfigDict(prompt_en="pour soybean"),
-                ),
+                tasks=(ConfigDict(prompt_en="pick up the cup"),),
             )
         )
     ],
     indirect=True,
 )
-def test_eval_stop_can_switch_prompt_and_start_next_rollout(console):
-    first_prompt = "pick up the cup"
-    second_prompt = "pour soybean"
-    console.do("/api/connect")
-    console.do("/api/select_mode", {"mode": "sim"})
-    console.do("/api/select_task", {"task": first_prompt})
-    console.do("/api/setup")
-    console.runtime.web_phase = "ready"
+def test_eval_cancel_discards_active_episode_and_is_idempotent(console):
+    class _EvalLogger:
+        is_evaluation = True
 
-    console.do(
-        "/api/eval_start",
-        {"clip_id": "clip-1", "prompt": first_prompt, "trial": 1},
-    )
-    for _ in range(5):
-        handlers.publish_next_action(console.config, console.runtime, console.session)
-    console.do("/api/eval_stop")
-    assert console.session.status is SessionStatus.READY
-    assert console.session.step_index == 5
-    assert console.runtime.needs_pre_start_reset is True
+        def __init__(self) -> None:
+            self.has_active_episode = False
+            self.cancelled = 0
 
-    console.do("/api/select_task", {"task": second_prompt})
-    console.do(
-        "/api/eval_start",
-        {"clip_id": "clip-2", "prompt": second_prompt, "trial": 1},
-    )
+        def start_episode(self, task: str) -> None:
+            del task
+            self.has_active_episode = True
 
-    assert console.status()["session_status"] == "running"
-    assert console.session.selected_task == second_prompt
-    assert console.session.step_index == 0
-    assert console.runtime.needs_pre_start_reset is False
+        def set_episode_meta(self, **fields) -> None:
+            del fields
 
+        def cancel_episode(self, reason: str) -> None:
+            assert reason == "external eval cancel"
+            self.cancelled += 1
+            self.has_active_episode = False
 
-def test_collect_loop_uses_publish_rate_without_dataset_fps():
-    config = console_config(
-        publish_rate=10,
-        collection=ConfigDict(
-            enabled=True,
-            schema=ConfigDict(),
-        ),
-    )
-    assert (
-        app._target_loop_rate_hz(config, cast(RuntimeState, SimpleNamespace(replay_source=None)))
-        == 10
-    )
-
-
-def test_active_client_teleop_loop_uses_publish_rate():
-    config = console_config(
-        publish_rate=100,
-        collection=ConfigDict(teleop=ConfigDict(control_source="client")),
-    )
-    runtime = SimpleNamespace(
-        replay_source=None,
-        collection_teleop_active=True,
-        teleop_execution=SimpleNamespace(active=True, control_source="client"),
-    )
-
-    assert app._target_loop_rate_hz(config, cast(RuntimeState, runtime)) == 100
-
-
-def test_replay_loop_uses_replay_fps_on_live_transport():
-    config = console_config(publish_rate=50)
-    runtime = SimpleNamespace(
-        replay_source=object(),
-        replay_fps=12,
-        transport=SimpleNamespace(is_offline=lambda: False),
-    )
-    assert app._target_loop_rate_hz(config, cast(RuntimeState, runtime)) == 12
-
-
-def test_config_exposes_resolved_collection_dataset_dir():
-    config = console_config(
-        collection=ConfigDict(
-            storage=ConfigDict(log_dir="work_dirs/collection/ur5e"),
-            schema=ConfigDict(columns={"qpos": "observation.qpos"}),
-        ),
-    )
-
-    with serve_console(config) as h:
-        collection = h.get("/api/config").json["collection"]
-
-    repo_root = Path(__file__).resolve().parents[3]
-    assert collection["dataset_dir"] == str(repo_root / "work_dirs" / "collection" / "ur5e")
-
-
-def test_collect_status_follows_selected_collect_task():
-    class _Logger:
-        def __init__(self):
-            self.tasks = []
-
-        def status_snapshot(self, task, *, include_history=True, collection_dataset=None):
+        def status_snapshot(
+            self,
+            task: str,
+            *,
+            include_history: bool = True,
+            collection_dataset: str | None = None,
+        ) -> dict:
+            del task
             del include_history, collection_dataset
-            self.tasks.append(task)
             return {
-                "dataset_dir": f"/datasets/{task.replace(' ', '_')}",
-                "episodes": [{"episode_index": 0, "status": "saved"}],
+                "active": self.has_active_episode,
+                "saving": False,
+                "queued_jobs": 0,
+                "episodes": [],
                 "queue": [],
             }
 
-    with serve_console(console_config()) as h:
-        logger = _Logger()
-        h.runtime.episode_logger = logger
-
-        h.post("/api/select_collect_task", {"task": "pick up cup"})
-        collect = h.status()["collect"]
-
-    assert logger.tasks[-1] == "pick up cup"
-    assert collect["dataset_dir"] == "/datasets/pick_up_cup"
-    assert "episodes" not in collect
-
-
-def test_collect_selection_keeps_explicit_set_for_duplicate_prompt():
-    scene_1 = "ArxKine_PnP_DivObj_Norm_Sngl_Base_v1_scene_1_20260828"
-    scene_3 = "ArxKine_PnP_DivObj_Norm_Sngl_Base_v1_scene_3_20260828"
-    prompt = "pick up the yellow cup and place it on the green plate with left hand."
-    config = console_config()
-    config.collection.tasks = ConfigDict(
-        {
-            scene_1: [(prompt, 1)],
-            scene_3: [(prompt, 7), ("place cup", 2)],
-        }
+    prompt = "pick up the cup"
+    eval_logger = _EvalLogger()
+    console.runtime.episode_logger = eval_logger
+    console.do("/api/connect")
+    console.do("/api/select_mode", {"mode": "sim"})
+    console.do("/api/select_task", {"task": prompt})
+    console.do("/api/setup")
+    console.runtime.web_phase = "ready"
+    console.do(
+        "/api/eval_start",
+        {"clip_id": "clip-cancel", "prompt": prompt, "trial": 1},
     )
+    assert console.status()["eval_recorder"]["active"] is True
 
-    with serve_console(config) as h:
-        response = h.post(
-            "/api/select_collect_task",
-            {"task": prompt, "dataset": scene_3, "task_index": 0},
+    console.do("/api/eval_cancel")
+
+    status = console.status()
+    assert console.session.status is SessionStatus.READY
+    assert status["web_phase"] == "ready"
+    assert status["clip_id"] is None
+    assert status["cell"] is None
+    assert status["eval_recorder"]["active"] is False
+    assert status["eval_recorder"]["saving"] is False
+    assert status["eval_recorder"]["queued_jobs"] == 0
+    assert "episodes" not in status["eval_recorder"]
+    assert console.runtime.needs_pre_start_reset is True
+
+    console.do("/api/eval_cancel")
+    assert console.status()["eval_recorder"]["active"] is False
+    assert eval_logger.cancelled == 1
+
+
+def test_collection_slots_api_filters_independently_and_selects_one_cursor(tmp_path, monkeypatch):
+    scene_plan = {
+        "scenes": [
+            {"scene_id": "SC-A", "placements": [{"name": "绿色杯子"}]},
+            {"scene_id": "SC-B", "placements": [{"name": "白色盘子"}]},
+        ],
+        "tasks": [
+            {
+                "task_id": "TASK-CUP",
+                "prompt_en": "pick up cup",
+                "prompt_zh": "拿起杯子",
+                "scene_ids": ["SC-A", "SC-B"],
+                "scene_epsiodes_count": [2, 1],
+            },
+            {
+                "task_id": "TASK-PLATE",
+                "prompt_en": "place cup",
+                "prompt_zh": "放置杯子",
+                "scene_ids": ["SC-A"],
+                "scene_epsiodes_count": [1],
+            },
+        ],
+    }
+    monkeypatch.setattr(console_server, "_load_scene_plan", lambda _config: scene_plan)
+
+    class _Logger:
+        has_active_episode = False
+
+        def status_snapshot(self, task, *, include_history=True, collection_dataset=None):
+            assert include_history is False
+            assert task == "pick up cup"
+            assert collection_dataset == "cup_set"
+            return {"dataset_dir": str(tmp_path), "queue": []}
+
+    with serve_console(console_config()) as h:
+        h.runtime.episode_logger = cast(Any, _Logger())
+        idle = h.get("/api/collection_slots?dataset=cup_set")
+        all_slots = h.get("/api/collection_slots?dataset=cup_set&all=1")
+        no_match = h.get("/api/collection_slots?dataset=cup_set&scene=SC-B&task=TASK-PLATE")
+        selected = h.post(
+            "/api/select_collection_slot",
+            {"dataset": "cup_set", "slot_id": "TASK-PLATE:SC-A:0"},
+        )
+        skipped = h.post(
+            "/api/skip_collection_slot",
+            {"dataset": "cup_set", "slot_id": "TASK-PLATE:SC-A:0"},
         )
         status = h.status()
 
-    assert response.status == 200
-    assert response.json == {
-        "ok": True,
-        "task": prompt,
-        "dataset": scene_3,
-        "task_index": 0,
-    }
-    assert status["selected_collect_task"] == prompt
-    assert status["selected_collect_set"] == scene_3
-    assert status["selected_collect_task_index"] == 0
-
-
-def test_collect_selection_rejects_task_index_from_another_prompt():
-    with serve_console(console_config()) as h:
-        response = h.post(
-            "/api/select_collect_task",
-            {"task": "pick up cup", "dataset": "cup_set", "task_index": 1},
-        )
-
-    assert response.status == 400
-    assert response.json["error"] == "collection task index does not match task"
-
-
-@pytest.mark.parametrize("verdict", ["pass", "fail", ""])
-def test_collect_qc_mark_routes_to_active_collection_logger(verdict):
-    calls = []
-
-    class _Logger:
-        def mark_collection_qc(self, task, episode, qc_verdict, note, *, collection_dataset=None):
-            assert collection_dataset is None
-            calls.append((task, episode, qc_verdict, note))
-            return True
-
-    with serve_console(console_config()) as h:
-        h.runtime.episode_logger = cast(Any, _Logger())
-        h.session.selected_collect_task = "pick up cup"
-
-        resp = h.post(
-            "/api/collect_qc_mark",
-            {
-                "task": "pick up cup",
-                "episode": 3,
-                "verdict": verdict,
-                "note": "checked",
-            },
-        )
-
-    assert resp.status == 200
-    assert resp.json == {"ok": True, "episode": 3, "verdict": verdict}
-    assert calls == [("pick up cup", 3, verdict, "checked")]
-
-
-def test_collect_qc_mark_rejects_unsupported_verdict():
-    with serve_console(console_config()) as h:
-        resp = h.post(
-            "/api/collect_qc_mark",
-            {"episode": 0, "verdict": "approve", "note": ""},
-        )
-
-    assert resp.status == 400
-    assert resp.json == {"ok": False, "error": "unsupported QC verdict: approve"}
-
-
-@pytest.mark.parametrize("episode", [None, -1, 1.5, "1.5", "²", {}])
-def test_collect_qc_mark_rejects_invalid_episode(episode):
-    with serve_console(console_config()) as h:
-        resp = h.post(
-            "/api/collect_qc_mark",
-            {"task": "unset", "episode": episode, "verdict": "pass", "note": ""},
-        )
-
-    assert resp.status == 400
-    assert resp.json == {"ok": False, "error": "collection episode must be a non-negative integer"}
-
-
-def test_collect_qc_mark_rejects_when_collection_logger_is_unavailable():
-    with serve_console(console_config()) as h:
-        resp = h.post(
-            "/api/collect_qc_mark",
-            {"task": "pick up cup", "episode": 0, "verdict": "pass", "note": ""},
-        )
-
-    assert resp.status == 409
-    assert resp.json == {"ok": False, "error": "collection recording is unavailable"}
-
-
-def test_collect_qc_mark_rejects_episode_that_is_not_saved():
-    class _Logger:
-        def mark_collection_qc(self, task, episode, verdict, note, *, collection_dataset=None):
-            assert collection_dataset is None
-            return False
-
-    with serve_console(console_config()) as h:
-        h.runtime.episode_logger = cast(Any, _Logger())
-        h.session.selected_collect_task = "pick up cup"
-
-        resp = h.post(
-            "/api/collect_qc_mark",
-            {
-                "task": "pick up cup",
-                "episode": 4,
-                "verdict": "fail",
-                "note": "pending",
-            },
-        )
-
-    assert resp.status == 409
-    assert resp.json == {"ok": False, "error": "collection episode is not saved"}
-
-
-def test_collect_qc_mark_rejects_review_from_previous_collection_task():
-    calls = []
-
-    class _Logger:
-        def mark_collection_qc(self, task, episode, verdict, note, *, collection_dataset=None):
-            calls.append((task, episode, verdict, note))
-            return True
-
-    with serve_console(console_config()) as h:
-        h.runtime.episode_logger = cast(Any, _Logger())
-        h.session.selected_collect_task = "pour soybean"
-
-        resp = h.post(
-            "/api/collect_qc_mark",
-            {
-                "task": "pick up cup",
-                "episode": 0,
-                "verdict": "pass",
-                "note": "reviewed before task switch",
-            },
-        )
-
-    assert resp.status == 409
-    assert resp.json == {"ok": False, "error": "collection review task is no longer active"}
-    assert calls == []
-
-
-def test_collect_qc_mark_rejects_review_after_switching_prompt_in_same_set():
-    calls = []
-
-    class _Logger:
-        def mark_collection_qc(self, task, episode, verdict, note, *, collection_dataset=None):
-            calls.append((task, episode, verdict, note))
-            return True
-
-    with serve_console(console_config()) as h:
-        h.runtime.episode_logger = cast(Any, _Logger())
-        h.session.selected_collect_task = "place cup"
-
-        resp = h.post(
-            "/api/collect_qc_mark",
-            {
-                "task": "pick up cup",
-                "episode": 0,
-                "verdict": "pass",
-                "note": "same dataset set",
-            },
-        )
-
-    assert resp.status == 409
-    assert resp.json == {"ok": False, "error": "collection review task is no longer active"}
-    assert calls == []
+    assert idle.status == 200
+    assert idle.json["slots"] == []
+    assert idle.json["active"]["slot_id"] == "TASK-CUP:SC-A:0"
+    assert all_slots.json["filtered_total"] == 4
+    assert [slot["slot_id"] for slot in all_slots.json["slots"]] == [
+        "TASK-CUP:SC-A:0",
+        "TASK-CUP:SC-A:1",
+        "TASK-PLATE:SC-A:0",
+        "TASK-CUP:SC-B:0",
+    ]
+    assert no_match.json["filtered_total"] == 0
+    assert selected.json["active"]["slot_id"] == "TASK-PLATE:SC-A:0"
+    assert skipped.json["active"]["slot_id"] == "TASK-CUP:SC-A:0"
+    assert status["collection_slot_id"] == "TASK-CUP:SC-A:0"
 
 
 class _CollectDatasetLogger:
@@ -540,14 +267,52 @@ def _set_collect_dataset_logger(
     harness.session.selected_collect_set = collection_set
 
 
-def _wait_for_quality_job(harness: Any, endpoint: str, job_id: str) -> Any:
+def _wait_for_quality_job(
+    harness: Any,
+    endpoint: str,
+    job_id: str,
+    *,
+    terminal_states: set[str] | None = None,
+) -> Any:
+    terminal = terminal_states or {"completed", "failed"}
     deadline = time.monotonic() + 2
     while True:
         status = harness.get(f"{endpoint}?job_id={job_id}")
-        if status.json["state"] in {"completed", "failed"}:
+        if status.json["state"] in terminal:
             return status
         assert time.monotonic() < deadline
         time.sleep(0.01)
+
+
+def _dataset_upload_plan(
+    local_dir: Path,
+    specs,
+    actions: list[tuple[str, int, str]],
+    remote_only: list[tuple[str, str]] | None = None,
+):
+    spec = specs[0]
+    return DatasetUploadPlan(
+        local_dir=str(local_dir.resolve()),
+        backends=(
+            (
+                spec,
+                DirectoryUploadPlan(
+                    local_dir=str(local_dir.resolve()),
+                    remote_dir=spec.target,
+                    destination="robot@upload.example.com",
+                    remote_exists=bool(remote_only)
+                    or any(action != "new" for _, _, action in actions),
+                    files=tuple(
+                        UploadFilePlan(path, size, "0" * 32, action)
+                        for path, size, action in actions
+                    ),
+                    remote_only_files=tuple(
+                        RemoteFilePlan(path, digest) for path, digest in (remote_only or [])
+                    ),
+                ),
+            ),
+        ),
+    )
 
 
 def _write_quality_split_marker(
@@ -560,6 +325,7 @@ def _write_quality_split_marker(
     marker = {
         "subset": "accepted",
         "source_dir": str(source_dir),
+        "source_episode_indices": [0, 2],
     }
     if dataset_format is not None:
         marker["dataset_format"] = dataset_format
@@ -567,12 +333,12 @@ def _write_quality_split_marker(
 
 
 def _register_completed_quality_export(
+    ctx: ConsoleContext,
     source_dir: Path,
     accepted_dir: Path,
     *,
     dataset_format: str,
 ) -> None:
-    ctx = console_server.ConsoleRequestHandler.ctx
     ctx.quality_export_jobs["completed-export"] = console_server._QualityExportJob(
         job_id="completed-export",
         source_dir=str(source_dir.resolve()),
@@ -639,64 +405,7 @@ def test_collect_quality_export_uses_active_task_dataset(tmp_path, monkeypatch):
     assert calls[0][2] == export_root / "rejected"
 
 
-def test_collect_quality_upload_uses_config_and_accepts_only_accepted_export(tmp_path, monkeypatch):
-    source = tmp_path / "legacy_local_name" / "raw"
-    source.mkdir(parents=True)
-    accepted = source.parent / "export" / "lerobot_v21" / "accepted"
-    _write_quality_split_marker(accepted, source, dataset_format="lerobot_v21")
-    calls = []
-
-    def upload(local_dir, specs, *, progress_callback):
-        calls.append((local_dir, specs))
-        progress_callback(DatasetUploadProgress(14, 14, 246, 246, "sftp: meta/info"))
-        return DatasetUploadResult(
-            local_dir=str(local_dir),
-            remote_dir=", ".join(spec.target for spec in specs),
-            destination="sftp",
-            files=14,
-            bytes=246,
-        )
-
-    monkeypatch.setattr(console_server, "upload_dataset_directory", upload)
-    config = console_config()
-    config.collection.storage.sftp = ConfigDict(
-        host="upload.example.com",
-        port=22,
-        user="robot",
-        identity_file=str(tmp_path / "key"),
-        remote_dir="/datasets/arx_x5",
-    )
-    with serve_console(config) as h:
-        _set_collect_dataset_logger(h, source)
-        _register_completed_quality_export(source, accepted, dataset_format="lerobot_v21")
-        public_config = h.get("/api/config")
-        assert public_config.json["collection"]["upload"] == {
-            "configured": True,
-            "backends": ["sftp"],
-            "targets": ["upload.example.com:22 · /datasets/arx_x5"],
-        }
-        response = h.post(
-            "/api/collect_quality_upload",
-            {"task": "pick up cup", "dataset_format": "lerobot_v21"},
-        )
-        assert response.status == 202
-        status = _wait_for_quality_job(h, "/api/collect_quality_upload", response.json["job_id"])
-
-    assert status.status == 200
-    assert status.json["state"] == "completed"
-    assert status.json["progress"] == 1.0
-    assert status.json["files_completed"] == 14
-    assert status.json["bytes_completed"] == 246
-    assert status.json["backends"] == ["sftp"]
-    assert len(calls) == 1
-    assert calls[0][0] == accepted.resolve()
-    specs = calls[0][1]
-    assert [spec.backend for spec in specs] == ["sftp"]
-    assert specs[0].target == "/datasets/arx_x5/cup_set"
-    assert status.json["remote_dir"] == "/datasets/arx_x5/cup_set"
-
-
-def test_collect_quality_upload_returns_actual_remote_copy_dir_and_never_uses_rejected_export(
+def test_collect_quality_upload_scan_skips_matching_files_and_never_uses_rejected_export(
     tmp_path,
     monkeypatch,
 ):
@@ -707,22 +416,19 @@ def test_collect_quality_upload_returns_actual_remote_copy_dir_and_never_uses_re
     _write_quality_split_marker(accepted, source, dataset_format="lerobot_v21")
     rejected.mkdir(parents=True)
     calls = []
-    copied_remote_dir = "/datasets/arx_x5/cup_set.copy_20260828T120000Z"
+    existing_remote_dir = "/datasets/arx_x5/cup_set"
 
-    def upload(local_dir, specs, *, progress_callback):
+    def scan(local_dir, specs):
         calls.append((local_dir, specs))
         assert local_dir == accepted.resolve()
         assert local_dir != rejected.resolve()
-        progress_callback(DatasetUploadProgress(2, 2, 20, 20, "data/chunk-000/file"))
-        return DatasetUploadResult(
-            local_dir=str(local_dir),
-            remote_dir=copied_remote_dir,
-            destination="sftp",
-            files=2,
-            bytes=20,
+        return _dataset_upload_plan(
+            local_dir,
+            specs,
+            [("meta/info.json", 20, "same"), ("data.bin", 200, "same")],
         )
 
-    monkeypatch.setattr(console_server, "upload_dataset_directory", upload)
+    monkeypatch.setattr(console_server, "scan_dataset_directory", scan)
     config = console_config()
     config.collection.storage.sftp = ConfigDict(
         host="upload.example.com",
@@ -733,21 +439,107 @@ def test_collect_quality_upload_returns_actual_remote_copy_dir_and_never_uses_re
     )
     with serve_console(config) as h:
         _set_collect_dataset_logger(h, source)
-        _register_completed_quality_export(source, accepted, dataset_format="lerobot_v21")
+        _register_completed_quality_export(
+            h.runtime.console_ctx, source, accepted, dataset_format="lerobot_v21"
+        )
 
         first = h.post(
             "/api/collect_quality_upload",
             {"task": "pick up cup", "dataset_format": "lerobot_v21"},
         )
         assert first.status == 202
-        status = _wait_for_quality_job(h, "/api/collect_quality_upload", first.json["job_id"])
+        status = _wait_for_quality_job(
+            h,
+            "/api/collect_quality_upload",
+            first.json["job_id"],
+            terminal_states={"ready", "failed"},
+        )
 
     assert status.status == 200
-    assert status.json["state"] == "completed"
-    assert status.json["remote_dir"] == copied_remote_dir
+    assert status.json["state"] == "ready"
+    assert status.json["remote_dir"] == existing_remote_dir
+    assert status.json["files_total"] == 0
+    assert status.json["bytes_total"] == 0
+    assert status.json["local_files"] == 2
+    assert status.json["files_skipped"] == 2
     assert len(calls) == 1
     assert calls[0][0] == accepted.resolve()
     assert calls[0][1][0].target == "/datasets/arx_x5/cup_set"
+    receipt = json.loads((accepted.parent / "upload_receipt.json").read_text())
+    assert receipt["source_episode_indices"] == [0, 2]
+
+
+def test_collect_quality_upload_serializes_confirmed_plans(tmp_path, monkeypatch):
+    source = tmp_path / "legacy_local_name" / "raw"
+    source.mkdir(parents=True)
+    accepted = source.parent / "export" / "lerobot_v21" / "accepted"
+    _write_quality_split_marker(accepted, source, dataset_format="lerobot_v21")
+    upload_started = threading.Event()
+    upload_finished = threading.Event()
+
+    def scan(local_dir, specs):
+        return _dataset_upload_plan(local_dir, specs, [("data.bin", 4, "new")])
+
+    def upload(local_dir, specs, *, plan, progress_callback):
+        upload_started.set()
+        assert upload_finished.wait(timeout=5)
+        return DatasetUploadResult(
+            local_dir=str(local_dir),
+            remote_dir=specs[0].target,
+            destination="sftp",
+            files=1,
+            bytes=4,
+        )
+
+    monkeypatch.setattr(console_server, "scan_dataset_directory", scan)
+    monkeypatch.setattr(console_server, "upload_dataset_directory", upload)
+    config = console_config()
+    config.collection.storage.sftp = ConfigDict(
+        host="upload.example.com",
+        port=22,
+        user="robot",
+        identity_file=str(tmp_path / "key"),
+        remote_dir="/datasets/arx_x5",
+    )
+    body = {"task": "pick up cup", "dataset_format": "lerobot_v21"}
+    with serve_console(config) as h:
+        _set_collect_dataset_logger(h, source)
+        _register_completed_quality_export(
+            h.runtime.console_ctx, source, accepted, dataset_format="lerobot_v21"
+        )
+        first = h.post("/api/collect_quality_upload", body)
+        first_status = _wait_for_quality_job(
+            h,
+            "/api/collect_quality_upload",
+            first.json["job_id"],
+            terminal_states={"ready", "failed"},
+        )
+        second = h.post("/api/collect_quality_upload", body)
+        second_status = _wait_for_quality_job(
+            h,
+            "/api/collect_quality_upload",
+            second.json["job_id"],
+            terminal_states={"ready", "failed"},
+        )
+        assert first_status.json["state"] == "ready"
+        assert second_status.json["state"] == "ready"
+
+        confirmed = h.post(
+            "/api/collect_quality_upload",
+            {**body, "confirmed": True, "plan_id": first.json["job_id"]},
+        )
+        assert confirmed.status == 202
+        assert upload_started.wait(timeout=2)
+        duplicate = h.post(
+            "/api/collect_quality_upload",
+            {**body, "confirmed": True, "plan_id": second.json["job_id"]},
+        )
+        upload_finished.set()
+        completed = _wait_for_quality_job(h, "/api/collect_quality_upload", first.json["job_id"])
+
+    assert duplicate.status == 409
+    assert duplicate.json["error"] == "dataset upload is already running"
+    assert completed.json["state"] == "completed"
 
 
 def test_collect_quality_upload_requires_export_and_sanitizes_invalid_marker(tmp_path):
@@ -763,7 +555,9 @@ def test_collect_quality_upload_requires_export_and_sanitizes_invalid_marker(tmp
         assert missing_export.status == 409
         assert missing_export.json["error"] == "export the current dataset before upload"
 
-        _register_completed_quality_export(source, accepted, dataset_format="lerobot_v21")
+        _register_completed_quality_export(
+            h.runtime.console_ctx, source, accepted, dataset_format="lerobot_v21"
+        )
         invalid_marker = h.post("/api/collect_quality_upload", body)
 
     assert invalid_marker.status == 400
@@ -771,273 +565,20 @@ def test_collect_quality_upload_requires_export_and_sanitizes_invalid_marker(tmp
     assert str(tmp_path) not in str(invalid_marker.json)
 
 
-@pytest.mark.parametrize(
-    "endpoint",
-    [
-        pytest.param("/api/collect_quality_export", id="export"),
-        pytest.param("/api/collect_quality_upload", id="upload"),
-    ],
-)
-def test_collect_quality_requires_dataset_format(tmp_path, endpoint):
-    source = tmp_path / "pick_up_cup"
-    source.mkdir()
+def test_dashboard_upload_rejects_source_outside_discovered_roots(tmp_path):
+    work_root = tmp_path / "dashboard-work"
+    work_root.mkdir()
+    outside = tmp_path / "outside" / "raw"
+    outside.mkdir(parents=True)
 
-    with serve_console(console_config()) as h:
-        _set_collect_dataset_logger(h, source)
-        response = h.post(endpoint, {"task": "pick up cup"})
-
-    assert response.status == 400
-    assert response.json == {"ok": False, "error": "dataset_format is required"}
-
-
-@pytest.mark.parametrize(
-    ("endpoint", "dataset_format", "marker_format", "expected_error"),
-    [
-        pytest.param(
-            "/api/collect_quality_export",
-            "unknown",
-            None,
-            "unsupported dataset export format",
-            id="export-unsupported-format",
-        ),
-        pytest.param(
-            "/api/collect_quality_upload",
-            "hdf5",
-            None,
-            "accepted export format mismatch",
-            id="upload-legacy-marker-mismatch",
-        ),
-    ],
-)
-def test_collect_quality_rejects_invalid_dataset_format_contracts(
-    tmp_path,
-    endpoint,
-    dataset_format,
-    marker_format,
-    expected_error,
-):
-    source = tmp_path / "legacy_local_name" / "raw"
-    source.mkdir(parents=True)
-    accepted = source.parent / "export" / dataset_format / "accepted"
-
-    if endpoint == "/api/collect_quality_upload":
-        _write_quality_split_marker(accepted, source, dataset_format=marker_format)
-
-    with serve_console(console_config()) as h:
-        _set_collect_dataset_logger(h, source)
-        if endpoint == "/api/collect_quality_upload":
-            _register_completed_quality_export(source, accepted, dataset_format=dataset_format)
-
+    with serve_console(console_config(work_dir=str(work_root))) as h:
         response = h.post(
-            endpoint,
-            {"task": "pick up cup", "dataset_format": dataset_format},
+            "/api/dashboard_upload",
+            {"source_dir": str(outside), "dataset_format": "lerobot_v21"},
         )
 
-    assert response.status == 400
-    assert response.json == {
-        "ok": False,
-        "error": expected_error,
-    }
-
-
-def test_status_exposes_replay_action_key_for_series_cache():
-    with serve_console(console_config()) as h:
-        h.runtime.replay_action_key = "action_eef"
-
-        assert h.status()["replay_action_key"] == "action_eef"
-
-
-def test_inspect_dataset_resolves_relative_dataset_dir(tmp_path, monkeypatch):
-    repo_root = tmp_path / "repo"
-    dataset_dir = repo_root / "work_dirs" / "collection" / "ur5e"
-    meta_dir = dataset_dir / "meta"
-    meta_dir.mkdir(parents=True)
-    info = {
-        "total_episodes": 3,
-        "features": {
-            "observation.qpos": {"dtype": "float32", "shape": [14]},
-            "action": {"dtype": "float32", "shape": [14]},
-        },
-    }
-    (meta_dir / "info.json").write_text(json.dumps(info), encoding="utf-8")
-    elsewhere = tmp_path / "elsewhere"
-    elsewhere.mkdir()
-    monkeypatch.setattr(handlers_utils, "_REPO_ROOT", repo_root)
-    monkeypatch.chdir(elsewhere)
-
-    with serve_console(console_config()) as h:
-        resp = h.post("/api/inspect_dataset", {"dataset_dir": "work_dirs/collection/ur5e"})
-
-    assert resp.json["ok"] is True
-    assert resp.json["n_episodes"] == 3
-    assert resp.json["keys"]["state"]["default"] == "observation.qpos"
-
-
-def test_load_replay_dataset_mounts_episode_before_response(tmp_path, monkeypatch):
-    repo_root = tmp_path / "repo"
-    dataset_dir = repo_root / "work_dirs" / "replay"
-    data_dir = dataset_dir / "data" / "chunk-000"
-    meta_dir = dataset_dir / "meta"
-    data_dir.mkdir(parents=True)
-    meta_dir.mkdir(parents=True)
-    monkeypatch.setattr(handlers_utils, "_REPO_ROOT", repo_root)
-
-    with serve_console(console_config(robot_type="ur5e")) as h:
-        dim = h.runtime.robot.total_action_dim
-        (meta_dir / "info.json").write_text(
-            json.dumps(
-                {
-                    "total_episodes": 1,
-                    "fps": 10,
-                    "features": {
-                        "observation.state": {"dtype": "float32", "shape": [dim]},
-                        "action": {"dtype": "float32", "shape": [dim]},
-                        "observation.images.cam_high": {
-                            "dtype": "video",
-                            "shape": [480, 640, 3],
-                        },
-                    },
-                }
-            ),
-            encoding="utf-8",
-        )
-        (meta_dir / "episodes.jsonl").write_text(
-            json.dumps({"episode_index": 0, "length": 2, "tasks": ["replay"]}) + "\n",
-            encoding="utf-8",
-        )
-        pq.write_table(
-            pa.table(
-                {
-                    "observation.state": [
-                        np.zeros(dim, dtype=np.float32).tolist(),
-                        np.ones(dim, dtype=np.float32).tolist(),
-                    ],
-                    "action": [
-                        np.zeros(dim, dtype=np.float32).tolist(),
-                        np.ones(dim, dtype=np.float32).tolist(),
-                    ],
-                    "timestamp": [0.0, 0.1],
-                    "frame_index": [0, 1],
-                    "episode_index": [0, 0],
-                    "index": [0, 1],
-                    "task_index": [0, 0],
-                }
-            ),
-            data_dir / "episode_000000.parquet",
-        )
-
-        resp = h.post(
-            "/api/load_replay_dataset",
-            {
-                "dataset_dir": "work_dirs/replay",
-                "episode": 0,
-                "keys": {"state": "observation.state", "action": "action"},
-                "video_keys": {"cam_high": "observation.images.cam_high"},
-                "action_mode": "joint",
-            },
-        )
-
-        assert resp.status == 200
-        assert resp.json["ok"] is True
-        assert resp.json["episode"] == 0
-        assert resp.json["frames"] == 2
-        assert resp.json["dataset_dir"] == str(dataset_dir)
-        assert resp.json["video_keys"] == {"cam_high": "observation.images.cam_high"}
-        assert h.runtime.replay_source is not None
-        assert h.runtime.command_queue.empty()
-
-
-def test_replay_video_resolves_relative_dataset_episode_video(tmp_path, monkeypatch):
-    repo_root = tmp_path / "repo"
-    dataset_dir = repo_root / "work_dirs" / "collection" / "ur5e"
-    meta_dir = dataset_dir / "meta"
-    video_dir = dataset_dir / "videos" / "chunk-000" / "observation.images.cam_high"
-    meta_dir.mkdir(parents=True)
-    video_dir.mkdir(parents=True)
-    info = {
-        "total_episodes": 8,
-        "chunks_size": 1000,
-        "video_path": "videos/chunk-{episode_chunk:03d}/{video_key}/{episode_file}.mp4",
-        "features": {
-            "observation.images.cam_high": {"dtype": "video", "shape": [480, 640, 3]},
-        },
-    }
-    (meta_dir / "info.json").write_text(json.dumps(info), encoding="utf-8")
-    (meta_dir / "episodes.jsonl").write_text(
-        json.dumps({"episode_index": 7, "file_stem": "prompt_a_ep_000007"}) + "\n",
-        encoding="utf-8",
-    )
-    payload = b"episode-7-video"
-    (video_dir / "prompt_a_ep_000007.mp4").write_bytes(payload)
-    monkeypatch.setattr(handlers_utils, "_REPO_ROOT", repo_root)
-
-    path = "/api/replay_video?dataset_dir=work_dirs/collection/ur5e&episode=7&cam=cam_high"
-    with serve_console(console_config()) as h:
-        resp = h.get(path)
-        suffix = h.get(path, headers={"Range": "bytes=-5"})
-
-    assert resp.status == 200
-    assert resp.headers["content-type"] == "video/mp4"
-    assert resp.headers["accept-ranges"] == "bytes"
-    assert resp.headers["cache-control"] == "public, max-age=3600"
-    assert resp.raw == payload
-    assert suffix.status == 206
-    assert suffix.headers["content-range"] == (
-        f"bytes {len(payload) - 5}-{len(payload) - 1}/{len(payload)}"
-    )
-    assert suffix.raw == payload[-5:]
-
-
-def test_replay_poster_resolves_relative_dataset_episode_video(tmp_path, monkeypatch):
-    repo_root = tmp_path / "repo"
-    dataset_dir = repo_root / "work_dirs" / "collection" / "ur5e"
-    meta_dir = dataset_dir / "meta"
-    video_dir = dataset_dir / "videos" / "chunk-000" / "observation.images.cam_high"
-    meta_dir.mkdir(parents=True)
-    video_dir.mkdir(parents=True)
-    info = {
-        "total_episodes": 8,
-        "chunks_size": 1000,
-        "video_path": "videos/chunk-{episode_chunk:03d}/{video_key}/{episode_file}.mp4",
-        "features": {
-            "observation.images.cam_high": {"dtype": "video", "shape": [480, 640, 3]},
-        },
-    }
-    (meta_dir / "info.json").write_text(json.dumps(info), encoding="utf-8")
-    (meta_dir / "episodes.jsonl").write_text(
-        json.dumps({"episode_index": 7, "file_stem": "prompt_a_ep_000007"}) + "\n",
-        encoding="utf-8",
-    )
-    video_path = video_dir / "prompt_a_ep_000007.mp4"
-    video_path.write_bytes(b"episode-7-video")
-    monkeypatch.setattr(handlers_utils, "_REPO_ROOT", repo_root)
-
-    class FakeCapture:
-        def __init__(self, path: str) -> None:
-            self.path = path
-
-        def read(self):
-            assert self.path == str(video_path)
-            return True, np.zeros((2, 3, 3), dtype=np.uint8)
-
-        def release(self) -> None:
-            pass
-
-    monkeypatch.setattr(console_server.cv2, "VideoCapture", FakeCapture)
-    monkeypatch.setattr(
-        console_server.cv2,
-        "imencode",
-        lambda ext, frame, args: (True, np.frombuffer(b"jpeg-frame", dtype=np.uint8)),
-    )
-
-    path = "/api/replay_poster?dataset_dir=work_dirs/collection/ur5e&episode=7&cam=cam_high"
-    with serve_console(console_config()) as h:
-        resp = h.get(path)
-
-    assert resp.status == 200
-    assert resp.headers["content-type"] == "image/jpeg"
-    assert resp.headers["cache-control"] == "public, max-age=3600"
-    assert resp.raw == b"jpeg-frame"
+    assert response.status == 404
+    assert response.json == {"ok": False, "error": "accepted export is unavailable"}
 
 
 def test_review_episode_returns_series_without_mutating_runtime(tmp_path, monkeypatch):
@@ -1105,101 +646,6 @@ def test_review_episode_returns_series_without_mutating_runtime(tmp_path, monkey
         assert h.runtime.replay_source is None
 
 
-def test_client_trace_is_logged_without_enqueuing_command(console, caplog):
-    with caplog.at_level("INFO", logger="core.app.console.server"):
-        resp = console.post(
-            "/api/client_trace",
-            {
-                "client_id": "browser-a",
-                "seq": 7,
-                "event": "review.video.error",
-                "details": {"episode": 3, "camera": "cam_high"},
-            },
-        )
-
-    assert resp.status == 200
-    assert resp.json == {"ok": True}
-    assert console.runtime.command_queue.empty()
-    assert "[UI_TRACE]" in caplog.text
-    assert "client=browser-a" in caplog.text
-    assert "seq=7" in caplog.text
-    assert "event=review.video.error" in caplog.text
-    assert '"episode":3' in caplog.text
-
-
-def test_scene_poll_returns_cached_frame_while_batch_transforms_are_loading(console):
-    cached = {"available": True, "arms": {"cached": {}}}
-    ctx = console_server.ConsoleRequestHandler.ctx
-    ctx.scene_cache = cached
-    ctx.scene_batch_loading = threading.Event()
-    ctx.scene_batch_loading.set()
-
-    class ExplodingScene:
-        def transforms(self, _qpos):
-            raise AssertionError("live scene must not contend with batch transforms")
-
-    ctx.scene = ExplodingScene()
-
-    resp = console.get("/api/scene")
-
-    assert resp.status == 200
-    assert resp.json == cached
-
-
-def test_native_transform_batch_uses_isolated_worker(monkeypatch):
-    qpos = np.zeros((3, 14), dtype=np.float32)
-    calls = []
-
-    class Future:
-        def result(self, timeout):
-            assert timeout == 120
-            return b"worker-transform-blob"
-
-    class Executor:
-        def submit(self, fn, *args):
-            calls.append((fn, args))
-            return Future()
-
-    class NativeScene:
-        def all_transforms_blob(self, _qpos):
-            raise AssertionError("native scene must not compute the batch in the web process")
-
-    monkeypatch.setattr(console_server, "_get_transform_executor", lambda: Executor())
-    monkeypatch.setattr(console_server, "_is_native_urdf_scene", lambda _scene: True)
-
-    raw = console_server._compute_transform_blob(NativeScene(), qpos, "r1_lite", 100.0, 0.0)
-
-    assert raw == b"worker-transform-blob"
-    assert len(calls) == 1
-    assert calls[0][1][0:3] == ("r1_lite", 100.0, 0.0)
-    np.testing.assert_array_equal(calls[0][1][3], qpos)
-
-
-def test_transform_worker_prewarm_is_non_blocking(monkeypatch):
-    submitted = []
-
-    class Future:
-        def add_done_callback(self, callback):
-            submitted.append(callback)
-
-    class Executor:
-        def submit(self, fn, *args):
-            submitted.append((fn, args))
-            return Future()
-
-    monkeypatch.setattr(console_server, "_get_transform_executor", lambda: Executor())
-    config = SimpleNamespace(
-        robot=SimpleNamespace(type="r1_lite", gripper_open=100.0, gripper_close=0.0)
-    )
-    runtime = SimpleNamespace(robot=SimpleNamespace(total_action_dim=14))
-
-    console_server._prewarm_transform_worker(config, runtime)
-
-    assert len(submitted) == 2
-    assert submitted[0][1][0:3] == ("r1_lite", 100.0, 0.0)
-    assert submitted[0][1][3].shape == (0, 14)
-
-
 def test_review_transforms_are_addressed_by_episode_without_runtime_mount(tmp_path, monkeypatch):
     repo_root = tmp_path / "repo"
     dataset_dir = repo_root / "work_dirs" / "review"
@@ -1259,7 +705,7 @@ def test_review_transforms_are_addressed_by_episode_without_runtime_mount(tmp_pa
         sentinel_qpos = np.ones((1, dim), dtype=np.float32)
         h.runtime.collection_replay_qpos = sentinel_qpos
         scene = _Scene()
-        console_server.ConsoleRequestHandler.ctx.scene = scene
+        h.runtime.console_ctx.scene = scene
 
         query = urlencode({"dataset_dir": "work_dirs/review", "episode": 0})
         resp = h.get(f"/api/review_transforms?{query}")
@@ -1281,273 +727,7 @@ def test_review_transforms_are_addressed_by_episode_without_runtime_mount(tmp_pa
         assert scene.calls[-1].shape[0] == 1
 
 
-def test_rollout_review_is_stateless_local_playback(tmp_path, monkeypatch):
-    repo_root = tmp_path / "repo"
-    dataset_dir = repo_root / "work_dirs" / "review"
-    data_dir = dataset_dir / "data" / "chunk-000"
-    meta_dir = dataset_dir / "meta"
-    data_dir.mkdir(parents=True)
-    meta_dir.mkdir(parents=True)
-    monkeypatch.setattr(handlers_utils, "_REPO_ROOT", repo_root)
-
-    with serve_console(console_config(robot_type="ur5e")) as h:
-        dim = h.runtime.robot.total_action_dim
-        (meta_dir / "info.json").write_text(
-            json.dumps(
-                {
-                    "total_episodes": 1,
-                    "fps": 10,
-                    "features": {
-                        "observation.state": {"dtype": "float32", "shape": [dim]},
-                        "action": {"dtype": "float32", "shape": [dim]},
-                    },
-                }
-            ),
-            encoding="utf-8",
-        )
-        (meta_dir / "episodes.jsonl").write_text(
-            json.dumps({"episode_index": 0, "length": 2, "tasks": ["review"]}) + "\n",
-            encoding="utf-8",
-        )
-        pq.write_table(
-            pa.table(
-                {
-                    "observation.state": [
-                        np.zeros(dim, dtype=np.float32).tolist(),
-                        np.ones(dim, dtype=np.float32).tolist(),
-                    ],
-                    "action": [
-                        np.zeros(dim, dtype=np.float32).tolist(),
-                        np.ones(dim, dtype=np.float32).tolist(),
-                    ],
-                    "timestamp": [0.0, 0.1],
-                    "frame_index": [0, 1],
-                    "episode_index": [0, 0],
-                    "index": [0, 1],
-                    "task_index": [0, 0],
-                }
-            ),
-            data_dir / "episode_000000.parquet",
-        )
-
-        sentinel_qpos = np.ones((1, dim), dtype=np.float32)
-        h.runtime.collection_replay_qpos = sentinel_qpos
-        resp = h.post(
-            "/api/review_episode",
-            {"dataset_dir": "work_dirs/review", "episode": 0},
-        )
-
-        assert resp.status == 200
-        assert resp.json["ok"] is True
-        assert resp.json["frames"] == 2
-        assert h.runtime.collection_replay_qpos is sentinel_qpos
-        assert h.runtime.collection_replay_started == 0.0
-
-
-def test_collection_replay_status_stops_playing_at_last_frame():
-    with serve_console(console_config()) as h:
-        h.runtime.collection_replay_qpos = np.zeros((2, 3), dtype=np.float32)
-        h.runtime.collection_replay_episode = 0
-        h.runtime.collection_replay_fps = 10
-        h.runtime.collection_replay_started = time.monotonic()
-
-        replay = h.status()["collection_replay"]
-        assert replay["active"] is True
-        assert replay["playing"] is True
-        assert replay["frame_index"] == 0
-
-        h.runtime.collection_replay_started = time.monotonic() - 1.0
-        replay = h.status()["collection_replay"]
-        assert replay["active"] is True
-        assert replay["playing"] is False
-        assert replay["frame_index"] == 1
-
-
-def test_collect_step_collection_capture_is_background_only():
-    class _Transport:
-        def __init__(self):
-            self.acquired = 0
-
-        def acquire_collection_raw(self):
-            self.acquired += 1
-            return object()
-
-    class _Logger:
-        is_collection_enabled = True
-
-        def ingest_collection_snapshot(self, snapshot):
-            raise AssertionError("collection-enabled collect_step must not ingest")
-
-    transport = _Transport()
-    runtime = SimpleNamespace(episode_logger=_Logger(), transport=transport)
-
-    assert not handlers.collect_step(console_config(), cast(RuntimeState, runtime))
-    assert transport.acquired == 0
-
-
-def test_collect_start_runs_collection_capture_in_background():
-    snapshots = [
-        RawCollectionSnapshot(timestamp=float(index), decode_raw=lambda: CollectionRawBatch())
-        for index in range(3)
-    ]
-    ingested = []
-
-    class _Transport:
-        def supports_collection(self):
-            return True
-
-        def start_collection(self):
-            return None
-
-        def reset_hil_control(self):
-            return None
-
-        def set_hil_relay_enabled(self, enabled):
-            return None
-
-        def clear_collection_backlog(self):
-            return 42.0
-
-        def acquire_collection_raw(self):
-            if snapshots:
-                return snapshots.pop(0)
-            return None
-
-    class _Logger:
-        is_collection_enabled = True
-        has_active_episode = True
-
-        def is_queue_full(self):
-            return False
-
-        def start_episode(self, *, task, collection_min_capture_time=None, collection_dataset=None):
-            assert collection_dataset is None
-            return None
-
-        def ingest_collection_snapshot(self, snapshot):
-            ingested.append(snapshot)
-
-        def end_episode(self):
-            return True
-
-    runtime = SimpleNamespace(
-        episode_logger=_Logger(),
-        transport=_Transport(),
-        collection_replay_qpos=None,
-        collection_replay_episode=None,
-        collection_teleop_armed=True,
-        collection_teleop_active=False,
-        last_collection_timestamp=None,
-    )
-    session = SessionState(selected_collect_task="pick")
-    config = console_config(inference_cfg=ConfigDict(publish_rate=200))
-
-    assert handlers.collect_start(config, cast(RuntimeState, runtime), session)
-    deadline = time.monotonic() + 1.0
-    while len(ingested) < 3 and time.monotonic() < deadline:
-        time.sleep(0.005)
-    handlers.collect_stop(config, cast(RuntimeState, runtime), session)
-
-    assert len(ingested) == 3
-
-
-def test_collect_start_clears_backlog_and_passes_cutoff_to_logger():
-    calls = []
-
-    class _Transport:
-        def supports_collection(self):
-            return True
-
-        def start_collection(self):
-            calls.append("start_collection")
-
-        def reset_hil_control(self):
-            calls.append("reset_hil_control")
-
-        def set_hil_relay_enabled(self, enabled):
-            calls.append(("set_hil_relay_enabled", enabled))
-
-        def clear_collection_backlog(self):
-            calls.append("clear_collection_backlog")
-            return 42.0
-
-        def acquire_collection_raw(self):
-            return None
-
-    class _Logger:
-        is_collection_enabled = True
-
-        def is_queue_full(self):
-            return False
-
-        def start_episode(self, *, task, collection_min_capture_time=None, collection_dataset=None):
-            calls.append(("start_episode", task, collection_min_capture_time, collection_dataset))
-
-    runtime = SimpleNamespace(
-        episode_logger=_Logger(),
-        transport=_Transport(),
-        collection_replay_qpos=np.zeros((1, 2), dtype=np.float32),
-        collection_replay_episode=7,
-        collection_teleop_armed=True,
-        collection_teleop_active=False,
-        last_collection_timestamp=None,
-    )
-    session = SessionState(selected_collect_task="pick", selected_collect_set="scene_3")
-    config = console_config(inference_cfg=ConfigDict(publish_rate=200))
-
-    assert handlers.collect_start(config, cast(RuntimeState, runtime), session)
-    try:
-        assert calls == [
-            "reset_hil_control",
-            ("set_hil_relay_enabled", True),
-            "start_collection",
-            "clear_collection_backlog",
-            ("start_episode", "pick", 42.0, "scene_3"),
-        ]
-        assert session.status is SessionStatus.RUNNING
-        assert runtime.collection_replay_qpos is None
-        assert runtime.collection_replay_episode is None
-    finally:
-        runtime.collection_capture_runner.stop()
-        runtime.collection_capture_runner = None
-
-
-def test_collect_start_requires_activation_gate():
-    calls = []
-
-    class _Transport:
-        def supports_collection(self):
-            return True
-
-        def start_collection(self):
-            calls.append("start_collection")
-
-    class _Logger:
-        is_collection_enabled = True
-
-        def is_queue_full(self):
-            return False
-
-        def start_episode(self, *, task, collection_min_capture_time=None):
-            calls.append("start_episode")
-
-    runtime = SimpleNamespace(
-        episode_logger=_Logger(),
-        transport=_Transport(),
-        collection_replay_qpos=None,
-        collection_replay_episode=None,
-        collection_teleop_armed=False,
-        collection_teleop_active=False,
-    )
-    session = SessionState(selected_collect_task="pick")
-    config = ConfigDict(collection=ConfigDict(gate=ConfigDict(enabled=False)))
-
-    assert not handlers.collect_start(config, cast(RuntimeState, runtime), session)
-    assert calls == []
-    assert session.last_error == "Collection teleop requires COLLECT activation"
-
-
-def test_collect_start_api_requires_collect_tab_activation():
+def test_collect_start_api_requires_activation_and_preserves_scene_metadata():
     with serve_console(console_config()) as h:
         h.runtime.transport.supports_collection = lambda: True
         resp = h.post("/api/collect_start")
@@ -1561,18 +741,48 @@ def test_collect_start_api_requires_collect_tab_activation():
 
         h.do("/api/collect_arm", {"enabled": True})
         assert h.status()["collection_teleop_armed"] is True
+        resp = h.post(
+            "/api/collect_start",
+            {"scene_id": "SC-002", "scene_round": 2, "random_seed": 91},
+        )
+        command = h.runtime.command_queue.get_nowait()
+        status = h.status()
+
+    assert resp.json["ok"] is True
+    assert command == "web:collect_start"
+    assert status["collection_scene_id"] == "SC-002"
+    assert status["collection_scene_round"] == 2
+    assert status["collection_random_seed"] == 91
 
 
-def test_unknown_route_returns_404(console):
-    assert console.get("/api/does_not_exist").status == 404
-    assert console.post("/api/also_missing").status == 404
+def test_collect_start_rejects_a_slot_that_is_no_longer_active(monkeypatch):
+    monkeypatch.setattr(
+        console_server,
+        "_collection_slots_snapshot",
+        lambda _ctx, _dataset: {"active": None},
+    )
+    with serve_console(console_config()) as h:
+        h.runtime.transport.supports_collection = lambda: True
+        h.post("/api/tab_switch", {"tab": "collect"})
+        h.do("/api/collect_arm", {"enabled": True})
+        h.session.selected_collect_set = "cup_set"
+        h.session.collection_scene_id = "SC-001"
+        h.session.collection_scene_round = 2
+        h.session.collection_slot_id = "TASK-CUP:SC-001:2"
+        h.session.collection_task_id = "TASK-CUP"
+
+        response = h.post("/api/collect_start")
+
+    assert response.status == 409
+    assert response.json["error"] == "collection slot is no longer active"
+    assert h.runtime.command_queue.empty()
 
 
 def test_setup_fails_cleanly_when_policy_unreachable():
     """A real (non-mock) policy server that isn't listening must fail setup with a
     clear error, not hang or crash — the operator needs to know the server is down.
     Console setup uses fail_fast (one attempt, no 30s retry block)."""
-    from _harness import console_config, serve_console
+    from tests.integration.web._harness import console_config, serve_console
 
     s = socket.socket()
     s.bind(("127.0.0.1", 0))
@@ -1590,9 +800,6 @@ def test_setup_fails_cleanly_when_policy_unreachable():
         st = h.status()
         assert st["is_setup_done"] is False
         assert "Setup failed" in st["last_error"]
-
-
-# --- lifecycle: thread leaks, counter resets, halt, run cycles ---
 
 
 def _eva_loop_thread_count() -> int:
@@ -1660,54 +867,6 @@ def test_halt_mid_chunk_aborts_real_publish_to_ready(console):
     assert s.interrupt_requested is False
 
 
-def test_step_sim_chunk_updates_preview_for_each_action():
-    actions = np.asarray(
-        [
-            [0.1, 0.2, 0.3],
-            [0.4, 0.5, 0.6],
-            [0.7, 0.8, 0.9],
-        ],
-        dtype=np.float32,
-    )
-    session = SessionState(
-        mode=SessionMode.STEP,
-        status=SessionStatus.READY,
-        is_setup_done=True,
-        selected_task="pick up the cup",
-        action_chunk=actions.copy(),
-    )
-
-    class _Transport:
-        def __init__(self) -> None:
-            self.published: list[tuple[str, np.ndarray]] = []
-            self.preview_snapshots: list[np.ndarray] = []
-
-        def publish_action(self, action: np.ndarray, target: str = "real") -> None:
-            self.published.append((target, np.asarray(action, dtype=np.float32).copy()))
-
-        def create_rate(self, _hz: float):
-            transport = self
-
-            class _Rate:
-                def sleep(self) -> None:
-                    transport.preview_snapshots.append(session.sim_preview_qpos.copy())
-
-            return _Rate()
-
-    transport = _Transport()
-    runtime = SimpleNamespace(transport=transport)
-    config = ConfigDict(inference_cfg=ConfigDict(publish_rate=10))
-
-    assert handlers.run_one_chunk_on_sim(config, cast(RuntimeState, runtime), session)
-
-    assert [target for target, _ in transport.published] == ["sim"] * len(actions)
-    np.testing.assert_allclose(np.asarray(transport.preview_snapshots), actions)
-    np.testing.assert_allclose(session.pending_real_chunk, actions)
-    np.testing.assert_allclose(session.sim_preview_qpos, actions[-1])
-    assert session.chunk_index == len(actions)
-    assert session.status is SessionStatus.READY
-
-
 def test_manual_halt_aborts_staged_real_publish():
     command_queue: queue.Queue[str] = queue.Queue()
 
@@ -1766,182 +925,6 @@ def test_manual_halt_aborts_staged_real_publish():
     assert not np.allclose(session.manual_real_qpos, session.manual_qpos)
 
 
-def test_manual_send_publishes_gripper_target_without_joint_step_scaling():
-    class _Rate:
-        def sleep(self) -> None:
-            pass
-
-    class _Transport:
-        def __init__(self) -> None:
-            self.qpos = np.zeros(14, dtype=np.float32)
-            self.published: list[tuple[str, np.ndarray]] = []
-
-        def get_latest_qpos(self) -> np.ndarray:
-            return self.qpos.copy()
-
-        def publish_action(self, action: np.ndarray, target: str = "real") -> None:
-            sent = np.asarray(action, dtype=np.float32).copy()
-            self.published.append((target, sent))
-            if target == "real":
-                self.qpos = sent
-
-        def create_rate(self, _hz: float) -> _Rate:
-            return _Rate()
-
-    transport = _Transport()
-    robot = SimpleNamespace(
-        gripper_mask=tuple(i in {6, 13} for i in range(14)),
-    )
-    runtime = SimpleNamespace(
-        robot=robot,
-        transport=transport,
-        command_queue=queue.Queue(),
-        prompt_ready=None,
-        web_phase="idle",
-    )
-    target = np.zeros(14, dtype=np.float32)
-    target[6] = 100.0
-    session = SessionState(
-        mode=SessionMode.MANUAL,
-        status=SessionStatus.UNSET,
-        manual_qpos=target,
-        manual_real_qpos=np.zeros(14, dtype=np.float32),
-    )
-    config = ConfigDict(inference_cfg=ConfigDict(publish_rate=100))
-
-    app.handle_command("web:manual_send", config, cast(RuntimeState, runtime), session)
-
-    assert len(transport.published) == 1
-    assert transport.published[-1][0] == "real"
-    assert transport.published[-1][1][6] == pytest.approx(100.0)
-    np.testing.assert_allclose(session.manual_real_qpos, target)
-
-
-def test_manual_send_status_returns_to_idle_after_publish(console):
-    console.session.mode = SessionMode.MANUAL
-    console.session.manual_qpos = np.asarray(console.runtime.robot.initial_qpos, dtype=np.float32)
-
-    resp = console.post("/api/manual_send")
-
-    assert resp.json == {"ok": True}
-    assert console.status()["manual_publish_active"] is True
-    console.pump()
-    assert console.status()["manual_publish_active"] is False
-
-
-def test_manual_scene_payloads_keep_eased_mesh_updates():
-    class _Scene:
-        def transforms(self, _qpos: np.ndarray | None) -> dict:
-            return {"body": {}}
-
-    class _Transport:
-        def get_latest_qpos(self) -> np.ndarray:
-            return np.asarray([0.25, -0.25], dtype=np.float32)
-
-    runtime = SimpleNamespace(
-        transport=_Transport(),
-        robot=SimpleNamespace(initial_qpos=np.zeros(2, dtype=np.float32)),
-        replay_source=None,
-        collection_replay_qpos=None,
-        collection_replay_started=0.0,
-        collection_replay_fps=10,
-    )
-    session = SessionState(
-        mode=SessionMode.MANUAL,
-        manual_qpos=np.asarray([0.5, -0.5], dtype=np.float32),
-    )
-    ctx = ConsoleContext(
-        config=ConfigDict(),
-        runtime=cast(RuntimeState, runtime),
-        session=session,
-        scene=_Scene(),
-    )
-
-    assert "instant" not in _serialize_scene(ctx)
-    assert "instant" not in _serialize_manual_scene(ctx)
-
-
-def test_halt_keeps_active_episode_open_for_continue():
-    class _Logger:
-        def __init__(self) -> None:
-            self.ended = 0
-
-        def end_episode(self) -> None:
-            self.ended += 1
-
-    logger_obj = _Logger()
-    runtime = SimpleNamespace(
-        web_phase="idle",
-        replay_source=None,
-        episode_logger=logger_obj,
-        rollout_episode_logger=None,
-    )
-    session = SessionState(
-        mode=SessionMode.SIM,
-        status=SessionStatus.RUNNING,
-        is_setup_done=True,
-        selected_task="pick up the cup",
-        step_index=5,
-    )
-
-    app.handle_command("web:halt", ConfigDict(), cast(RuntimeState, runtime), session)
-
-    assert session.status is SessionStatus.READY
-    assert logger_obj.ended == 0
-
-
-def test_run_clears_collection_replay_preview():
-    runtime = SimpleNamespace(
-        web_phase="idle",
-        replay_source=None,
-        infer_strategy=None,
-        collection_replay_qpos=np.zeros((2, 14), dtype=float),
-        collection_replay_episode=1,
-    )
-    session = SessionState(
-        mode=SessionMode.SIM,
-        status=SessionStatus.READY,
-        is_setup_done=True,
-        selected_task="pick up the cup",
-        step_index=5,
-    )
-
-    app.handle_command("web:run", ConfigDict(), cast(RuntimeState, runtime), session)
-
-    assert runtime.collection_replay_qpos is None
-    assert runtime.collection_replay_episode is None
-
-
-def test_run_uses_rollout_logger_without_opening_collection_logger(monkeypatch):
-    calls = []
-    rollout_logger = object()
-    runtime = SimpleNamespace(
-        rollout_episode_logger=None,
-        replay_source=None,
-    )
-    session = SessionState(
-        mode=SessionMode.REAL,
-        status=SessionStatus.READY,
-        is_setup_done=True,
-        selected_task="pick up the cup",
-    )
-    monkeypatch.setattr(app, "_select_only_inference_strategy_if_needed", lambda *args: True)
-    monkeypatch.setattr(app, "run_warmup_and_start", lambda *args: True)
-    monkeypatch.setattr(app, "is_replay", lambda runtime: False)
-
-    def _begin_rollout(config, runtime, session):
-        calls.append("rollout")
-        runtime.rollout_episode_logger = rollout_logger
-
-    monkeypatch.setattr(app, "begin_rollout_save_episode", _begin_rollout)
-    monkeypatch.setattr(app, "start_episode", lambda *args: calls.append("collection"))
-
-    app._dispatch_run(ConfigDict(), cast(RuntimeState, runtime), session)
-
-    assert calls == ["rollout"]
-    assert session.status is SessionStatus.RUNNING
-
-
 def test_repeated_setup_run_stop_cycles_never_pin_running(console):
     """setup->run->publish->stop, ~15x. step_index is reset by run_setup (via
     reset_session_progress), so it must read 0 right after each /api/setup. The final
@@ -1966,118 +949,6 @@ def test_repeated_setup_run_stop_cycles_never_pin_running(console):
         assert s.status is SessionStatus.READY
 
     assert s.status is SessionStatus.READY
-
-
-def test_eval_start_skips_setup_when_already_warmed(monkeypatch):
-    """SETUP (web:warmup) homes + validates; a following RUN (web:start) must NOT re-home
-    when nothing since left the arm un-reset — otherwise the SETUP key buys nothing."""
-    setup_calls = {"n": 0}
-
-    def _fake_setup(config, runtime, session, fail_fast=False):
-        setup_calls["n"] += 1
-        session.is_setup_done = True
-        session.status = SessionStatus.READY
-        return True
-
-    def _fake_dispatch(config, runtime, session):
-        session.status = SessionStatus.RUNNING
-
-    monkeypatch.setattr(app, "run_setup", _fake_setup)
-    monkeypatch.setattr(app, "_dispatch_run", _fake_dispatch)
-
-    runtime = SimpleNamespace(
-        web_phase="ready",
-        replay_source=None,
-        episode_logger=None,
-        current_cell={"prompt": "pick up the cup", "trial": 1},
-        current_clip_id=None,
-        needs_pre_start_reset=False,
-        infer_strategy=None,
-        policy=None,
-        ik_solver=None,
-    )
-    session = SessionState(
-        mode=SessionMode.REAL,
-        status=SessionStatus.READY,
-        is_setup_done=True,  # already warmed by a prior SETUP
-        selected_task="pick up the cup",
-    )
-
-    app.handle_command("web:start", ConfigDict(), cast(RuntimeState, runtime), session)
-
-    assert setup_calls["n"] == 0  # skipped the redundant home + validate
-    assert session.status is SessionStatus.RUNNING
-
-
-def test_eval_start_runs_setup_when_not_warmed(monkeypatch):
-    """The skip is gated: a RUN with no prior SETUP or an explicit deferred reset
-    must still run setup so the home trajectory is sent before publishing."""
-    setup_calls = {"n": 0}
-
-    def _fake_setup(config, runtime, session, fail_fast=False):
-        setup_calls["n"] += 1
-        session.is_setup_done = True
-        session.status = SessionStatus.READY
-        return True
-
-    monkeypatch.setattr(app, "run_setup", _fake_setup)
-    monkeypatch.setattr(
-        app, "_dispatch_run", lambda *a: setattr(a[2], "status", SessionStatus.RUNNING)
-    )
-
-    runtime = SimpleNamespace(
-        web_phase="ready",
-        replay_source=None,
-        episode_logger=None,
-        current_cell={"prompt": "pick up the cup", "trial": 1},
-        current_clip_id=None,
-        needs_pre_start_reset=True,
-    )
-    session = SessionState(
-        mode=SessionMode.REAL,
-        status=SessionStatus.READY,
-        is_setup_done=True,
-        selected_task="pick up the cup",
-    )
-
-    app.handle_command("web:start", ConfigDict(), cast(RuntimeState, runtime), session)
-
-    assert setup_calls["n"] == 1
-
-
-def test_eval_start_binds_cell_prompt_before_task_gate(monkeypatch):
-    def _fake_setup(config, runtime, session, fail_fast=False):
-        session.is_setup_done = True
-        session.status = SessionStatus.READY
-        return True
-
-    monkeypatch.setattr(app, "run_setup", _fake_setup)
-    monkeypatch.setattr(
-        app, "_dispatch_run", lambda *a: setattr(a[2], "status", SessionStatus.RUNNING)
-    )
-
-    runtime = SimpleNamespace(
-        web_phase="ready",
-        replay_source=None,
-        episode_logger=None,
-        current_cell={"prompt": "pick up the cup", "trial": 1},
-        current_clip_id=None,
-        needs_pre_start_reset=False,
-        infer_strategy=None,
-        policy=None,
-        ik_solver=None,
-    )
-    session = SessionState(
-        mode=SessionMode.REAL,
-        status=SessionStatus.READY,
-        is_setup_done=True,
-        selected_task=None,
-    )
-
-    app.handle_command("web:start", ConfigDict(), cast(RuntimeState, runtime), session)
-
-    assert session.selected_task == "pick up the cup"
-    assert session.status is SessionStatus.RUNNING
 
 
 def test_eval_stop_during_running_motion_is_requeued_finalized_and_left_ready():
@@ -2126,34 +997,6 @@ def test_eval_stop_during_running_motion_is_requeued_finalized_and_left_ready():
     assert finished_capture == [True]
 
 
-def test_interrupting_verb_during_reset_is_requeued_not_dropped(console):
-    """A motion-interrupting verb seen mid-reset must abort the motion AND be re-queued
-    (not silently dropped) so the main loop applies it once the reset unwinds.
-
-    Driven through handle_motion_command (the unit poll_motion_commands invokes per
-    action) rather than reset_with_setup, so this test stays focused on the
-    interrupt/re-queue contract. consume_motion_interrupt then clears
-    interrupt_requested before the reset would return, so it reads False after.
-    """
-    console.do("/api/select_mode", {"mode": "real"})
-    console.do("/api/select_task", {"task": "pick up the cup"})
-    s = console.session
-
-    interrupted = handlers.handle_motion_command(
-        "web:select_mode:sim", console.config, console.runtime, s
-    )
-    assert interrupted is True
-    assert s.interrupt_requested is True
-    assert "web:select_mode:sim" in list(console.runtime.command_queue.queue)
-
-    handlers.consume_motion_interrupt(s, SessionStatus.UNSET)
-    assert s.interrupt_requested is False
-    assert s.status is SessionStatus.UNSET
-
-    console.pump()
-    assert s.mode.value == "sim"
-
-
 def test_requeued_motion_interrupt_returns_to_main_loop(console):
     console.do("/api/select_mode", {"mode": "real"})
     console.do("/api/select_task", {"task": "pick up the cup"})
@@ -2177,41 +1020,3 @@ def test_requeued_motion_interrupt_returns_to_main_loop(console):
     assert interrupted is True
     assert s.interrupt_requested is True
     assert list(q.queue) == ["web:select_mode:sim"]
-
-
-def test_sync_wait_can_ignore_gripper_tracking_error():
-    class _Rate:
-        def __init__(self):
-            self.sleeps = 0
-
-        def sleep(self):
-            self.sleeps += 1
-
-    class _Transport:
-        def __init__(self):
-            self.rate = _Rate()
-
-        def create_rate(self, publish_rate):
-            del publish_rate
-            return self.rate
-
-        def get_latest_qpos(self):
-            return np.asarray([1.0, 0.444], dtype=np.float32)
-
-    transport = _Transport()
-    runtime = SimpleNamespace(
-        transport=transport,
-        robot=SimpleNamespace(gripper_mask=(False, True)),
-    )
-
-    reached = handlers._wait_until_reached(
-        cast(RuntimeState, runtime),
-        np.asarray([1.0, 0.0], dtype=np.float32),
-        publish_rate=10,
-        threshold=0.05,
-        max_ticks=5,
-        ignore_gripper_error=True,
-    )
-
-    assert reached is True
-    assert transport.rate.sleeps == 0

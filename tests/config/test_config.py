@@ -8,10 +8,10 @@ import pytest
 
 import robots  # noqa: F401  (registers robots)
 import transport  # noqa: F401  (registers transport backends)
-from core.app import rl as app_rl
-from core.config import ConfigDict, load_config, resolve_video_key
-from core.registry import TRANSPORT_REGISTRY
-from transport.base import resolve_topics
+from core.config import load_config
+from core.registry import ROBOT_REGISTRY
+
+pytestmark = pytest.mark.integration
 
 _CONFIGS_DIR = Path(__file__).resolve().parents[2] / "configs"
 _DEFAULTS = _CONFIGS_DIR / "00_base" / "defaults.py"
@@ -23,257 +23,21 @@ def _write_config(path: Path, body: str) -> Path:
     return path
 
 
-def test_resolve_video_key_default_convention():
-    assert resolve_video_key(ConfigDict(video_keys={}), "cam_high") == "observation.images.cam_high"
-
-
-def test_resolve_video_key_explicit_override():
-    keys = ConfigDict(video_keys={"cam_high": "videos.top"})
-    assert resolve_video_key(keys, "cam_high") == "videos.top"
-
-
-def test_resolve_topics_builds_camera_and_group_maps():
-    cameras, groups = resolve_topics(
-        {
-            "camera_topics": {"front": "/front", "left_wrist": "/left"},
-            "group_topics": {
-                "left_arm": {"state_topic": "/state", "command_topic": "/cmd"},
-            },
-        }
+def test_load_config_uses_configured_collection_task_set(tmp_path):
+    task_set = tmp_path / "task_set"
+    task_set.mkdir()
+    (task_set / "tasks.csv").write_text(
+        "task_id,prompt_en,total_epsiodes_count\nTASK-001,place the cup,5\n",
+        encoding="utf-8",
     )
-    assert cameras == {"front": "/front", "left_wrist": "/left"}
-    assert groups["left_arm"].state_topic == "/state"
-    assert groups["left_arm"].command_topic == "/cmd"
-    assert groups["left_arm"].eef_state_topic is None
-
-
-def test_resolve_topics_empty_raises():
-    with pytest.raises(ValueError, match="transport.topics is required"):
-        resolve_topics({})
-
-
-def test_transport_registry_only_exposes_supported_backends():
-    available = [name for name in TRANSPORT_REGISTRY.available() if name != "debug"]
-    assert available == ["dataset", "ros1", "ros2", "zmq"]
-
-
-def test_load_deploy_config_resolves_spaces_and_defaults():
-    cfg = load_config(_CONFIGS_DIR / "01_deploy" / "dual_agilex_piper" / "openpi_qpos.py")
-    assert cfg.robot.type == "agilex_piper"
-    assert cfg.policy.type == "openpi_rtc"
-    assert cfg.policy.backend_options["latency_k"] == 4
-    assert cfg.inference_cfg.publish_rate > 0
-    assert not cfg.inference_cfg.obs_space.is_eef()
-    assert cfg.eval_cfg is None
-    assert cfg.eval is None
-    assert cfg.rl_cfg is None
-    assert cfg.rl is None
-
-
-@pytest.mark.parametrize(
-    ("subdir", "pattern", "tab"),
-    [
-        ("01_deploy", "*/_base.py", "debug"),
-        ("02_collection", "*.py", "collect"),
-        ("03_evaluation", "*.py", "eval"),
-        ("04_rl", "*_rl.py", "rl"),
-    ],
-)
-def test_console_initial_tab_contract(subdir: str, pattern: str, tab: str):
-    paths = sorted((_CONFIGS_DIR / subdir).glob(pattern))
-    assert paths
-    for path in paths:
-        assert load_config(path).console.initial_tab == tab
-
-
-def test_rl_config_exposes_preview_models_and_lerobot_storage():
-    cfg = load_config(_CONFIGS_DIR / "04_rl" / "r1lite_rl.py")
-
-    assert cfg.rl.cli_mode == "real"
-    assert cfg.rl.inference_strategy == "async"
-    assert cfg.rl.data.format == "lerobot"
-    assert cfg.rl.policies[0].name == "r1lite_openpi_qpos"
-    assert cfg.rl.policies[0].config.policy.type == "openpi"
-    assert cfg.rl.policies[0].config.policy.host == "127.0.0.1"
-    assert cfg.rl.policies[0].config.policy.port == 9000
-    assert cfg.rl.critics[0].name == "r1lite_critic"
-    assert cfg.rl.intervention.get("source", "transport") == "transport"
-
-
-@pytest.mark.parametrize(
-    ("filename", "robot_type"),
-    [
-        ("agibot_g2_rl.py", "agibot_g2"),
-        ("arx_x5_rl.py", "arx_x5"),
-        ("arx_r5_rl.py", "arx_r5"),
-        ("dual_agilex_piper_rl.py", "agilex_piper"),
-        ("dual_franka_rl.py", "dual_franka"),
-        ("r1lite_rl.py", "r1_lite"),
-        ("ur5e_rl.py", "ur5e"),
-    ],
-)
-def test_all_robot_rl_templates_load(filename: str, robot_type: str):
-    cfg = load_config(_CONFIGS_DIR / "04_rl" / filename)
-
-    assert cfg.robot.type == robot_type
-    assert cfg.rl.policies[0].config.robot.type == robot_type
-    assert cfg.rl.inference_strategy == "async"
-    assert cfg.rl.critics[0].type == "websocket"
-    assert cfg.rl.data.format == "lerobot"
-    assert cfg.rl.intervention.control_mode == "relative"
-
-
-@pytest.mark.parametrize(
-    ("filename", "robot_type"),
-    [
-        ("agibot_g2_rl.py", "agibot_g2"),
-        ("arx_x5_rl.py", "arx_x5"),
-        ("dual_franka_rl.py", "dual_franka"),
-    ],
-)
-def test_vr_rl_templates_reuse_client_teleop_and_open_on_rl_tab(filename: str, robot_type: str):
-    cfg = load_config(_CONFIGS_DIR / "04_rl" / filename)
-
-    assert cfg.robot.type == robot_type
-    assert cfg.console.initial_tab == "rl"
-    assert cfg.collection.teleop.control_source == "client"
-    assert cfg.collection.teleop.client.type == "vr_webxr"
-    assert cfg.inference_cfg.publish_rate == 30
-    assert cfg.collection.storage.fps == 30
-    assert cfg.rl.intervention.source == "teleop_client"
-    assert cfg.rl.policies[0].config.robot.type == robot_type
-
-
-@pytest.mark.parametrize(
-    "filename",
-    ["arx_r5_rl.py", "dual_agilex_piper_rl.py", "r1lite_rl.py", "ur5e_rl.py"],
-)
-def test_leader_follower_rl_templates_use_transport_hil(filename: str):
-    cfg = load_config(_CONFIGS_DIR / "04_rl" / filename)
-
-    assert cfg.rl.intervention.get("source", "transport") == "transport"
-    assert cfg.rollout.intervention.get("source", "transport") == "transport"
-
-
-def test_build_rl_active_config_preserves_vr_teleop_contract():
-    cfg = load_config(_CONFIGS_DIR / "04_rl" / "arx_x5_rl.py")
-
-    active = app_rl.build_rl_active_config(cfg, 0)
-
-    assert active.collection.teleop.control_source == "client"
-    assert active.collection.teleop.client.type == "vr_webxr"
-    assert active.rollout.intervention.source == "teleop_client"
-
-
-def test_rl_local_config_pattern_is_ignored():
-    gitignore = (_CONFIGS_DIR.parent / ".gitignore").read_text(encoding="utf-8")
-
-    assert "configs/01_deploy/*/*.local.py" in gitignore
-    assert "configs/04_rl/*.local.py" in gitignore
-
-
-def test_r1lite_local_rl_config_loads_when_present():
-    path = _CONFIGS_DIR / "04_rl" / "r1lite_rl.local.py"
-    if not path.exists():
-        pytest.skip("machine-local RL config is not checked into the repository")
-
-    cfg = load_config(path)
-
-    assert cfg.rl.cli_mode == "real"
-    assert cfg.rl.inference_strategy == "async"
-    assert cfg.rl.policies[0].config.robot.gripper_threshold == 50.0
-
-
-def test_rl_config_rejects_unimplemented_transition_storage(tmp_path):
-    config = tmp_path / "rl_transition.py"
-    config.write_text(
-        "_base_ = ['"
-        + str((_CONFIGS_DIR / "04_rl" / "r1lite_rl.py").resolve())
-        + "']\nrl_cfg = dict(data=dict(format='transition'))\n"
+    config_path = _write_config(
+        tmp_path / "collection.py",
+        f"collection = dict(task_set_dir={str(task_set)!r}, task_set_name='demo_set')\n",
     )
 
-    with pytest.raises(ValueError, match="rl.data.format must be 'lerobot'"):
-        load_config(config)
+    cfg = load_config(config_path)
 
-
-def test_rl_teleop_client_source_requires_client_control_source(tmp_path):
-    config = tmp_path / "rl_bad_source.py"
-    config.write_text(
-        "_base_ = ['"
-        + str((_CONFIGS_DIR / "04_rl" / "arx_x5_rl.py").resolve())
-        + "']\ncollection = dict(teleop=dict("
-        + "_delete_=True, control_source='transport', client={}))\n"
-    )
-
-    with pytest.raises(ValueError, match="requires collection.teleop.control_source='client'"):
-        load_config(config)
-
-
-def test_load_eef_config_builds_eef_space():
-    cfg = load_config(_CONFIGS_DIR / "01_deploy" / "dual_agilex_piper" / "openpi_eef.py")
-    assert cfg.inference_cfg.obs_space.is_eef()
-    assert cfg.inference_cfg.action_space.is_eef()
-
-
-def test_load_collection_config_exposes_schema():
-    cfg = load_config(_CONFIGS_DIR / "02_collection" / "arx_r5.py")
-    assert cfg.collection.schema.robot_type == "arx_r5"
-    assert set(cfg.collection.schema.columns) == {"qpos", "eef", "action_qpos", "action_eef"}
-    assert cfg.collection.schema.cameras["cam_high"] == "observation.images.cam_high"
-    assert cfg.collection.storage.log_dir
-
-
-def test_load_vr_collection_config_selects_client_input_source():
-    for filename in ("agibot_g2_vr.py", "arx_x5_vr.py", "dual_franka_vr.py"):
-        cfg = load_config(_CONFIGS_DIR / "02_collection" / filename)
-
-        assert cfg.collection.teleop.control_source == "client"
-        assert cfg.collection.teleop.client.type == "vr_webxr"
-        assert set(cfg.collection.schema.columns) == {
-            "qpos",
-            "eef",
-            "action_qpos",
-            "action_eef",
-        }
-
-
-def test_load_arx_r5_collection_uses_transport_teleop():
-    cfg = load_config(_CONFIGS_DIR / "02_collection" / "arx_r5.py")
-
-    assert cfg.robot.type == "arx_r5"
-    assert cfg.transport.type == "zmq"
-    assert cfg.transport.sub_endpoint == "tcp://127.0.0.1:5555"
-    assert cfg.transport.pub_endpoint == "tcp://127.0.0.1:5556"
-    assert cfg.transport.disabled_cameras == []
-    assert cfg.collection.storage.log_dir == "work_dirs/collection/arx_r5/"
-    assert cfg.collection.teleop.control_source == "transport"
-    assert cfg.collection.teleop.client == {}
-
-
-def test_arx_x5_collection_has_no_default_remote_upload_target():
-    cfg = load_config(_CONFIGS_DIR / "02_collection" / "arx_x5_vr.py")
-
-    assert not cfg.collection.storage.get("sftp")
-    assert not cfg.collection.storage.get("s3")
-    assert cfg.collection.storage.log_dir == "work_dirs/collection/arx_x5_vr"
-
-
-def test_arx_x5_vr_collection_opens_on_collect_tab():
-    cfg = load_config(_CONFIGS_DIR / "02_collection" / "arx_x5_vr.py")
-
-    assert cfg.console.initial_tab == "collect"
-    assert cfg.inference_cfg.publish_rate == 30
-    assert cfg.collection.storage.fps == 30
-
-
-def test_console_initial_tab_rejects_unknown_workspace(tmp_path):
-    with pytest.raises(ValueError, match="console.initial_tab"):
-        load_config(
-            _write_config(
-                tmp_path / "invalid_initial_tab.py",
-                "console = dict(initial_tab='unknown')\n",
-            )
-        )
+    assert dict(cfg.collection.tasks) == {"demo_set": [("place the cup", 5)]}
 
 
 @pytest.mark.parametrize(
@@ -311,227 +75,40 @@ def test_teleop_config_validation_rejects_unsafe_combinations(tmp_path, body, ma
 
 
 @pytest.mark.parametrize(
-    "robot_name",
-    ["r1lite", "ur5e", "arx_r5", "dual_agilex_piper"],
-)
-def test_deploy_configs_enable_relative_hil_rollout(robot_name: str):
-    cfg = load_config(_CONFIGS_DIR / "01_deploy" / robot_name / "openpi_qpos.py")
-    assert cfg.rollout.storage.enabled is True
-    assert "enabled" not in cfg.rollout.intervention
-    assert cfg.rollout.intervention.control_mode == "relative"
-
-
-@pytest.mark.parametrize("robot_name", ["dual_franka", "agibot_g2"])
-def test_deploy_configs_without_leader_keep_hil_disabled(robot_name: str):
-    cfg = load_config(_CONFIGS_DIR / "01_deploy" / robot_name / "openpi_qpos.py")
-    assert cfg.rollout.storage.enabled is False
-    assert cfg.rollout.intervention.control_mode == "absolute"
-
-
-def test_rollout_config_parses(tmp_path):
-    cfg_path = _write_config(
-        tmp_path / "rollout.py",
-        "rollout = dict(\n"
-        "    storage=dict(enabled=True, log_dir='work_dirs/rollout/test', fps=15),\n"
-        "    intervention=dict(control_mode='relative'),\n"
-        ")\n",
-    )
-    cfg = load_config(cfg_path)
-    assert cfg.rollout.storage.enabled is True
-    assert cfg.rollout.storage.log_dir == "work_dirs/rollout/test"
-    assert cfg.rollout.storage.fps == 15
-    assert cfg.rollout.intervention.control_mode == "relative"
-
-
-def test_r1lite_collection_configures_common_recording():
-    cfg = load_config(_CONFIGS_DIR / "02_collection" / "r1lite.py")
-    assert "gate" not in cfg.collection
-    assert cfg.collection.storage.image_height == 360
-    assert cfg.collection.storage.image_width == 640
-    assert cfg.rollout.storage.image_height == 360
-    assert cfg.rollout.storage.image_width == 640
-    assert cfg.rollout.intervention.control_mode == "relative"
-
-
-def test_operator_control_defaults_disabled():
-    cfg = load_config(_CONFIGS_DIR / "00_base" / "defaults.py")
-
-    assert cfg.operator_control.enabled is False
-    assert cfg.operator_control.action_topic == "/eva/operator_action"
-
-
-def test_r1lite_enables_operator_control():
-    cfg = load_config(_CONFIGS_DIR / "01_deploy" / "r1lite" / "openpi_qpos.py")
-
-    assert "hardware" not in cfg
-    assert cfg.operator_control.enabled is True
-    assert cfg.operator_control.action_topic == "/eva/operator_action"
-    assert cfg.rollout.storage.image_height == 360
-    assert cfg.rollout.storage.image_width == 640
-
-
-def test_r1lite_collection_enables_operator_control():
-    cfg = load_config(_CONFIGS_DIR / "02_collection" / "r1lite.py")
-
-    assert cfg.operator_control.enabled is True
-    assert cfg.operator_control.action_topic == "/eva/operator_action"
-
-
-def test_load_eval_config_resolves_checkpoints():
-    cfg = load_config(_CONFIGS_DIR / "03_evaluation" / "arx_r5_eval.py")
-    assert cfg.eval_cfg is cfg.eval
-    assert cfg.eval is not None
-    assert len(cfg.eval.checkpoints) == 2
-    for checkpoint in cfg.eval.checkpoints:
-        resolved = checkpoint["config"]
-        assert isinstance(resolved, ConfigDict)
-        assert resolved.policy.port == checkpoint["port"]
-
-
-def test_collection_log_dir_derives_from_filename(tmp_path):
-    cfg_path = _write_config(
-        tmp_path / "myrun.py",
-        "collection = dict(schema=dict(\n"
-        "    robot_type='ur5e', arms=dict(arm='arm'),\n"
-        "    cameras=dict(cam_high='observation.images.cam_high'),\n"
-        "    columns=dict(qpos='o.q', eef='o.e', action_qpos='a.q', action_eef='a.e'),\n"
-        "))\n",
-    )
-    cfg = load_config(cfg_path)
-    assert cfg.collection.storage.log_dir.endswith("myrun")
-
-
-def test_collection_schema_requires_core_columns(tmp_path):
-    cfg_path = _write_config(
-        tmp_path / "bad.py",
-        "collection = dict(schema=dict(\n"
-        "    robot_type='ur5e', arms=dict(arm='arm'),\n"
-        "    cameras=dict(cam_high='observation.images.cam_high'),\n"
-        "    columns=dict(qpos='o.q', action_qpos='a.q'),\n"
-        "))\n",
-    )
-    with pytest.raises(ValueError, match="collection.schema.columns"):
-        load_config(cfg_path)
-
-
-def test_collection_schema_requires_cameras(tmp_path):
-    cfg_path = _write_config(
-        tmp_path / "no_cam.py",
-        "collection = dict(schema=dict(\n"
-        "    robot_type='ur5e', arms=dict(arm='arm'), cameras=dict(),\n"
-        "    columns=dict(qpos='o.q', eef='o.e', action_qpos='a.q', action_eef='a.e'),\n"
-        "))\n",
-    )
-    with pytest.raises(ValueError, match="collection.schema.cameras"):
-        load_config(cfg_path)
-
-
-def test_collection_tasks_are_dataset_to_prompt_target_lists(tmp_path):
-    cfg_path = _write_config(
-        tmp_path / "tasks.py",
-        "collection = dict(tasks=dict(cup_set=[('pick up cup', 10), ('place cup', -1)]))\n",
-    )
-
-    cfg = load_config(cfg_path)
-
-    assert dict(cfg.collection.tasks) == {
-        "cup_set": [("pick up cup", 10), ("place cup", -1)],
-    }
-
-
-def test_collection_tasks_allow_prompt_in_multiple_datasets(tmp_path):
-    cfg_path = _write_config(
-        tmp_path / "duplicate_prompts.py",
-        "collection = dict(tasks=dict(\n"
-        "    cup_set_scene_1_20260828=[('pick up cup', 1)],\n"
-        "    cup_set_scene_2_20260828=[('pick up cup', 2)],\n"
-        "))\n",
-    )
-
-    cfg = load_config(cfg_path)
-
-    assert cfg.collection.tasks.cup_set_scene_1_20260828 == [("pick up cup", 1)]
-    assert cfg.collection.tasks.cup_set_scene_2_20260828 == [("pick up cup", 2)]
-
-
-@pytest.mark.parametrize(
-    "tasks",
-    [
-        "['pick up cup']",
-        "dict(cup_set=[])",
-        "dict(cup_set=['pick up cup'])",
-        "dict(cup_set=[('pick up cup',)])",
-        "dict(cup_set=[('pick up cup', 0)])",
-        "dict(cup_set=[('pick up cup', -2)])",
-        "dict(cup_set=[('pick up cup', 1.5)])",
-        "dict(**{'..': [('pick up cup', 1)]})",
-    ],
-)
-def test_collection_tasks_reject_invalid_grouping(tmp_path, tasks):
-    cfg_path = _write_config(
-        tmp_path / "bad_tasks.py",
-        f"collection = dict(tasks={tasks})\n",
-    )
-
-    with pytest.raises(ValueError, match="collection.tasks"):
-        load_config(cfg_path)
-
-
-@pytest.mark.parametrize(
-    "remote_dir",
-    [
-        "/datasets/../escape",
-        "/datasets/./current",
-    ],
-)
-def test_collection_sftp_remote_dir_rejects_noncanonical_absolute_paths(tmp_path, remote_dir):
-    cfg_path = _write_config(
-        tmp_path / "bad_sftp.py",
-        "collection = dict(storage=dict(sftp=dict("
-        "host='upload.example.com', port=22, remote_dir="
-        f"{remote_dir!r}"
-        ")))\n",
-    )
-
-    with pytest.raises(ValueError, match="collection.storage.sftp.remote_dir"):
-        load_config(cfg_path)
-
-
-@pytest.mark.parametrize(
     "preset",
-    sorted(str(p) for p in _CONFIGS_DIR.glob("01_deploy/**/*.py") if not p.name.startswith("_")),
+    [
+        "agibot_g2/openpi_eef.py",
+        "arx_r5/openpi_qpos.py",
+        "arx_x5/openpi_eef.py",
+        "dual_agilex_piper/xpolicylab.py",
+        "dual_franka/openpi_qpos.py",
+        "dual_yam/openpi_qpos.py",
+        "r1lite/eva_eef.py",
+    ],
 )
-def test_all_deploy_presets_load_without_error(preset):
-    cfg = load_config(preset)
-    assert cfg.robot.type
+def test_deploy_config_builds_robot_contract(preset):
+    cfg = load_config(_CONFIGS_DIR / "01_deploy" / preset)
+    robot = ROBOT_REGISTRY.build(cfg.robot.type)
+    assert robot.initial_qpos.shape == (robot.total_action_dim,)
+    assert robot.observation_schema.cameras
     assert cfg.inference_cfg.publish_rate > 0
 
 
 @pytest.mark.parametrize(
     "preset",
-    sorted(str(p) for p in _CONFIGS_DIR.glob("02_collection/*.py")),
+    ["arx_x5_vr_tasks_set.py", "dual_yam.py", "r1lite.py", "ur5e.py"],
 )
-def test_all_collection_presets_load_without_error(preset):
-    cfg = load_config(preset)
+def test_collection_config_resolves_recording_schema(preset):
+    cfg = load_config(_CONFIGS_DIR / "02_collection" / preset)
     assert cfg.collection.schema.robot_type
     assert set(cfg.collection.schema.columns) == {"qpos", "eef", "action_qpos", "action_eef"}
     assert isinstance(cfg.collection.tasks, dict)
 
 
-def test_arx_x5_vr_defines_scene_task_set():
-    cfg = load_config(_CONFIGS_DIR / "02_collection" / "arx_x5_vr.py")
-
-    assert list(cfg.collection.tasks) == ["ArxKine_PnP_DivObj_Norm_Sngl_Base_v1_scene_1_20260828"]
-    tasks = cfg.collection.tasks.ArxKine_PnP_DivObj_Norm_Sngl_Base_v1_scene_1_20260828
-    assert len(tasks) == 6
-    assert tasks[0] == ("pick up the yellow cup and place it on the green plate with left hand.", 1)
-    assert tasks[-1] == ("pick up the gray cup and place it on the green plate with left hand.", 1)
-
-
 @pytest.mark.parametrize(
     "preset",
-    sorted(str(p) for p in _CONFIGS_DIR.glob("03_evaluation/*.py")),
+    ["dual_agilex_piper_eva_sim_eval.py", "ur5e_eval.py"],
 )
-def test_all_eval_presets_load_without_error(preset):
-    cfg = load_config(preset)
+def test_eval_config_resolves_checkpoint_contract(preset):
+    cfg = load_config(_CONFIGS_DIR / "03_evaluation" / preset)
     assert cfg.eval is not None

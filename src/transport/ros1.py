@@ -10,7 +10,7 @@ import importlib.util
 import logging
 import os
 import threading
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib import parse
 
 import numpy as np
@@ -19,13 +19,15 @@ from core.config import ConfigDict
 from core.registry import TRANSPORT_REGISTRY
 from core.types import Observation
 from core.utils.math import build_eef_pose_from_xyzw
-from robots.base import Robot
 from transport.base import (
     HilStatus,
     _RosTransportBase,
     resolve_topics,
 )
 from transport.utils import ImageRateTracker, StreamFreshness
+
+if TYPE_CHECKING:
+    from robots.base import Robot
 
 logger = logging.getLogger(__name__)
 
@@ -195,6 +197,7 @@ class Ros1Transport(_RosTransportBase):
 
         # Dynamic deques for cameras and actuator groups
         self._camera_deques: dict[str, collections.deque] = {}
+        self._collection_camera_deques: dict[str, collections.deque] = {}
         self._group_state_deques: dict[str, collections.deque] = {}
         self._group_eef_deques: dict[str, collections.deque] = {}
 
@@ -221,6 +224,7 @@ class Ros1Transport(_RosTransportBase):
         for group in self._robot.actuator_groups:
             self._group_joint_names[group.name] = list(group.joint_names)
         self._last_acquire_stamp: float | None = None
+        self._collection_capture_active = False
 
         self._init_ros()
 
@@ -234,7 +238,7 @@ class Ros1Transport(_RosTransportBase):
 
     def _register_subscriber(self, topic: str, msg_type: Any, callback: Any) -> Any:
         subscriber = self._rospy.Subscriber(
-            topic, msg_type, callback, queue_size=1000, tcp_nodelay=True
+            topic, msg_type, callback, queue_size=1, tcp_nodelay=True
         )
         self._subscribers.append(subscriber)
         return subscriber
@@ -254,6 +258,9 @@ class Ros1Transport(_RosTransportBase):
                 continue
             deque: collections.deque = collections.deque()
             self._camera_deques[camera.name] = deque
+            collection_cameras = self._config.collection.schema.get("cameras", ())
+            if camera.name in collection_cameras or camera.observation_key in collection_cameras:
+                self._collection_camera_deques[camera.name] = collections.deque()
             self._register_subscriber(
                 topic,
                 self._Image,
@@ -343,7 +350,36 @@ class Ros1Transport(_RosTransportBase):
         """Create a deque for ``group_name`` and subscribe ``topic`` into it."""
         deque: collections.deque = collections.deque()
         deques[group_name] = deque
-        self._register_subscriber(topic, msg_type, lambda msg, d=deque: self._append_msg(d, msg))
+        self._register_subscriber(
+            topic,
+            msg_type,
+            lambda msg, d=deque: self._append_collection_msg(d, msg),
+        )
+
+    def start_collection(self) -> None:
+        with self._deque_guard():
+            self._collection_capture_active = True
+
+    def clear_collection_backlog(self) -> float | None:
+        """Clear pre-episode samples and open a fresh collection boundary."""
+        with self._deque_guard():
+            self._collection_capture_active = False
+            cutoff = super().clear_collection_backlog()
+            for _kind, _field, _source, _spec, deque in self._collection_raw_streams():
+                deque.clear()
+            self._collection_capture_active = True
+        return cutoff
+
+    def finish_collection_capture(self) -> None:
+        """Stop buffering collection-only samples between episodes."""
+        with self._deque_guard():
+            self._collection_capture_active = False
+            for _kind, _field, _source, _spec, deque in self._collection_raw_streams():
+                deque.clear()
+            self._collection_raw_cursors().clear()
+
+    def stop_collection(self) -> None:
+        self.finish_collection_capture()
 
     def close(self) -> None:
         """Unregister all subscribers and publishers and drop publisher handles."""

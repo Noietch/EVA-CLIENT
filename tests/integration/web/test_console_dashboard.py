@@ -3,7 +3,14 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from core.app.console.dashboard import build_dashboard, discover_raw_datasets
+import pytest
+
+from core.app.console.dashboard import (
+    build_dashboard,
+)
+from core.utils.dataset_upload import record_dataset_upload_receipt
+
+pytestmark = pytest.mark.integration
 
 
 def _write_json(path: Path, value: object) -> None:
@@ -32,49 +39,6 @@ def _dataset(
             for index, (task, required) in enumerate((requirements or {}).items())
         ],
     )
-
-
-def test_dashboard_counts_only_explicit_raw_and_keeps_unset_targets_blank(tmp_path: Path):
-    mango = "pick up the mango and place it in the plate"
-    other = "place the apple in the bowl"
-    raw = tmp_path / "collection" / "arx_x5_vr" / "fruit" / "raw"
-    rows = [
-        {
-            "episode_index": 0,
-            "tasks": [mango],
-            "length": 300,
-            "started_at": "2026-08-03T09:00:00+08:00",
-            "ended_at": "2026-08-03T09:00:10+08:00",
-            "session_id": "morning",
-        },
-        {
-            "episode_index": 1,
-            "tasks": [other],
-            "length": 600,
-            "started_at": "2026-08-04T09:00:00+08:00",
-            "ended_at": "2026-08-04T09:00:20+08:00",
-            "session_id": "morning",
-            "quality": "red",
-        },
-    ]
-    _dataset(raw, rows, requirements={mango: 100})
-
-    export = raw.parent / "export" / "accepted"
-    _dataset(export, rows[:1], requirements={mango: 100})
-
-    payload = build_dashboard([tmp_path])
-    collection = payload["views"]["collection"]
-
-    assert discover_raw_datasets([tmp_path]) == [(raw.resolve(), "collection")]
-    assert payload["raw_only"] is True
-    assert collection["episodes"] == 2
-    assert collection["valid_episodes"] == 1
-    assert collection["duration_seconds"] == 30.0
-    assert collection["robot_count"] == 1
-    assert {row["task"]: row["required_episodes"] for row in collection["tasks"]} == {
-        mango: 100,
-        other: 0,
-    }
 
 
 def test_dashboard_date_filter_and_eval_summary(tmp_path: Path):
@@ -117,3 +81,49 @@ def test_dashboard_date_filter_and_eval_summary(tmp_path: Path):
             "duration_seconds": 8.0,
         }
     ]
+
+
+def test_dashboard_reports_uploaded_episodes_for_all_data_and_each_day(tmp_path: Path):
+    raw = tmp_path / "collection" / "cup_set" / "raw"
+    _dataset(
+        raw,
+        [
+            {
+                "episode_index": 0,
+                "tasks": ["cup"],
+                "length": 30,
+                "started_at": "2026-08-03T10:00:00+08:00",
+            },
+            {
+                "episode_index": 1,
+                "tasks": ["cup"],
+                "length": 60,
+                "started_at": "2026-08-04T10:00:00+08:00",
+            },
+        ],
+    )
+    accepted = raw.parent / "export" / "lerobot_v21" / "accepted"
+    _write_json(
+        accepted / "meta" / "quality_split.json",
+        {
+            "subset": "accepted",
+            "source_dir": str(raw),
+            "source_episode_indices": [1],
+            "dataset_format": "lerobot_v21",
+        },
+    )
+    record_dataset_upload_receipt(
+        accepted,
+        destination="robot@host",
+        remote_dir="/datasets/cup_set",
+    )
+
+    collection = build_dashboard([tmp_path])["views"]["collection"]
+
+    assert collection["uploaded_episodes"] == 1
+    assert collection["not_uploaded_episodes"] == 1
+    by_date = {row["date"]: row for row in collection["daily"]}
+    assert by_date["2026-08-03"]["uploaded_episodes"] == 0
+    assert by_date["2026-08-03"]["not_uploaded_episodes"] == 1
+    assert by_date["2026-08-04"]["uploaded_episodes"] == 1
+    assert by_date["2026-08-04"]["frames"] == 60

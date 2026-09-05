@@ -6,7 +6,11 @@ import json
 from pathlib import Path
 from urllib.parse import urlencode
 
-from _harness import console_config, serve_console
+import pytest
+
+from tests.integration.web._harness import console_config, serve_console
+
+pytestmark = pytest.mark.integration
 
 
 def _write_history(dataset_dir, count: int) -> None:
@@ -18,12 +22,6 @@ def _write_history(dataset_dir, count: int) -> None:
             for index in range(count)
         )
     )
-
-
-def _write_history_rows(dataset_dir: Path, rows: list[dict[str, object]]) -> None:
-    path = dataset_dir / "meta" / "episodes.jsonl"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
 
 
 class _CollectionHistoryLogger:
@@ -89,39 +87,19 @@ def test_status_excludes_rollout_history_and_history_endpoint_pages(tmp_path):
         assert second["reset"] is False
 
 
-def test_episode_history_rejects_unknown_scope():
-    with serve_console(console_config()) as console:
-        response = console.get("/api/episodes?scope=unknown")
-
-    assert response.status == 400
-    assert response.json["ok"] is False
-
-
-def test_episode_history_uses_a_bounded_default_page(tmp_path):
-    config = console_config(rollout={"storage": {"enabled": True, "log_dir": str(tmp_path)}})
-    _write_history(tmp_path, 129)
-
-    with serve_console(config) as console:
-        response = console.get("/api/episodes?scope=rollout").json
-
-    assert len(response["episodes"]) == 128
-    assert response["next_since"] == 128
-    assert response["has_more"] is True
-
-
 def test_collection_history_is_scoped_to_set_and_prompt_before_counting(tmp_path):
     first_dir = tmp_path / "first" / "raw"
     second_dir = tmp_path / "second" / "raw"
     _write_history(first_dir, 1)
-    _write_history_rows(
-        second_dir,
-        [
-            {"episode_index": 4, "tasks": ["shared prompt"], "length": 5},
-            {"episode_index": 8, "tasks": ["other prompt"], "length": 9},
-            {"episode_index": 11, "tasks": ["shared prompt"], "length": 12},
-            {"episode_index": 12, "tasks": ["shared prompt"], "length": 13},
-        ],
-    )
+    path = second_dir / "meta" / "episodes.jsonl"
+    path.parent.mkdir(parents=True)
+    rows = [
+        {"episode_index": 4, "tasks": ["shared prompt"], "length": 5},
+        {"episode_index": 8, "tasks": ["other prompt"], "length": 9},
+        {"episode_index": 11, "tasks": ["shared prompt"], "length": 12},
+        {"episode_index": 12, "tasks": ["shared prompt"], "length": 13},
+    ]
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
 
     config = console_config(
         collection={

@@ -6,9 +6,10 @@ import numpy as np
 import pytest
 
 import transport.ros1 as ros1
-import transport.utils as transport_utils
 from core.config import ConfigDict
 from robots.base import ActuatorGroup, CameraSpec, ObservationSchema, Robot
+
+pytestmark = pytest.mark.unit
 
 
 class _FakeJointState:
@@ -65,14 +66,12 @@ def _subscription_callback(rospy: _FakeRospy, topic: str):
     raise AssertionError(f"missing subscription for {topic}")
 
 
-def test_ros1_camera_subscriptions_report_minimum_image_hz(monkeypatch):
-    now = [0.0]
-    monkeypatch.setattr(transport_utils.time, "monotonic", lambda: now[0])
+def test_ros1_collection_subscriptions_only_buffer_active_episode(monkeypatch):
     config = ConfigDict(
         transport=ConfigDict(
-            node_name="test_ros1",
+            node_name="test_ros1_collection",
             topics=ConfigDict(
-                camera_topics={"front": "/cam/front", "left": "/cam/left"},
+                camera_topics={"front": "/cam/front"},
                 group_topics={
                     "arm": {
                         "state_topic": "/joint_states",
@@ -83,8 +82,21 @@ def test_ros1_camera_subscriptions_report_minimum_image_hz(monkeypatch):
         ),
         inference_cfg=ConfigDict(obs_space=types.SimpleNamespace(is_eef=lambda: False)),
         collection=ConfigDict(
-            schema=ConfigDict(columns={}),
-            transport=ConfigDict(ros1=ConfigDict(groups={})),
+            schema=ConfigDict(columns={"qpos": {}}, cameras={"cam_front": {}}),
+            transport=ConfigDict(
+                ros1=ConfigDict(
+                    primary_camera="cam_front",
+                    max_frame_skew_sec=0.1,
+                    groups=ConfigDict(
+                        arm=ConfigDict(
+                            qpos_topic="/collection/qpos",
+                            eef_topic=None,
+                            action_qpos_topic=None,
+                            action_eef_topic=None,
+                        )
+                    ),
+                )
+            ),
         ),
     )
     robot = Robot(
@@ -92,31 +104,36 @@ def test_ros1_camera_subscriptions_report_minimum_image_hz(monkeypatch):
         actuator_groups=(ActuatorGroup("arm", 2, ("j0", "j1")),),
         initial_qpos=np.zeros(2, dtype=np.float32),
         observation_schema=ObservationSchema(
-            cameras=(CameraSpec("front", "cam_front"), CameraSpec("left", "cam_left")),
+            cameras=(CameraSpec("front", "cam_front"),),
             state_composition=("arm",),
         ),
     )
     fake_rospy, transport = _build_ros1_transport(monkeypatch, config, robot)
+    camera_callbacks = [
+        callback for topic, _, callback, _, _ in fake_rospy.subscribers if topic == "/cam/front"
+    ]
+    assert len(camera_callbacks) == 1
+    camera_callback = camera_callbacks[0]
+    qpos_callback = _subscription_callback(fake_rospy, "/collection/qpos")
+    old_camera = types.SimpleNamespace(header=types.SimpleNamespace(stamp=1.0))
+    old_qpos = types.SimpleNamespace(header=types.SimpleNamespace(stamp=1.0))
 
-    for topic in ("/cam/front", "/cam/left"):
-        now[0] = 0.0
-        _subscription_callback(fake_rospy, topic)(object())
-    now[0] = 0.05
-    _subscription_callback(fake_rospy, "/cam/front")(object())
-    now[0] = 0.10
-    _subscription_callback(fake_rospy, "/cam/left")(object())
+    camera_callback(old_camera)
+    qpos_callback(old_qpos)
+    assert not transport._collection_camera_deques["front"]
+    assert not transport._collection_qpos_deques["arm"]
 
-    assert transport.image_min_hz() == pytest.approx(10.0)
+    transport.clear_collection_backlog()
+    camera_callback(old_camera)
+    qpos_callback(old_qpos)
+    assert list(transport._collection_camera_deques["front"]) == [old_camera]
+    assert list(transport._collection_qpos_deques["arm"]) == [old_qpos]
 
-    decoded = []
-    transport._bridge = types.SimpleNamespace(
-        imgmsg_to_cv2=lambda message, encoding: decoded.append((message, encoding)) or message
-    )
-    latest = object()
-    transport._camera_deques["front"].append(latest)
-    assert transport.get_camera_frame("cam_front") is latest
-    assert decoded == [(latest, "passthrough")]
-    assert len(transport._camera_deques["front"]) == 3
+    transport.finish_collection_capture()
+    camera_callback(old_camera)
+    qpos_callback(old_qpos)
+    assert not transport._collection_camera_deques["front"]
+    assert not transport._collection_qpos_deques["arm"]
 
 
 def test_ros1_hil_relative_relay_reorders_named_input(monkeypatch):

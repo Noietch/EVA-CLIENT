@@ -24,6 +24,7 @@ uv.lock
 
 # Runtime datasets, logs, and generated work directories.
 datasets/
+/datasets
 work_dirs/
 logs/
 Log/
@@ -31,8 +32,21 @@ Log/
 # Local helpers are ignored except maintained tool packages.
 tools/*
 !tools/__init__.py
+!tools/openloop.py
+!tools/run_r1lite_fake_e2e.py
 !tools/conversion/
 !tools/conversion/**
+!tools/datasets/
+tools/datasets/*
+!tools/datasets/*.py
+!tools/datasets/*.sh
+!tools/datasets/static/
+tools/datasets/static/*
+!tools/datasets/static/*.css
+!tools/datasets/static/*.js
+!tools/datasets/templates/
+tools/datasets/templates/*
+!tools/datasets/templates/*.html
 !tools/skills/
 !tools/skills/**
 tools/conversion/__pycache__/

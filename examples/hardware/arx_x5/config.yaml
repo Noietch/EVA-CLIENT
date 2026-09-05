@@ -1,0 +1,42 @@
+robot:
+  arx_x5:
+    label: ARX X5
+    client_config: configs/01_deploy/arx_x5/_base.py
+    launch:
+      python: examples/hardware/arx_x5/.venv/bin/python
+      module: examples.hardware.arx_x5.node
+      fixed: [--passive-collection]
+      disable_camera_option: disabled_camera
+    settings:
+      obs_endpoint: tcp://127.0.0.1:5555
+      action_endpoint: tcp://127.0.0.1:5556
+      camera_endpoint: tcp://127.0.0.1:5557
+      left_can_port: can1
+      right_can_port: can3
+      arm_type: 2
+      rate: 30
+camera:
+  x5_d405:
+    separate: true
+    label: RealSense D405
+    robots: [arx_x5]
+    profile_field: realsense_profile_path
+    profile_loader: examples.hardware.arx_x5.camera:load_realsense_color_profiles
+    profile_variants: [{profile: day}, {profile: night}]
+    repeat: [realsense_camera]
+    profiles: [examples/hardware/arx_x5/d405_profile.yaml]
+    choices:
+      realsense_profile: [day, night]
+    settings:
+      realsense_camera: [cam_high=index:0, cam_left_wrist=index:1, cam_right_wrist=index:2]
+      realsense_resolution: 640x480
+      realsense_fps: 30
+      realsense_profile: day
+      realsense_profile_path: examples/hardware/arx_x5/d405_profile.yaml
+teleop:
+  x5_leader:
+    label: Alicia leaders
+    robots: [arx_x5]
+    settings:
+      left_alicia_port: /dev/ttyUSB0
+      right_alicia_port: /dev/ttyUSB1

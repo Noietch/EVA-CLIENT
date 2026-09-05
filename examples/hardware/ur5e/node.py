@@ -13,7 +13,8 @@ import numpy as np
 import robots  # noqa: F401  # registers every zoo robot under the registries on import
 from core.config import ConfigDict
 from core.registry import ROBOT_REGISTRY
-from examples.hardware.ur5e.camera import CameraSpec, open_cameras, read_camera_images
+from core.devices.camera import CameraPublisher, CameraSource
+from examples.hardware.ur5e.camera import CameraCache, CameraSpec
 from examples.hardware.ur5e.robot import Ur5eRobot
 from examples.hardware.ur5e.teleop import Ur5eTeleopSource
 from transport.zmq import (
@@ -57,7 +58,7 @@ class Ur5eHardwareConfig:
 
 
 class Ur5eZmqNode:
-    def __init__(self, config: Ur5eHardwareConfig) -> None:
+    def __init__(self, config: Ur5eHardwareConfig, camera_endpoint: str = "") -> None:
         import zmq
 
         self._config = config
@@ -73,7 +74,9 @@ class Ur5eZmqNode:
         self._robot = Ur5eRobot(config)
         robot = ROBOT_REGISTRY.build("ur5e")
         self._fk_solver = robot.build_kinematics(initial_qpos_groups=robot.initial_qpos_by_group())
-        self._captures = open_cameras(config.cameras)
+        self._cameras = (
+            CameraSource(camera_endpoint) if camera_endpoint else CameraCache(config.cameras)
+        )
         self._collection_active = False
         self._hil_active = False
         self._hil_error = ""
@@ -89,7 +92,7 @@ class Ur5eZmqNode:
         return self._robot.read_qpos()
 
     def _read_images(self) -> dict[str, np.ndarray]:
-        return read_camera_images(self._captures, self._config.cameras)
+        return self._cameras.snapshot()
 
     def get_latest_qpos(self) -> np.ndarray | None:
         return self._read_qpos()
@@ -227,8 +230,7 @@ class Ur5eZmqNode:
         self.stop_collection()
         self._fk_solver.close()
         self._robot.close()
-        for capture in self._captures.values():
-            capture.release()
+        self._cameras.close()
         self._action_sub.close(linger=0)
         self._obs_pub.close(linger=0)
 
@@ -269,6 +271,8 @@ def _build_teleop_config(args: argparse.Namespace) -> ConfigDict | None:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="UR5e hardware-side ZMQ node for EVA.")
+    parser.add_argument("--camera-only", action="store_true")
+    parser.add_argument("--camera-endpoint", default="")
     parser.add_argument("--obs-endpoint", default="tcp://127.0.0.1:5555")
     parser.add_argument("--action-endpoint", default="tcp://127.0.0.1:5556")
     parser.add_argument("--robot-ip", default="127.0.0.1")
@@ -288,6 +292,11 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     args = build_arg_parser().parse_args()
     camera_specs = args.camera if args.camera is not None else DEFAULT_CAMERA_SPECS
+    if args.camera_only:
+        CameraPublisher(
+            (CameraCache(_parse_camera_specs(camera_specs)),), args.camera_endpoint
+        ).run()
+        return
     node = Ur5eZmqNode(
         Ur5eHardwareConfig(
             observation_endpoint=args.obs_endpoint,
@@ -297,7 +306,8 @@ def main() -> None:
             cameras=_parse_camera_specs(camera_specs),
             publish_rate_hz=args.rate,
             teleop=_build_teleop_config(args),
-        )
+        ),
+        args.camera_endpoint,
     )
     signal.signal(signal.SIGINT, lambda *_args: node.close())
     signal.signal(signal.SIGTERM, lambda *_args: node.close())
