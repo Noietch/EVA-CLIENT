@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-R1LITE_HOST="${R1LITE_HOST:-r1lite@<R1LITE_HOST>}"
-CAT_HOST="${CAT_HOST:-cat@<CAT_HOST>}"
+R1LITE_HOST="${R1LITE_HOST:-r1lite@127.0.0.1}"
+CAT_HOST="${CAT_HOST:-cat@127.0.0.1}"
 R1LITE_SESSION="${R1LITE_SESSION:-eva_r1lite_robot}"
 CAT_SESSION="${CAT_SESSION:-eva_r1lite_teleop}"
 START_R1LITE="${START_R1LITE:-1}"

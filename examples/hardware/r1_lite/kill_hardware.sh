@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-R1LITE_HOST="${R1LITE_HOST:-r1lite@<R1LITE_HOST>}"
-CAT_HOST="${CAT_HOST:-cat@<CAT_HOST>}"
+R1LITE_HOST="${R1LITE_HOST:-r1lite@127.0.0.1}"
+CAT_HOST="${CAT_HOST:-cat@127.0.0.1}"
 R1LITE_KILL_CMD="${R1LITE_KILL_CMD:-bash ~/workspace/robot/kill_robot.sh}"
 CAT_KILL_CMD="${CAT_KILL_CMD:-bash ~/kill_tele.sh}"
 START_R1LITE="${START_R1LITE:-1}"
