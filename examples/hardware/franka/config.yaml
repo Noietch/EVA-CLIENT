@@ -1,7 +1,7 @@
 robot:
   dual_franka:
     label: Dual Franka
-    client_config: configs/01_deploy/dual_franka/_base.py
+    defaults: {teleop: joint, camera: external}
     launch:
       python: examples/hardware/franka/.venv/bin/python
       module: examples.hardware.franka.node
@@ -12,16 +12,71 @@ robot:
       camera_endpoint: tcp://127.0.0.1:5557
       left_robot_ip: 127.0.0.2
       right_robot_ip: 127.0.0.3
-      left_gripper_ip: ""
-      right_gripper_ip: ""
+      left_gripper_ip: ''
+      right_gripper_ip: ''
       rate: 30
+    config:
+      robot:
+        type: dual_franka
+        initial_qpos: null
+        eef_reference_frame: base_link
+        gripper_threshold: null
+        gripper_open: 1.0
+        gripper_close: 0.0
+      transport:
+        type: zmq
+        node_name: eva_client
+        disabled_cameras:
+        - cam_left_wrist
+        disabled_groups: []
+        topics: {}
+      collection:
+        schema:
+          robot_type: dual_franka
+          arms:
+            left_arm: left
+            right_arm: right
+          cameras:
+            cam_high: observation.images.cam_high
+            cam_left_wrist: observation.images.cam_left_wrist
+            cam_right_wrist: observation.images.cam_right_wrist
+        transport:
+          ros1:
+            primary_camera: ''
+            max_frame_skew_sec: 0.1
+            groups: {}
+          ros2:
+            primary_camera: ''
+            max_frame_skew_sec: 0.1
+            groups: {}
+      operator_control:
+        enabled: false
+        action_topic: /eva/operator_action
 camera:
   franka_orbbec:
     separate: true
     label: Orbbec
-    robots: [dual_franka]
-    repeat: [orbbec_camera]
+    robots:
+    - dual_franka
+    repeat:
+    - orbbec_camera
     settings:
-      orbbec_camera: [cam_high=index:0, cam_left_wrist=index:1, cam_right_wrist=index:2]
+      orbbec_camera:
+      - cam_high=index:0
+      - cam_left_wrist=index:1
+      - cam_right_wrist=index:2
       orbbec_resolution: 640x480
       orbbec_fps: 30
+  none: {}
+  external: {}
+teleop:
+  joint: {}
+  transport: {}
+  vr_webxr:
+    client:
+      arms:
+        left_arm:
+          controller: left
+        right_arm:
+          controller: right
+      eef_filter_alpha: 1.0

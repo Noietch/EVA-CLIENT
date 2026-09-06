@@ -4,27 +4,12 @@ _base_ = ["../../00_base/defaults.py"]
 
 console = dict(initial_tab="debug")
 
-robot = dict(
-    type="arx_r5",
-    gripper_threshold=None,
-)
+robot = dict(type="arx_r5")
 
-transport = dict(
-    type="zmq",
-    resize_pad=False,
-    image_layout="hwc",
-)
-
-policy = dict(type="openpi")
+transport = dict(resize_pad=False, image_layout="hwc")
 
 rollout = dict(
-    storage=dict(
-        enabled=True,
-        log_dir="work_dirs/rollout/arx_r5",
-        fps=30,
-        save_queue_max=15,
-        async_save=True,
-    ),
+    storage=dict(enabled=True, log_dir="work_dirs/rollout/arx_r5"),
     intervention=dict(control_mode="relative"),
 )
 

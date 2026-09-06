@@ -15,6 +15,7 @@ import yaml
 
 import robots  # noqa: F401
 from core.app.state import SessionStatus
+from core.cfg import Config
 from core.config import load_config
 from core.devices import REPOSITORY_ROOT, DeviceWorkspace
 from core.devices.service import DeviceProcesses, DeviceService
@@ -62,12 +63,16 @@ def test_device_catalog_composes_and_restores_each_robot(tmp_path, monkeypatch):
         restored = DeviceWorkspace(workspace.path)
         assert restored.saved["selected"] == selected
         assert restored.saved["overrides"]["robot"][name] == {}
-        config = restored.configure(load_config(REPOSITORY_ROOT / "configs/00_base/defaults.py"))
-        assert config.robot.type == name
-        robot_defaults = load_config(
-            REPOSITORY_ROOT / workspace.catalog["robot"][name]["client_config"]
+        config = load_config(
+            REPOSITORY_ROOT / "configs/00_base/defaults.py", workspace=restored
         )
-        assert config.collection.transport == robot_defaults.collection.transport
+        assert config.robot.type == name
+        robot_defaults = workspace.catalog["robot"][name]["config"]
+        assert set(robot_defaults["collection"]["schema"]["cameras"]) == {
+            camera.observation_key for camera in robot.observation_schema.cameras
+        }
+        for key, value in robot_defaults.get("collection", {}).get("transport", {}).items():
+            assert config.collection.transport[key] == value
         assert config.collection.teleop.client.position_scale == 0.7
         assert set(config.collection.teleop.client.arms) == {
             group.name for group in robot.arm_groups
@@ -77,7 +82,7 @@ def test_device_catalog_composes_and_restores_each_robot(tmp_path, monkeypatch):
         ]
         assert "collection_teleop_armed" not in restored.saved
         for kind, command in restored.commands().items():
-            spec = restored.catalog[kind][selected[kind]]["launch"]
+            spec = restored.hardware.options(name)[kind][selected[kind]]["launch"]
             module = importlib.import_module(spec["module"])
             parser = getattr(module, spec.get("parser", "build_arg_parser"))()
             parsed = parser.parse_args(command[3:])
@@ -112,6 +117,49 @@ def test_device_catalog_composes_and_restores_each_robot(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "argv", ["eva"])
     config, _, _, _ = parse_args()
     assert config.robot.type == "dual_yam" and config.console.initial_tab == "manual"
+
+
+def test_robot_hardware_defaults_and_saved_overrides_preserve_business_config(tmp_path):
+    workspace = DeviceWorkspace(tmp_path / "workstation.yaml")
+    selected = dict(robot="agilex_piper", teleop="vr_webxr", camera="external")
+    values = workspace.resolve(selected)
+    client = values["teleop"]["client"]
+    assert client["gripper"]["open_value"] == 0.1
+    assert client["arms"]["left_arm"]["workspace"]["min"] == [0.0, -0.55, -0.10]
+    g2 = workspace.resolve(dict(robot="agibot_g2", teleop="vr_webxr", camera="none"))
+    assert g2["teleop"]["client"]["gripper"]["close_value"] == -0.785
+    values["robot"]["config"]["robot"]["gripper_threshold"] = 0.03
+    workspace.save(selected, values)
+    restored = DeviceWorkspace(workspace.path)
+    raw = Config.fromfile(str(REPOSITORY_ROOT / "configs/00_base/defaults.py"))._cfg_dict
+    raw.transport.update(image_mode="on_demand", image_height=320, convert_bgr_to_rgb=False)
+    raw.collection.schema.cameras = {"cam_high": "observation.images.front"}
+    config = restored.configure(raw)
+    assert config.robot.gripper_threshold == 0.03
+    assert config.transport.image_mode == "on_demand"
+    assert config.transport.image_height == 320
+    assert config.transport.convert_bgr_to_rgb is False
+    assert config.collection.schema.cameras.cam_high == "observation.images.front"
+    assert restored.resolve(selected)["robot"]["config"]["robot"]["gripper_threshold"] == 0.03
+    raw.transport.type = "dataset"
+    raw.robot.type = "agibot_g2"
+    assert restored.configure(raw).robot.type == "agibot_g2"
+    with pytest.raises(ValueError, match="not supported"):
+        workspace.resolve(dict(robot="agibot_g2", teleop="yam_leader", camera="none"))
+
+
+def test_disabled_cameras_use_camera_ids_independently_of_dataset_column_names(tmp_path):
+    workspace = DeviceWorkspace(tmp_path / "workstation.yaml")
+    selected = dict(robot="dual_franka", teleop="joint", camera="external")
+    workspace.save(selected, workspace.resolve(selected))
+    raw = Config.fromfile(str(REPOSITORY_ROOT / "configs/00_base/defaults.py"))._cfg_dict
+    raw.collection.schema.cameras = {
+        "cam_high": "observation.images.cam_left_wrist",
+        "cam_left_wrist": "left_view",
+    }
+    config = workspace.configure(raw)
+    assert config.collection.schema.cameras.cam_high == "observation.images.cam_left_wrist"
+    assert "cam_left_wrist" not in config.collection.schema.cameras
 
 
 def test_device_http_profiles_rejection_and_restart_request(tmp_path, monkeypatch, device_daemon):

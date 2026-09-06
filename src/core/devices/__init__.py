@@ -11,7 +11,8 @@ from pathlib import Path
 
 import yaml
 
-from core.config import ConfigDict, load_config
+from core.cfg import Config, ConfigDict
+from core.devices.hardware import HardwareCatalog
 from core.registry import ROBOT_REGISTRY
 from teleop_client import validate_client_config
 
@@ -27,58 +28,37 @@ class DeviceWorkspace:
             )
         )
         self.path = self.path.expanduser().resolve()
-        self.catalog = {kind: {} for kind in DEVICE_KINDS}
-        for folder in ("hardware", "input_sources"):
-            for path in sorted((REPOSITORY_ROOT / "examples" / folder).glob("*/config.yaml")):
-                for kind, devices in yaml.safe_load(path.read_text()).items():
-                    for name, device in devices.items():
-                        self.catalog[kind][name] = device
+        self.hardware = HardwareCatalog()
+        self.catalog = self.hardware.catalog
         self.saved = yaml.safe_load(self.path.read_text()) if self.path.exists() else {}
         self.saved = self.saved or {}
 
     def initial_selection(self, config: ConfigDict) -> dict[str, str]:
         if self.saved:
             return dict(self.saved["selected"])
-        client = config.collection.teleop.get("client") or {}
-        teleop = next(
-            (
-                name
-                for name, spec in self.catalog["teleop"].items()
-                if spec.get("client", {}).get("type") == client.get("type") and client.get("type")
-            ),
-            None,
-        )
         return {
             "robot": config.robot.type,
-            "teleop": teleop
-            or next(name for name, spec in self.catalog["teleop"].items() if spec.get("default")),
-            "camera": next(
-                name for name, spec in self.catalog["camera"].items() if spec.get("initial")
-            ),
+            **self.catalog["robot"][config.robot.type]["defaults"],
         }
 
     def resolve(self, selected: dict[str, str], *, saved: bool = True) -> dict[str, dict]:
         if set(selected) != set(DEVICE_KINDS):
             raise ValueError("Select Robot, Teleop and Camera")
+        if selected["robot"] not in self.catalog["robot"]:
+            raise ValueError(f"Unknown robot: {selected['robot']}")
+        options = self.hardware.options(selected["robot"])
         robot = ROBOT_REGISTRY.build(selected["robot"])
         result = {}
         for kind in DEVICE_KINDS:
             name = selected[kind]
-            if name not in self.catalog[kind]:
-                raise ValueError(f"Unknown {kind}: {name}")
-            spec = self.catalog[kind][name]
-            if selected["robot"] not in spec.get("robots", [selected["robot"]]):
-                raise ValueError(f"{spec['label']} is not supported by {robot.name}")
+            if name not in options[kind]:
+                raise ValueError(f"{kind} {name} is not supported by {robot.name}")
+            spec = options[kind][name]
             defaults = {
                 key: copy.deepcopy(spec[key])
-                for key in ("settings", "client", "safety")
+                for key in ("settings", "client", "safety", "config")
                 if key in spec
             }
-            if kind == "teleop" and "client" in defaults:
-                defaults["client"]["arms"] = {
-                    group.name: {"controller": hand}
-                    for group, hand in zip(robot.arm_groups, spec["controllers"], strict=False)
-                }
             override_key = f"{name}@{selected['robot']}" if kind == "teleop" else name
             overrides = (
                 self.saved.get("overrides", {}).get(kind, {}).get(override_key, {}) if saved else {}
@@ -96,7 +76,9 @@ class DeviceWorkspace:
                 result[key] = DeviceWorkspace.merge(defaults[key], value)
             else:
                 expected = defaults[key]
-                if isinstance(expected, bool):
+                if expected is None:
+                    valid = value is None or isinstance(value, (int, float, list))
+                elif isinstance(expected, bool):
                     valid = isinstance(value, bool)
                 elif isinstance(expected, (int, float)):
                     valid = (
@@ -166,40 +148,28 @@ class DeviceWorkspace:
         return result
 
     def configure(self, config: ConfigDict) -> ConfigDict:
-        if not self.saved:
-            return config
-        selected = self.saved["selected"]
+        if config.transport.get("type") == "dataset":
+            return self.hardware.compose(config)
+        selected = self.initial_selection(config)
         values = self.resolve(selected)
-        robot_config = load_config(
-            REPOSITORY_ROOT / self.catalog["robot"][selected["robot"]]["client_config"]
+        config = self.hardware.compose(
+            config, selected["robot"], settings=values["robot"]["settings"]
         )
-        config.robot = robot_config.robot
-        config.transport = robot_config.transport
-        config.collection.transport = robot_config.collection.transport
-        settings = values["robot"]["settings"]
-        if config.transport.type == "zmq":
-            config.transport.sub_endpoint = settings["obs_endpoint"]
-            config.transport.pub_endpoint = settings["action_endpoint"]
+        overrides = self.saved.get("overrides", {}).get("robot", {}).get(selected["robot"], {})
+        config = ConfigDict(Config._merge_a_into_b(overrides.get("config", {}), config))
         robot = ROBOT_REGISTRY.build(config.robot.type)
-        if self.catalog["camera"][selected["camera"]].get("disabled"):
+        options = self.hardware.options(selected["robot"])
+        if options["camera"][selected["camera"]].get("disabled"):
             config.transport.disabled_cameras = [
                 camera.observation_key for camera in robot.observation_schema.cameras
             ]
-        config.collection.schema.update(
-            robot_type=config.robot.type,
-            arms={group.name: group.name for group in robot.arm_groups},
-            cameras={
-                camera.name: camera.observation_key
-                for camera in robot.observation_schema.cameras
-                if camera.observation_key not in config.transport.disabled_cameras
-            },
-            columns=dict(
-                qpos="observations.state.qpos",
-                eef="observations.state.eef",
-                action_qpos="action.qpos",
-                action_eef="action.eef",
-            ),
-        )
+            config.collection.schema.cameras = {}
+        else:
+            config.collection.schema.cameras = {
+                camera_id: column
+                for camera_id, column in config.collection.schema.cameras.items()
+                if camera_id not in config.transport.disabled_cameras
+            }
         if "client" in values["teleop"]:
             config.collection.teleop = ConfigDict(
                 control_source="client",
@@ -207,11 +177,8 @@ class DeviceWorkspace:
                 safety=values["teleop"]["safety"],
             )
         else:
-            config.collection.teleop = ConfigDict(control_source="transport")
-        for key in ("manual_max_qpos_step", "manual_settle_duration"):
-            config.inference_cfg.pop(key, None)
-            if key in robot_config.inference_cfg:
-                config.inference_cfg[key] = robot_config.inference_cfg[key]
+            config.collection.teleop.control_source = "transport"
+            config.collection.teleop.client = {}
         return config
 
     def commands(
@@ -220,8 +187,9 @@ class DeviceWorkspace:
         selected = self.saved["selected"] if selected is None else selected
         values = self.resolve(selected) if values is None else values
         commands = {}
+        options = self.hardware.options(selected["robot"])
         for kind in DEVICE_KINDS:
-            spec = self.catalog[kind][selected[kind]]
+            spec = options[kind][selected[kind]]
             launch = (
                 self.catalog["robot"][selected["robot"]].get("launch")
                 if kind == "camera" and spec.get("separate")
@@ -253,7 +221,7 @@ class DeviceWorkspace:
             ]
             repeated = set(spec.get("repeat", []))
             if kind == "robot":
-                repeated.update(self.catalog["teleop"][selected["teleop"]].get("repeat", []))
+                repeated.update(options["teleop"][selected["teleop"]].get("repeat", []))
                 if launch.get("disable_camera_option"):
                     repeated.add(launch["disable_camera_option"])
             for key, value in settings.items():

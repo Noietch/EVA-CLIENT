@@ -1,6 +1,6 @@
-"""ARX X5 WebXR collection using the dataset service's task-plan directory."""
+"""ARX X5 collection using the dataset service's task-plan directory."""
 
-_base_ = ["arx_x5_vr.py"]
+_base_ = ["arx_x5.py"]
 
 collection = dict(
     task_set_dir="datasets/data_collection/task_tests/larybench2_20260901_arx_x5",
@@ -12,6 +12,6 @@ collection = dict(
             prefix="embodied_raw_files",
             sign_service="https://SIGN_SERVICE.example.com",
             secure=False,
-        )
+        ),
     ),
 )

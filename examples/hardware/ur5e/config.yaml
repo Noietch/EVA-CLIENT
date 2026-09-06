@@ -1,7 +1,7 @@
 robot:
   ur5e:
     label: UR5e
-    client_config: configs/01_deploy/ur5e/_base.py
+    defaults: {teleop: joint, camera: external}
     launch:
       python: examples/hardware/ur5e/.venv/bin/python
       module: examples.hardware.ur5e.node
@@ -12,18 +12,69 @@ robot:
       robot_ip: 127.0.0.1
       gripper_port: /dev/ttyUSB1
       rate: 25
+    config:
+      robot:
+        type: ur5e
+        initial_qpos: null
+        eef_reference_frame: base_link
+        gripper_threshold: 0.5
+        gripper_open: 1.0
+        gripper_close: 0.0
+      transport:
+        type: zmq
+        node_name: eva_client
+        disabled_cameras: []
+        disabled_groups: []
+        topics: {}
+      collection:
+        schema:
+          robot_type: ur5e
+          arms:
+            arm: arm
+          cameras:
+            cam_high: observation.images.cam_high
+            cam_wrist: observation.images.cam_wrist
+        transport:
+          ros1:
+            primary_camera: ''
+            max_frame_skew_sec: 0.1
+            groups: {}
+          ros2:
+            primary_camera: ''
+            max_frame_skew_sec: 0.1
+            groups: {}
+      operator_control:
+        enabled: false
+        action_topic: /eva/operator_action
 camera:
   ur5e_opencv:
     separate: true
     label: USB cameras
-    repeat: [camera]
-    robots: [ur5e]
+    repeat:
+    - camera
+    robots:
+    - ur5e
     settings:
-      camera: [wrist_image:2:1280:720:25:0, exterior_image:0:1280:720:25:0]
+      camera:
+      - wrist_image:2:1280:720:25:0
+      - exterior_image:0:1280:720:25:0
+  none: {}
+  external: {}
 teleop:
   ur5e_leader:
     label: UR5e master arm
-    robots: [ur5e]
+    robots:
+    - ur5e
     settings:
       teleop_port: /dev/ttyACM0
       teleop_joint_coef: 1,-1,-1,-1,-1,-1
+  joint: {}
+  transport: {}
+  vr_webxr:
+    client:
+      arms:
+        arm:
+          controller: right
+      gripper:
+        open_value: 1.0
+        close_value: 0.0

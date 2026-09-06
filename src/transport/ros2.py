@@ -302,10 +302,7 @@ class Ros2Transport(_RosTransportBase):
             # uses a separate deque below and keeps its existing capture bound.
             deque: collections.deque = collections.deque(maxlen=_CAMERA_QOS_DEPTH)
             self._camera_deques[camera.name] = deque
-            if (
-                camera.observation_key in self._config.collection.schema.cameras
-                or camera.name in self._config.collection.schema.cameras
-            ):
+            if camera.observation_key in self._config.collection.schema.cameras:
                 self._collection_camera_deques[camera.name] = collections.deque()
             is_compressed = topic.endswith("/compressed")
             self._camera_is_compressed[camera.name] = is_compressed
@@ -607,13 +604,13 @@ class Ros2Transport(_RosTransportBase):
         """Return the latest decoded image for one camera without consuming queues.
 
         Args:
-            key: Camera observation key or ROS2 camera name.
+            key: Camera observation key.
 
         Returns:
             Image [H, W, 3] uint8, or None if no message is available.
         """
         for camera in self._robot.observation_schema.cameras:
-            if key not in (camera.observation_key, camera.name):
+            if key != camera.observation_key:
                 continue
             deque = self._camera_deques.get(camera.name)
             if deque is None:
@@ -629,13 +626,13 @@ class Ros2Transport(_RosTransportBase):
         """Return the latest compressed JPEG payload for one camera without consuming queues.
 
         Args:
-            key: Camera observation key or ROS2 camera name.
+            key: Camera observation key.
 
         Returns:
             JPEG bytes, or None if the camera is unavailable or not compressed.
         """
         for camera in self._robot.observation_schema.cameras:
-            if key not in (camera.observation_key, camera.name):
+            if key != camera.observation_key:
                 continue
             if not self._camera_is_compressed.get(camera.name, False):
                 return None

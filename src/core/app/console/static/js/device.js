@@ -29,6 +29,7 @@ class DevicePanel {
 
   async load(selected) {
     this.pending = true;
+    this.updateControls();
     try {
       const query = selected ? "?" + new URLSearchParams(selected) : "";
       const data = await apiGet("/api/devices" + query);
@@ -39,6 +40,7 @@ class DevicePanel {
       this.error = error.message;
     } finally {
       this.pending = false;
+      this.updateControls();
     }
   }
 
@@ -53,7 +55,6 @@ class DevicePanel {
       const select = document.createElement("select");
       select.id = "device-select-" + kind;
       for (const [id, spec] of Object.entries(catalog[kind])) {
-        if (spec.robots && !spec.robots.includes(selected.robot)) continue;
         select.add(new Option(spec.label, id));
       }
       select.value = selected[kind];
@@ -61,9 +62,9 @@ class DevicePanel {
         const next = {...selected, [kind]: select.value};
         if (kind === "robot") {
           for (const other of ["teleop", "camera"]) {
-            const spec = catalog[other][next[other]];
-            if (spec.robots && !spec.robots.includes(next.robot)) {
-              next[other] = Object.keys(catalog[other]).find(id => catalog[other][id].default);
+            const supported = catalog.robot[next.robot][other];
+            if (!supported.includes(next[other])) {
+              next[other] = catalog.robot[next.robot].defaults[other];
             }
           }
         }
@@ -124,12 +125,23 @@ class DevicePanel {
         input.type = typeof value === "number" ? "number" : typeof value === "boolean" ? "checkbox" : "text";
         if (input.type === "number") input.step = "any";
       }
-      input.value = value ?? "";
+      input.value = value === null ? "null" : value;
+      if (value === null) input.placeholder = "null, number or JSON array";
       if (input.type === "checkbox") input.checked = value;
       input.setAttribute("aria-label", next.join(" / "));
       input.oninput = () => {
-        values[key] = input.type === "checkbox" ? input.checked :
-          input.type === "number" ? Number(input.value) : input.value;
+        if (value === null) {
+          try {
+            values[key] = JSON.parse(input.value);
+            input.setCustomValidity("");
+          } catch {
+            input.setCustomValidity("Enter null, a number or a JSON array");
+            return;
+          }
+        } else {
+          values[key] = input.type === "checkbox" ? input.checked :
+            input.type === "number" ? Number(input.value) : input.value;
+        }
         this.dirty = true;
       };
       row.append(label, input);
@@ -188,13 +200,17 @@ class DevicePanel {
     }
   }
 
-  update() {
-    if (!this.data && !this.pending) this.load();
+  updateControls() {
     const moving = !!S.STATUS.collection_teleop_armed || !!S.STATUS.manual_publish_active ||
       S.STATUS.session_status === "running";
     $("device-editors").disabled = this.pending || moving;
     $("device-start").disabled = this.pending || this.dirty || moving;
     if (!this.pending) $("device-result").textContent = this.error || (this.dirty ? "UNSAVED" : "");
+  }
+
+  update() {
+    if (!this.data && !this.pending) this.load();
+    this.updateControls();
     if (this.polling || Date.now() - this.lastPoll < 1000) return;
     this.polling = true;
     this.lastPoll = Date.now();

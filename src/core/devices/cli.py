@@ -76,7 +76,7 @@ class DeviceCLI:
                     {"id": name, "label": spec["label"], "robots": spec.get("robots", [])}
                     for name, spec in devices.items()
                 ]
-                for kind, devices in self.workspace.catalog.items()
+                for kind, devices in self.workspace.hardware.options(selected["robot"]).items()
             }
         if args.action == "config":
             return {"selected": selected, "values": values}
@@ -85,6 +85,10 @@ class DeviceCLI:
                 choice = getattr(args, kind)
                 if choice:
                     selected[kind] = choice
+            options = self.workspace.hardware.options(selected["robot"])
+            for kind in ("teleop", "camera"):
+                if not getattr(args, kind) and selected[kind] not in options[kind]:
+                    selected[kind] = options["robot"][selected["robot"]]["defaults"][kind]
             values = self.workspace.resolve(selected)
             self.apply(selected, values)
             return {"selected": selected}

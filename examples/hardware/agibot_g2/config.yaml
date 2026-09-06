@@ -1,7 +1,60 @@
 robot:
   agibot_g2:
     label: AgiBot G2
-    client_config: configs/01_deploy/agibot_g2/_base.py
+    defaults: {teleop: joint, camera: external}
     settings:
       obs_endpoint: tcp://127.0.0.1:5555
       action_endpoint: tcp://127.0.0.1:5556
+    config:
+      robot:
+        type: agibot_g2
+        initial_qpos: null
+        eef_reference_frame: base_link
+        gripper_threshold: -0.4
+        gripper_open: 0.0
+        gripper_close: -0.785
+      transport:
+        type: zmq
+        node_name: eva_client
+        disabled_cameras: []
+        disabled_groups: []
+        topics: {}
+      collection:
+        schema:
+          robot_type: agibot_g2
+          arms:
+            left_arm: left
+            right_arm: right
+          cameras:
+            top_head: observation.images.cam_high
+            hand_left: observation.images.cam_left_wrist
+            hand_right: observation.images.cam_right_wrist
+        transport:
+          ros1:
+            primary_camera: ''
+            max_frame_skew_sec: 0.1
+            groups: {}
+          ros2:
+            primary_camera: ''
+            max_frame_skew_sec: 0.1
+            groups: {}
+      operator_control:
+        enabled: false
+        action_topic: /eva/operator_action
+teleop:
+  joint: {}
+  transport: {}
+  vr_webxr:
+    client:
+      gripper:
+        open_value: 0.0
+        close_value: -0.785
+      arms:
+        left_arm:
+          controller: left
+        right_arm:
+          controller: right
+      eef_filter_alpha: 1.0
+camera:
+  none: {}
+  external: {}

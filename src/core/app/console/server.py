@@ -884,9 +884,7 @@ def _serialize_rl(ctx: ConsoleContext) -> dict:
         "backend_ready": True,
         "cli_mode": str(rl_cfg.cli_mode),
         "inference_strategy": str(rl_cfg.inference_strategy),
-        "rollout_intervention_source": str(
-            (rl_cfg.get("intervention") or {}).get("source", "transport")
-        ),
+        "rollout_intervention_source": rollout_intervention_source(config),
         "tasks": [str(task) for task in rl_cfg.tasks],
         "policies": [
             {"slot": slot, "name": str(model.name)} for slot, model in enumerate(rl_cfg.policies)
@@ -3319,19 +3317,10 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         except (ValueError, KeyError) as error:
             self._send_json(400, {"ok": False, "error": str(error)})
             return
-        if not workspace.saved and selected["teleop"] == "vr_webxr":
-            configured = config.collection.teleop
-            if (
-                configured.get("client", {}).get("type") == "vr_webxr"
-                and selected["robot"] == config.robot.type
-            ):
-                values["teleop"].update(
-                    client=dict(configured.client), safety=dict(configured.safety)
-                )
         self._send_json(
             200,
             {
-                "catalog": workspace.catalog,
+                "catalog": workspace.hardware.options(selected["robot"]),
                 "selected": selected,
                 "values": values,
             },

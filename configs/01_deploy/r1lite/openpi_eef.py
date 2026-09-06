@@ -1,6 +1,6 @@
 """R1 Lite: openpi policy deploy, EEF-pose action space."""
 
-_base_ = ["openpi_base.py"]
+_base_ = ["_base.py"]
 
 policy = dict(
     type="openpi_rtc",

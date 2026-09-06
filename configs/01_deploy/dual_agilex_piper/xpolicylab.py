@@ -2,15 +2,7 @@
 
 _base_ = ["_base.py"]
 
-transport = dict(
-    type="zmq",
-    image_mode="on_demand",
-    image_height=224,
-    image_width=224,
-    resize_pad=False,
-    image_layout="hwc",
-    convert_bgr_to_rgb=False,
-)
+transport = dict(type="zmq", image_mode="on_demand")
 
 policy = dict(
     type="xpolicylab",

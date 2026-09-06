@@ -1,15 +1,12 @@
 """Dual Franka RL workspace with independent policy and critic selection."""
 
-_base_ = ["../02_collection/dual_franka_vr.py"]
+_base_ = ["../02_collection/dual_franka.py", "../00_base/rl.py"]
 
 console = dict(
     initial_tab="rl",
 )
 
 rl_cfg = dict(
-    cli_mode="real",
-    inference_strategy="async",
-    tasks=["placeholder task — replace with the real RL task prompt"],
     policies=[
         dict(
             name="dual_franka_openpi_qpos",
@@ -24,17 +21,8 @@ rl_cfg = dict(
             type="websocket",
             host="127.0.0.1",
             port=9100,
-            backend_options={},
+            backend_options=dict(),
         ),
     ],
-    data=dict(
-        format="lerobot",
-        storage=dict(
-            log_dir="work_dirs/rl/dual_franka",
-            fps=30,
-            save_queue_max=15,
-            async_save=True,
-        ),
-    ),
-    intervention=dict(control_mode="relative", source="teleop_client"),
+    data=dict(storage=dict(log_dir="work_dirs/rl/dual_franka")),
 )

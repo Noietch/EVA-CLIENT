@@ -652,7 +652,7 @@ run_python "${ARX_X5_NODE_PATH}" \
   --gripper-open-pos "-3.4" \
   --gripper-close-pos "0.1" \
   --initial-gripper-scalar "1.0" \
-  --eva-config "configs/02_collection/arx_x5_vr.py" \
+  --eva-config "configs/02_collection/arx_x5.py" \
   --rate "100" \
   --realsense-resolution "640x480" \
   --realsense-fps "30" \

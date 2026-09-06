@@ -123,6 +123,54 @@ def test_robot_assets_render_and_move(browser, viewer_url, tmp_path, viewport, r
         page.close()
 
 
+def test_device_panel_switches_robot_options_and_vr_parameters(browser, tmp_path, monkeypatch):
+    monkeypatch.setenv("EVA_WORKSTATION_PATH", str(tmp_path / "workstation.yaml"))
+    with serve_console(console_config()) as console:
+        page = browser.new_page()
+        page.route("**/api/camera/**", lambda route: route.abort())
+        errors = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        try:
+            page.goto(f"http://127.0.0.1:{console.port}", wait_until="domcontentloaded")
+            page.wait_for_function(
+                "document.querySelector('[data-tab=rl]').classList.contains('disabled')"
+            )
+            with page.expect_response(lambda response: response.url.endswith("/api/tab_switch")):
+                page.locator("button[data-tab=manual]").click()
+            console.pump()
+            page.locator("#device-select-robot").wait_for()
+            for robot, opened in (("agibot_g2", "0"), ("agilex_piper", "0.1"), ("arx_x5", "1")):
+                with page.expect_response(lambda response: "/api/devices?" in response.url):
+                    page.locator("#device-select-robot").select_option(robot)
+                page.wait_for_function(
+                    "robot => document.querySelector('#device-select-robot')?.value === robot",
+                    arg=robot,
+                )
+                if page.locator("#device-select-teleop").input_value() != "vr_webxr":
+                    with page.expect_response(lambda response: "/api/devices?" in response.url):
+                        page.locator("#device-select-teleop").select_option("vr_webxr")
+                page.wait_for_function(
+                    "value => document.querySelector("
+                    "'[aria-label=\"client / gripper / open_value\"]')?.value === value",
+                    arg=opened,
+                )
+                camera_ids = page.locator("#device-select-camera option").evaluate_all(
+                    "options => options.map(option => option.value)"
+                )
+                assert "yam_d405" not in camera_ids
+                assert ("x5_d405" in camera_ids) == (robot == "arx_x5")
+            with page.expect_response(lambda response: "/api/devices?" in response.url):
+                page.locator("#device-select-camera").select_option("x5_d405")
+            with page.expect_response(lambda response: "/api/devices?" in response.url):
+                page.locator("#device-select-robot").select_option("agibot_g2")
+            page.wait_for_function(
+                "document.querySelector('#device-select-camera')?.value === 'external'"
+            )
+            assert not errors, errors
+        finally:
+            page.close()
+
+
 def test_console_tabs_change_backend_state(browser, tmp_path, monkeypatch):
     monkeypatch.setenv("EVA_WORKSTATION_PATH", str(tmp_path / "workstation.yaml"))
     with serve_console(console_config()) as console:

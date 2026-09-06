@@ -1,18 +1,4 @@
-"""Minimal config loader wrapping Config.fromfile + a few derived fields.
-
-The previous 750-line dataclass + hand-written YAML loader is replaced by:
-
-  1. ``configs/_base_/defaults.py`` — single source of truth for default values
-     (every preset inherits via ``_base_ = ["../../_base_/defaults.py"]``).
-  2. ``Config.fromfile`` (vendored mmengine) — handles .py lazy config loading
-     and deep ``_base_`` merge.
-  3. ``load_config`` (this file) — wraps the loaded ConfigDict, builds
-     ``obs_space`` / ``action_space`` into JointState / EEFPose instances,
-     applies path-dependent derived fields, and validates.
-
-The returned ConfigDict supports dotted attribute access
-(``cfg.transport.image_height``) and behaves like a plain dict otherwise.
-"""
+"""Compose device YAML defaults with business presets, derive fields and validate."""
 
 from __future__ import annotations
 
@@ -21,10 +7,14 @@ import math
 import posixpath
 import re
 from pathlib import Path, PurePosixPath
-from typing import TypedDict
+from typing import TYPE_CHECKING, TypedDict
 
 from core.cfg import Config, ConfigDict
+from core.devices.hardware import HardwareCatalog
 from core.utils.s3_upload import S3UploadConfig
+
+if TYPE_CHECKING:
+    from core.devices import DeviceWorkspace
 
 
 class StrategyYamlArgs(TypedDict, total=False):
@@ -137,7 +127,7 @@ def _is_safe_loopback_directory(value: str) -> bool:
     return path.expanduser().resolve() != Path("/")
 
 
-def load_config(path: str | Path) -> ConfigDict:
+def load_config(path: str | Path, *, workspace: DeviceWorkspace | None = None) -> ConfigDict:
     """Load a .py config (with ``_base_`` inheritance) into a ConfigDict.
 
     Args:
@@ -152,14 +142,18 @@ def load_config(path: str | Path) -> ConfigDict:
     p = Path(path).expanduser()
     cfg = Config.fromfile(str(p)).to_dict()
     cfg = ConfigDict(cfg)
+    if workspace is None:
+        cfg = HardwareCatalog().compose(cfg)
+    else:
+        cfg = workspace.configure(cfg)
     _normalize_eval_cfg(cfg)
     _normalize_rl_cfg(cfg)
     _normalize_collection_task_set(cfg)
     _coerce_spaces(cfg)
     _apply_derived(cfg, p)
     _validate(cfg)
-    _resolve_eval_checkpoints(cfg, p)
-    _resolve_rl_policies(cfg, p)
+    _resolve_eval_checkpoints(cfg, p, workspace)
+    _resolve_rl_policies(cfg, p, workspace)
     return cfg
 
 
@@ -360,8 +354,6 @@ def _validate(cfg: ConfigDict) -> None:
         missing = sorted(set(_COLLECTION_REQUIRED_COLUMNS) - columns)
         if missing:
             raise ValueError(f"collection.schema.columns missing required keys: {missing}")
-        if not (schema.get("cameras") or {}):
-            raise ValueError("collection.schema.cameras must define at least one camera")
         if not (schema.get("arms") or {}):
             raise ValueError("collection.schema.arms must define at least one arm")
         storage = coll.get("storage") or {}
@@ -450,7 +442,9 @@ def _validate_teleop(cfg: ConfigDict) -> None:
         _positive_finite(safety.get(name), f"collection.teleop.safety.{name}")
 
 
-def _resolve_eval_checkpoints(cfg: ConfigDict, path: Path) -> None:
+def _resolve_eval_checkpoints(
+    cfg: ConfigDict, path: Path, workspace: DeviceWorkspace | None = None
+) -> None:
     """Load an eval config's inline checkpoint list into full ConfigDicts.
 
     For an eval config (``cfg.eval_cfg`` non-empty with a ``checkpoints`` list), each
@@ -475,13 +469,15 @@ def _resolve_eval_checkpoints(cfg: ConfigDict, path: Path) -> None:
 
     for ckpt in eval_cfg["checkpoints"]:
         ref = str(ckpt["config"])
-        sub = load_config((path.parent / ref).resolve())
+        sub = load_config((path.parent / ref).resolve(), workspace=workspace)
         sub.policy.host = str(ckpt.get("host", "127.0.0.1"))
         sub.policy.port = int(ckpt["port"])
         ckpt["config"] = sub
 
 
-def _resolve_rl_policies(cfg: ConfigDict, path: Path) -> None:
+def _resolve_rl_policies(
+    cfg: ConfigDict, path: Path, workspace: DeviceWorkspace | None = None
+) -> None:
     """Load each RL policy choice into a full deploy ConfigDict."""
     rl_cfg = cfg.get("rl_cfg")
     if not rl_cfg:
@@ -490,7 +486,7 @@ def _resolve_rl_policies(cfg: ConfigDict, path: Path) -> None:
         ref = model.config
         if isinstance(ref, ConfigDict):
             continue
-        sub = load_config((path.parent / str(ref)).resolve())
+        sub = load_config((path.parent / str(ref)).resolve(), workspace=workspace)
         if "host" in model:
             sub.policy.host = str(model.host)
         if "port" in model:

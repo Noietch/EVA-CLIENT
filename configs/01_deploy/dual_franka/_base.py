@@ -4,22 +4,11 @@ _base_ = ["../../00_base/defaults.py"]
 
 console = dict(initial_tab="debug")
 
-robot = dict(
-    type="dual_franka",
-    gripper_threshold=None,
-)
+robot = dict(type="dual_franka")
 
-transport = dict(
-    type="zmq",
-    resize_pad=False,
-    image_layout="hwc",
-    disabled_cameras=["cam_left_wrist"],
-)
+transport = dict(resize_pad=False, image_layout="hwc")
 
-policy = dict(
-    type="openpi_rtc",
-    backend_options=dict(latency_k=10),
-)
+policy = dict(type="openpi_rtc", backend_options=dict(latency_k=10))
 
 inference_strategies = {
     "sync": dict(

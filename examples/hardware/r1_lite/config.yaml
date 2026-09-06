@@ -1,5 +1,96 @@
 robot:
   r1_lite:
     label: Galaxea R1 Lite
-    client_config: configs/01_deploy/r1lite/_base.py
+    defaults: {teleop: joint, camera: external}
     settings: {}
+    config:
+      robot:
+        type: r1_lite
+        initial_qpos: null
+        eef_reference_frame: torso_link3
+        gripper_threshold: 0.5
+        gripper_open: 100.0
+        gripper_close: 0.0
+      transport:
+        type: ros2
+        node_name: eva_client
+        sub_endpoint: tcp://127.0.0.1:5555
+        pub_endpoint: tcp://127.0.0.1:5556
+        disabled_cameras: []
+        disabled_groups: []
+        topics:
+          camera_topics:
+            head: /hdas/camera_head/right_raw/image_raw_color/compressed
+            left_wrist: /hdas/camera_wrist_left/color/image_raw/compressed
+            right_wrist: /hdas/camera_wrist_right/color/image_raw/compressed
+          group_topics:
+            left_arm:
+              state_topic: /hdas/feedback_arm_left
+              command_topic: /motion_target/target_joint_state_arm_left
+              eef_state_topic: /relaxed_ik/motion_control/pose_ee_arm_left
+              gripper_state_topic: /hdas/feedback_gripper_left
+              gripper_command_topic: /motion_target/target_position_gripper_left
+              hil_input_topic: /eva/hil/input_joint_state_arm_left
+            right_arm:
+              state_topic: /hdas/feedback_arm_right
+              command_topic: /motion_target/target_joint_state_arm_right
+              eef_state_topic: /relaxed_ik/motion_control/pose_ee_arm_right
+              gripper_state_topic: /hdas/feedback_gripper_right
+              gripper_command_topic: /motion_target/target_position_gripper_right
+              hil_input_topic: /eva/hil/input_joint_state_arm_right
+      collection:
+        schema:
+          robot_type: r1_lite
+          arms:
+            left_arm: left
+            right_arm: right
+          cameras:
+            cam_high: observation.images.cam_high
+            cam_left_wrist: observation.images.cam_left_wrist
+            cam_right_wrist: observation.images.cam_right_wrist
+        transport:
+          ros1:
+            primary_camera: ''
+            max_frame_skew_sec: 0.1
+            groups: {}
+          ros2:
+            primary_camera: ''
+            max_frame_skew_sec: 0.3
+            groups:
+              left_arm:
+                qpos_topic: /hdas/feedback_arm_left
+                qpos_gripper_topic: /hdas/feedback_gripper_left
+                eef_topic: /relaxed_ik/motion_control/pose_ee_arm_left
+                action_qpos_topic: /motion_target/target_joint_state_arm_left
+                action_qpos_gripper_source: operator
+                action_qpos_gripper_topic: null
+                action_qpos_gripper_binary: true
+                action_eef_topic: /relaxed_ik/motion_control/pose_ee_arm_left
+              right_arm:
+                qpos_topic: /hdas/feedback_arm_right
+                qpos_gripper_topic: /hdas/feedback_gripper_right
+                eef_topic: /relaxed_ik/motion_control/pose_ee_arm_right
+                action_qpos_topic: /motion_target/target_joint_state_arm_right
+                action_qpos_gripper_source: operator
+                action_qpos_gripper_topic: null
+                action_qpos_gripper_binary: true
+                action_eef_topic: /relaxed_ik/motion_control/pose_ee_arm_right
+      operator_control:
+        enabled: true
+        action_topic: /eva/operator_action
+teleop:
+  joint: {}
+  transport: {}
+  vr_webxr:
+    client:
+      arms:
+        left_arm:
+          controller: left
+        right_arm:
+          controller: right
+      gripper:
+        open_value: 100.0
+        close_value: 0.0
+camera:
+  none: {}
+  external: {}

@@ -1,7 +1,6 @@
 teleop:
   vr_webxr:
     label: VR / WebXR
-    controllers: [left, right]
     launch:
       python: .venv/bin/python
       module: examples.input_sources.vr_webxr.node

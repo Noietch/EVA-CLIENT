@@ -38,9 +38,10 @@ def parse_args() -> tuple[ConfigDict, int, str | None, bool]:
 
     import robots  # noqa: F401
 
-    config = load_config(args.config or REPOSITORY_ROOT / "configs/00_base/defaults.py")
-    if config.transport.type != "dataset":
-        config = DeviceWorkspace().configure(config)
+    config = load_config(
+        args.config or REPOSITORY_ROOT / "configs/00_base/defaults.py",
+        workspace=DeviceWorkspace(),
+    )
     if not args.config:
         config.console.initial_tab = "manual"
 

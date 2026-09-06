@@ -259,7 +259,7 @@ class Ros1Transport(_RosTransportBase):
             deque: collections.deque = collections.deque()
             self._camera_deques[camera.name] = deque
             collection_cameras = self._config.collection.schema.get("cameras", ())
-            if camera.name in collection_cameras or camera.observation_key in collection_cameras:
+            if camera.observation_key in collection_cameras:
                 self._collection_camera_deques[camera.name] = collections.deque()
             self._register_subscriber(
                 topic,
@@ -603,7 +603,7 @@ class Ros1Transport(_RosTransportBase):
         """
         camera_name = None
         for camera in self._robot.observation_schema.cameras:
-            if key in (camera.name, camera.observation_key):
+            if key == camera.observation_key:
                 camera_name = camera.name
                 break
         if camera_name is None:

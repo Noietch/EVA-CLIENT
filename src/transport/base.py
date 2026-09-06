@@ -550,7 +550,7 @@ class _RosTransportBase(TransportBridge):
         return [
             camera
             for camera in self._robot.observation_schema.cameras
-            if camera.observation_key in cameras or camera.name in cameras
+            if camera.observation_key in cameras
         ]
 
     def _collection_capture_camera_deques(self) -> dict[str, collections.deque]:
@@ -577,7 +577,7 @@ class _RosTransportBase(TransportBridge):
         camera_deques = self._collection_capture_camera_deques()
         if primary_camera:
             for camera in self._robot.observation_schema.cameras:
-                if primary_camera not in (camera.observation_key, camera.name):
+                if primary_camera != camera.observation_key:
                     continue
                 deque = camera_deques.get(camera.name)
                 if deque is None or len(deque) == 0:

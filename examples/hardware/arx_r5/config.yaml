@@ -1,11 +1,12 @@
 robot:
   arx_r5:
     label: ARX R5
-    client_config: configs/01_deploy/arx_r5/_base.py
+    defaults: {teleop: joint, camera: external}
     launch:
       python: examples/hardware/arx_r5/.venv/bin/python
       module: examples.hardware.arx_r5.node
-      fixed: [--passive-collection]
+      fixed:
+      - --passive-collection
       disable_camera_option: disabled_camera
     settings:
       obs_endpoint: tcp://127.0.0.1:5555
@@ -14,24 +15,81 @@ robot:
       left_can_port: can0
       right_can_port: can1
       rate: 30
+    config:
+      robot:
+        type: arx_r5
+        initial_qpos: null
+        eef_reference_frame: base_link
+        gripper_threshold: null
+        gripper_open: 1.0
+        gripper_close: 0.0
+      transport:
+        type: zmq
+        node_name: eva_client
+        disabled_cameras: []
+        disabled_groups: []
+        topics: {}
+      collection:
+        schema:
+          robot_type: arx_r5
+          arms:
+            left_arm: left
+            right_arm: right
+          cameras:
+            cam_high: observation.images.cam_high
+            cam_left_wrist: observation.images.cam_left_wrist
+            cam_right_wrist: observation.images.cam_right_wrist
+        transport:
+          ros1:
+            primary_camera: ''
+            max_frame_skew_sec: 0.1
+            groups: {}
+          ros2:
+            primary_camera: ''
+            max_frame_skew_sec: 0.1
+            groups: {}
+      operator_control:
+        enabled: false
+        action_topic: /eva/operator_action
 camera:
   r5_orbbec:
     separate: true
     label: Orbbec
-    robots: [arx_r5]
+    robots:
+    - arx_r5
     profile_field: orbbec_white_balance_file
     profile_loader: examples.hardware.arx_r5.camera:load_orbbec_white_balances
-    repeat: [orbbec_camera]
-    profiles: [examples/hardware/arx_r5/utils/white_balance.yaml]
+    repeat:
+    - orbbec_camera
+    profiles:
+    - examples/hardware/arx_r5/utils/white_balance.yaml
     settings:
-      orbbec_camera: [cam_high=index:0, cam_left_wrist=index:1, cam_right_wrist=index:2]
+      orbbec_camera:
+      - cam_high=index:0
+      - cam_left_wrist=index:1
+      - cam_right_wrist=index:2
       orbbec_resolution: 640x480
       orbbec_fps: 30
       orbbec_white_balance_file: examples/hardware/arx_r5/utils/white_balance.yaml
+  none: {}
+  external: {}
 teleop:
   r5_leader:
     label: Alicia leaders
-    robots: [arx_r5]
+    robots:
+    - arx_r5
     settings:
       left_alicia_port: /dev/ttyUSB0
       right_alicia_port: /dev/ttyUSB1
+  joint: {}
+  transport: {}
+  vr_webxr:
+    client:
+      arms:
+        left_arm:
+          controller: left
+        right_arm:
+          controller: right
+      gripper:
+        open_value: 1.0
+        close_value: 0.0
