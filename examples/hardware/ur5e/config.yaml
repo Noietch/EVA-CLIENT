@@ -1,7 +1,7 @@
 robot:
   ur5e:
     label: UR5e
-    defaults: {teleop: joint, camera: external}
+    defaults: {teleop: vr_webxr, camera: external}
     launch:
       python: examples/hardware/ur5e/.venv/bin/python
       module: examples.hardware.ur5e.node
@@ -15,7 +15,10 @@ robot:
     config:
       robot:
         type: ur5e
-        initial_qpos: null
+        initial_qpos: [-3.3475797812091272, -1.2882714432528992, 1.4286816755877894,
+                       1.5116821962543945, 1.6023021936416626, -0.21513206163515264, 1.0]
+        safe_qpos: [-3.3475797812091272, -1.2882714432528992, 1.4286816755877894,
+                   1.5116821962543945, 1.6023021936416626, -0.21513206163515264, 1.0]
         eef_reference_frame: base_link
         gripper_threshold: 0.5
         gripper_open: 1.0
@@ -62,14 +65,13 @@ camera:
   external: {}
 teleop:
   ur5e_leader:
-    label: UR5e master arm
+    label: Leader
+    operation: leader
     robots:
     - ur5e
     settings:
       teleop_port: /dev/ttyACM0
       teleop_joint_coef: 1,-1,-1,-1,-1,-1
-  joint: {}
-  transport: {}
   vr_webxr:
     client:
       arms:

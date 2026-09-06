@@ -2,7 +2,9 @@
 // polling loop for frame/scene/camera refresh (poll).
 import { $, LIVE, RUN_CONTROLS, S, apiGet, clientTrace, replaceCamStripContent } from "./core.js";
 import { buildLiveDims, drawLiveCharts, resetLiveSeries, updateScrub } from "./charts.js";
-import { applyRunControlStatus, renderManualCurrent, renderManualTarget, uiMode } from "./run.js";
+import {
+  applyRunControlStatus, renderManualCurrent, renderManualTarget, syncGripperState, uiMode,
+} from "./run.js";
 
 window.__evaReplaySync = LIVE.replaySync;
 
@@ -1010,6 +1012,7 @@ async function pollFrame() {
       // flight. Do not resurrect camera streams after the visibility handler has
       // already released them.
       if (!liveStageActive() || S.ACTIVE_TAB === "replay" || LIVE.replayMode) return;
+      syncGripperState(f.qpos);
       const strip = $("cam-strip");
       const keys = f.cameras || [];
       // REPLAY owns the cam strip with native <video> elements driven by the scrub

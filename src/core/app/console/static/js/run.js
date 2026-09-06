@@ -708,29 +708,6 @@ function orderCollectTaskSets(sets) {
     return ordered;
   }
 
-function collectTaskLocation(
-    prompt = collectTaskValue(),
-    setName = collectSet,
-    preferredTaskIndex = collectTaskIndex,
-  ) {
-    const sets = collectTaskSets();
-    const selectedSetIndex = sets.findIndex((set) => set.name === setName);
-    if (selectedSetIndex >= 0) {
-      const tasks = sets[selectedSetIndex].tasks;
-      if (Number.isInteger(preferredTaskIndex) &&
-          tasks[preferredTaskIndex] && tasks[preferredTaskIndex].prompt === prompt) {
-        return { sets, setIndex: selectedSetIndex, taskIndex: preferredTaskIndex };
-      }
-      const taskIndex = tasks.findIndex((task) => task.prompt === prompt);
-      if (taskIndex >= 0) return { sets, setIndex: selectedSetIndex, taskIndex };
-    }
-    for (let setIndex = 0; setIndex < sets.length; setIndex += 1) {
-      const taskIndex = sets[setIndex].prompts.indexOf(prompt);
-      if (taskIndex >= 0) return { sets, setIndex, taskIndex };
-    }
-    return { sets, setIndex: -1, taskIndex: -1 };
-  }
-
 function applyCollectTaskSelection(prompt, setName, taskIndex, preferredSceneId = "") {
     const sets = collectTaskSets();
     const selectedSet = sets.find((set) => set.name === setName);
@@ -754,56 +731,13 @@ function applyCollectTaskSelection(prompt, setName, taskIndex, preferredSceneId 
     return true;
   }
 
-async function selectCollectTask(
-    prompt, setName = collectSet, taskIndex = null, preferredSceneId = null
-  ) {
-    if (!prompt || S.collectTaskSelectionPending) return false;
-    const currentPlan = ((S.SCENE_PLAN && S.SCENE_PLAN.tasks) || []).find(
-      (task) => task.task_id === S.scenePlanTaskId
-    );
-    const previousSceneId = preferredSceneId !== null ? String(preferredSceneId || "")
-      : S.scenePlanSceneId || (currentPlan && Array.isArray(currentPlan.scene_ids)
-        ? currentPlan.scene_ids[S.scenePlanSceneIndex] : "");
-    const location = collectTaskLocation(prompt, setName, taskIndex);
-    if (location.setIndex < 0 || location.taskIndex < 0) return false;
-    const selectedSet = location.sets[location.setIndex];
-    const nextTask = selectedSet.tasks[location.taskIndex].prompt;
-    const nextSet = selectedSet.name;
-    const nextTaskIndex = location.taskIndex;
-    let confirmed = false;
-    S.collectTaskSelectionPending = true;
-    try {
-      syncCollectTaskNavigation();
-      renderCollect();
-      const response = await apiPost("/api/select_collect_task", {
-        task: nextTask,
-        dataset: nextSet,
-        task_index: nextTaskIndex,
-      }, { concurrent: true, timeoutMs: 5000 });
-      confirmed = !!response.ok && response.task === nextTask &&
-        response.dataset === nextSet && response.task_index === nextTaskIndex;
-      if (confirmed) {
-        confirmed = applyCollectTaskSelection(
-          nextTask, nextSet, nextTaskIndex, previousSceneId
-        );
-      }
-    } catch {
-      confirmed = false;
-    } finally {
-      S.collectTaskSelectionPending = false;
-      syncCollectTaskNavigation();
-      renderCollect();
-      updateGuide();
-    }
-    return confirmed;
-  }
-
 function stepCollectSet(delta) {
-    const { sets, setIndex } = collectTaskLocation();
-    const nextIndex = setIndex + delta;
+    const sets = collectTaskSets();
+    const setIndex = sets.findIndex((set) => set.name === collectSet);
+    const nextIndex = (setIndex < 0 ? 0 : setIndex) + delta;
     if (nextIndex < 0 || nextIndex >= sets.length) return;
     selectCollectionDataset(sets[nextIndex].name);
-  }
+}
 
 function syncCollectTaskNavigation() {
     const sets = collectTaskSets();
@@ -879,6 +813,28 @@ const GRIP_STATE = {};
 
 let GRIP_FORCE = true;
 
+function gripperStateFromValue(control, value) {
+    const current = Number(value);
+    const openValue = Number(control.open_value);
+    const closeValue = Number(control.close_value);
+    if (![current, openValue, closeValue].every(Number.isFinite)) return null;
+    return Math.abs(current - openValue) <= Math.abs(current - closeValue) ? "open" : "close";
+  }
+
+function syncGripperState(qpos) {
+    if (!Array.isArray(qpos)) return;
+    const controls = (S.CFG && S.CFG.gripper_controls) || [];
+    let changed = false;
+    controls.forEach((control) => {
+      const state = gripperStateFromValue(control, qpos[control.qpos_index]);
+      if (state && GRIP_STATE[control.side] !== state) {
+        GRIP_STATE[control.side] = state;
+        changed = true;
+      }
+    });
+    if (changed) syncGripperCaps();
+  }
+
 function buildGripperCaps(host) {
     if (!host) return;
     host.innerHTML = "";
@@ -888,6 +844,12 @@ function buildGripperCaps(host) {
     caps.className = "grip-caps";
     if (controls.length === 1) caps.style.gridTemplateColumns = "1fr";
     controls.forEach((control) => {
+      if (!GRIP_STATE[control.side]) {
+        GRIP_STATE[control.side] = gripperStateFromValue(
+          control,
+          control.initial_value,
+        ) || "close";
+      }
       const cap = document.createElement("div");
       cap.className = "grip-cap";
       const lbl = document.createElement("div");
@@ -1270,10 +1232,10 @@ async function applyManualTune() {
 // ===== manual =====
 
 function enterManualSim() {
-    const teleop = renderControl();
-    S.manualActive = !teleop;
-    if (!teleop) apiPost("/api/select_mode", { mode: "manual" });
-    if (!teleop) renderManualConn();
+    S.manualActive = !S.STATUS.collection_teleop_armed;
+    if (S.manualActive) apiPost("/api/select_mode", { mode: "manual" });
+    renderManualConn();
+    renderControl();
   }
 
 function renderControl() {
@@ -1283,22 +1245,25 @@ function renderControl() {
     const source = config.collection.teleop;
     const teleop = config.device_selection.teleop !== "joint";
     const name = source.client_type === "vr_webxr" ? "VR" : source.client_type || "LEADER";
-    $("control-robot").textContent = config.robot_type;
-    $("control-source").textContent = teleop ? name : "JOINT";
-    $("control-cameras").textContent = config.camera_keys.join(", ") || "NONE";
-    $("control-teleop").hidden = !teleop;
-    document.querySelectorAll(".control-joints").forEach(panel => { panel.hidden = teleop; });
+    $("control-teleop-controls").hidden = !teleop;
+    document.querySelectorAll(".control-joints").forEach(panel => { panel.hidden = false; });
+    const motionOwnedByTeleop = !!S.STATUS.collection_teleop_armed;
+    S.manualActive = !motionOwnedByTeleop;
+    renderManualConn();
+    if (motionOwnedByTeleop) {
+      $("bm-connect").disabled = true;
+      $("bm-send").disabled = true;
+      $("bm-home").disabled = true;
+    }
+    buildManualSliders(S.STATUS.manual_qpos);
+    document.querySelectorAll("#manual-sliders-m input").forEach(input => {
+      input.disabled = motionOwnedByTeleop;
+    });
     if (!teleop) return false;
-    $("control-teleop-title").textContent = name;
     const status = S.STATUS;
-    const input = status.teleop;
     const armed = !!status.collection_teleop_armed;
     $("control-arm-enable").checked = armed;
     $("control-arm-enable").disabled = !armed && !status.transport_connected;
-    $("control-arm-label").textContent = armed ? "ENABLED" : "LOCKED";
-    $("control-teleop-status").textContent = status.last_error || input?.last_fault || input?.source_error ||
-      (input ? `${input.connected ? "CONNECTED" : "DISCONNECTED"} · ${input.condition}` :
-        (status.transport_connected ? "ROBOT CONNECTED" : "ROBOT DISCONNECTED"));
     $("manual-conn").textContent = `${name} · ${armed ? "ENABLED" : "LOCKED"}`;
     return true;
   }
@@ -1488,9 +1453,10 @@ export {
   applyRunControlStatus, applyStatus, mark, pauseSetup, replayIsLocalMode, resumeSetup,
   retrySetup, setPanel, startRunFromDebug, syncChip, uiMode, updateGuide,
   applyTune, applyManualTune, collectSetValue, collectTaskIndexValue,
-  collectTaskValue, renderConfig, selectCollectTask, applyCollectTaskSelection,
+  collectTaskValue, renderConfig, applyCollectTaskSelection,
   renderEvalGripper,
   renderRlGripper,
   enterManualSim, manualConnect, manualDisconnect, manualDispatchToggle,
   renderManualConn, renderManualCurrent, renderManualTarget,
+  syncGripperState,
 };

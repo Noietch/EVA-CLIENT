@@ -3,14 +3,28 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>EVA · INSTRUMENT CONSOLE</title>
+<title>EVA · CLIENT</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='30 35 190 190'%3E%3Cpath d='M192.09 91 A74 74 0 1 1 85.56 67.38' fill='none' stroke='%23686870' stroke-width='26'/%3E%3Cpath d='M85.56 67.38 A74 74 0 0 1 192.09 91' fill='none' stroke='%23FB8C2E' stroke-width='26'/%3E%3C/svg%3E" />
 <link rel="stylesheet" href="/css/console.css" />
 </head>
 <body>
 
   <!-- ============ telemetry bar ============ -->
   <div class="telemetry">
-    <span class="brand">EVA <b>CONSOLE</b></span>
+    <span class="brand">
+      <svg class="brand-icon" viewBox="30 35 190 190" aria-hidden="true" focusable="false">
+        <defs>
+          <linearGradient id="brand-piece" x1="70" y1="58" x2="196" y2="140" gradientUnits="userSpaceOnUse">
+            <stop offset="0" stop-color="#FFC98A" />
+            <stop offset="0.45" stop-color="#FB8C2E" />
+            <stop offset="1" stop-color="#C2410C" />
+          </linearGradient>
+        </defs>
+        <path d="M192.09 91 A74 74 0 1 1 85.56 67.38" fill="none" stroke="#AAAAAF" stroke-width="26" />
+        <path d="M85.56 67.38 A74 74 0 0 1 192.09 91" fill="none" stroke="url(#brand-piece)" stroke-width="26" />
+      </svg>
+      <span>EVA · <b>CLIENT</b></span>
+    </span>
     <span class="tele-seg"><span class="lbl">robot</span><span class="val" id="t-robot">—</span></span>
     <span class="tele-seg"><span class="dot" id="t-tx-dot"></span><span class="lbl">tx</span><span class="val" id="t-tx">—</span></span>
     <span class="tele-seg"><span class="dot" id="t-state-dot"></span><span class="lbl">state</span><span class="val" id="t-state">—</span></span>
@@ -237,6 +251,7 @@
         <div class="panel" id="collect-panel-task">
           <div class="panel-h"><span class="step-badge">1</span>DATASET <span class="n" id="collect-fps"></span></div>
           <div class="card">
+            <div class="collect-task-field-label">DATASET NAME</div>
             <div class="collect-task-selector">
               <button class="btn collect-nav-btn" id="b-collect-prev-set" title="Previous dataset set" aria-label="Previous dataset set">&#8592;</button>
               <select class="choice-select task-select" id="collect-set-list" aria-label="Collection dataset set"></select>
@@ -636,70 +651,32 @@
 
       <!-- control column -->
       <div class="col col-control">
-        <div class="panel">
-          <div class="panel-h">DEVICES</div>
-          <div class="tune-row"><span>Robot</span><span id="control-robot"></span></div>
-          <div class="tune-row"><span>Teleop</span><span id="control-source"></span></div>
-          <div class="tune-row"><span>Camera</span><span id="control-cameras"></span></div>
-        </div>
-        <div class="panel" id="control-teleop" hidden>
-          <div class="panel-h" id="control-teleop-title">TELEOP</div>
-          <label class="collect-arm-gate">
-            <span id="control-arm-label">LOCKED</span>
-            <input type="checkbox" id="control-arm-enable" aria-label="Enable teleop motion">
-          </label>
-          <div class="tune-status" id="control-teleop-status" role="status"></div>
-        </div>
-        <div class="panel control-joints">
-          <div class="panel-h">MANUAL · REAL ROBOT</div>
-          <div class="card">
-            <div class="btn-grid">
-              <button class="btn primary full" id="bm-connect">CONNECT</button>
-            </div>
-          </div>
-        </div>
 
-        <form class="panel" id="device-workspace">
-          <div class="panel-h">WORKSTATION</div>
-          <fieldset id="device-editors">
-            <div id="device-selections"></div>
-            <div id="device-fields"></div>
-            <div id="device-profile" hidden>
-              <label class="device-setting">Profile<select id="device-profile-select"></select></label>
-              <div class="btn-grid">
-                <button class="btn" type="button" id="device-profile-load">LOAD</button>
-                <button class="btn" type="button" id="device-profile-upload">IMPORT</button>
-              </div>
-              <input id="device-profile-file" type="file" accept=".json,.yaml,.yml" hidden>
-              <pre id="device-profile-values"></pre>
-            </div>
-            <button class="btn primary full" type="submit">APPLY</button>
-          </fieldset>
-          <label class="device-setting">Component
-            <select id="device-component">
-              <option value="">All</option>
-              <option value="robot">Robot</option>
-              <option value="teleop">Teleop</option>
-              <option value="camera">Camera</option>
-            </select>
-          </label>
-          <div class="btn-grid">
-            <button class="btn" type="button" id="device-start">START ▶</button>
-            <button class="btn" type="button" id="device-stop">STOP ■</button>
+        <div class="panel" id="device-workspace">
+          <div class="panel-h">
+            <span>DEVICES</span>
+            <button class="btn danger" id="device-kill-all" title="Stop every device process and clear device state">KILL ALL</button>
           </div>
-          <div class="tune-status" id="device-result" role="status"></div>
-          <a id="device-open-input" target="_blank" rel="noopener" hidden>OPEN INPUT</a>
-          <details><summary>LOG</summary><pre id="device-log"></pre></details>
-        </form>
+          <div class="card" id="device-selections"></div>
+        </div>
 
         <div class="panel control-joints">
           <div class="panel-h">DISPATCH</div>
           <div class="card">
             <div class="btn-grid">
+              <button class="btn primary full" id="bm-connect">CONNECT</button>
+            </div>
+            <div class="btn-grid">
               <button class="btn primary full" id="bm-send">SEND TO REAL ▶</button>
             </div>
             <div class="btn-grid">
               <button class="btn full" id="bm-home">HOME ⌂</button>
+            </div>
+            <div id="control-teleop-controls" hidden>
+              <label class="collect-arm-gate" title="Enable teleop motion">
+                <input type="checkbox" id="control-arm-enable" aria-label="Enable teleop motion">
+                <span class="ios-sw" aria-hidden="true"></span>
+              </label>
             </div>
           </div>
         </div>

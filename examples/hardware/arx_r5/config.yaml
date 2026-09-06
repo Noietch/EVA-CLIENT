@@ -1,7 +1,7 @@
 robot:
   arx_r5:
     label: ARX R5
-    defaults: {teleop: joint, camera: external}
+    defaults: {teleop: vr_webxr, camera: external}
     launch:
       python: examples/hardware/arx_r5/.venv/bin/python
       module: examples.hardware.arx_r5.node
@@ -18,7 +18,8 @@ robot:
     config:
       robot:
         type: arx_r5
-        initial_qpos: null
+        initial_qpos: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+        safe_qpos: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
         eef_reference_frame: base_link
         gripper_threshold: null
         gripper_open: 1.0
@@ -75,14 +76,13 @@ camera:
   external: {}
 teleop:
   r5_leader:
-    label: Alicia leaders
+    label: Leader
+    operation: leader
     robots:
     - arx_r5
     settings:
       left_alicia_port: /dev/ttyUSB0
       right_alicia_port: /dev/ttyUSB1
-  joint: {}
-  transport: {}
   vr_webxr:
     client:
       arms:

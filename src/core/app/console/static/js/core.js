@@ -11,6 +11,7 @@ export function setCommandMetadata(node, command, template = false) {
 function replaceCamStripContent(html) {
   const strip = $("cam-strip");
   if (!strip) return;
+  strip.querySelectorAll("img.cam").forEach(image => image.removeAttribute("src"));
   strip.querySelectorAll("video.cam").forEach((v) => {
     v.pause();
     v.removeAttribute("src");
@@ -182,6 +183,18 @@ const API_GET_TIMEOUT_MS = 5000;
 const API_GET_ABORT_TRACE_MS = 30000;
 const apiGetAbortTraceAt = new Map();
 
+async function parseJsonResponse(response, path) {
+  const text = await response.text();
+  if (!text.trim()) {
+    throw new Error(`Empty response from ${path} (HTTP ${response.status}); EVA may be restarting`);
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`Invalid JSON response from ${path} (HTTP ${response.status})`);
+  }
+}
+
 async function apiGet(path, { timeoutMs = API_GET_TIMEOUT_MS, signal = null } = {}) {
   let controller = null;
   let timer = null;
@@ -200,7 +213,7 @@ async function apiGet(path, { timeoutMs = API_GET_TIMEOUT_MS, signal = null } = 
   try {
     const r = await fetch(path, controller ? { signal: controller.signal } : {});
     if (!r.ok) clientTrace("api.get.error", { path, status: r.status });
-    return await r.json();
+    return await parseJsonResponse(r, path);
   } catch (error) {
     const aborted = !!(error && error.name === "AbortError");
     const lastAbortTraceAt = apiGetAbortTraceAt.get(path) || 0;
@@ -245,7 +258,7 @@ async function apiPost(
         body: JSON.stringify(body || {}),
         ...(controller ? { signal: controller.signal } : {}),
       });
-      const payload = await r.json();
+      const payload = await parseJsonResponse(r, path);
       clientTrace("api.post.end", {
         path,
         status: r.status,

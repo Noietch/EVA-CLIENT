@@ -30,6 +30,14 @@ class HardwareCatalog:
                         device: Config._merge_a_into_b(values, templates[kind].get(device, {}))
                         for device, values in data[kind].items()
                     }
+                    if kind == "teleop":
+                        modes = [option.get("operation") for option in options.values()]
+                        if not modes or any(mode not in {"vr", "leader"} for mode in modes):
+                            raise ValueError(f"{path}: Operation must be VR or Leader")
+                        if len(set(modes)) != len(modes):
+                            raise ValueError(f"{path}: Declare at most one adapter per Operation")
+                        if spec["defaults"]["teleop"] not in options:
+                            raise ValueError(f"{path}: Default Operation must be supported")
                     spec[kind] = list(options)
                     self.devices[name][kind] = options
                     for device, values in options.items():

@@ -96,7 +96,7 @@ def test_deploy_config_builds_robot_contract(preset):
 
 @pytest.mark.parametrize(
     "preset",
-    ["arx_x5_tasks_set.py", "dual_yam.py", "r1lite.py", "ur5e.py"],
+    ["arx_r5.py", "arx_x5_tasks_set.py", "dual_yam.py", "r1lite.py", "ur5e.py"],
 )
 def test_collection_config_resolves_recording_schema(preset):
     cfg = load_config(_CONFIGS_DIR / "02_collection" / preset)

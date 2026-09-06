@@ -13,6 +13,7 @@ import robots  # noqa: F401
 from core.registry import ROBOT_REGISTRY
 from examples.hardware.yam.robot import (
     YamFollowers,
+    map_leader_gripper,
 )
 from examples.hardware.yam.wire import (
     WireAction as YamWireAction,
@@ -20,6 +21,16 @@ from examples.hardware.yam.wire import (
 from robots.utils import UrdfScene
 
 pytestmark = pytest.mark.integration
+
+
+def _rendered_finger_separation(urdf) -> float:
+    centroids = []
+    for geometry_name in ("geometry_7", "geometry_8"):
+        transform, _ = urdf.scene.graph.get(frame_to=geometry_name)
+        mesh = urdf.scene.geometry[geometry_name].copy()
+        mesh.apply_transform(transform)
+        centroids.append(mesh.centroid)
+    return float(abs(centroids[0][1] - centroids[1][1]))
 
 
 @dataclasses.dataclass(frozen=True)
@@ -103,14 +114,27 @@ def test_yam_official_model_gripper_opening_and_independent_arms() -> None:
     urdf = scene._urdfs[str(robot.urdf)]
     part = robot.vis_config.parts[0]
     assert urdf.actuated_joint_names == [f"joint{index}" for index in range(1, 9)]
-    gaps = []
+    separations = []
     for value in (0.0, 1.0):
         urdf.update_cfg(part.qpos_to_cfg(np.array([0.0] * 6 + [value])))
-        left = urdf.get_transform("tip_left", "gripper")
-        right = urdf.get_transform("tip_right", "gripper")
-        gaps.append(left[1, 3] - right[1, 3])
-    assert gaps[1] - gaps[0] == pytest.approx(0.0939)
-    assert gaps[1] > 0.08
+        separations.append(_rendered_finger_separation(urdf))
+    assert separations[1] - separations[0] > 0.08
+    assert separations[1] > 0.08
+
+    physical_scene = UrdfScene(robot, gripper_open=1.0, gripper_close=0.0)
+    physical_urdf = physical_scene._urdfs[str(robot.urdf)]
+    physical_part = robot.vis_config.parts[0]
+    physical_separations = []
+    for value in (0.0, 1.0):
+        visual_qpos = physical_scene._part_transforms(
+            physical_part,
+            np.array([0.0] * 6 + [value]),
+            np.eye(4),
+        )
+        assert visual_qpos
+        physical_separations.append(_rendered_finger_separation(physical_urdf))
+    assert physical_separations[1] > physical_separations[0]
+    assert physical_separations[1] > 0.08
 
     qpos = robot.initial_qpos.copy()
     before = scene.transforms(qpos)
@@ -121,6 +145,13 @@ def test_yam_official_model_gripper_opening_and_independent_arms() -> None:
         not np.allclose(before["left_arm"][name], after["left_arm"][name])
         for name in before["left_arm"]
     )
+
+
+def test_yam_leader_gripper_uses_one_for_open() -> None:
+    endpoints = (-0.7, 0.0)
+    assert map_leader_gripper(-0.7, endpoints) == pytest.approx(1.0)
+    assert map_leader_gripper(0.0, endpoints) == pytest.approx(0.0)
+    assert map_leader_gripper(-0.35, endpoints) == pytest.approx(0.5)
 
 
 def test_follower_commands_both_arms_and_watchdog(monkeypatch: pytest.MonkeyPatch) -> None:

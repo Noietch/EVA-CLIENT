@@ -1,14 +1,19 @@
 robot:
   agibot_g2:
     label: AgiBot G2
-    defaults: {teleop: joint, camera: external}
+    defaults: {teleop: vr_webxr, camera: external}
     settings:
       obs_endpoint: tcp://127.0.0.1:5555
       action_endpoint: tcp://127.0.0.1:5556
     config:
       robot:
         type: agibot_g2
-        initial_qpos: null
+        initial_qpos: [0.739033, -0.717023, -1.524419, -1.537612, 0.27811, -0.925845, -0.839257, -0.785,
+                       -0.739033, -0.717023, 1.524419, -1.537612, -0.27811, -0.925845, 0.839257, -0.785,
+                       0.0, 0.0, 0.11464, -0.83423, 1.2172, 0.10025, 0.0, 0.0]
+        safe_qpos: [0.739033, -0.717023, -1.524419, -1.537612, 0.27811, -0.925845, -0.839257, -0.785,
+                   -0.739033, -0.717023, 1.524419, -1.537612, -0.27811, -0.925845, 0.839257, -0.785,
+                   0.0, 0.0, 0.11464, -0.83423, 1.2172, 0.10025, 0.0, 0.0]
         eef_reference_frame: base_link
         gripper_threshold: -0.4
         gripper_open: 0.0
@@ -42,8 +47,6 @@ robot:
         enabled: false
         action_topic: /eva/operator_action
 teleop:
-  joint: {}
-  transport: {}
   vr_webxr:
     client:
       gripper:

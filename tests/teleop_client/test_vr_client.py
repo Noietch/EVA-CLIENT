@@ -127,6 +127,48 @@ def test_client_result_token_rejects_reset_disconnect_and_source_timeout(monkeyp
     assert not client.validate_result(fresh)
 
 
+def test_client_connection_requires_fresh_vr_frames(monkeypatch) -> None:
+    clock = [10.0]
+    monkeypatch.setattr(vr_client_module.time, "monotonic", lambda: clock[0])
+    client = _client()
+
+    client._ingest(json.dumps(_frame()).encode())
+    assert client.status().connected
+
+    clock[0] = 10.3
+    assert not client.status().connected
+
+
+def test_client_uses_configured_robot_pose_as_vr_home(monkeypatch) -> None:
+    clock = [10.0]
+    monkeypatch.setattr(vr_client_module.time, "monotonic", lambda: clock[0])
+    client = _client()
+    configured_home = np.asarray(
+        [0.8, -0.2, 0.6, 0.9238795, 0.0, 0.3826834, 0.0, 1.0],
+        dtype=np.float32,
+    )
+    client.set_home_eef({"left_arm": configured_home})
+
+    active_frame = _frame(squeeze=0.0)
+    active_frame["controllers"]["left"]["position"] = [0.0, 0.0, 0.0]
+    client._ingest(json.dumps(active_frame).encode())
+    result = client.poll(_context(now=10.0))
+
+    assert result.command is not None
+    np.testing.assert_allclose(result.command.value[:3], configured_home[:3], atol=1e-6)
+    np.testing.assert_allclose(
+        result.command.value[3:7],
+        configured_home[3:7] / np.linalg.norm(configured_home[3:7]),
+        atol=1e-6,
+    )
+
+    client.reset()
+    client._ingest(json.dumps(_frame(1, squeeze=0.0)).encode())
+    reset_result = client.poll(_context(now=10.0))
+    assert reset_result.command is not None
+    np.testing.assert_allclose(reset_result.command.value[:3], configured_home[:3], atol=1e-6)
+
+
 def test_client_event_flood_rejects_and_fails_closed() -> None:
     client = _client()
     client._ingest(json.dumps(_frame(squeeze=0.0)).encode())
@@ -206,15 +248,16 @@ def test_external_zmq_bridge_reaches_vr_client() -> None:
     client.start()
     try:
         bridge.set_browser(True, "wire-session")
+        neutral = _frame(session="wire-session", squeeze=0.0)
+        neutral["controllers"]["left"]["grip_engaged"] = False
+        neutral["controllers"]["left"]["trigger"] = 0.0
+        neutral["input_feedback"] = {"pressed": [], "hold_progress": {}}
+        bridge.submit_frame(neutral)
         deadline = time.monotonic() + 3.0
         while not client.status().connected and time.monotonic() < deadline:
             time.sleep(0.01)
         assert client.status().connected
 
-        neutral = _frame(session="wire-session", squeeze=0.0)
-        neutral["controllers"]["left"]["grip_engaged"] = False
-        neutral["controllers"]["left"]["trigger"] = 0.0
-        neutral["input_feedback"] = {"pressed": [], "hold_progress": {}}
         bridge.submit_frame(neutral)
         result = None
         while time.monotonic() < deadline:

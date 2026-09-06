@@ -1,5 +1,27 @@
 # YAM YAM Hardware
 
+## Startup and Normal Stop Poses
+
+`config.yaml` defines `robot.config.robot.initial_qpos` and `safe_qpos` as 14 values:
+left six joints, left gripper, right six joints, right gripper. Joint angles are
+in radians. YAM gripper values use `1=open` and `0=closed`; the console remaps
+that convention to the URDF so the 3D fingers match the physical grippers. The
+console preserves measured gripper positions during these moves.
+If `safe_qpos` is omitted, it defaults to `initial_qpos`. The configured YAM
+initial joint targets match the X5 nominal
+targets; this does not imply identical Cartesian poses between the two robots.
+Validate the pose and unobstructed path on your installation before a real move.
+
+Robot Start moves to `initial_qpos`. Normal Robot Stop locks teleoperation, moves
+to `safe_qpos`, checks fresh feedback and settling, then closes the hardware node.
+Failure or interruption withholds shutdown and leaves the process available for
+recovery. Robot shutdown is not forcibly killed on timeout. The YAM SDK releases
+motor torque when closing; this is not a mains-power relay operation. Zero joint
+angles alone do not prove mechanical support or power-loss safety.
+
+This normal shutdown sequence is not an emergency stop. Use the physical emergency
+stop when immediate intervention is necessary; do not wait for a parking move.
+
 This adapter connects a two-follower YAM Cell-style pair (`dual_yam`) to
 EVA through the existing ZMQ transport. The overhead and two wrist Orbbec
 cameras are bound by serial number so camera roles remain stable across reboots.

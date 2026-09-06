@@ -71,10 +71,11 @@ _MOTION_INTERRUPTING_VERBS = frozenset(
         "reset",
         "console_reset",
         "eval_cancel",
+        "device_stop",
     }
 )
 
-_MOTION_DEFERRED_VERBS = frozenset({"start"})
+_MOTION_DEFERRED_VERBS = frozenset({"start", "device_start"})
 
 
 MANUAL_MAX_QPOS_STEP = 0.02
@@ -218,6 +219,19 @@ def set_gripper_open_close(
     )
 
 
+def opposite_gripper_value(
+    current: float,
+    open_value: float,
+    close_value: float,
+    threshold: float | None = None,
+) -> float:
+    """Return the opposite endpoint for either high-open or low-open grippers."""
+    boundary = (open_value + close_value) / 2.0 if threshold is None else threshold
+    high_is_open = open_value >= close_value
+    is_open = current >= boundary if high_is_open else current <= boundary
+    return close_value if is_open else open_value
+
+
 def toggle_gripper_immediate(
     config: ConfigDict,
     runtime: RuntimeState,
@@ -237,15 +251,13 @@ def toggle_gripper_immediate(
     Returns:
         True when a gripper was toggled, False if no feedback / no gripper.
     """
-    # When no explicit threshold is configured, decide open/closed by proximity to
-    # the configured open/close targets rather than a fixed 0.5 (gripper ranges vary).
-    if config.robot.gripper_threshold is not None:
-        threshold = config.robot.gripper_threshold
-    else:
-        threshold = (config.robot.gripper_open + config.robot.gripper_close) / 2.0
-
     def decide(cur: float) -> float:
-        return config.robot.gripper_close if cur >= threshold else config.robot.gripper_open
+        return opposite_gripper_value(
+            cur,
+            config.robot.gripper_open,
+            config.robot.gripper_close,
+            config.robot.gripper_threshold,
+        )
 
     return apply_gripper_command(
         config, runtime, session, side, decide=decide, lock=True, stream=False
@@ -292,6 +304,8 @@ def _publish_manual_real_qpos(
     runtime: RuntimeState,
     session: SessionState,
     target: np.ndarray,
+    *,
+    feedback_guard=None,
 ) -> bool:
     start = session.manual_real_qpos
     if start is None:
@@ -315,6 +329,8 @@ def _publish_manual_real_qpos(
         if poll_motion_commands(config, runtime, session):
             consume_motion_interrupt(session, session.status)
             return False
+        if feedback_guard is not None:
+            feedback_guard()
         publish_action(runtime, action, target=OutputTarget.REAL.value)
         session.manual_real_qpos = np.asarray(action, dtype=np.float32).copy()
         rate.sleep()
@@ -328,6 +344,8 @@ def _publish_manual_real_qpos(
         if poll_motion_commands(config, runtime, session):
             consume_motion_interrupt(session, session.status)
             return False
+        if feedback_guard is not None:
+            feedback_guard()
         publish_action(runtime, target, target=OutputTarget.REAL.value)
         session.manual_real_qpos = np.asarray(target, dtype=np.float32).copy()
         rate.sleep()
@@ -1387,6 +1405,7 @@ __all__ = [
     "iter_target_grippers",
     "apply_gripper_command",
     "set_gripper_open_close",
+    "opposite_gripper_value",
     "toggle_gripper_immediate",
     "set_gripper_immediate",
     "publish_action",

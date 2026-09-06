@@ -14,6 +14,7 @@ future edit can't silently regress it:
 from __future__ import annotations
 
 import socket
+from types import SimpleNamespace
 
 import pytest
 
@@ -23,6 +24,22 @@ from core.app.console.server import (
 from tests.integration.web._harness import WebHarness
 
 pytestmark = pytest.mark.integration
+
+
+def test_offline_cameras_do_not_reserve_browser_stream_connections(monkeypatch):
+    from core.app.console import server
+
+    frames = {}
+    reader = SimpleNamespace(
+        get_camera_keys=lambda: ["cam_high", "cam_left_wrist"],
+        get_camera_frame=frames.get,
+    )
+    monkeypatch.setattr(server, "_observation_reader", lambda ctx: reader)
+    assert server._live_camera_keys(None) == []
+    frames["cam_high"] = object()
+    assert server._live_camera_keys(None) == ["cam_high"]
+    frames.clear()
+    assert server._live_camera_keys(None) == []
 
 
 def test_video_stream_client_disconnect_is_silent(tmp_path):

@@ -24,7 +24,4 @@ exec "$UR5E_PYTHON_BIN" -X faulthandler examples/hardware/ur5e/fake_node.py \
   --obs-endpoint "${OBS_ENDPOINT:-tcp://127.0.0.1:5555}" \
   --action-endpoint "${ACTION_ENDPOINT:-tcp://127.0.0.1:5556}" \
   --rate "${PUBLISH_RATE:-25}" \
-  --dynamics-rate "${DYNAMICS_RATE:-200}" \
-  --natural-frequency-hz "${NATURAL_FREQUENCY_HZ:-2}" \
-  --damping-ratio "${DAMPING_RATIO:-1}" \
   "$@"

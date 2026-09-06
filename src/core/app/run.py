@@ -47,6 +47,7 @@ from core.app.handlers import (
     manual_send,
     mark_rollout_save_ready,
     maybe_build_episode_logger,
+    opposite_gripper_value,
     prewarm_teleop_ik,
     publish_next_action,
     rebuild_eval_episode_logger,
@@ -204,12 +205,12 @@ def _handle_gripper_lock_command(
         for group, index, _ in iter_target_grippers(runtime.robot, None):
             if group.name == group_name:
                 cur = float(current_qpos[index])
-                thresh = (
-                    config.robot.gripper_threshold
-                    if config.robot.gripper_threshold is not None
-                    else 0.5
+                value = opposite_gripper_value(
+                    cur,
+                    config.robot.gripper_open,
+                    config.robot.gripper_close,
+                    config.robot.gripper_threshold,
                 )
-                value = config.robot.gripper_close if cur >= thresh else config.robot.gripper_open
                 session.gripper_locks[group_name] = value
                 logger.info("Gripper '%s' locked to %.3f", group_name, value)
                 break
@@ -995,23 +996,62 @@ def _handle_web_command(
         return
 
     if verb in {"device_start", "device_stop"}:
-        if verb == "device_start" and (
-            runtime.collection_teleop_armed
-            or session.manual_publish_active
-            or session.status is SessionStatus.RUNNING
-        ):
-            session.last_error = "Stop control before starting devices"
-            return
+        from core.devices import DEVICE_KINDS, DeviceWorkspace
+        from core.devices.startup import prepare_device, stop_devices
+
+        component, _, request_id = arg.partition(":")
+        component = component or None
+        settings = runtime.console_ctx.device_settings
+        names = (component,) if component else DEVICE_KINDS
+        owned = []
+
+        def operation(state, error=""):
+            for name in names:
+                current = settings.operations.get(name, {})
+                if not request_id or current.get("id") == request_id:
+                    settings.operations[name] = {"id": request_id, "state": state, "error": error}
+
         if verb == "device_stop":
             _handle_web_command("web:collect_arm:off", config, runtime, session)
             _dispatch_halt(config, runtime, session)
         try:
             session.last_error = ""
-            runtime.console_ctx.device_settings.service.request(
-                verb.removeprefix("device_"), {"component": arg or None}
-            )
-        except (ValueError, OSError) as error:
+            if verb == "device_start":
+                if (runtime.collection_teleop_armed or session.manual_publish_active
+                        or session.status is SessionStatus.RUNNING):
+                    raise ValueError("Stop control before starting devices")
+                operation("starting")
+                if not settings.workspace.saved:
+                    settings.service.request("save", {"selected": settings.workspace.initial_selection(config)})
+                    settings.workspace = DeviceWorkspace(settings.workspace.path)
+                before = settings.service.request("status")
+                result = settings.service.request("start", {"component": component})
+                session.interrupt_requested = False
+                for name in names:
+                    if name not in result["pids"]:
+                        continue
+                    if before.get("pids", {}).get(name) != result["pids"][name]:
+                        owned.append(name)
+                for name in names:
+                    if name in result["pids"] and not result.get("ready", {}).get(name):
+                        prepare_device(config, runtime, session, settings.service, name, result["pids"][name])
+                operation("ready")
+            else:
+                operation("stopping")
+                stop_devices(config, runtime, session, settings.service, component)
+                operation("stopped")
+        except (ValueError, OSError, RuntimeError) as error:
             session.last_error = str(error)
+            for name in owned:
+                if name == "robot":
+                    # A failed startup may leave a raised arm. Keep its holding
+                    # controller alive for recovery instead of dropping power.
+                    continue
+                try:
+                    settings.service.request("stop", {"component": name})
+                except (ValueError, OSError):
+                    logger.exception("Could not stop failed device %s", name)
+            operation("failed", str(error))
         return
 
     if verb == "device_control":
@@ -1328,8 +1368,11 @@ def run(
     import robots  # noqa: F401  (register robot types before registry construction)
 
     robot = ROBOT_REGISTRY.build(config.robot.type)
-    if config.robot.initial_qpos is not None:
-        override = np.asarray(config.robot.initial_qpos, dtype=np.float32)
+    initial = config.robot.get("initial_qpos")
+    if initial is None:
+        initial = robot.initial_qpos
+    if initial is not None:
+        override = np.asarray(initial, dtype=np.float32)
         if override.shape != robot.initial_qpos.shape:
             raise ValueError(
                 f"robot.initial_qpos override has {override.shape[0]} dims, "

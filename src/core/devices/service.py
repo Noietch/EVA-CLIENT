@@ -20,8 +20,10 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 from core.devices import DEVICE_KINDS, REPOSITORY_ROOT, DeviceWorkspace
+from core.devices.preflight import check_yam_can
 
 
 class DeviceProcesses:
@@ -29,9 +31,10 @@ class DeviceProcesses:
         self.workspace = DeviceWorkspace(workspace_path)
         self.boot_id = str(time.monotonic_ns())
         self.processes: dict[str, subprocess.Popen] = {}
-        self.log_root = REPOSITORY_ROOT / "work_dirs/device" / self.boot_id
+        self.log_root = REPOSITORY_ROOT / "logs/device" / self.boot_id
         self.browser_url = ""
         self.commands = {}
+        self.ready_pids = {}
 
     def start(self, component: str | None = None) -> None:
         self.workspace = DeviceWorkspace(self.workspace.path)
@@ -50,6 +53,7 @@ class DeviceProcesses:
         for command in commands.values():
             if not os.access(command[0], os.X_OK):
                 raise ValueError(f"Device environment is missing: {command[0]}")
+            check_yam_can(command, prepare=True)
 
         # Start only missing components and roll back this attempt on failure
         self.log_root.mkdir(parents=True, exist_ok=True)
@@ -73,6 +77,7 @@ class DeviceProcesses:
                         start_new_session=True,
                     )
                 self.processes[name] = process
+                self.ready_pids.pop(name, None)
                 self.commands[name] = command
                 started.append(name)
                 if token:
@@ -105,6 +110,8 @@ class DeviceProcesses:
             try:
                 process.wait(timeout=5)
             except subprocess.TimeoutExpired:
+                if name == "robot":
+                    raise ValueError("Robot did not finish shutdown; forced termination withheld")
                 try:
                     os.killpg(process.pid, signal.SIGKILL)
                 except ProcessLookupError:
@@ -112,28 +119,92 @@ class DeviceProcesses:
                 process.wait(timeout=5)
             del self.processes[name]
             self.commands.pop(name, None)
+            self.ready_pids.pop(name, None)
         if "teleop" not in self.processes:
             self.browser_url = ""
+
+    def kill_all(self) -> None:
+        """Immediately force-kill every owned device process group."""
+        processes = list(self.processes.items())
+        for _, process in processes:
+            if process.poll() is None:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+
+        errors = []
+        for name, process in processes:
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                errors.append(f"{name}: process did not exit after SIGKILL")
+            finally:
+                if process.poll() is not None:
+                    self.processes.pop(name, None)
+                    self.commands.pop(name, None)
+                    self.ready_pids.pop(name, None)
+        self.browser_url = ""
+        if errors:
+            raise RuntimeError("; ".join(errors))
+
+    def mark_ready(self, component: str, pid: int) -> None:
+        process = self.processes.get(component)
+        if process is None or process.pid != pid or process.poll() is not None:
+            raise ValueError("Device process changed or exited during startup")
+        self.ready_pids[component] = pid
+
+    def open_pico(self) -> None:
+        process = self.processes.get("teleop")
+        if (
+            process is None or process.poll() is not None
+            or self.ready_pids.get("teleop") != process.pid or not self.browser_url
+        ):
+            raise ValueError("Start VR successfully before opening Pico")
+        url = urlsplit(self.browser_url)
+        token = parse_qs(url.query)["token"][0]
+        result = subprocess.run(
+            ["bash", str(REPOSITORY_ROOT / "examples/input_sources/vr_webxr/open_pico.sh")],
+            env=dict(os.environ, VR_TOKEN=token, VR_PORT=str(url.port), VR_SCHEME=url.scheme),
+            capture_output=True, text=True, timeout=15, check=False,
+        )
+        if result.returncode:
+            message = (result.stderr or result.stdout or "Open Pico failed").replace(token, "[redacted]")
+            raise ValueError(message[-1000:])
 
     def status(self, component: str | None = None) -> dict:
         processes = {name: process.poll() for name, process in self.processes.items()}
         failed = {name: code for name, code in processes.items() if code is not None}
         logs = []
+        errors = []
         for name in DEVICE_KINDS if component is None else (component,):
             path = self.log_root / f"{name}.log"
             if path.exists():
                 with path.open("rb") as stream:
                     stream.seek(max(0, path.stat().st_size - 8192))
-                    logs.append(f"[{name}]\n" + stream.read().decode(errors="replace"))
+                    output = stream.read().decode(errors="replace")
+                    logs.append(f"[{name}]\n" + output)
+                    if name in failed:
+                        lines = [line.strip() for line in output.splitlines() if line.strip()]
+                        if lines:
+                            errors.append(f"{name}: {lines[-1][:1000]}")
         return {
             "state": "failed" if failed else "started" if processes else "stopped",
-            "error": f"Device process exited: {failed}" if failed else "",
+            "error": "\n".join(errors) or (f"Device process exited: {failed}" if failed else ""),
             "boot_id": self.boot_id,
             "processes": processes,
             "log": "\n".join(logs),
             "browser_url": self.browser_url,
             "commands": self.commands,
             "pids": {name: process.pid for name, process in self.processes.items()},
+            "ready": {
+                name: self.ready_pids.get(name) == process.pid and process.poll() is None
+                for name, process in self.processes.items()
+            },
         }
 
 
@@ -145,6 +216,27 @@ class DeviceSettings:
         self.service = DeviceService(self.workspace.path)
         self.restart_requested = False
         self.boot_id = str(time.monotonic_ns())
+        self.operations = {}
+
+    def queue_command(self, action: str, component: str | None) -> str:
+        names = (component,) if component else DEVICE_KINDS
+        if action == "start" and any(
+            operation["state"] in {"queued", "starting", "stopping"}
+            for operation in self.operations.values()
+        ):
+            raise ValueError("A device command is already pending")
+        request_id = secrets.token_hex(12)
+        for name in names:
+            self.operations[name] = {"id": request_id, "state": "queued", "error": ""}
+        return request_id
+
+    def kill_all(self) -> dict:
+        """Immediately clear the device service and any stale UI operation state."""
+        result = self.service.request("kill_all")
+        self.operations.clear()
+        self.state = "idle"
+        self.error = ""
+        return result
 
     def save_selection(self, payload, runtime, session) -> None:
         from core.app.state import SessionStatus
@@ -173,6 +265,7 @@ class DeviceSettings:
         result = self.service.request("status")
         result.pop("commands", None)
         result["boot_id"] = self.boot_id
+        result["operations"] = dict(self.operations)
         if self.state != "idle":
             result.update(state=self.state, error=self.error)
         return result
@@ -194,7 +287,7 @@ class DeviceService:
         spawned = False
         while True:
             connection = socket.socket(socket.AF_UNIX)
-            connection.settimeout(20)
+            connection.settimeout(150 if action == "start" else 30 if action == "kill_all" else 20)
             try:
                 connection.connect(str(self.socket_path))
                 break
@@ -240,7 +333,13 @@ class DeviceService:
         with connection, connection.makefile("rwb") as stream:
             stream.write(json.dumps({"action": action, "payload": payload or {}}).encode() + b"\n")
             stream.flush()
-            response = json.loads(stream.readline(1024 * 1024))
+            raw = stream.readline(1024 * 1024)
+            if not raw:
+                raise RuntimeError("Device service closed the connection without a response")
+            try:
+                response = json.loads(raw)
+            except json.JSONDecodeError as error:
+                raise RuntimeError("Device service returned invalid JSON") from error
             if response.get("ok") is False:
                 raise ValueError(response["error"])
             return response
@@ -260,20 +359,29 @@ class DeviceRequestHandler(socketserver.StreamRequestHandler):
                 self.manager.start(component)
             elif action == "stop":
                 self.manager.stop(component)
+            elif action == "kill_all":
+                self.manager.kill_all()
+            elif action == "ready":
+                self.manager.mark_ready(component, request["payload"]["pid"])
+            elif action == "open_pico":
+                self.manager.open_pico()
             elif action == "save":
                 payload = request["payload"]
                 self.manager.workspace = DeviceWorkspace(self.manager.workspace.path)
-                commands = self.manager.workspace.commands(payload["selected"], payload["values"])
+                values = payload.get("values")
+                if values is None:
+                    values = self.manager.workspace.resolve(payload["selected"])
+                commands = self.manager.workspace.commands(payload["selected"], values)
                 if any(
                     process.poll() is None and commands.get(name) != self.manager.commands.get(name)
                     for name, process in self.manager.processes.items()
                 ):
                     raise ValueError("Stop affected devices before changing their launch settings")
-                self.manager.workspace.save(payload["selected"], payload["values"])
+                self.manager.workspace.save(payload["selected"], values)
             elif action != "status":
                 raise ValueError(f"Unknown device operation: {action}")
             result = self.manager.status(component)
-        except (ValueError, KeyError, TypeError, OSError) as error:
+        except (ValueError, KeyError, TypeError, OSError, RuntimeError, subprocess.TimeoutExpired) as error:
             result = {"ok": False, "error": str(error)}
         self.wfile.write(json.dumps(result).encode() + b"\n")
 

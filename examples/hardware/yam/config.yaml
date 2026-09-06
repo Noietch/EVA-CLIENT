@@ -1,15 +1,13 @@
 robot:
   dual_yam:
     label: Dual YAM
-    defaults: {teleop: joint, camera: external}
+    defaults: {teleop: vr_webxr, camera: external}
     repeat:
     - follower_can
     launch:
       python: examples/hardware/yam/.venv/bin/python
       module: examples.hardware.yam.node
       fixed:
-      - --startup-position
-      - current
       - --idle-mode
       - hold_position
     settings:
@@ -17,14 +15,16 @@ robot:
       action_endpoint: tcp://127.0.0.1:5556
       camera_endpoint: tcp://127.0.0.1:5557
       follower_can:
-      - left_arm=can1
-      - right_arm=can2
+      - left_arm=can0
+      - right_arm=can1
       gripper_limits_override: []
+      allow_gripper_calibration: true
       rate: 30
     config:
       robot:
         type: dual_yam
-        initial_qpos: null
+        initial_qpos: [0.0, 1.58, 0.49, 1.15, 0.0, 0.0, 1.0, 0.0, 1.58, 0.49, 1.15, 0.0, 0.0, 1.0]
+        safe_qpos: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
         eef_reference_frame: base_link
         gripper_threshold: null
         gripper_open: 1.0
@@ -101,7 +101,8 @@ camera:
   external: {}
 teleop:
   yam_leader:
-    label: YAM leaders
+    label: Leader
+    operation: leader
     repeat:
     - leader_gripper_endpoint
     robots:
@@ -113,8 +114,6 @@ teleop:
       leader_gripper_endpoint:
       - left_arm=-0.698132,0.0
       - right_arm=-0.698132,0.0
-  joint: {}
-  transport: {}
   vr_webxr:
     client:
       arms:

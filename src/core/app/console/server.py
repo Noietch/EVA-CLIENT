@@ -608,6 +608,7 @@ class ConsoleContext:
     session: SessionState
     device_settings: DeviceSettings = dataclasses.field(default_factory=DeviceSettings)
     obs_reader: ObservationSource | None = None  # independent source for visualization
+    camera_preview: Any = None
     scene: object | None = None  # UrdfScene, lazily built (None if URDF unavailable)
     scene_cache_key: object | None = None  # last qpos signature fed to scene.transforms
     scene_cache: dict | None = None  # cached transforms payload for that signature
@@ -900,16 +901,32 @@ def _serialize_rl(ctx: ConsoleContext) -> dict:
     }
 
 
-def _serialize_gripper_controls(ctx: ConsoleContext) -> list[dict[str, str]]:
-    gripper_groups = [g for g in ctx.runtime.robot.actuator_groups if g.gripper_index is not None]
-    if len(gripper_groups) == 0:
+def _serialize_gripper_controls(ctx: ConsoleContext) -> list[dict[str, object]]:
+    config = ctx.runtime.active_config or ctx.config
+    controls: list[dict[str, object]] = []
+    offset = 0
+    for group in ctx.runtime.robot.actuator_groups:
+        if group.gripper_index is not None:
+            controls.append(
+                {
+                    "group": group.name,
+                    "qpos_index": offset + group.gripper_index,
+                    "initial_value": float(
+                        ctx.runtime.robot.initial_qpos[offset + group.gripper_index]
+                    ),
+                    "open_value": float(config.robot.gripper_open),
+                    "close_value": float(config.robot.gripper_close),
+                }
+            )
+        offset += group.dof
+    if not controls:
         return []
-    if len(gripper_groups) == 1:
-        return [{"side": "l", "label": "GRIPPER", "group": gripper_groups[0].name}]
-    return [
-        {"side": "l", "label": "LEFT", "group": gripper_groups[0].name},
-        {"side": "r", "label": "RIGHT", "group": gripper_groups[1].name},
-    ]
+    if len(controls) == 1:
+        controls[0].update(side="l", label="GRIPPER")
+        return controls
+    for control, side, label in zip(controls[:2], ("l", "r"), ("LEFT", "RIGHT"), strict=True):
+        control.update(side=side, label=label)
+    return controls[:2]
 
 
 def _serialize_manual_qpos_limits(ctx: ConsoleContext) -> list[dict[str, float]]:
@@ -1669,7 +1686,7 @@ def _camera_jpeg_payload(
 def _list_camera_keys(ctx: ConsoleContext) -> list[str]:
     # Cameras the visualization stream may expose, in schema order minus disabled ones.
     disabled = set(ctx.config.transport.disabled_cameras)
-    reader = _observation_reader(ctx)
+    reader = _camera_reader(ctx)
     available = getattr(reader, "available_camera_keys", None)
     if available is not None:
         return [key for key in available() if key not in disabled]
@@ -1681,15 +1698,26 @@ def _list_camera_keys(ctx: ConsoleContext) -> list[str]:
 
 
 def _live_camera_keys(ctx: ConsoleContext) -> list[str]:
-    reader = _observation_reader(ctx)
+    reader = _camera_reader(ctx)
     get_keys = getattr(reader, "get_camera_keys", None)
-    if get_keys is not None:
-        return list(get_keys())
-    return _list_camera_keys(ctx)
+    keys = list(get_keys()) if get_keys is not None else _list_camera_keys(ctx)
+    get_frame = getattr(reader, "get_camera_frame", None)
+    if get_frame is not None:
+        # Empty MJPEG responses can occupy all browser HTTP/1 connection slots,
+        # preventing Start/Stop requests from reaching the server.
+        return [key for key in keys if get_frame(key) is not None]
+    return keys
 
 
 def _uses_replay_observation(ctx: ConsoleContext) -> bool:
     return ctx.active_tab == "replay" and ctx.runtime.replay_source is not None
+
+
+def _camera_reader(ctx: ConsoleContext):
+    preview = getattr(ctx, "camera_preview", None)
+    if preview is not None and not _uses_replay_observation(ctx):
+        return preview
+    return _observation_reader(ctx)
 
 
 def _observation_reader(ctx: ConsoleContext) -> ObservationSource:
@@ -1780,12 +1808,12 @@ def _serialize_scene(ctx: ConsoleContext) -> dict:
         source = f"collection_replay:{collection_frame_index}"
     # MANUAL mode: the solid arm follows the hand-set command qpos. Bypass the cache
     # since manual_qpos moves freely with the sliders.
-    elif session.mode is SessionMode.MANUAL:
+    elif session.mode is SessionMode.MANUAL and ctx.active_tab != "collect":
         return {
             "available": True,
             "arms": ctx.scene.transforms(session.manual_qpos),  # type: ignore[attr-defined]
         }
-    elif session.sim_preview_qpos is not None:
+    elif session.sim_preview_qpos is not None and ctx.active_tab != "collect":
         # SIM run/preview: render the last command directly. A replay source may
         # still be mounted after visiting REPLAY, but active SIM commands should
         # drive the console canvas.
@@ -1802,6 +1830,9 @@ def _serialize_scene(ctx: ConsoleContext) -> dict:
     else:
         qpos = reader.get_latest_qpos()
         source = "reader.get_latest_qpos"
+    if qpos is None:
+        qpos = ctx.runtime.robot.initial_qpos
+        source = "robot.initial_qpos"
     key = None if qpos is None else np.asarray(qpos, dtype=float).round(5).tobytes()
     replay_source = ctx.runtime.replay_source
     replay_frame = None if replay_source is None else getattr(replay_source, "frame_index", None)
@@ -2176,7 +2207,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                 tick = time.monotonic()
                 # Re-resolve per tick so mounting/clearing a replay source mid-stream
                 # swaps the feed without the client reopening the <img> connection.
-                reader = _observation_reader(ctx)
+                reader = _camera_reader(ctx)
                 jpeg = None
                 payload, sig = _camera_jpeg_payload(reader, key, convert, last_sig)
                 if payload is not None and sig != last_sig:
@@ -3304,7 +3335,35 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             if argument not in {"", "robot", "teleop", "camera"}:
                 self._send_json(400, {"ok": False, "error": "Unknown device component"})
                 return
+        if command in {"device_start", "device_stop"}:
+            try:
+                request_id = self.ctx.device_settings.queue_command(
+                    command.removeprefix("device_"), argument or None
+                )
+            except ValueError as error:
+                self._send_json(409, {"ok": False, "error": str(error)})
+                return
+            self._enqueue(f"web:{command}:{argument}:{request_id}")
+            self._send_json(200, {"ok": True, "request_id": request_id})
+            return
         self._enqueue_ok(f"web:{command}:{argument}")
+
+    def _post_device_open_pico(self, body: dict) -> None:
+        try:
+            self.ctx.device_settings.service.request("open_pico")
+        except (ValueError, OSError, RuntimeError) as error:
+            self._send_json(400, {"ok": False, "error": str(error)})
+            return
+        self._send_json(200, {"ok": True})
+
+    def _post_device_kill_all(self, body: dict) -> None:
+        try:
+            result = self.ctx.device_settings.kill_all()
+            result.pop("commands", None)
+        except (ValueError, OSError, RuntimeError) as error:
+            self._send_json(409, {"ok": False, "error": str(error)})
+            return
+        self._send_json(200, {"ok": True, **result})
 
     def _get_devices(self) -> None:
         workspace = self.ctx.device_settings.workspace
@@ -3965,6 +4024,8 @@ _POST_COMMANDS = {
 # response. Each handler owns its own _send_json. Values are unbound (self, body) methods.
 _POST_ROUTES = {
     "/api/device_start": ConsoleRequestHandler._post_device_command,
+    "/api/device_open_pico": ConsoleRequestHandler._post_device_open_pico,
+    "/api/device_kill_all": ConsoleRequestHandler._post_device_kill_all,
     "/api/device_stop": ConsoleRequestHandler._post_device_command,
     "/api/device_control": ConsoleRequestHandler._post_device_command,
     "/api/client_trace": ConsoleRequestHandler._post_client_trace,
@@ -4063,6 +4124,19 @@ def build_console_context(
         output_dir=output_dir,
     )
     # RESULT-tab playback reads recorded episodes under <output_dir>/episodes.
+    if with_obs_reader and config.transport.type != "dataset":
+        workspace = ctx.device_settings.workspace
+        selected = workspace.initial_selection(config)
+        spec = workspace.hardware.options(selected["robot"])["camera"][selected["camera"]]
+        if spec.get("separate"):
+            from core.devices.camera import CameraPreview
+
+            values = workspace.resolve(selected)
+            ctx.camera_preview = CameraPreview(
+                values["robot"]["settings"]["camera_endpoint"],
+                list(config.collection.schema.cameras),
+                runtime.transport.is_shutdown,
+            )
     if with_preview and output_dir:
         from core.app.console.episode_preview import EpisodePreview
 

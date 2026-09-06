@@ -1,12 +1,13 @@
 robot:
   r1_lite:
     label: Galaxea R1 Lite
-    defaults: {teleop: joint, camera: external}
+    defaults: {teleop: vr_webxr, camera: external}
     settings: {}
     config:
       robot:
         type: r1_lite
-        initial_qpos: null
+        initial_qpos: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 100.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 100.0]
+        safe_qpos: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 100.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 100.0]
         eef_reference_frame: torso_link3
         gripper_threshold: 0.5
         gripper_open: 100.0
@@ -79,8 +80,6 @@ robot:
         enabled: true
         action_topic: /eva/operator_action
 teleop:
-  joint: {}
-  transport: {}
   vr_webxr:
     client:
       arms:

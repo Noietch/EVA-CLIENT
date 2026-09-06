@@ -244,7 +244,7 @@ def test_console_tabs_change_backend_state(browser, tmp_path, monkeypatch):
             assert page.locator("#manual-panel-tune").is_hidden()
             assert page.locator("#device-select-robot").input_value() == "dual_yam"
             assert page.locator("#device-select-teleop").input_value() == "vr_webxr"
-            assert page.get_by_label("client / position_scale", exact=True).input_value() == "1"
+            assert page.get_by_label("client / position_scale", exact=True).input_value() == "1.2"
             page.locator("#device-select-camera").select_option("yam_d405")
             page.wait_for_selector("#device-profile-load", state="visible")
             page.locator("#device-profile-load").click()

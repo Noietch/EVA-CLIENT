@@ -1,12 +1,13 @@
 robot:
   agilex_piper:
     label: Dual AgileX Piper
-    defaults: {teleop: joint, camera: external}
+    defaults: {teleop: vr_webxr, camera: external}
     settings: {}
     config:
       robot:
         type: agilex_piper
-        initial_qpos: null
+        initial_qpos: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        safe_qpos: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         eef_reference_frame: base_link
         gripper_threshold: null
         gripper_open: 0.1
@@ -73,8 +74,6 @@ robot:
         enabled: false
         action_topic: /eva/operator_action
 teleop:
-  joint: {}
-  transport: {}
   vr_webxr:
     client:
       squeeze_threshold: 0.5

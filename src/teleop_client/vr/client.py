@@ -633,6 +633,19 @@ class VrTeleopClient:
             self._held_groups = tuple(item.group_name for item in self._bindings)
             self._awaiting_neutral = bool(require_neutral)
 
+    def set_home_eef(self, home_eef_by_group: Mapping[str, np.ndarray]) -> None:
+        """Set the fixed robot-pose origin used when VR motion is re-armed."""
+        with self._lock:
+            expected = {binding.group_name for binding in self._bindings}
+            provided = {str(name) for name in home_eef_by_group}
+            if provided != expected:
+                raise ValueError(
+                    "VR home EEF groups must match configured arms: "
+                    f"expected {sorted(expected)}, got {sorted(provided)}"
+                )
+            for binding in self._bindings:
+                binding.retargeter.set_home_eef(home_eef_by_group[binding.group_name])
+
     def poll(self, context: TeleopContext) -> TeleopResult:
         with self._lock:
             worker = self._thread
@@ -751,11 +764,15 @@ class VrTeleopClient:
             worker_healthy = not self._worker_ever_started or bool(
                 worker is not None and worker.is_alive() and not self._stop.is_set()
             )
+            frame_fresh = bool(
+                frame is not None and frame.age(current) <= self._input_timeout_s
+            )
             connected = bool(
                 worker_healthy
                 and browser_connected
                 and node_seen_at is not None
                 and current - node_seen_at <= self._heartbeat_timeout_s
+                and frame_fresh
             )
             input_age_ms = None if frame is None else frame.age(current) * 1000.0
             neutral = bool(

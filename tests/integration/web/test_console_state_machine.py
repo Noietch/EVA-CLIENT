@@ -234,6 +234,26 @@ def test_collection_slots_api_filters_independently_and_selects_one_cursor(tmp_p
     assert status["collection_slot_id"] == "TASK-CUP:SC-A:0"
 
 
+def test_collection_slots_api_builds_slots_for_inline_tasks(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        console_server,
+        "_load_scene_plan",
+        lambda _config: {"scenes": [], "tasks": []},
+    )
+
+    with serve_console(console_config()) as h:
+        _set_collect_dataset_logger(h, tmp_path)
+        response = h.get("/api/collection_slots?dataset=cup_set&all=1")
+
+    assert response.status == 200
+    assert response.json["filtered_total"] == 11
+    assert response.json["active"]["task"] == "pick up cup"
+    assert response.json["active"]["scene_id"] == "DEFAULT"
+    assert response.json["active"]["unbounded"] is False
+    assert response.json["slots"][-1]["task"] == "place cup"
+    assert response.json["slots"][-1]["unbounded"] is True
+
+
 class _CollectDatasetLogger:
     def __init__(self, dataset_dir: Path, *, has_active_episode: bool = False) -> None:
         self._dataset_dir = dataset_dir

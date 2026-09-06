@@ -29,6 +29,7 @@ class CollectionSlot:
     scene_label: str
     round_index: int
     round_total: int
+    unbounded: bool = False
 
 
 @dataclass(frozen=True)
@@ -96,6 +97,39 @@ def build_collection_slots(
                         round_total=round_total,
                     )
                 )
+    if slots:
+        return slots
+
+    # Inline collection configs do not have scene.csv/tasks.csv, but they still
+    # use the same slot picker. A -1 target means the task remains available for
+    # repeated captures; finite targets expand into one slot per episode.
+    for task_index, entry in enumerate(entries):
+        if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+            continue
+        prompt = str(entry[0]).strip()
+        if not prompt:
+            continue
+        target = int(entry[1])
+        unbounded = target == -1
+        round_total = target if target > 0 else 1
+        task_id = f"INLINE-{task_index}"
+        for round_index in range(round_total):
+            slots.append(
+                CollectionSlot(
+                    slot_id=f"{task_id}:{round_index}",
+                    ordinal=len(slots),
+                    dataset=dataset,
+                    task_index=task_index,
+                    task_id=task_id,
+                    task=prompt,
+                    task_zh="",
+                    scene_id="DEFAULT",
+                    scene_label="DEFAULT",
+                    round_index=round_index,
+                    round_total=round_total,
+                    unbounded=unbounded,
+                )
+            )
     return slots
 
 
@@ -206,7 +240,11 @@ def collection_slot_status(
         episode = episode_by_slot.get(slot.slot_id) or legacy_episode_by_target.get(
             (slot.task, slot.scene_id, slot.round_index)
         )
-        outcome = _episode_outcome(episode) if episode else "pending"
+        outcome = (
+            "pending"
+            if slot.unbounded
+            else (_episode_outcome(episode) if episode else "pending")
+        )
         if outcome == "usable":
             state = "complete"
             counts["complete"] += 1

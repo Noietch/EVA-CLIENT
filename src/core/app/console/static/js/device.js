@@ -4,183 +4,99 @@ class DevicePanel {
   constructor() {
     this.data = null;
     this.pending = false;
-    this.dirty = false;
-    this.error = "";
+    this.status = {processes: {}};
+    this.busy = new Set();
+    this.killBusy = false;
     this.polling = false;
     this.lastPoll = 0;
-    $("device-workspace").onsubmit = event => { event.preventDefault(); this.apply(); };
-    for (const action of ["start", "stop"]) {
-      $("device-" + action).onclick = async () => {
-        try {
-          const result = await apiPost("/api/device_" + action, {component: $("device-component").value});
-          if (result.ok === false) throw new Error(result.error);
-          this.error = "";
-        } catch (error) { this.error = error.message; }
-      };
-    }
-    $("device-profile-load").onclick = () => this.loadProfile({path: $("device-profile-select").value});
-    $("device-profile-upload").onclick = () => $("device-profile-file").click();
-    $("device-profile-file").onchange = async event => {
-      const file = event.target.files[0];
-      if (file) await this.loadProfile({content: await file.text()});
-      event.target.value = "";
-    };
+    const kill = $("device-kill-all");
+    if (kill) kill.onclick = () => this.killAll();
   }
 
-  async load(selected) {
+  async load() {
     this.pending = true;
-    this.updateControls();
     try {
-      const query = selected ? "?" + new URLSearchParams(selected) : "";
-      const data = await apiGet("/api/devices" + query);
-      if (data.ok === false) throw new Error(data.error);
-      this.data = data;
+      this.data = await apiGet("/api/devices");
+      if (this.data.ok === false) throw new Error(this.data.error);
       this.render();
-    } catch (error) {
-      this.error = error.message;
-    } finally {
-      this.pending = false;
-      this.updateControls();
-    }
+    } catch (error) { window.alert(error.message); }
+    finally { this.pending = false; }
   }
 
   render() {
-    const {catalog, selected, values} = this.data;
+    const {catalog, selected} = this.data;
     $("device-selections").replaceChildren();
-    $("device-fields").replaceChildren();
-    for (const kind of ["robot", "teleop", "camera"]) {
+    for (const [kind, name] of [["robot", "Robot"], ["teleop", "Operation"], ["camera", "Camera"]]) {
+      const row = document.createElement("div");
+      row.className = "device-row";
       const label = document.createElement("label");
-      label.className = "device-setting";
-      label.textContent = kind.toUpperCase();
+      label.htmlFor = "device-select-" + kind;
+      label.textContent = name;
+      const indicator = document.createElement("span");
+      indicator.id = "device-state-" + kind;
+      indicator.className = "device-state";
+      indicator.setAttribute("role", "status");
+      label.prepend(indicator);
       const select = document.createElement("select");
-      select.id = "device-select-" + kind;
+      select.id = label.htmlFor;
       for (const [id, spec] of Object.entries(catalog[kind])) {
-        select.add(new Option(spec.label, id));
+        if (kind === "robot") continue;
+        if (kind === "camera" && spec.disabled) continue;
+        const transport = S.CFG?.transport_type;
+        const label = kind === "camera" && id === "external"
+          ? ({ros1: "ROS 1", ros2: "ROS 2", zmq: "ZMQ"}[transport] || spec.label)
+          : spec.label;
+        select.add(new Option(label, id));
       }
       select.value = selected[kind];
-      select.onchange = async () => {
-        const next = {...selected, [kind]: select.value};
-        if (kind === "robot") {
-          for (const other of ["teleop", "camera"]) {
-            const supported = catalog.robot[next.robot][other];
-            if (!supported.includes(next[other])) {
-              next[other] = catalog.robot[next.robot].defaults[other];
-            }
-          }
-        }
-        this.dirty = true;
-        await this.load(next);
-      };
-      label.appendChild(select);
-      $("device-selections").appendChild(label);
-      const details = document.createElement("details");
-      const summary = document.createElement("summary");
-      summary.textContent = catalog[kind][selected[kind]].label + " settings";
-      details.appendChild(summary);
-      this.fields(details, values[kind], [], catalog[kind][selected[kind]].choices || {});
-      $("device-fields").appendChild(details);
+      if (kind === "robot") {
+        select.add(new Option("Real", "real"));
+        select.add(new Option("Fake", "fake"));
+        select.value = this.data.values.robot.mode || "real";
+        select.title = catalog.robot[selected.robot].label;
+      }
+      if (kind === "camera" && catalog.camera[selected.camera]?.disabled) {
+        const placeholder = new Option("Select camera", "", true, true);
+        placeholder.disabled = true;
+        select.add(placeholder, 0);
+        select.value = "";
+      }
+      select.onchange = () => this.select(kind, select.value);
+      const actions = document.createElement("div");
+      actions.className = "device-actions";
+      const toggle = document.createElement("button");
+      toggle.id = "device-toggle-" + kind;
+      toggle.type = "button";
+      toggle.className = "btn";
+      toggle.onclick = () => this.command(kind);
+      actions.append(toggle);
+      if (kind === "teleop" && selected.teleop === "vr_webxr") {
+        const pico = document.createElement("button");
+        pico.id = "device-open-pico";
+        pico.type = "button";
+        pico.className = "btn";
+        pico.textContent = "WebXR";
+        pico.title = "Open WebXR on the headset";
+        pico.onclick = () => this.openPico();
+        actions.append(pico);
+      }
+      row.append(label, select, actions);
+      $("device-selections").append(row);
     }
-    const camera = catalog.camera[selected.camera];
-    $("device-profile").hidden = !camera.profile_field;
-    const profiles = $("device-profile-select");
-    profiles.replaceChildren();
-    const active = values.camera.settings[camera.profile_field];
-    const paths = new Set([...(camera.profiles || []), ...(active ? [active] : [])]);
-    for (const path of paths) profiles.add(new Option(path.split("/").pop(), path));
-    if (active) profiles.value = active;
+    this.updateControls();
   }
 
-  fields(host, values, path, choices) {
-    for (const [key, value] of Object.entries(values)) {
-      if (key === "type") continue;
-      const next = [...path, key];
-      if (value !== null && typeof value === "object") {
-        const group = document.createElement("fieldset");
-        const legend = document.createElement("legend");
-        legend.textContent = key.replaceAll("_", " ");
-        group.appendChild(legend);
-        this.fields(group, value, next, choices);
-        if (Array.isArray(value)) {
-          const add = document.createElement("button");
-          add.type = "button"; add.className = "btn"; add.textContent = "+";
-          add.title = "Add value"; add.setAttribute("aria-label", "Add " + key);
-          add.onclick = () => {
-            value.push(key === "gripper_limits_override" ? 0 : "");
-            this.dirty = true; this.render();
-          };
-          group.appendChild(add);
-        }
-        host.appendChild(group);
-        continue;
-      }
-      const row = document.createElement("label");
-      row.className = "device-setting";
-      const label = document.createElement("span");
-      label.textContent = key.replaceAll("_", " ");
-      const options = choices[key] || (key === "controller" ? ["left", "right"] :
-        key === "mode" ? ["binary", "analog", "linear", "toggle"] : null);
-      const input = document.createElement(options ? "select" : "input");
-      if (options) for (const option of options) input.add(new Option(option, option));
-      else {
-        input.type = typeof value === "number" ? "number" : typeof value === "boolean" ? "checkbox" : "text";
-        if (input.type === "number") input.step = "any";
-      }
-      input.value = value === null ? "null" : value;
-      if (value === null) input.placeholder = "null, number or JSON array";
-      if (input.type === "checkbox") input.checked = value;
-      input.setAttribute("aria-label", next.join(" / "));
-      input.oninput = () => {
-        if (value === null) {
-          try {
-            values[key] = JSON.parse(input.value);
-            input.setCustomValidity("");
-          } catch {
-            input.setCustomValidity("Enter null, a number or a JSON array");
-            return;
-          }
-        } else {
-          values[key] = input.type === "checkbox" ? input.checked :
-            input.type === "number" ? Number(input.value) : input.value;
-        }
-        this.dirty = true;
-      };
-      row.append(label, input);
-      if (Array.isArray(values)) {
-        const remove = document.createElement("button");
-        remove.type = "button"; remove.className = "btn"; remove.textContent = "−";
-        remove.title = "Remove value"; remove.setAttribute("aria-label", "Remove " + key);
-        remove.onclick = event => {
-          event.preventDefault(); values.splice(Number(key), 1);
-          this.dirty = true; this.render();
-        };
-        row.appendChild(remove);
-      }
-      host.appendChild(row);
-    }
-  }
-
-  async loadProfile(body) {
-    try {
-      const result = await apiPost("/api/camera_profile", {camera: this.data.selected.camera, ...body});
-      if (result.ok === false) throw new Error(result.error);
-      Object.assign(this.data.values.camera.settings, result.settings);
-      $("device-profile-values").textContent = JSON.stringify(result.data, null, 2);
-      this.dirty = true;
-      this.render();
-    } catch (error) {
-      this.error = error.message;
-    }
-  }
-
-  async apply() {
-    this.error = "";
+  async select(kind, value) {
+    const selected = {...this.data.selected};
+    const values = structuredClone(this.data.values);
+    if (kind === "robot") {
+      values.robot.mode = value;
+    } else selected[kind] = value;
     this.pending = true;
-    $("device-result").textContent = "APPLYING";
+    this.updateControls();
     try {
       const before = await apiGet("/api/device_settings");
-      const response = await apiPost("/api/device_selection", {
-        selected: this.data.selected, values: this.data.values,
-      });
+      const response = await apiPost("/api/device_selection", kind === "robot" ? {selected, values} : {selected});
       if (response.ok === false) throw new Error(response.error);
       for (let attempt = 0; attempt < 120; attempt++) {
         await new Promise(resolve => setTimeout(resolve, 250));
@@ -188,24 +104,108 @@ class DevicePanel {
         try { status = await apiGet("/api/device_settings", {timeoutMs: 1000}); }
         catch { continue; }
         if (status.state === "failed") throw new Error(status.error);
-        if (status.boot_id !== before.boot_id) {
-          location.reload();
-          return;
+        if (status.boot_id !== before.boot_id) { location.reload(); return; }
+      }
+      throw new Error("Device selection timed out");
+    } catch (error) {
+      window.alert(error.message);
+      this.pending = false;
+      this.render();
+    }
+  }
+
+  async command(kind) {
+    this.busy.add(kind);
+    this.updateControls();
+    try {
+      const action = this.status.processes[kind] === null ? "stop" : "start";
+      const result = await apiPost("/api/device_" + action, {component: kind});
+      if (result.ok === false) throw new Error(result.error);
+      if (typeof result.request_id !== "string" || !result.request_id) {
+        throw new Error("Device server is out of date. The command may already have been sent. Restart EVA and refresh this page before trying again.");
+      }
+      // Queue acknowledgement is not device readiness.
+      for (let attempt = 0; attempt < 240; attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 500));
+        this.status = await apiGet("/api/device_settings");
+        const operation = this.status.operations?.[kind];
+        if (!operation || operation.id !== result.request_id) continue;
+        if (operation.state === "failed") throw new Error(operation.error);
+        if (operation.state === "ready" && action === "start" && this.status.ready?.[kind]) return;
+        if (action === "stop" && operation.state === "stopped" && !(kind in this.status.processes)) return;
+        if (kind in this.status.processes && this.status.processes[kind] !== null) {
+          throw new Error(this.status.error || "Device process exited");
         }
       }
-      throw new Error("Client restart timed out");
-    } catch (error) {
-      this.error = error.message;
-      this.pending = false;
+      throw new Error("Device command timed out");
+    } catch (error) { window.alert(error.message); }
+    finally { this.busy.delete(kind); this.updateControls(); }
+  }
+
+  async openPico() {
+    this.busy.add("pico");
+    this.updateControls();
+    try {
+      const result = await apiPost("/api/device_open_pico", {}, {timeoutMs: 20000});
+      if (result.ok === false) throw new Error(result.error);
+    } catch (error) { window.alert(error.message); }
+    finally { this.busy.delete("pico"); this.updateControls(); }
+  }
+
+  async killAll() {
+    if (!window.confirm("KILL ALL will force-kill Robot, Operation and Camera processes immediately. Robot torque will be removed. Continue?")) return;
+    this.killBusy = true;
+    this.updateControls();
+    try {
+      const result = await apiPost("/api/device_kill_all", {}, {timeoutMs: 30000});
+      if (result.ok === false) throw new Error(result.error);
+      this.status = await apiGet("/api/device_settings");
+    } catch (error) { window.alert(error.message); }
+    finally {
+      this.busy.clear();
+      this.killBusy = false;
+      this.updateControls();
     }
   }
 
   updateControls() {
+    if (!this.data) return;
     const moving = !!S.STATUS.collection_teleop_armed || !!S.STATUS.manual_publish_active ||
       S.STATUS.session_status === "running";
-    $("device-editors").disabled = this.pending || moving;
-    $("device-start").disabled = this.pending || this.dirty || moving;
-    if (!this.pending) $("device-result").textContent = this.error || (this.dirty ? "UNSAVED" : "");
+    for (const kind of ["robot", "teleop", "camera"]) {
+      const running = this.status.processes[kind] === null;
+      const ready = running && this.status.ready?.[kind];
+      const isVr = kind === "teleop" && this.data.selected.teleop === "vr_webxr";
+      const connected = !isVr || !!S.STATUS.teleop?.connected;
+      const button = $("device-toggle-" + kind);
+      const operation = this.status.operations?.[kind];
+      const stopping = operation?.state === "stopping";
+      const transitioning = ["queued", "starting", "stopping"].includes(operation?.state);
+      const failed = operation?.state === "failed" || (kind in this.status.processes && !running);
+      const state = stopping ? "Stopping" : failed ? "Failed" : ready ? (connected ? "Running" : "Waiting for headset") : running || this.busy.has(kind) || transitioning ? "Starting" : "Stopped";
+      const indicator = $("device-state-" + kind);
+      indicator.dataset.state = state;
+      indicator.title = state === "Failed" ? operation?.error || this.status.error || state : state;
+      indicator.setAttribute("aria-label", state);
+      button.textContent = stopping ? "Stopping..." : (kind === "robot" && running && failed) ? "Stop" : ready ? (connected ? "Stop" : "Cancel") : running || this.busy.has(kind) || transitioning ? "Starting..." : "Start";
+      button.classList.toggle("danger", !!ready && connected);
+      button.disabled = this.killBusy || this.pending || this.busy.has(kind) || transitioning || (running && !ready && !failed) || (!running && moving);
+      const spec = this.data.catalog[kind][this.data.selected[kind]];
+      const launchable = spec.launch || spec.separate || (kind === "robot" && this.data.values.robot.mode === "fake");
+      if (!launchable) button.disabled = true;
+      button.title = !launchable ? "No local process" : "";
+      $("device-select-" + kind).disabled = this.killBusy || this.pending || moving || this.busy.size > 0 ||
+        Object.values(this.status.processes).some(code => code === null);
+    }
+    const kill = $("device-kill-all");
+    if (kill) kill.disabled = this.killBusy || this.pending;
+    const pico = $("device-open-pico");
+    if (pico) {
+      const vrConnected = !!S.STATUS.teleop?.connected;
+      pico.disabled = this.pending || this.busy.has("pico") ||
+        this.status.processes.teleop !== null || !this.status.ready?.teleop || vrConnected;
+      pico.title = vrConnected ? "WebXR is already streaming" : "Open WebXR on the headset";
+    }
   }
 
   update() {
@@ -215,15 +215,9 @@ class DevicePanel {
     this.polling = true;
     this.lastPoll = Date.now();
     apiGet("/api/device_settings").then(status => {
-      $("device-log").textContent = status.log;
-      $("device-open-input").hidden = !status.browser_url;
-      $("device-open-input").href = status.browser_url || "#";
-      if (!this.pending && !this.dirty) $("device-result").textContent = this.error || status.error || status.state.toUpperCase();
-      const component = $("device-component").value;
-      if (component && status.processes[component] === null) $("device-start").disabled = true;
-    }).catch(error => {
-      if (!this.pending) $("device-result").textContent = error.message;
-    }).finally(() => { this.polling = false; });
+      this.status = status;
+      this.updateControls();
+    }).catch(() => {}).finally(() => { this.polling = false; });
   }
 }
 

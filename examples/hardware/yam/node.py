@@ -467,6 +467,10 @@ class YamZmqNode:
             self._config.group_names,
         )
         action_eef = None if action is None else self._fk(action)
+        online = self._followers.hardware_status()
+        # Cached poses are useful for local bookkeeping, never as hardware feedback.
+        state = {name: qpos for name, qpos in state.items() if online.get(name) == "online"}
+        eef = {name: pose for name, pose in eef.items() if name in state}
         observation = WireObservation(
             t=time.monotonic(),
             images=self._camera_snapshot(),
@@ -694,9 +698,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--startup-position",
-        choices=("current", "zero"),
-        default="current",
-        help="Initial follower target after connection.",
+        choices=("zero",),
+        default="zero",
+        help="Move followers to the configured initial position after connection.",
     )
     parser.add_argument(
         "--startup-duration",

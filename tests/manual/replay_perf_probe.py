@@ -484,6 +484,28 @@ def human_click_target(cdp: Cdp, target: dict[str, Any]) -> None:
     dispatch_mouse_click(cdp, float(target["x"]), float(target["y"]))
 
 
+def select_collect_task_slot(cdp: Cdp, prompt: str) -> None:
+    """Select a collection task by clicking its slot tile, when needed."""
+    wait_for(
+        cdp,
+        f"Array.from(document.querySelectorAll('#collect-queue-tiles .collect-tile'))"
+        f".some((tile) => tile.title.includes({json.dumps(prompt)}))",
+        10,
+    )
+    cdp.eval(
+        f"""
+        (() => {{
+          const prompt = {json.dumps(prompt)};
+          const tile = Array.from(document.querySelectorAll('#collect-queue-tiles .collect-tile'))
+            .find((candidate) => candidate.title.includes(prompt));
+          if (!tile) throw new Error(`collection task slot not found: ${{prompt}}`);
+          if (!tile.disabled) tile.click();
+          return true;
+        }})()
+        """
+    )
+
+
 def select_clickable_tile(
     cdp: Cdp, container_selector: str, index: int, item_selector: str = ".collect-tile.replayable"
 ) -> dict[str, Any]:
@@ -1093,7 +1115,7 @@ def main() -> None:
             human_click(cdp, '.tab[data-tab="collect"]')
             wait_for(cdp, tab_active_expr("collect"), 5)
             if args.collect_task:
-                set_value(cdp, "#collect-prompt-list", args.collect_task)
+                select_collect_task_slot(cdp, args.collect_task)
             wait_for(cdp, COLLECT_REPLAYABLE_READY_EXPR, 10)
             for i in range(args.collect_count):
                 ensure_collect_replay_stopped(cdp)

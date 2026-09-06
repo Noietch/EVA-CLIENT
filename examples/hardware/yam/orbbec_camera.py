@@ -284,6 +284,10 @@ def _capture_orbbec_camera(
 
 def _capture_orbbec_cameras(capture_args: tuple[tuple[Any, ...], ...], stop: Any) -> None:
     """Capture all cameras from device handles owned by one isolated SDK context."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     cv2.setNumThreads(1)
     try:
@@ -308,6 +312,8 @@ def _capture_orbbec_cameras(capture_args: tuple[tuple[Any, ...], ...], stop: Any
 
     threads: list[threading.Thread] = []
     for index, (args, device) in enumerate(selected):
+        if stop.is_set():
+            break
         thread = threading.Thread(
             target=_capture_orbbec_camera,
             args=(*args, stop, sdk, device),
@@ -319,7 +325,9 @@ def _capture_orbbec_cameras(capture_args: tuple[tuple[Any, ...], ...], stop: Any
         if index + 1 < len(selected):
             state = args[5]
             deadline = time.monotonic() + _CAMERA_START_TIMEOUT_S
-            while state.value != _STATE_NAMES.index("online") and time.monotonic() < deadline:
+            # Serialize pipeline opening, but overlap exposure warmup across cameras.
+            started_states = {_STATE_NAMES.index("warming"), _STATE_NAMES.index("online")}
+            while state.value not in started_states and time.monotonic() < deadline:
                 if stop.wait(0.05):
                     break
 
@@ -341,6 +349,7 @@ def _run_orbbec_capture_loop(
     sdk: ModuleType | None = None,
     device: Any = None,
 ) -> None:
+    started_at = time.monotonic()
     _set_process_state(state, "connecting")
     if sdk is None or device is None:
         sdk = get_orbbec_sdk()
@@ -381,6 +390,7 @@ def _run_orbbec_capture_loop(
         spec.warmup_frames,
     )
     remaining_warmup = spec.warmup_frames
+    first_frame = True
     shared_image = np.frombuffer(frame_buffer, dtype=np.uint8).reshape((spec.height, spec.width, 3))
     try:
         while not stop.is_set():
@@ -401,6 +411,13 @@ def _run_orbbec_capture_loop(
                 frame_count.value += 1
                 last_frame_time.value = time.monotonic()
                 _set_process_state(state, "online")
+            if first_frame:
+                logger.info(
+                    "Orbbec camera %s first frame ready in %.3f s",
+                    spec.image_key,
+                    time.monotonic() - started_at,
+                )
+                first_frame = False
     finally:
         pipeline.stop()
 

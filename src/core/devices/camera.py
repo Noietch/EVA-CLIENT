@@ -80,3 +80,51 @@ class CameraSource:
 
     def close(self) -> None:
         self.socket.close(linger=0)
+
+
+class CameraPreview:
+    """Keep the ZMQ socket on one thread; HTTP threads only read cached frames."""
+
+    def __init__(self, endpoint: str, keys: list[str], is_shutdown=lambda: False) -> None:
+        self.endpoint = endpoint
+        self.keys = tuple(keys)
+        self.is_shutdown = is_shutdown
+        self.stopped = threading.Event()
+        self.lock = threading.Lock()
+        self.images = {}
+        self.updated = 0.0
+        self.thread = threading.Thread(target=self._run, name="eva-camera-preview", daemon=True)
+        self.thread.start()
+
+    def _run(self) -> None:
+        source = CameraSource(self.endpoint)
+        try:
+            while not self.stopped.is_set() and not self.is_shutdown():
+                images = source.snapshot()
+                with self.lock:
+                    self.images = images
+                    self.updated = time.monotonic()
+                self.stopped.wait(0.03)
+        finally:
+            source.close()
+            with self.lock:
+                self.images = {}
+
+    def available_camera_keys(self) -> list[str]:
+        return list(self.keys)
+
+    def get_camera_keys(self) -> list[str]:
+        with self.lock:
+            if time.monotonic() - self.updated > 0.5:
+                return []
+            return [key for key in self.keys if key in self.images]
+
+    def get_camera_frame(self, key: str):
+        with self.lock:
+            if time.monotonic() - self.updated > 0.5:
+                return None
+            return self.images.get(key)
+
+    def close(self) -> None:
+        self.stopped.set()
+        self.thread.join(timeout=2)

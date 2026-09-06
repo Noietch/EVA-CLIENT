@@ -19,14 +19,14 @@ from robots.base import (
 
 ARM_JOINTS = ("joint1", "joint2", "joint3", "joint4", "joint5", "joint6")
 JOINT_NAMES = (*ARM_JOINTS, "gripper")
-ARM_QPOS = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+ARM_QPOS = (0.0, 1.58, 0.49, 1.15, 0.0, 0.0, 1.0)
 GRIPPER_SEGMENTS = [
     {"copy": [0, 6]},
     {
         "gripper": 6,
         "range": [0.0, 1.0],
         "stroke": 0.04695,
-        "invert": True,
+        "invert": False,
         "fingers": [-1, -1],
     },
 ]

@@ -57,7 +57,6 @@ _COMMANDS = (
     ("collect_start", "web:collect_start", ()),
     ("collect_stop", "web:collect_stop", ()),
     ("collect_cancel", "web:collect_cancel", ("b-collect-cancel",)),
-    ("select_collect_task", "web:select_collect_task:{task}", ("collect-prompt-list",)),
     (
         "gripper",
         "web:gripper:{side}:{state}:{lock}",

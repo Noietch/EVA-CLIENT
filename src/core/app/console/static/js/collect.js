@@ -1028,6 +1028,33 @@ function triggerKeyboardAction(action) {
   target.click();
 }
 
+function keyboardHint(action) {
+  if (action === "motion") return $("collect-hint-motion");
+  if (action === "record_toggle") return $("collect-hint-record-toggle");
+  if (action === "record_cancel") return $("collect-hint-record-cancel");
+  if (action === "home") return $("collect-hint-home");
+  return null;
+}
+
+function updateKeyboardHoldVisual(entry, progress) {
+  const host = keyboardHint(entry.action);
+  if (!host) return;
+  const percent = Math.round(progress * 100);
+  host.classList.add("pressed");
+  host.classList.toggle("holding", progress > 0);
+  host.classList.toggle("complete", progress >= 1);
+  host.style.setProperty("--control-progress", String(progress * 100));
+  host.style.setProperty("--control-fill-width", `${progress * 100}%`);
+  const label = host.querySelector(".control-key-label");
+  if (label) {
+    const display = `${percent}%`;
+    if (label.textContent !== display) label.textContent = display;
+    label.dataset.label = display;
+  }
+  const gesture = host.querySelector(".control-gesture");
+  if (gesture && gesture.textContent !== `${percent}%`) gesture.textContent = `${percent}%`;
+}
+
 function keyboardShortcutAllowed(event) {
   if (S.ACTIVE_TAB !== "collect" || collectControlsConfig().mode !== "keyboard") return false;
   if (event.altKey || event.ctrlKey || event.metaKey) return false;
@@ -1048,7 +1075,7 @@ function animateKeyboardHold(entry) {
   const holdMs = Math.max(1, Number(binding.hold_ms || 1000));
   const progress = Math.min(1, (performance.now() - entry.startedAt) / holdMs);
   keyboardControlState.holdProgress[binding.control] = progress;
-  renderCollectControls();
+  updateKeyboardHoldVisual(entry, progress);
   if (progress >= 1) {
     if (!entry.triggered) {
       entry.triggered = true;

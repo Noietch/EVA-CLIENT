@@ -21,7 +21,4 @@ exec "${AGIBOT_G2_PYTHON_BIN}" -X faulthandler examples/hardware/agibot_g2/fake_
   --obs-endpoint "${OBS_ENDPOINT:-tcp://127.0.0.1:5555}" \
   --action-endpoint "${ACTION_ENDPOINT:-tcp://127.0.0.1:5556}" \
   --rate "${PUBLISH_RATE:-30}" \
-  --dynamics-rate "${DYNAMICS_RATE:-200}" \
-  --natural-frequency-hz "${NATURAL_FREQUENCY_HZ:-2}" \
-  --damping-ratio "${DAMPING_RATIO:-1}" \
   "$@"

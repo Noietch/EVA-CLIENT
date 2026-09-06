@@ -6,6 +6,7 @@ import copy
 import importlib
 import math
 import os
+import sys
 import tempfile
 from pathlib import Path
 
@@ -32,6 +33,10 @@ class DeviceWorkspace:
         self.catalog = self.hardware.catalog
         self.saved = yaml.safe_load(self.path.read_text()) if self.path.exists() else {}
         self.saved = self.saved or {}
+        if self.saved and self.saved["selected"].get("teleop") in {"joint", "transport"}:
+            # Retired UI selections migrate on read; preserve all parameter overrides.
+            robot = self.saved["selected"]["robot"]
+            self.saved["selected"]["teleop"] = self.catalog["robot"][robot]["defaults"]["teleop"]
 
     def initial_selection(self, config: ConfigDict) -> dict[str, str]:
         if self.saved:
@@ -59,6 +64,8 @@ class DeviceWorkspace:
                 for key in ("settings", "client", "safety", "config")
                 if key in spec
             }
+            if kind == "robot":
+                defaults["mode"] = "real"
             override_key = f"{name}@{selected['robot']}" if kind == "teleop" else name
             overrides = (
                 self.saved.get("overrides", {}).get(kind, {}).get(override_key, {}) if saved else {}
@@ -97,7 +104,13 @@ class DeviceWorkspace:
         defaults = self.resolve(selected, saved=False)
         if set(values) != set(DEVICE_KINDS):
             raise ValueError("Device settings must include Robot, Teleop and Camera")
+        # ``mode`` is a workstation choice, not a hardware SDK setting. Keep it
+        # outside the strict hardware settings merge for old saved workspaces.
+        robot_mode = values["robot"].pop("mode", "real")
         resolved = {kind: self.merge(defaults[kind], values[kind]) for kind in DEVICE_KINDS}
+        resolved["robot"]["mode"] = robot_mode
+        if resolved["robot"]["mode"] not in {"real", "fake"}:
+            raise ValueError("Robot mode must be real or fake")
         if "client" in resolved["teleop"]:
             robot = ROBOT_REGISTRY.build(selected["robot"])
             validate_client_config(
@@ -157,6 +170,14 @@ class DeviceWorkspace:
         )
         overrides = self.saved.get("overrides", {}).get("robot", {}).get(selected["robot"], {})
         config = ConfigDict(Config._merge_a_into_b(overrides.get("config", {}), config))
+        if values["robot"]["mode"] == "fake":
+            config.transport.type = "zmq"
+            config.transport.sub_endpoint = values["robot"]["settings"].get(
+                "obs_endpoint", "tcp://127.0.0.1:5555"
+            )
+            config.transport.pub_endpoint = values["robot"]["settings"].get(
+                "action_endpoint", "tcp://127.0.0.1:5556"
+            )
         robot = ROBOT_REGISTRY.build(config.robot.type)
         options = self.hardware.options(selected["robot"])
         if options["camera"][selected["camera"]].get("disabled"):
@@ -190,6 +211,24 @@ class DeviceWorkspace:
         options = self.hardware.options(selected["robot"])
         for kind in DEVICE_KINDS:
             spec = options[kind][selected[kind]]
+            # Fake robots must not start physical leader adapters such as YAM CAN.
+            if (
+                kind == "teleop"
+                and values["robot"].get("mode", "real") == "fake"
+                and spec.get("operation") == "leader"
+            ):
+                continue
+            if kind == "robot" and values[kind].get("mode", "real") == "fake":
+                settings = values[kind]["settings"]
+                commands[kind] = [
+                    sys.executable, "-m", "examples.hardware.fake_common",
+                    selected["robot"],
+                    "--dynamics-mode", "direct",
+                    "--obs-endpoint", settings.get("obs_endpoint", "tcp://127.0.0.1:5555"),
+                    "--action-endpoint", settings.get("action_endpoint", "tcp://127.0.0.1:5556"),
+                    "--rate", str(settings.get("rate", 30)),
+                ]
+                continue
             launch = (
                 self.catalog["robot"][selected["robot"]].get("launch")
                 if kind == "camera" and spec.get("separate")

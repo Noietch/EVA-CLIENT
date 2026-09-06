@@ -841,7 +841,7 @@ class WebXrNode:
         tls_key: str,
         bridge: ZmqBridge,
         long_press_ms: float = 1000.0,
-        stats_interval_s: float = 0.25,
+        stats_interval_s: float = 0.0,
     ) -> None:
         if bool(tls_cert) != bool(tls_key):
             raise ValueError("TLS certificate and key must be configured together")
@@ -1067,8 +1067,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--stats-interval-s",
         type=float,
-        default=0.25,
-        help="single-line VR receive diagnostics interval; use 0 to disable",
+        default=0.0,
+        help="single-line VR receive diagnostics interval; disabled by default",
     )
     parser.add_argument("--log-level", default="INFO")
     return parser

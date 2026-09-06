@@ -132,6 +132,26 @@ Full guides live in [`docs/`](./docs). Start here:
 | [🎞️ Recording](./docs/recording.md) | LeRobot v2.1 on-disk layout, QC flags, eval trials |
 | [🔬 Development](./docs/development.md) | Tests, lint, type-check, and how the robot side is faked |
 
+### Android Platform Tools
+
+VR/WebXR workflows that communicate with an Android headset require `adb`.
+Install the official Platform Tools in the current user's home directory:
+
+```bash
+mkdir -p "$HOME/.local/android-sdk"
+cd /tmp
+curl -fL -o platform-tools-latest-linux.zip \
+  https://dl.google.com/android/repository/platform-tools-latest-linux.zip
+unzip -o -q platform-tools-latest-linux.zip -d "$HOME/.local/android-sdk"
+printf '\nexport PATH="$HOME/.local/android-sdk/platform-tools:$PATH"\n' >> ~/.zshrc
+printf '\nexport PATH="$HOME/.local/android-sdk/platform-tools:$PATH"\n' >> ~/.bashrc
+export PATH="$HOME/.local/android-sdk/platform-tools:$PATH"
+adb version
+```
+
+After opening a new terminal, `adb` should resolve from
+`$HOME/.local/android-sdk/platform-tools/adb`.
+
 ---
 
 ## 🗺️ Roadmap

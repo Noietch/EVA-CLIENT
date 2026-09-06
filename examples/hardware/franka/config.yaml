@@ -1,7 +1,7 @@
 robot:
   dual_franka:
     label: Dual Franka
-    defaults: {teleop: joint, camera: external}
+    defaults: {teleop: vr_webxr, camera: external}
     launch:
       python: examples/hardware/franka/.venv/bin/python
       module: examples.hardware.franka.node
@@ -18,7 +18,10 @@ robot:
     config:
       robot:
         type: dual_franka
-        initial_qpos: null
+        initial_qpos: [-1.88733017, -0.98627802, 1.34066187, -1.77472402, 0.08241637, 1.80246260, 0.79725709, 1.0,
+                       -1.88733017, -0.98627802, 1.34066187, -1.77472402, 0.08241637, 1.80246260, 0.79725709, 1.0]
+        safe_qpos: [-1.88733017, -0.98627802, 1.34066187, -1.77472402, 0.08241637, 1.80246260, 0.79725709, 1.0,
+                   -1.88733017, -0.98627802, 1.34066187, -1.77472402, 0.08241637, 1.80246260, 0.79725709, 1.0]
         eef_reference_frame: base_link
         gripper_threshold: null
         gripper_open: 1.0
@@ -70,8 +73,6 @@ camera:
   none: {}
   external: {}
 teleop:
-  joint: {}
-  transport: {}
   vr_webxr:
     client:
       arms:

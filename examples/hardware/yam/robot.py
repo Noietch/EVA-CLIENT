@@ -17,6 +17,8 @@ logger = logging.getLogger(__name__)
 GROUP_DOF = 7
 ARM_DOF = 6
 GRIPPER_INDEX = 6
+# Same arm initialization used by the X5 model; YAM uses 1=open and 0=closed.
+INITIAL_ARM_QPOS = np.asarray([0.0, 1.58, 0.49, 1.15, 0.0, 0.0], dtype=np.float64)
 
 YAM_ARM_LOWER = np.asarray(
     [-2.61799, 0.0, 0.0, -1.69297, -1.5708, -2.0944],
@@ -148,7 +150,7 @@ def map_leader_gripper(
     raw_position: float,
     endpoints: tuple[float, float],
 ) -> float:
-    """Map calibrated raw encoder radians to 1=open and 0=closed."""
+    """Map calibrated raw encoder radians to YAM's 1=open and 0=closed convention."""
     opened, closed = endpoints
     if opened == closed:
         raise ValueError("Leader gripper encoder endpoints must be distinct")
@@ -429,13 +431,13 @@ class YamFollowers:
         targets: dict[str, np.ndarray] = {}
         for group_name, current in initial.items():
             target = current.astype(np.float64, copy=True)
-            target[:ARM_DOF] = 0.0
+            target[:ARM_DOF] = INITIAL_ARM_QPOS
             targets[group_name] = target
 
         control_hz = 50.0
         steps = max(int(round(duration_s * control_hz)), 1)
         logger.info(
-            "Moving YAM followers to all-zero arm position over %.1f s",
+            "Moving YAM followers to initial position over %.1f s",
             duration_s,
         )
         for step in range(1, steps + 1):

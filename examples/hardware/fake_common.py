@@ -40,7 +40,7 @@ _DEFAULT_PUBLISH_RATE_HZ = 30.0
 _DEFAULT_DYNAMICS_RATE_HZ = 200.0
 _DEFAULT_NATURAL_FREQUENCY_HZ = 2.0
 _DEFAULT_DAMPING_RATIO = 1.0
-_DEFAULT_DYNAMICS_MODE = "second-order"
+_DEFAULT_DYNAMICS_MODE = "direct"
 _DYNAMICS_MODES = ("second-order", "direct")
 _MAX_DYNAMICS_CATCHUP_STEPS = 20
 _HIL_SUPPORTED_ROBOTS = frozenset({"r1_lite", "ur5e", "arx_r5", "agilex_piper", "dual_yam"})
@@ -495,3 +495,9 @@ def main(
 
 
 __all__ = ["FakeRobotNode", "build_arg_parser", "main"]
+
+
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        raise SystemExit("Usage: python -m examples.hardware.fake_common ROBOT [options]")
+    main(sys.argv.pop(1))
