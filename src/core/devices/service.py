@@ -22,6 +22,8 @@ import time
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
+import psutil
+
 from core.devices import DEVICE_KINDS, REPOSITORY_ROOT, DeviceWorkspace
 from core.devices.preflight import check_yam_can
 
@@ -35,6 +37,57 @@ class DeviceProcesses:
         self.browser_url = ""
         self.commands = {}
         self.ready_pids = {}
+
+    @staticmethod
+    def _same_command(process: psutil.Process, command: list[str]) -> bool:
+        try:
+            actual = process.cmdline()
+            cwd = Path(process.cwd()).resolve()
+        except (psutil.AccessDenied, psutil.NoSuchProcess, OSError):
+            return False
+        if len(actual) != len(command) or actual[1:] != command[1:]:
+            return False
+        try:
+            same_executable = Path(actual[0]).resolve() == Path(command[0]).resolve()
+        except OSError:
+            same_executable = actual[0] == command[0]
+        return same_executable and cwd == REPOSITORY_ROOT
+
+    def _stop_stale_teleop(self, command: list[str]) -> list[int]:
+        """Stop an identical VR launcher orphaned by an earlier device service."""
+        owned = {
+            process.pid
+            for process in self.processes.values()
+            if process.poll() is None
+        }
+        stale = [
+            process
+            for process in psutil.process_iter()
+            if process.pid not in owned
+            and process.pid != os.getpid()
+            and self._same_command(process, command)
+        ]
+        if not stale:
+            return []
+        pids = [process.pid for process in stale]
+        for process in stale:
+            try:
+                process.send_signal(signal.SIGINT)
+            except (psutil.AccessDenied, psutil.NoSuchProcess):
+                pass
+        _, alive = psutil.wait_procs(stale, timeout=5)
+        for process in alive:
+            try:
+                process.kill()
+            except (psutil.AccessDenied, psutil.NoSuchProcess):
+                pass
+        _, alive = psutil.wait_procs(alive, timeout=5)
+        if alive:
+            raise RuntimeError(
+                "Could not stop stale teleop process(es): "
+                + ", ".join(str(process.pid) for process in alive)
+            )
+        return pids
 
     def start(self, component: str | None = None) -> None:
         self.workspace = DeviceWorkspace(self.workspace.path)
@@ -65,8 +118,17 @@ class DeviceProcesses:
         started = []
         try:
             for name, command in commands.items():
+                stale_pids = self._stop_stale_teleop(command) if name == "teleop" else []
                 token = secrets.token_urlsafe(24) if "--token-stdin" in command else ""
                 with (self.log_root / f"{name}.log").open("ab") as log:
+                    if stale_pids:
+                        log.write(
+                            (
+                                "[device] stopped stale teleop process(es) before restart: "
+                                + ", ".join(map(str, stale_pids))
+                                + "\n"
+                            ).encode()
+                        )
                     process = subprocess.Popen(
                         command,
                         cwd=REPOSITORY_ROOT,

@@ -1,7 +1,7 @@
 robot:
   dual_yam:
     label: Dual YAM
-    defaults: {teleop: vr_webxr, camera: external}
+    defaults: {teleop: vr_webxr, camera: yam_d405_orbbec}
     repeat:
     - follower_can
     launch:
@@ -60,46 +60,74 @@ robot:
       operator_control:
         enabled: false
         action_topic: /eva/operator_action
-camera:
-  yam_d405:
-    separate: true
-    label: RealSense D405
-    robots:
-    - dual_yam
-    profile_field: camera_profile
-    serial_mapping: camera
-    profile_loader: examples.hardware.yam.camera:load_camera_profiles
+camera_devices:
+  d405_high:
     repeat:
     - camera
-    profiles:
-    - examples/hardware/yam/profiles/d405_workcell.json
     settings:
       camera:
-      - cam_high=index:0
-      - cam_left_wrist=index:1
-      - cam_right_wrist=index:2
+      - cam_high=260422275306
       camera_width: 640
       camera_height: 480
       camera_fps: 30
-      camera_profile: ''
-  yam_orbbec:
-    separate: true
-    label: Orbbec
+      camera_auto_exposure_limit_us: 16000
+      camera_auto_gain_limit: 32
+      camera_warmup_frames: 90
+  orbbec_355_high:
     repeat:
     - orbbec_camera
-    robots:
-    - dual_yam
     settings:
       orbbec_camera:
-      - cam_high=index:0
-      - cam_left_wrist=index:1
-      - cam_right_wrist=index:2
+      - cam_high=CP0HC530000Z
       orbbec_width: 640
       orbbec_height: 480
       orbbec_fps: 30
-      orbbec_brightness: 15
+      orbbec_brightness: 25
+      orbbec_power_line_frequency: 50
+  orbbec_305_left_wrist:
+    repeat:
+    - orbbec_camera
+    settings:
+      orbbec_camera:
+      - cam_left_wrist=CV2R1610003Z
+      orbbec_width: 640
+      orbbec_height: 480
+      orbbec_fps: 30
+      orbbec_brightness: 25
+      orbbec_power_line_frequency: 50
+  orbbec_305_right_wrist:
+    repeat:
+    - orbbec_camera
+    settings:
+      orbbec_camera:
+      - cam_right_wrist=CV2L360000CL
+      orbbec_width: 640
+      orbbec_height: 480
+      orbbec_fps: 30
+      orbbec_brightness: 25
+      orbbec_power_line_frequency: 50
+camera:
+  yam_d405_orbbec:
+    separate: true
+    label: 1 D405 + 2 Orbbec 305
+    robots:
+    - dual_yam
+    cameras:
+    - d405_high
+    - orbbec_305_left_wrist
+    - orbbec_305_right_wrist
+  yam_orbbec:
+    separate: true
+    label: 2 Orbbec 305 + 1 Orbbec 355
+    robots:
+    - dual_yam
+    cameras:
+    - orbbec_355_high
+    - orbbec_305_left_wrist
+    - orbbec_305_right_wrist
   none: {}
-  external: {}
+  external:
+    hidden: true
 teleop:
   yam_leader:
     label: Leader

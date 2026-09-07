@@ -38,7 +38,8 @@ class OrbbecCameraSpec:
     warmup_frames: int = 30
     # Keep auto exposure enabled while applying a moderate compensation for
     # the relatively dark workcell image.
-    brightness: int = 15
+    brightness: int = 25
+    power_line_frequency_hz: int = 50
 
 
 def parse_orbbec_camera_specs(
@@ -50,7 +51,8 @@ def parse_orbbec_camera_specs(
     color_format: str = "MJPG",
     timeout_ms: int = 1000,
     warmup_frames: int = 30,
-    brightness: int = 15,
+    brightness: int = 25,
+    power_line_frequency_hz: int = 50,
 ) -> tuple[OrbbecCameraSpec, ...]:
     """Parse repeated ``IMAGE_KEY=SERIAL`` or ``IMAGE_KEY=index:N`` mappings."""
     if width <= 0 or height <= 0 or fps <= 0 or timeout_ms <= 0:
@@ -59,6 +61,8 @@ def parse_orbbec_camera_specs(
         raise ValueError("Orbbec warmup frame count must be non-negative")
     if not -64 <= brightness <= 64:
         raise ValueError("Orbbec brightness must be in [-64, 64]")
+    if power_line_frequency_hz not in (0, 50, 60):
+        raise ValueError("Orbbec power-line frequency must be 0, 50, or 60 Hz")
 
     cameras: list[OrbbecCameraSpec] = []
     seen: set[str] = set()
@@ -91,6 +95,7 @@ def parse_orbbec_camera_specs(
                 timeout_ms=timeout_ms,
                 warmup_frames=warmup_frames,
                 brightness=brightness,
+                power_line_frequency_hz=power_line_frequency_hz,
             )
         )
     return tuple(cameras)
@@ -191,6 +196,36 @@ def enable_auto_exposure(device: Any, sdk: ModuleType) -> bool:
         return False
     device.set_bool_property(prop, True)
     return True
+
+
+def set_color_power_line_frequency(
+    device: Any,
+    sdk: ModuleType,
+    frequency_hz: int,
+) -> int | None:
+    """Set color anti-flicker frequency to off, 50 Hz, or 60 Hz."""
+    if frequency_hz not in (0, 50, 60):
+        raise ValueError("Orbbec power-line frequency must be 0, 50, or 60 Hz")
+    prop = getattr(sdk.OBPropertyID, "OB_PROP_COLOR_POWER_LINE_FREQUENCY_INT", None)
+    modes = getattr(sdk, "OBPowerLineFreqMode", None)
+    if prop is None or modes is None:
+        return None
+    permissions = (
+        sdk.OBPermissionType.PERMISSION_READ_WRITE,
+        sdk.OBPermissionType.PERMISSION_WRITE,
+    )
+    if not any(device.is_property_supported(prop, item) for item in permissions):
+        return None
+    mode_name = {
+        0: "FREQUENCY_CLOSE",
+        50: "FREQUENCY_50HZ",
+        60: "FREQUENCY_60HZ",
+    }[frequency_hz]
+    mode = getattr(modes, mode_name, None)
+    if mode is None:
+        return None
+    device.set_int_property(prop, int(mode))
+    return frequency_hz
 
 
 def set_color_brightness(device: Any, sdk: ModuleType, value: int) -> int | None:
@@ -327,9 +362,11 @@ def _capture_orbbec_cameras(capture_args: tuple[tuple[Any, ...], ...], stop: Any
         if index + 1 < len(selected):
             state = args[5]
             deadline = time.monotonic() + _CAMERA_START_TIMEOUT_S
-            # Serialize pipeline opening, but overlap exposure warmup across cameras.
-            started_states = {_STATE_NAMES.index("warming"), _STATE_NAMES.index("online")}
-            while state.value not in started_states and time.monotonic() < deadline:
+            # Wait for a real frame before opening the next SDK pipeline. Starting
+            # multiple Gemini devices during warmup can leave one pipeline alive
+            # but permanently starved of color frames.
+            online_state = _STATE_NAMES.index("online")
+            while state.value != online_state and time.monotonic() < deadline:
                 if stop.wait(0.05):
                     break
 
@@ -361,6 +398,11 @@ def _run_orbbec_capture_loop(
             raise RuntimeError("No Orbbec camera is connected")
         device = select_orbbec_device(devices, spec)
     serial = device.get_device_info().get_serial_number()
+    power_line_frequency_hz = set_color_power_line_frequency(
+        device,
+        sdk,
+        spec.power_line_frequency_hz,
+    )
     auto_exposure = enable_auto_exposure(device, sdk)
     brightness = set_color_brightness(device, sdk, spec.brightness)
     pipeline = sdk.Pipeline(device)
@@ -384,23 +426,34 @@ def _run_orbbec_capture_loop(
     pipeline.start(stream_config)
     _set_process_state(state, "warming")
     logger.info(
-        "Started Orbbec camera %s serial=%s auto_exposure=%s brightness=%s warmup_frames=%d",
+        "Started Orbbec camera %s serial=%s auto_exposure=%s brightness=%s "
+        "power_line_frequency_hz=%s warmup_frames=%d",
         spec.image_key,
         serial,
         auto_exposure,
         brightness,
+        power_line_frequency_hz,
         spec.warmup_frames,
     )
     remaining_warmup = spec.warmup_frames
     first_frame = True
+    first_frame_deadline = time.monotonic() + _CAMERA_START_TIMEOUT_S
     shared_image = np.frombuffer(frame_buffer, dtype=np.uint8).reshape((spec.height, spec.width, 3))
     try:
         while not stop.is_set():
             frameset = pipeline.wait_for_frames(spec.timeout_ms)
             if frameset is None:
+                if first_frame and time.monotonic() >= first_frame_deadline:
+                    raise TimeoutError(
+                        f"no color frame received within {_CAMERA_START_TIMEOUT_S:.0f} s"
+                    )
                 continue
             color_frame = frameset.get_color_frame()
             if color_frame is None:
+                if first_frame and time.monotonic() >= first_frame_deadline:
+                    raise TimeoutError(
+                        f"no color frame received within {_CAMERA_START_TIMEOUT_S:.0f} s"
+                    )
                 continue
             if remaining_warmup > 0:
                 remaining_warmup -= 1

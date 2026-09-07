@@ -1,7 +1,7 @@
 robot:
   arx_x5:
     label: ARX X5
-    defaults: {teleop: vr_webxr, camera: external}
+    defaults: {teleop: vr_webxr, camera: x5_d405_day}
     launch:
       python: examples/hardware/arx_x5/.venv/bin/python
       module: examples.hardware.arx_x5.node
@@ -53,36 +53,119 @@ robot:
       operator_control:
         enabled: false
         action_topic: /eva/operator_action
-camera:
-  x5_d405:
-    separate: true
-    label: RealSense D405
-    robots:
-    - arx_x5
-    profile_field: realsense_profile_path
-    profile_loader: examples.hardware.arx_x5.camera:load_realsense_color_profiles
-    profile_variants:
-    - profile: day
-    - profile: night
+camera_devices:
+  x5_d405_high_day:
     repeat:
     - realsense_camera
-    profiles:
-    - examples/hardware/arx_x5/d405_profile.yaml
-    choices:
-      realsense_profile:
-      - day
-      - night
     settings:
       realsense_camera:
       - cam_high=index:0
+      realsense_color_profiles:
+        cam_high:
+          enable_auto_exposure: false
+          exposure: 6000
+          gain: 16
+          enable_auto_white_balance: false
+          white_balance: 4390
+          bgr_gains: [0.977523, 1.047903, 0.977785]
+  x5_d405_left_wrist_day:
+    repeat:
+    - realsense_camera
+    settings:
+      realsense_camera:
       - cam_left_wrist=index:1
+      realsense_color_profiles:
+        cam_left_wrist:
+          enable_auto_exposure: false
+          exposure: 8000
+          gain: 16
+          enable_auto_white_balance: false
+          white_balance: 4450
+          bgr_gains: [0.982710, 1.038928, 0.980512]
+  x5_d405_right_wrist_day:
+    repeat:
+    - realsense_camera
+    settings:
+      realsense_camera:
       - cam_right_wrist=index:2
+      realsense_color_profiles:
+        cam_right_wrist:
+          enable_auto_exposure: false
+          exposure: 7000
+          gain: 16
+          enable_auto_white_balance: false
+          white_balance: 4410
+          bgr_gains: [0.971018, 1.064308, 0.970333]
+  x5_d405_high_night:
+    repeat:
+    - realsense_camera
+    settings:
+      realsense_camera:
+      - cam_high=index:0
+      realsense_color_profiles:
+        cam_high:
+          enable_auto_exposure: false
+          exposure: 12000
+          gain: 16
+          enable_auto_white_balance: false
+          white_balance: 4390
+          bgr_gains: [0.977523, 1.047903, 0.977785]
+  x5_d405_left_wrist_night:
+    repeat:
+    - realsense_camera
+    settings:
+      realsense_camera:
+      - cam_left_wrist=index:1
+      realsense_color_profiles:
+        cam_left_wrist:
+          enable_auto_exposure: false
+          exposure: 14000
+          gain: 16
+          enable_auto_white_balance: false
+          white_balance: 4450
+          bgr_gains: [0.982710, 1.038928, 0.980512]
+  x5_d405_right_wrist_night:
+    repeat:
+    - realsense_camera
+    settings:
+      realsense_camera:
+      - cam_right_wrist=index:2
+      realsense_color_profiles:
+        cam_right_wrist:
+          enable_auto_exposure: false
+          exposure: 14000
+          gain: 16
+          enable_auto_white_balance: false
+          white_balance: 4410
+          bgr_gains: [0.971018, 1.064308, 0.970333]
+camera:
+  x5_d405_day:
+    separate: true
+    label: 3 D405 - Day
+    robots:
+    - arx_x5
+    cameras:
+    - x5_d405_high_day
+    - x5_d405_left_wrist_day
+    - x5_d405_right_wrist_day
+    settings:
       realsense_resolution: 640x480
       realsense_fps: 30
-      realsense_profile: day
-      realsense_profile_path: examples/hardware/arx_x5/d405_profile.yaml
+  x5_d405_night:
+    separate: true
+    label: 3 D405 - Night
+    robots:
+    - arx_x5
+    cameras:
+    - x5_d405_high_night
+    - x5_d405_left_wrist_night
+    - x5_d405_right_wrist_night
+    settings:
+      realsense_resolution: 640x480
+      realsense_fps: 30
   none: {}
-  external: {}
+  external:
+    hidden: true
 teleop:
   x5_leader:
     label: Leader

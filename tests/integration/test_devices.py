@@ -11,7 +11,6 @@ from urllib.request import ProxyHandler, build_opener
 
 import numpy as np
 import pytest
-import yaml
 
 import robots  # noqa: F401
 from core.app.state import SessionStatus
@@ -89,24 +88,40 @@ def test_device_catalog_composes_and_restores_each_robot(tmp_path, monkeypatch):
             if kind == "robot":
                 assert parsed.obs_endpoint == config.transport.sub_endpoint
 
-    selected = dict(robot="dual_yam", teleop="yam_leader", camera="yam_d405")
+        mode_workspace = DeviceWorkspace(tmp_path / f"{name}-modes.yaml")
+        mode_values = mode_workspace.resolve(selected, saved=False)
+        assert mode_values["robot"]["mode"] == "real"
+        real = mode_workspace.commands(selected, mode_values).get("robot")
+        mode_values["robot"]["mode"] = "fake"
+        mode_workspace.save(selected, mode_values)
+        mode_restored = DeviceWorkspace(mode_workspace.path)
+        assert mode_restored.saved["selected"]["robot"] == name
+        assert mode_restored.resolve(selected)["robot"]["mode"] == "fake"
+        fake = mode_restored.commands()["robot"]
+        assert fake[:4] == [sys.executable, "-m", "examples.hardware.fake_common", name]
+        assert fake[fake.index("--dynamics-mode") + 1] == "direct"
+        assert fake != real
+        mode_values["robot"]["mode"] = "invalid"
+        with pytest.raises(ValueError, match="Robot mode"):
+            mode_workspace.save(selected, mode_values)
+
+    selected = dict(robot="dual_yam", teleop="yam_leader", camera="yam_d405_orbbec")
     values = workspace.resolve(selected)
-    profile = workspace.catalog["camera"][selected["camera"]]["profiles"][0]
-    data, settings = workspace.profile_values(selected["camera"], profile)
-    values["camera"]["settings"].update(settings)
-    assert all("index:" not in value for value in settings["camera"])
+    assert all("index:" not in value for value in values["camera"]["settings"]["camera"])
     values["robot"]["settings"]["gripper_limits_override"] = [0.0, 1.0]
+    values["teleop"]["settings"]["leader_cans"] = ["can2", "can3"]
     workspace.save(selected, values)
     from examples.hardware.yam.node import build_arg_parser, build_config
 
     node_config = build_config(build_arg_parser().parse_args(workspace.commands()["robot"][3:]))
-    assert node_config.startup_position == "current"
+    assert node_config.startup_position == "zero"
     assert not node_config.direct_leader_control
     assert node_config.leader_can_channels
     camera_config = build_config(build_arg_parser().parse_args(workspace.commands()["camera"][3:]))
-    assert len(camera_config.cameras) == 3
-    assert camera_config.cameras[0].auto_exposure_limit_us == 33000
-    selected["camera"] = "x5_d405"
+    assert len(camera_config.cameras) == 1
+    assert len(camera_config.orbbec_cameras) == 2
+    assert camera_config.cameras[0].auto_exposure_limit_us == 16000
+    selected["camera"] = "x5_d405_day"
     with pytest.raises(ValueError, match="not supported"):
         workspace.resolve(selected)
 
@@ -150,7 +165,7 @@ def test_robot_hardware_defaults_and_saved_overrides_preserve_business_config(tm
 
 def test_disabled_cameras_use_camera_ids_independently_of_dataset_column_names(tmp_path):
     workspace = DeviceWorkspace(tmp_path / "workstation.yaml")
-    selected = dict(robot="dual_franka", teleop="joint", camera="external")
+    selected = dict(robot="dual_franka", teleop="vr_webxr", camera="external")
     workspace.save(selected, workspace.resolve(selected))
     raw = Config.fromfile(str(REPOSITORY_ROOT / "configs/00_base/defaults.py"))._cfg_dict
     raw.collection.schema.cameras = {
@@ -162,31 +177,20 @@ def test_disabled_cameras_use_camera_ids_independently_of_dataset_column_names(t
     assert "cam_left_wrist" not in config.collection.schema.cameras
 
 
-def test_device_http_profiles_rejection_and_restart_request(tmp_path, monkeypatch, device_daemon):
+def test_device_http_camera_combination_restart_request(tmp_path, monkeypatch, device_daemon):
     monkeypatch.setenv("EVA_WORKSTATION_PATH", str(device_daemon))
     with serve_console(console_config()) as console:
-        response = console.get("/api/devices?robot=arx_x5&teleop=vr_webxr&camera=x5_d405")
+        response = console.get(
+            "/api/devices?robot=arx_x5&teleop=vr_webxr&camera=x5_d405_night"
+        )
         assert response.status == 200
         payload = response.json
-        spec = payload["catalog"]["camera"]["x5_d405"]
-        response = console.post(
-            "/api/camera_profile", {"camera": "x5_d405", "path": spec["profiles"][0]}
-        )
-        assert response.status == 200
-        data = response.json["data"]
-        data["day"]["cam_high"]["exposure"] = 5000
-        response = console.post(
-            "/api/camera_profile", {"camera": "x5_d405", "content": yaml.safe_dump(data)}
-        )
-        assert response.status == 200
-        payload["values"]["camera"]["settings"]["realsense_profile_path"] = response.json["path"]
+        assert payload["selected"]["camera"] == "x5_d405_night"
         assert (
-            console.post("/api/camera_profile", {"camera": "x5_d405", "path": "/etc/passwd"}).status
-            == 400
-        )
-        assert (
-            console.post("/api/camera_profile", {"camera": "x5_d405", "content": "[]"}).status
-            == 400
+            payload["values"]["camera"]["settings"]["realsense_color_profiles"]["cam_high"][
+                "exposure"
+            ]
+            == 12000
         )
         console.runtime.collection_teleop_armed = True
         console.do("/api/device_selection", payload)
@@ -200,7 +204,20 @@ def test_device_http_profiles_rejection_and_restart_request(tmp_path, monkeypatc
         from examples.hardware.arx_x5.node import build_arg_parser, build_config
 
         config = build_config(build_arg_parser().parse_args(workspace.commands()["camera"][3:]))
-        assert config.realsense_cameras[0].color_profile.exposure == 5000
+        assert config.realsense_cameras[0].color_profile.exposure == 12000
+
+
+def test_saved_x5_camera_selection_migrates_to_day_combination(tmp_path):
+    path = tmp_path / "workstation.yaml"
+    path.write_text(
+        "selected:\n"
+        "  robot: arx_x5\n"
+        "  teleop: vr_webxr\n"
+        "  camera: x5_d405\n"
+        "overrides: {}\n"
+    )
+
+    assert DeviceWorkspace(path).saved["selected"]["camera"] == "x5_d405_day"
 
 
 def test_cli_and_eva_restart_preserve_real_vr_service(tmp_path, monkeypatch, device_daemon):
@@ -302,6 +319,28 @@ def test_cli_and_eva_restart_preserve_real_vr_service(tmp_path, monkeypatch, dev
     assert service.request("status")["processes"] == {}
 
 
+def test_teleop_start_replaces_stale_matching_process(tmp_path, monkeypatch):
+    workspace = DeviceWorkspace(tmp_path / "workstation.yaml")
+    selected = dict(robot="agibot_g2", teleop="vr_webxr", camera="none")
+    workspace.save(selected, workspace.resolve(selected))
+    command = [sys.executable, "-c", "import time; time.sleep(60)"]
+    monkeypatch.setattr(DeviceWorkspace, "commands", lambda self: {"teleop": command})
+    stale = subprocess.Popen(command, cwd=REPOSITORY_ROOT, start_new_session=True)
+    manager = DeviceProcesses(workspace.path)
+    try:
+        manager.start("teleop")
+        replacement = manager.processes["teleop"]
+        stale.wait(timeout=10)
+        assert replacement.pid != stale.pid
+        assert replacement.poll() is None
+        assert f"before restart: {stale.pid}" in manager.status("teleop")["log"]
+    finally:
+        manager.stop()
+        if stale.poll() is None:
+            stale.kill()
+            stale.wait(timeout=5)
+
+
 def test_camera_restart_keeps_robot_process_and_expires_frames(tmp_path, monkeypatch):
     from core.devices.camera import CameraSource
 
@@ -309,7 +348,7 @@ def test_camera_restart_keeps_robot_process_and_expires_frames(tmp_path, monkeyp
         sock.bind(("127.0.0.1", 0))
         endpoint = f"tcp://127.0.0.1:{sock.getsockname()[1]}"
     workspace = DeviceWorkspace(tmp_path / "workstation.yaml")
-    selected = dict(robot="dual_yam", teleop="joint", camera="yam_d405")
+    selected = dict(robot="dual_yam", teleop="vr_webxr", camera="yam_d405_orbbec")
     workspace.save(selected, workspace.resolve(selected))
     camera_script = (
         "from types import SimpleNamespace; import numpy as np; "

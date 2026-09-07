@@ -9,6 +9,8 @@ import numpy as np
 from core.app.handlers.control import _publish_manual_real_qpos, poll_motion_commands
 from core.devices.camera import CameraSource
 
+_CAMERA_STARTUP_FRAME_WINDOW_S = 2.0
+
 
 def resolve_pose(config, robot, name):
     """Resolve configured initial or safe qpos and validate its shape."""
@@ -91,10 +93,52 @@ def stop_devices(config, runtime, session, service, component):
     return service.request("stop", {"component": component})
 
 
+def _camera_startup_keys(config, values) -> set[str]:
+    """Return camera keys this selected launcher is expected to publish."""
+    schema_keys = set(config.collection.schema.cameras)
+    settings = values.get("camera", {}).get("settings", {})
+    configured_keys: set[str] = set()
+    for field in ("camera", "orbbec_camera", "realsense_camera"):
+        mappings = settings.get(field)
+        if not mappings:
+            continue
+        configured_keys.update(
+            str(mapping).split("=", 1)[0].strip()
+            for mapping in mappings
+            if "=" in str(mapping)
+        )
+    if configured_keys and configured_keys.issubset(schema_keys):
+        return configured_keys
+    return schema_keys
+
+
+def _robot_is_at_startup_pose(config, runtime, qpos) -> bool:
+    """Check whether fresh feedback already satisfies the startup pose."""
+    robot = getattr(runtime, "robot", None)
+    if robot is None:
+        return False
+    live = np.asarray(qpos, dtype=np.float32)
+    if getattr(config, "robot", None) is None:
+        target = np.asarray(robot.initial_qpos, dtype=np.float32).copy()
+    else:
+        target = resolve_pose(config, robot, "initial_qpos")
+    if live.shape != target.shape or not np.isfinite(live).all():
+        return False
+    indices = np.asarray(robot.gripper_indices, dtype=int)
+    if indices.size:
+        mask = np.ones(target.shape, dtype=bool)
+        mask[indices] = False
+        return bool(np.allclose(live[mask], target[mask], atol=0.08, rtol=0))
+    return bool(np.allclose(live, target, atol=0.08, rtol=0))
+
+
 def prepare_device(config, runtime, session, service, component, pid, *, timeout=60):
     """Wait for live input; robot readiness also requires a verified move home."""
     deadline = time.monotonic() + timeout
     camera = None
+    expected_camera_keys: set[str] = set()
+    observed_camera_keys: set[str] = set()
+    observed_camera_at: dict[str, float] = {}
     workspace = runtime.console_ctx.device_settings.workspace
     selected = workspace.initial_selection(config)
     values = workspace.resolve(selected)
@@ -102,6 +146,7 @@ def prepare_device(config, runtime, session, service, component, pid, *, timeout
     http = build_opener(ProxyHandler({}))
     if component == "camera":
         camera = CameraSource(values["robot"]["settings"]["camera_endpoint"])
+        expected_camera_keys = _camera_startup_keys(config, values)
     try:
         while time.monotonic() < deadline:
             if poll_motion_commands(config, runtime, session):
@@ -121,12 +166,24 @@ def prepare_device(config, runtime, session, service, component, pid, *, timeout
                         break
                     feedback_age = runtime.transport.seconds_since_last_recv()
                     if feedback_age is not None and feedback_age <= 0.5:
-                        _home_robot(config, runtime, session, qpos)
+                        if _robot_is_at_startup_pose(config, runtime, qpos):
+                            live = np.asarray(qpos, dtype=np.float32).copy()
+                            session.manual_real_qpos = live
+                            session.manual_qpos = live.copy()
+                        else:
+                            _home_robot(config, runtime, session, qpos)
                         break
             elif component == "camera":
                 images = camera.snapshot()
-                expected = set(config.collection.schema.cameras)
-                if images and expected.issubset(images):
+                observed_at = time.monotonic()
+                observed_camera_keys.update(images)
+                observed_camera_at.update({key: observed_at for key in images})
+                recent = all(
+                    observed_at - observed_camera_at.get(key, 0.0)
+                    <= _CAMERA_STARTUP_FRAME_WINDOW_S
+                    for key in expected_camera_keys
+                )
+                if expected_camera_keys.issubset(observed_camera_keys) and recent:
                     break
             elif status.get("browser_url"):
                 try:
@@ -139,6 +196,15 @@ def prepare_device(config, runtime, session, service, component, pid, *, timeout
                 raise ValueError("No readiness check is available for this operation")
             time.sleep(0.1)
         else:
+            if component == "camera":
+                if camera is not None:
+                    images = camera.snapshot()
+                    observed_camera_keys.update(images)
+                missing = sorted(expected_camera_keys - observed_camera_keys)
+                detail = f"; missing camera keys: {', '.join(missing)}" if missing else ""
+                raise ValueError(
+                    f"{component} startup timed out waiting for live feedback{detail}"
+                )
             raise ValueError(f"{component} startup timed out waiting for live feedback")
         service.request("ready", {"component": component, "pid": pid})
     finally:

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 import logging
+import math
 import threading
 import time
 from pathlib import Path
@@ -16,13 +18,12 @@ import yaml
 logger = logging.getLogger(__name__)
 
 ARX_X5_CAMERA_KEYS: tuple[str, ...] = ("cam_high", "cam_left_wrist", "cam_right_wrist")
-ARX_X5_LIGHTING_PROFILES: tuple[str, ...] = ("day", "night")
 DEFAULT_ARX_X5_D405_CAMERAS: dict[str, str] = {
     "cam_high": "409122271504",
     "cam_left_wrist": "352122272510",
     "cam_right_wrist": "352122271326",
 }
-DEFAULT_ARX_X5_D405_PROFILE_PATH = Path(__file__).with_name("d405_profile.yaml")
+DEFAULT_ARX_X5_CONFIG_PATH = Path(__file__).with_name("config.yaml")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -47,65 +48,63 @@ class RealSenseCameraSpec:
     color_profile: RealSenseColorProfile | None = None
 
 
-def load_realsense_color_profiles(
-    path: Path = DEFAULT_ARX_X5_D405_PROFILE_PATH,
-    profile: str = "night",
-) -> dict[str, RealSenseColorProfile]:
-    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+def parse_realsense_color_profiles(raw: Any) -> dict[str, RealSenseColorProfile]:
     if not isinstance(raw, dict):
-        raise ValueError(f"RealSense profile must be a mapping: {path}")
-
-    if profile not in ARX_X5_LIGHTING_PROFILES:
-        raise ValueError(
-            f"Unknown RealSense lighting profile {profile!r}; "
-            f"expected one of {ARX_X5_LIGHTING_PROFILES}"
-        )
-
-    # Accept the original camera-key-only file as a night profile so older
-    # deployments can still be rolled back without rewriting their config.
-    legacy_format = set(raw) == set(ARX_X5_CAMERA_KEYS)
-    if legacy_format:
-        if profile != "night":
-            raise ValueError(
-                f"RealSense profile file {path} only contains the legacy night profile"
-            )
-        selected = raw
-    else:
-        unknown = set(raw) - set(ARX_X5_LIGHTING_PROFILES)
-        missing = set(ARX_X5_LIGHTING_PROFILES) - set(raw)
-        if unknown or missing:
-            raise ValueError(
-                f"RealSense lighting profiles mismatch: missing={sorted(missing)} "
-                f"unknown={sorted(unknown)}"
-            )
-        selected = raw[profile]
-    if not isinstance(selected, dict):
-        raise ValueError(f"RealSense profile {profile!r} must be a mapping")
-    unknown = set(selected) - set(ARX_X5_CAMERA_KEYS)
-    missing = set(ARX_X5_CAMERA_KEYS) - set(selected)
+        raise ValueError("RealSense color profiles must be a mapping")
+    unknown = set(raw) - set(ARX_X5_CAMERA_KEYS)
+    missing = set(ARX_X5_CAMERA_KEYS) - set(raw)
     if unknown or missing:
         raise ValueError(
-            f"RealSense profile {profile!r} camera keys mismatch: "
+            "RealSense color profile camera keys mismatch: "
             f"missing={sorted(missing)} unknown={sorted(unknown)}"
         )
 
     profiles: dict[str, RealSenseColorProfile] = {}
     for image_key in ARX_X5_CAMERA_KEYS:
-        values = selected[image_key]
+        values = raw[image_key]
         if not isinstance(values, dict):
             raise ValueError(f"RealSense profile {image_key!r} must be a mapping")
+        for field in ("enable_auto_exposure", "enable_auto_white_balance"):
+            if not isinstance(values.get(field), bool):
+                raise ValueError(f"RealSense profile {image_key!r} {field} must be boolean")
         bgr_gains = tuple(float(value) for value in values["bgr_gains"])
         if len(bgr_gains) != 3 or any(value <= 0 for value in bgr_gains):
             raise ValueError(f"RealSense profile {image_key!r} bgr_gains must be 3 positive values")
+        numeric = {
+            field: float(values[field]) for field in ("exposure", "gain", "white_balance")
+        }
+        if any(not math.isfinite(value) or value <= 0 for value in numeric.values()):
+            raise ValueError(f"RealSense profile {image_key!r} values must be positive")
         profiles[image_key] = RealSenseColorProfile(
-            enable_auto_exposure=bool(values["enable_auto_exposure"]),
-            exposure=float(values["exposure"]),
-            gain=float(values["gain"]),
-            enable_auto_white_balance=bool(values["enable_auto_white_balance"]),
-            white_balance=float(values["white_balance"]),
+            enable_auto_exposure=values["enable_auto_exposure"],
+            exposure=numeric["exposure"],
+            gain=numeric["gain"],
+            enable_auto_white_balance=values["enable_auto_white_balance"],
+            white_balance=numeric["white_balance"],
             bgr_gains=bgr_gains,
         )
     return profiles
+
+
+def parse_realsense_color_profiles_json(value: str) -> dict[str, RealSenseColorProfile]:
+    try:
+        raw = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ValueError("RealSense color profiles must be valid JSON") from exc
+    return parse_realsense_color_profiles(raw)
+
+
+def load_default_realsense_color_profiles(
+    path: Path = DEFAULT_ARX_X5_CONFIG_PATH,
+) -> dict[str, RealSenseColorProfile]:
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    combination = raw["camera"]["x5_d405_day"]
+    profiles: dict[str, Any] = {}
+    for camera_name in combination["cameras"]:
+        profiles.update(
+            raw["camera_devices"][camera_name]["settings"]["realsense_color_profiles"]
+        )
+    return parse_realsense_color_profiles(profiles)
 
 
 def parse_resolution(value: str) -> tuple[int, int]:
@@ -122,10 +121,9 @@ def parse_realsense_camera_specs(
     resolution: tuple[int, int],
     fps: int,
     timeout_ms: int,
-    profile: str = "night",
-    profile_path: Path = DEFAULT_ARX_X5_D405_PROFILE_PATH,
+    color_profiles: dict[str, RealSenseColorProfile] | None = None,
 ) -> tuple[RealSenseCameraSpec, ...]:
-    color_profiles = load_realsense_color_profiles(profile_path, profile)
+    color_profiles = color_profiles or load_default_realsense_color_profiles()
     cameras: list[RealSenseCameraSpec] = []
     for raw in specs:
         if "=" not in raw:
@@ -161,10 +159,9 @@ def default_realsense_camera_specs(
     resolution: tuple[int, int],
     fps: int,
     timeout_ms: int,
-    profile: str = "night",
-    profile_path: Path = DEFAULT_ARX_X5_D405_PROFILE_PATH,
+    color_profiles: dict[str, RealSenseColorProfile] | None = None,
 ) -> tuple[RealSenseCameraSpec, ...]:
-    color_profiles = load_realsense_color_profiles(profile_path, profile)
+    color_profiles = color_profiles or load_default_realsense_color_profiles()
     return tuple(
         RealSenseCameraSpec(
             image_key=image_key,

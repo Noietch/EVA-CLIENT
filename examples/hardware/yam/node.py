@@ -823,8 +823,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--orbbec-brightness",
         type=int,
-        default=15,
+        default=25,
         help="Orbbec color brightness compensation while auto exposure is enabled (-64..64).",
+    )
+    parser.add_argument(
+        "--orbbec-power-line-frequency",
+        type=int,
+        choices=(0, 50, 60),
+        default=50,
+        help="Orbbec color anti-flicker frequency in Hz; 0 disables compensation.",
     )
     parser.add_argument(
         "--list-cameras",
@@ -918,6 +925,7 @@ def build_config(args: argparse.Namespace) -> YamZmqConfig:
         timeout_ms=args.orbbec_timeout_ms,
         warmup_frames=args.orbbec_warmup_frames,
         brightness=args.orbbec_brightness,
+        power_line_frequency_hz=args.orbbec_power_line_frequency,
     )
     invalid_cameras = {
         camera.image_key

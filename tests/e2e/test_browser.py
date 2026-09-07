@@ -158,9 +158,10 @@ def test_device_panel_switches_robot_options_and_vr_parameters(browser, tmp_path
                     "options => options.map(option => option.value)"
                 )
                 assert "yam_d405" not in camera_ids
-                assert ("x5_d405" in camera_ids) == (robot == "arx_x5")
+                assert ("x5_d405_day" in camera_ids) == (robot == "arx_x5")
+                assert ("x5_d405_night" in camera_ids) == (robot == "arx_x5")
             with page.expect_response(lambda response: "/api/devices?" in response.url):
-                page.locator("#device-select-camera").select_option("x5_d405")
+                page.locator("#device-select-camera").select_option("x5_d405_night")
             with page.expect_response(lambda response: "/api/devices?" in response.url):
                 page.locator("#device-select-robot").select_option("agibot_g2")
             page.wait_for_function(
@@ -245,12 +246,16 @@ def test_console_tabs_change_backend_state(browser, tmp_path, monkeypatch):
             assert page.locator("#device-select-robot").input_value() == "dual_yam"
             assert page.locator("#device-select-teleop").input_value() == "vr_webxr"
             assert page.get_by_label("client / position_scale", exact=True).input_value() == "1.2"
-            page.locator("#device-select-camera").select_option("yam_d405")
-            page.wait_for_selector("#device-profile-load", state="visible")
-            page.locator("#device-profile-load").click()
+            assert page.locator("#device-select-camera option").evaluate_all(
+                "options => options.map(option => option.value)"
+            ) == ["yam_d405_orbbec", "yam_orbbec", "none"]
+            page.locator("#device-select-camera").select_option("yam_d405_orbbec")
             page.wait_for_function(
-                "document.querySelector('#device-profile-values').textContent.includes('33000')"
+                "document.querySelector("
+                "'[aria-label=\"settings / camera_auto_exposure_limit_us\"]'"
+                ")?.value === '16000'"
             )
+            assert page.locator("#device-profile-load").is_hidden()
             assert not console.runtime.collection_teleop_armed
             page.set_viewport_size({"width": 390, "height": 844})
             page.locator("#gl").scroll_into_view_if_needed()

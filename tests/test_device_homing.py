@@ -155,3 +155,130 @@ def test_real_robot_readiness_waits_for_fresh_feedback(monkeypatch):
     startup.prepare_device(SimpleNamespace(), runtime, session, service, "robot", 123)
 
     assert calls[-1] == ("ready", {"component": "robot", "pid": 123})
+
+
+def test_real_robot_already_at_startup_pose_skips_duplicate_homing(monkeypatch):
+    qpos = np.array([0.0, 1.0])
+    workspace = SimpleNamespace(
+        initial_selection=lambda config: {
+            "robot": "dual_yam",
+            "teleop": "vr_webxr",
+            "camera": "none",
+        },
+        resolve=lambda selected: {"robot": {"mode": "real"}},
+    )
+    runtime = SimpleNamespace(
+        robot=SimpleNamespace(initial_qpos=qpos.copy(), gripper_indices=[1]),
+        console_ctx=SimpleNamespace(device_settings=SimpleNamespace(workspace=workspace)),
+        command_queue=None,
+        transport=SimpleNamespace(
+            get_latest_qpos=lambda: qpos,
+            seconds_since_last_recv=lambda: 0.1,
+        ),
+    )
+    session = SimpleNamespace(interrupt_requested=False, manual_qpos=None, manual_real_qpos=None)
+    calls = []
+
+    def request(action, payload=None):
+        calls.append((action, payload))
+        if action == "status":
+            return {"pids": {"robot": 123}, "processes": {"robot": None}}
+        return {}
+
+    service = SimpleNamespace(request=request)
+    monkeypatch.setattr(
+        startup,
+        "_home_robot",
+        lambda *args, **kwargs: pytest.fail("Already homed robot must not move again"),
+    )
+
+    startup.prepare_device(
+        SimpleNamespace(robot={"initial_qpos": qpos.tolist()}),
+        runtime,
+        session,
+        service,
+        "robot",
+        123,
+    )
+
+    np.testing.assert_allclose(session.manual_qpos, qpos)
+    assert calls[-1] == ("ready", {"component": "robot", "pid": 123})
+
+
+def test_camera_readiness_accepts_frames_arriving_in_separate_messages(monkeypatch):
+    snapshots = iter(
+        [
+            {"cam_left_wrist": object()},
+            {"cam_right_wrist": object()},
+            {"cam_high": object()},
+        ]
+    )
+
+    class FakeCamera:
+        def __init__(self, endpoint):
+            assert endpoint == "tcp://127.0.0.1:5557"
+
+        def snapshot(self):
+            return next(snapshots)
+
+        def close(self):
+            pass
+
+    workspace = SimpleNamespace(
+        initial_selection=lambda config: {
+            "robot": "dual_yam",
+            "teleop": "vr_webxr",
+            "camera": "yam_orbbec",
+        },
+        resolve=lambda selected: {
+            "robot": {"settings": {"camera_endpoint": "tcp://127.0.0.1:5557"}},
+            "camera": {
+                "settings": {
+                    "camera": ["cam_high=260422275306"],
+                    "orbbec_camera": [
+                        "cam_left_wrist=CV2R1610003Z",
+                        "cam_right_wrist=CV2L360000CL",
+                    ]
+                }
+            },
+        },
+    )
+    runtime = SimpleNamespace(
+        console_ctx=SimpleNamespace(device_settings=SimpleNamespace(workspace=workspace)),
+        command_queue=None,
+    )
+    session = SimpleNamespace(interrupt_requested=False)
+    calls = []
+
+    def request(action, payload=None):
+        calls.append((action, payload))
+        if action == "status":
+            return {"pids": {"camera": 123}, "processes": {"camera": None}}
+        return {}
+
+    clock = iter([index * 0.1 for index in range(1, 30)])
+    monkeypatch.setattr(startup, "CameraSource", FakeCamera)
+    monkeypatch.setattr(startup.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(startup.time, "sleep", lambda _: None)
+
+    config = SimpleNamespace(
+        collection=SimpleNamespace(
+            schema=SimpleNamespace(
+                cameras={
+                    "cam_high": "observation.images.cam_high",
+                    "cam_left_wrist": "observation.images.cam_left_wrist",
+                    "cam_right_wrist": "observation.images.cam_right_wrist",
+                }
+            )
+        )
+    )
+    startup.prepare_device(
+        config,
+        runtime,
+        session,
+        SimpleNamespace(request=request),
+        "camera",
+        123,
+    )
+
+    assert calls[-1] == ("ready", {"component": "camera", "pid": 123})

@@ -234,6 +234,7 @@ def test_run_hardware_defaults_to_dual_leaders_and_gripper_calibration(
         "ORBBEC_CAMERA_TIMEOUT_MS",
         "ORBBEC_CAMERA_WARMUP_FRAMES",
         "ORBBEC_CAMERA_BRIGHTNESS",
+        "ORBBEC_POWER_LINE_FREQUENCY",
         "ORBBEC_ENABLED_CAMERAS",
         "ORBBEC_USB_RESET",
         "YAM_CPU_AFFINITY",
@@ -283,12 +284,11 @@ def test_run_hardware_defaults_to_dual_leaders_and_gripper_calibration(
     startup_index = args.index("--startup-position")
     assert args[startup_index + 1] == "zero"
     camera_indexes = [index for index, value in enumerate(args) if value == "--camera"]
-    assert camera_indexes == []
+    assert [args[index + 1] for index in camera_indexes] == ["cam_high=260422275306"]
     orbbec_indexes = [index for index, value in enumerate(args) if value == "--orbbec-camera"]
     assert [args[index + 1] for index in orbbec_indexes] == [
         "cam_left_wrist=CV2R1610003Z",
         "cam_right_wrist=CV2L360000CL",
-        "cam_high=CP0HC530000Z",
     ]
     camera_width_index = args.index("--camera-width")
     camera_height_index = args.index("--camera-height")
@@ -304,16 +304,21 @@ def test_run_hardware_defaults_to_dual_leaders_and_gripper_calibration(
     orbbec_format_index = args.index("--orbbec-color-format")
     orbbec_warmup_index = args.index("--orbbec-warmup-frames")
     orbbec_brightness_index = args.index("--orbbec-brightness")
+    orbbec_power_line_index = args.index("--orbbec-power-line-frequency")
     assert args[orbbec_width_index + 1] == "640"
     assert args[orbbec_height_index + 1] == "480"
     assert args[orbbec_fps_index + 1] == "30"
     assert args[orbbec_format_index + 1] == "MJPG"
     assert args[orbbec_warmup_index + 1] == "30"
-    assert args[orbbec_brightness_index + 1] == "15"
-    camera_profile_index = args.index("--camera-profile")
-    assert args[camera_profile_index + 1].endswith(
-        "examples/hardware/yam/profiles/d405_workcell.json"
-    )
+    assert args[orbbec_brightness_index + 1] == "25"
+    assert args[orbbec_power_line_index + 1] == "50"
+    assert "--camera-profile" not in args
+    exposure_limit_index = args.index("--camera-auto-exposure-limit-us")
+    gain_limit_index = args.index("--camera-auto-gain-limit")
+    warmup_index = args.index("--camera-warmup-frames")
+    assert args[exposure_limit_index + 1] == "16000"
+    assert args[gain_limit_index + 1] == "32"
+    assert args[warmup_index + 1] == "90"
     assert not list((root / "examples/hardware/yam").glob("run_*leader.sh"))
 
     env["ORBBEC_ENABLED_CAMERAS"] = ""

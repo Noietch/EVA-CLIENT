@@ -105,23 +105,28 @@ Then launch EVA:
 eva --config configs/01_deploy/dual_yam/openpi_qpos.py --web-port 8080
 ```
 
-The default three-camera mapping is:
+The default three-camera combination is:
 
-- `cam_high=CP0HC530000Z` (Orbbec Gemini 335)
+- `cam_high=260422275306` (RealSense D405)
 - `cam_left_wrist=CV2R1610003Z` (Orbbec Gemini 305)
 - `cam_right_wrist=CV2L360000CL` (Orbbec Gemini 305)
 
-The launcher enables all three Orbbec keys by default. For single-camera
-diagnosis, set `ORBBEC_ENABLED_CAMERAS=cam_right_wrist`. Streams default to
-`640x480` MJPG at 30 FPS, the highest rate verified with all three cameras on
-this workstation. A 60 FPS override is available, but all three devices are not
-reliably concurrent at that rate. Override mappings with
+The DEVICE camera dropdown exposes two named three-camera combinations:
+`1 D405 + 2 Orbbec 305` (default) and
+`2 Orbbec 305 + 1 Orbbec 355`. `None` disables all camera streams. Each
+combination is a list of three entries from `camera_devices` in `config.yaml`.
+
+For single-camera diagnosis with `run_hardware.sh`, set
+`D405_ENABLED_CAMERAS=` and `ORBBEC_ENABLED_CAMERAS=cam_right_wrist`. Streams
+default to `640x480` MJPG at 30 FPS. Override mappings with
 `ORBBEC_CAM_HIGH_SERIAL`, `ORBBEC_CAM_LEFT_WRIST_SERIAL`, and
 `ORBBEC_CAM_RIGHT_WRIST_SERIAL`; tune the stream with `ORBBEC_CAMERA_WIDTH`,
 `ORBBEC_CAMERA_HEIGHT`, `ORBBEC_CAMERA_FPS`, `ORBBEC_CAMERA_FORMAT`, and
 `ORBBEC_CAMERA_TIMEOUT_MS`. Auto exposure remains enabled and a moderate default
-brightness compensation of `+15` is applied; override it with
-`ORBBEC_CAMERA_BRIGHTNESS` (`-64..64`).
+brightness compensation of `+25` is applied; override it with
+`ORBBEC_CAMERA_BRIGHTNESS` (`-64..64`). Color anti-flicker defaults to `50 Hz`
+for the local power grid; use `ORBBEC_POWER_LINE_FREQUENCY=60` for 60 Hz lighting
+or `ORBBEC_POWER_LINE_FREQUENCY=0` to disable it.
 
 All enabled Orbbec streams share one isolated SDK process and one SDK context.
 The launcher starts the left, right, and overhead streams sequentially and
@@ -148,14 +153,10 @@ color auto exposure, and discard 30 frames before publishing. Camera waits do
 not run in the motor SDK process. Override the warmup with
 `ORBBEC_CAMERA_WARMUP_FRAMES`.
 
-To use the optional D405 overhead camera, disable the Orbbec `cam_high` mapping
-and enable the D405, for example
-`ORBBEC_ENABLED_CAMERAS=cam_left_wrist,cam_right_wrist D405_ENABLED_CAMERAS=cam_high`.
-For the D405, every `run_hardware.sh` launch loads
-`profiles/d405_workcell.json`. It enables automatic exposure, turns on the D405
-exposure/gain limit toggles, caps exposure at 33 ms and gain at 64, and discards
-90 startup frames while exposure converges. Override the profile with
-`D405_CAMERA_PROFILE`; the individual
+The default `run_hardware.sh` launch enables the D405 `cam_high` mapping and the
+two Orbbec wrist mappings. The matching `camera_devices.d405_high` entry in
+`config.yaml` enables automatic exposure, caps exposure at 16 ms and gain at 32,
+and discards 90 startup frames while exposure converges. The individual
 `D405_CAMERA_AUTO_EXPOSURE_LIMIT_US`, `D405_CAMERA_AUTO_GAIN_LIMIT`,
 `D405_CAMERA_EXPOSURE_US`, and `D405_CAMERA_WARMUP_FRAMES` variables remain
 available for temporary tuning.

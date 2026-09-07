@@ -7,8 +7,30 @@ from examples.hardware.yam import orbbec_camera as camera
 pytestmark = pytest.mark.unit
 
 
-@pytest.mark.parametrize("state_name", ["warming", "online"])
-def test_camera_start_overlaps_warmup(monkeypatch, state_name):
+def test_power_line_frequency_maps_50hz_to_sdk_mode():
+    writes = []
+    prop = object()
+    sdk = SimpleNamespace(
+        OBPropertyID=SimpleNamespace(OB_PROP_COLOR_POWER_LINE_FREQUENCY_INT=prop),
+        OBPermissionType=SimpleNamespace(PERMISSION_READ_WRITE="rw", PERMISSION_WRITE="write"),
+        OBPowerLineFreqMode=SimpleNamespace(
+            FREQUENCY_CLOSE=0,
+            FREQUENCY_50HZ=1,
+            FREQUENCY_60HZ=2,
+        ),
+    )
+    device = SimpleNamespace(
+        is_property_supported=lambda candidate, permission: (
+            candidate is prop and permission == "rw"
+        ),
+        set_int_property=lambda candidate, value: writes.append((candidate, value)),
+    )
+
+    assert camera.set_color_power_line_frequency(device, sdk, 50) == 50
+    assert writes == [(prop, 1)]
+
+
+def test_camera_start_waits_for_first_frame_before_opening_next(monkeypatch):
     states = [SimpleNamespace(value=0) for _ in range(3)]
     specs = [camera.OrbbecCameraSpec(f"cam_{i}", serial=str(i)) for i in range(3)]
     capture_args = tuple(
@@ -23,6 +45,8 @@ def test_camera_start_overlaps_warmup(monkeypatch, state_name):
 
         def wait(self, timeout):
             waits.append(timeout)
+            if timeout == 0.05:
+                states[len(started) - 1].value = camera._STATE_NAMES.index("online")
             # End the sidecar's idle loop after startup.
             return timeout == 0.2
 
@@ -32,7 +56,7 @@ def test_camera_start_overlaps_warmup(monkeypatch, state_name):
 
         def start(self):
             started.append(self.args[0].image_key)
-            self.args[5].value = camera._STATE_NAMES.index(state_name)
+            self.args[5].value = camera._STATE_NAMES.index("warming")
 
         def join(self, timeout):
             pass
@@ -51,4 +75,4 @@ def test_camera_start_overlaps_warmup(monkeypatch, state_name):
     camera._capture_orbbec_cameras(capture_args, Stop())
 
     assert started == [spec.image_key for spec in specs]
-    assert waits == [0.2]
+    assert waits == [0.05, 0.05, 0.2]

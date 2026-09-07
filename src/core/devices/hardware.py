@@ -13,6 +13,56 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 
 
 class HardwareCatalog:
+    @staticmethod
+    def _expand_camera_combinations(data: dict, path: Path) -> dict[str, dict]:
+        definitions = data.get("camera_devices", {})
+        options = copy.deepcopy(data["camera"])
+        for option_name, option in options.items():
+            cameras = option.pop("cameras", None)
+            if not cameras:
+                continue
+            settings = option.setdefault("settings", {})
+            repeated = list(option.get("repeat", []))
+            for camera_name in cameras:
+                if camera_name not in definitions:
+                    raise ValueError(f"{path}: Unknown camera device {camera_name!r}")
+                camera = definitions[camera_name]
+                for key, value in camera.get("settings", {}).items():
+                    if isinstance(value, list):
+                        settings.setdefault(key, []).extend(copy.deepcopy(value))
+                    elif isinstance(value, dict):
+                        target = settings.setdefault(key, {})
+                        if not isinstance(target, dict):
+                            raise ValueError(
+                                f"{path}: Camera combination {option_name!r} "
+                                f"has conflicting {key!r}"
+                            )
+                        overlap = set(target) & set(value)
+                        if any(target[name] != value[name] for name in overlap):
+                            raise ValueError(
+                                f"{path}: Camera combination {option_name!r} "
+                                f"has conflicting {key!r}"
+                            )
+                        target.update(copy.deepcopy(value))
+                    elif key not in settings:
+                        settings[key] = copy.deepcopy(value)
+                    elif settings[key] != value:
+                        raise ValueError(
+                            f"{path}: Camera combination {option_name!r} has conflicting {key!r}"
+                        )
+                repeated.extend(camera.get("repeat", []))
+                for key in ("profile_field", "serial_mapping", "profile_loader", "profiles"):
+                    if key not in camera:
+                        continue
+                    if key in option and option[key] != camera[key]:
+                        raise ValueError(
+                            f"{path}: Camera combination {option_name!r} has conflicting {key!r}"
+                        )
+                    option[key] = copy.deepcopy(camera[key])
+            if repeated:
+                option["repeat"] = list(dict.fromkeys(repeated))
+        return options
+
     def __init__(self) -> None:
         self.catalog: dict[str, dict] = {kind: {} for kind in ("robot", "teleop", "camera")}
         for path in sorted((REPOSITORY_ROOT / "examples/input_sources").glob("*/config.yaml")):
@@ -22,13 +72,15 @@ class HardwareCatalog:
         self.devices: dict[str, dict] = {}
         for path in sorted((REPOSITORY_ROOT / "examples/hardware").glob("*/config.yaml")):
             data = yaml.safe_load(path.read_text())
+            camera_options = self._expand_camera_combinations(data, path)
             for name, spec in data["robot"].items():
                 self.catalog["robot"][name] = spec
                 self.devices[name] = {}
                 for kind in ("teleop", "camera"):
+                    device_specs = camera_options if kind == "camera" else data[kind]
                     options = {
                         device: Config._merge_a_into_b(values, templates[kind].get(device, {}))
-                        for device, values in data[kind].items()
+                        for device, values in device_specs.items()
                     }
                     if kind == "teleop":
                         modes = [option.get("operation") for option in options.values()]

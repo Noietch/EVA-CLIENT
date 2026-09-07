@@ -32,7 +32,6 @@ DEFAULT_RIGHT_CAN_PORT = "can3"
 DEFAULT_ARM_TYPE = 2
 DEFAULT_GRIPPER_OPEN_POS = -3.4
 DEFAULT_GRIPPER_CLOSE_POS = 0.1
-ARX_X5_LIGHTING_PROFILES: tuple[str, ...] = ("day", "night")
 DEFAULT_ALICIA_PORT = ""
 DEFAULT_LEFT_ALICIA_PORT = "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5C4C192742-if00"
 DEFAULT_RIGHT_ALICIA_PORT = "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5C4C192642-if00"
@@ -700,17 +699,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Requested D405 color resolution, e.g. 640x480.",
     )
     parser.add_argument("--realsense-fps", type=int, default=30)
-    parser.add_argument(
-        "--realsense-profile-path",
-        type=Path,
-        default=_camera_module().DEFAULT_ARX_X5_D405_PROFILE_PATH,
-    )
     parser.add_argument("--realsense-timeout-ms", type=int, default=1000)
     parser.add_argument(
-        "--realsense-profile",
-        choices=ARX_X5_LIGHTING_PROFILES,
-        default="day",
-        help="D405 lighting profile; day avoids the longer night exposure.",
+        "--realsense-color-profiles",
+        type=_camera_module().parse_realsense_color_profiles_json,
+        default=None,
+        metavar="JSON",
+        help="Per-camera D405 color settings; defaults to the day combination in config.yaml.",
     )
     parser.add_argument(
         "--status-log-interval",
@@ -732,20 +727,19 @@ def build_config(args: argparse.Namespace) -> ArxX5ZmqConfig:
     cli_disabled = parse_name_list(args.disabled_camera)
     disabled_cameras = tuple(dict.fromkeys(configured_disabled + cli_disabled))
     resolution = camera.parse_resolution(args.realsense_resolution)
+    color_profiles = args.realsense_color_profiles or camera.load_default_realsense_color_profiles()
     default_cameras = camera.default_realsense_camera_specs(
         resolution=resolution,
         fps=int(args.realsense_fps),
         timeout_ms=int(args.realsense_timeout_ms),
-        profile=args.realsense_profile,
-        profile_path=args.realsense_profile_path,
+        color_profiles=color_profiles,
     )
     override_cameras = camera.parse_realsense_camera_specs(
         args.realsense_camera,
         resolution=resolution,
         fps=int(args.realsense_fps),
         timeout_ms=int(args.realsense_timeout_ms),
-        profile=args.realsense_profile,
-        profile_path=args.realsense_profile_path,
+        color_profiles=color_profiles,
     )
     cameras = camera.merge_realsense_camera_specs(
         default_cameras,

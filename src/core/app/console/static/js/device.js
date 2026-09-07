@@ -41,7 +41,7 @@ class DevicePanel {
       select.id = label.htmlFor;
       for (const [id, spec] of Object.entries(catalog[kind])) {
         if (kind === "robot") continue;
-        if (kind === "camera" && spec.disabled) continue;
+        if (kind === "camera" && spec.hidden) continue;
         const transport = S.CFG?.transport_type;
         const label = kind === "camera" && id === "external"
           ? ({ros1: "ROS 1", ros2: "ROS 2", zmq: "ZMQ"}[transport] || spec.label)
@@ -54,12 +54,6 @@ class DevicePanel {
         select.add(new Option("Fake", "fake"));
         select.value = this.data.values.robot.mode || "real";
         select.title = catalog.robot[selected.robot].label;
-      }
-      if (kind === "camera" && catalog.camera[selected.camera]?.disabled) {
-        const placeholder = new Option("Select camera", "", true, true);
-        placeholder.disabled = true;
-        select.add(placeholder, 0);
-        select.value = "";
       }
       select.onchange = () => this.select(kind, select.value);
       const actions = document.createElement("div");

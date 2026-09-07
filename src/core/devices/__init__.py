@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import importlib
+import json
 import math
 import os
 import sys
@@ -37,6 +38,8 @@ class DeviceWorkspace:
             # Retired UI selections migrate on read; preserve all parameter overrides.
             robot = self.saved["selected"]["robot"]
             self.saved["selected"]["teleop"] = self.catalog["robot"][robot]["defaults"]["teleop"]
+        if self.saved and self.saved["selected"].get("camera") == "x5_d405":
+            self.saved["selected"]["camera"] = "x5_d405_day"
 
     def initial_selection(self, config: ConfigDict) -> dict[str, str]:
         if self.saved:
@@ -272,9 +275,12 @@ class DeviceWorkspace:
                 elif isinstance(value, list):
                     if key in repeated:
                         for item in value:
-                            command.extend((flag, str(item)))
+                            rendered = json.dumps(item) if isinstance(item, dict) else str(item)
+                            command.extend((flag, rendered))
                     else:
                         command.extend((flag, *map(str, value)))
+                elif isinstance(value, dict):
+                    command.extend((flag, json.dumps(value, separators=(",", ":"))))
                 else:
                     command.extend((flag, str(value)))
             commands[kind] = command

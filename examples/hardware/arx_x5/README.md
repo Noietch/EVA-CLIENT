@@ -28,19 +28,20 @@ cam_left_wrist:  352122272510
 cam_right_wrist: 352122271326
 ```
 
-All three D405 cameras automatically load `d405_profile.yaml` at startup. The
-launcher uses the `day` profile by default: auto exposure is disabled and the
-high/left/right cameras use fixed exposures of `6000/8000/7000 us`. Use
-`--realsense-profile night` to switch to the night values
-`12000/14000/14000 us`. Both profiles use white-balance values calibrated with
+The Device page exposes `3 D405 - Day` and `3 D405 - Night` as two complete
+three-camera combinations defined in `config.yaml`; no secondary camera-profile
+selector or separate profile file is required. The launcher uses the day
+combination by default: auto exposure is disabled and the high/left/right
+cameras use fixed exposures of `6000/8000/7000 us`. The night combination uses
+`12000/14000/14000 us`. Both combinations use white-balance values calibrated with
 the whiteboard: high `4390 K`, left `4450 K`, and right `4410 K`. Each camera
 also loads its small BGR correction gain.
 
 The D405 auto white-balance mode works, but when the white desk or whiteboard
 covers much of the frame, auto exposure pushes about 68%-86% of pixels into
 the saturated region. X5 therefore disables auto exposure by default to avoid
-overexposing the board and desk. Recalibrate the corresponding day/night
-values in `d405_profile.yaml` when the collection environment changes.
+overexposing the board and desk. Recalibrate the corresponding day/night camera
+definitions in `config.yaml` when the collection environment changes.
 
 ## Initial Installation
 
