@@ -7,8 +7,8 @@ console = dict(initial_tab="collect")
 collection = dict(
     storage=dict(log_dir="work_dirs/collection/arx_r5/"),
     tasks=dict(
-        pick_up_the_apple=[("pick up the apple", -1)],
-        pick_up_the_orange=[("pick up the orange", -1)],
+        pick_up_the_apple=[("pick up the apple", 10)],
+        pick_up_the_orange=[("pick up the orange", 10)],
     ),
 )
 

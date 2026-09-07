@@ -77,7 +77,11 @@ def test_interrupted_home_is_not_ready(monkeypatch):
 def test_fake_robot_readiness_skips_homing(monkeypatch):
     qpos = np.array([0.0, 0.4])
     workspace = SimpleNamespace(
-        initial_selection=lambda config: {"robot": "dual_yam", "teleop": "vr_webxr", "camera": "none"},
+        initial_selection=lambda config: {
+            "robot": "dual_yam",
+            "teleop": "vr_webxr",
+            "camera": "none",
+        },
         resolve=lambda selected: {"robot": {"mode": "fake"}},
     )
     runtime = SimpleNamespace(
@@ -100,6 +104,53 @@ def test_fake_robot_readiness_skips_homing(monkeypatch):
         "_home_robot",
         lambda *args, **kwargs: pytest.fail("Fake robot must not run hardware homing"),
     )
+
+    startup.prepare_device(SimpleNamespace(), runtime, session, service, "robot", 123)
+
+    assert calls[-1] == ("ready", {"component": "robot", "pid": 123})
+
+
+def test_real_robot_readiness_waits_for_fresh_feedback(monkeypatch):
+    qpos = np.array([0.0, 0.4])
+    workspace = SimpleNamespace(
+        initial_selection=lambda config: {
+            "robot": "dual_yam",
+            "teleop": "vr_webxr",
+            "camera": "none",
+        },
+        resolve=lambda selected: {"robot": {"mode": "real"}},
+    )
+    feedback_ages = iter([5.0, None, 0.1])
+    observed_ages = []
+
+    def seconds_since_last_recv():
+        age = next(feedback_ages)
+        observed_ages.append(age)
+        return age
+
+    runtime = SimpleNamespace(
+        console_ctx=SimpleNamespace(device_settings=SimpleNamespace(workspace=workspace)),
+        command_queue=None,
+        transport=SimpleNamespace(
+            get_latest_qpos=lambda: qpos,
+            seconds_since_last_recv=seconds_since_last_recv,
+        ),
+    )
+    session = SimpleNamespace(interrupt_requested=False)
+    calls = []
+
+    def request(action, payload=None):
+        calls.append((action, payload))
+        if action == "status":
+            return {"pids": {"robot": 123}, "processes": {"robot": None}}
+        return {}
+
+    def home(*args):
+        assert observed_ages == [5.0, None, 0.1]
+
+    service = SimpleNamespace(request=request)
+    monkeypatch.setattr(startup, "_home_robot", home)
+    monkeypatch.setattr(startup.time, "sleep", lambda _: None)
 
     startup.prepare_device(SimpleNamespace(), runtime, session, service, "robot", 123)
 

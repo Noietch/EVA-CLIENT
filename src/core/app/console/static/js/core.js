@@ -59,6 +59,7 @@ export const RT_COLORS = ["#FF4D00", "#1F7A4D", "#2563EB", "#B0A14F", "#9B59B6",
 export const S = {
   CFG: null,
   SCENE_PLAN: null,
+  TELEOP_FEEDBACK: null,
   scenePlanTaskId: "",
   scenePlanSceneIndex: 0,
   scenePlanSceneId: "",

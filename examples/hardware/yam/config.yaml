@@ -97,6 +97,7 @@ camera:
       orbbec_width: 640
       orbbec_height: 480
       orbbec_fps: 30
+      orbbec_brightness: 15
   none: {}
   external: {}
 teleop:

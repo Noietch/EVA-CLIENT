@@ -913,7 +913,7 @@ function controlFeedback() {
       holdProgress: keyboardControlState.holdProgress,
     };
   }
-  const teleop = (S.STATUS && S.STATUS.teleop) || {};
+  const teleop = S.TELEOP_FEEDBACK || (S.STATUS && S.STATUS.teleop) || {};
   return {
     pressed: new Set(teleop.pressed_controls || []),
     holdProgress: teleop.hold_progress || {},

@@ -3,7 +3,7 @@
 import { $, LIVE, S, apiGet, apiPost, setCommandMetadata } from "./core.js";
 import { closeChartModal, drawLiveCharts, liveDimsAll, onScrubInput, openChartModal, resetLiveSeries } from "./charts.js";
 import { applyTune, applyManualTune, renderConfig, manualConnect, manualDisconnect, manualDispatchToggle, enterManualSim, applyStatus, pauseSetup, replayIsLocalMode, resumeSetup, retrySetup, startRunFromDebug, updateGuide } from "./run.js";
-import { changeCollectionExportFormat, changeCollectionSlotFilter, changeCollectionSlotPage, clearReviewPlayback, collectConfigured, exportCollectionQuality, installCollectKeyboardControls, pollEpisodeHistory, renderCollect, renderRolloutSave, returnReviewToLive, reviewActiveInCurrentTab, saveAnnotation, startCollectFromTab, submitEpisodeNote, submitEpisodeQc, submitQc, toggleCollectionSlotAll, uploadCollectionQuality } from "./collect.js";
+import { changeCollectionExportFormat, changeCollectionSlotFilter, changeCollectionSlotPage, clearReviewPlayback, collectConfigured, exportCollectionQuality, installCollectKeyboardControls, pollEpisodeHistory, renderCollect, renderCollectControls, renderRolloutSave, returnReviewToLive, reviewActiveInCurrentTab, saveAnnotation, startCollectFromTab, submitEpisodeNote, submitEpisodeQc, submitQc, toggleCollectionSlotAll, uploadCollectionQuality } from "./collect.js";
 import { evalReset, evalSetup, evalRunToggle, evalResumeOnEnter, submitEvalScore, loadEvalResults, renderEvalSelectors, loadResultsAll, tpSeek, tpToggle, trialPopClose } from "./eval.js";
 import { handleVisibilityChange, replayPlay, replayStop, replayToggle, seekReplay, loop, pollFrame, pollScene, refreshCameraStreams, exitReplayMode } from "./replay.js";
 import { pollRlSeries, renderRlConfig, renderRlStatus } from "./rl.js";
@@ -117,6 +117,7 @@ function afterWindowLoad(fn) {
   }
 
 function closeMediaStreams() {
+    closeTeleopFeedbackStream();
     document.querySelectorAll("img.cam").forEach((img) => {
       img.removeAttribute("src");
     });
@@ -126,6 +127,31 @@ function closeMediaStreams() {
       video.load();
     });
   }
+
+let teleopFeedbackSource = null;
+
+function closeTeleopFeedbackStream() {
+    if (!teleopFeedbackSource) return;
+    teleopFeedbackSource.close();
+    teleopFeedbackSource = null;
+}
+
+function startTeleopFeedbackStream() {
+    const controls = S.CFG && S.CFG.collection && S.CFG.collection.controls;
+    if (!controls || controls.mode !== "vr" || !window.EventSource || teleopFeedbackSource) return;
+    teleopFeedbackSource = new EventSource("/api/teleop/feedback");
+    teleopFeedbackSource.onmessage = (event) => {
+      try {
+        const feedback = JSON.parse(event.data);
+        S.TELEOP_FEEDBACK = feedback;
+        S.STATUS.teleop = { ...(S.STATUS.teleop || {}), ...feedback };
+        renderCollectControls();
+      } catch {}
+    };
+    // EventSource reconnects automatically. Keep the last valid snapshot visible
+    // during a short reconnect instead of replacing it with a stale 1 Hz status.
+    teleopFeedbackSource.onerror = () => {};
+}
 
 // #trial-pop is a single shared node used only by RESULT now: its detail view docks it
 // into #rv-detail-replay; anything else parks it on .workspace as a floating popup
@@ -240,6 +266,7 @@ async function boot() {
     initDashboard();
     installCollectKeyboardControls();
     renderConfig();
+    startTeleopFeedbackStream();
     // EVAL/RESULT use inline onclick handlers; expose them.
     window.tpToggle = tpToggle; window.tpSeek = tpSeek;
     window.trialPopClose = trialPopClose;

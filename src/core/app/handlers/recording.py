@@ -1288,12 +1288,12 @@ def ingest_client_teleop_action(
     runtime: RuntimeState,
     published: PublishedTeleopAction,
 ) -> bool:
-    """Capture one high-rate client action and at most one raw observation snapshot.
+    """Pair one client action with an execution-endpoint observation timestamp.
 
-    Actions retain their control-loop timestamps as an independent stream. Raw
-    state/camera snapshots remain at the execution endpoint's observation rate; the
-    collection aligner later interpolates both streams onto collection.storage.fps.
-    The call is intentionally single-shot and non-blocking.
+    ``PublishedTeleopAction.timestamp`` belongs to this process's monotonic clock,
+    while raw snapshots may be stamped by another process or host. Pairing both
+    streams on ``snapshot.timestamp`` keeps collection alignment in one clock domain.
+    The call remains single-shot and non-blocking.
     """
     del config
     logger_obj = runtime.episode_logger
@@ -1303,11 +1303,11 @@ def ingest_client_teleop_action(
         or not logger_obj.has_active_episode
     ):
         return False
-    logger_obj.ingest_collection_action(published.timestamp, published.qpos)
     snapshot = runtime.transport.acquire_collection_raw()
     if snapshot is None:
         return False
-    logger_obj.ingest_collection_client_snapshot(snapshot)
+    runtime.last_collection_timestamp = float(snapshot.timestamp)
+    logger_obj.ingest_collection_action_snapshot(snapshot, published.qpos)
     return True
 
 

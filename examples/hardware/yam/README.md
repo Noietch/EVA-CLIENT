@@ -119,8 +119,8 @@ reliably concurrent at that rate. Override mappings with
 `ORBBEC_CAM_HIGH_SERIAL`, `ORBBEC_CAM_LEFT_WRIST_SERIAL`, and
 `ORBBEC_CAM_RIGHT_WRIST_SERIAL`; tune the stream with `ORBBEC_CAMERA_WIDTH`,
 `ORBBEC_CAMERA_HEIGHT`, `ORBBEC_CAMERA_FPS`, `ORBBEC_CAMERA_FORMAT`, and
-`ORBBEC_CAMERA_TIMEOUT_MS`. Auto exposure remains enabled and a small default
-brightness compensation of `+5` is applied; override it with
+`ORBBEC_CAMERA_TIMEOUT_MS`. Auto exposure remains enabled and a moderate default
+brightness compensation of `+15` is applied; override it with
 `ORBBEC_CAMERA_BRIGHTNESS` (`-64..64`).
 
 All enabled Orbbec streams share one isolated SDK process and one SDK context.

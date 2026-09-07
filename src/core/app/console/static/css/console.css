@@ -1172,12 +1172,14 @@
     fill: var(--control-fill); stroke: none;
     transform: scaleX(calc(var(--control-progress) / 100));
     transform-box: fill-box; transform-origin: left center;
+    transition: transform .18s linear;
     will-change: transform;
   }
   .control-key-progress {
     fill: none; stroke: var(--control-color); stroke-width: 2.25; stroke-linecap: round;
     stroke-dasharray: 100; stroke-dashoffset: calc(100 - var(--control-progress));
-    transition: stroke .16s ease; will-change: stroke-dashoffset;
+    transition: stroke-dashoffset .18s linear, stroke .16s ease;
+    will-change: stroke-dashoffset;
   }
   .control-hint.gamepad[data-key="A"] { --control-color: #35B84B; --control-fill: #107C10; }
   .control-hint.gamepad[data-key="B"] { --control-color: #F04450; --control-fill: #C50F1F; }

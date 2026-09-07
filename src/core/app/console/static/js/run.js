@@ -1435,7 +1435,7 @@ function syncManualSliders(qpos) {
   }
 
 function renderManualCurrent(qpos) {
-    if (!S.manualActive || uiMode(S.STATUS.cli_mode) !== "manual" || !qpos) return;
+    if (!S.manualActive || S.ACTIVE_TAB !== "manual" || !qpos) return;
     _manualCurrentQpos = qpos.slice();
     _manualCurrentQpos.forEach((v, i) => {
       const current = $(`ms-current-${i}`);
@@ -1444,7 +1444,7 @@ function renderManualCurrent(qpos) {
   }
 
 function renderManualTarget(qpos) {
-    if (!S.manualActive || uiMode(S.STATUS.cli_mode) !== "manual") return;
+    if (!S.manualActive || S.ACTIVE_TAB !== "manual") return;
     buildManualSliders(qpos);
     syncManualSliders(qpos);
   }

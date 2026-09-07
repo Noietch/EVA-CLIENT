@@ -36,7 +36,9 @@ class OrbbecCameraSpec:
     timeout_ms: int = 1000
     retry_interval_s: float = 3.0
     warmup_frames: int = 30
-    brightness: int = 5
+    # Keep auto exposure enabled while applying a moderate compensation for
+    # the relatively dark workcell image.
+    brightness: int = 15
 
 
 def parse_orbbec_camera_specs(
@@ -48,7 +50,7 @@ def parse_orbbec_camera_specs(
     color_format: str = "MJPG",
     timeout_ms: int = 1000,
     warmup_frames: int = 30,
-    brightness: int = 5,
+    brightness: int = 15,
 ) -> tuple[OrbbecCameraSpec, ...]:
     """Parse repeated ``IMAGE_KEY=SERIAL`` or ``IMAGE_KEY=index:N`` mappings."""
     if width <= 0 or height <= 0 or fps <= 0 or timeout_ms <= 0:

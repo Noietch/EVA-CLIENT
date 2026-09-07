@@ -309,7 +309,7 @@ def test_run_hardware_defaults_to_dual_leaders_and_gripper_calibration(
     assert args[orbbec_fps_index + 1] == "30"
     assert args[orbbec_format_index + 1] == "MJPG"
     assert args[orbbec_warmup_index + 1] == "30"
-    assert args[orbbec_brightness_index + 1] == "5"
+    assert args[orbbec_brightness_index + 1] == "15"
     camera_profile_index = args.index("--camera-profile")
     assert args[camera_profile_index + 1].endswith(
         "examples/hardware/yam/profiles/d405_workcell.json"

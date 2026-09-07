@@ -820,7 +820,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--orbbec-color-format", default="MJPG")
     parser.add_argument("--orbbec-timeout-ms", type=int, default=1000)
     parser.add_argument("--orbbec-warmup-frames", type=int, default=30)
-    parser.add_argument("--orbbec-brightness", type=int, default=5)
+    parser.add_argument(
+        "--orbbec-brightness",
+        type=int,
+        default=15,
+        help="Orbbec color brightness compensation while auto exposure is enabled (-64..64).",
+    )
     parser.add_argument(
         "--list-cameras",
         action="store_true",

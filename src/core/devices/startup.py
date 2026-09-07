@@ -117,9 +117,12 @@ def prepare_device(config, runtime, session, service, component, pid, *, timeout
                 if qpos is not None:
                     # The fake node starts at its configured initial pose and does
                     # not need real-hardware homing or a freshness-gated command.
-                    if robot_mode != "fake":
+                    if robot_mode == "fake":
+                        break
+                    feedback_age = runtime.transport.seconds_since_last_recv()
+                    if feedback_age is not None and feedback_age <= 0.5:
                         _home_robot(config, runtime, session, qpos)
-                    break
+                        break
             elif component == "camera":
                 images = camera.snapshot()
                 expected = set(config.collection.schema.cameras)

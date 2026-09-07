@@ -2235,6 +2235,44 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             # Browser closed the tab / swapped the <img> src — expected, end quietly.
             return
 
+    def _stream_teleop_feedback(self) -> None:
+        """Stream the small, high-rate VR control snapshot used by Collect hints."""
+        self.close_connection = True
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate, private")
+        self.send_header("Connection", "keep-alive")
+        # Prevent buffering when the console is served behind nginx.
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+        self.wfile.write(b"retry: 1000\n\n")
+        self.wfile.flush()
+
+        period = 1.0 / 60.0
+        next_tick = time.monotonic()
+        try:
+            while not self.ctx.runtime.transport.is_shutdown():
+                status = teleop_status(self.ctx.runtime) or {}
+                payload = {
+                    "connected": bool(status.get("connected", False)),
+                    "pressed_controls": status.get("pressed_controls", []),
+                    "hold_progress": status.get("hold_progress", {}),
+                }
+                body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+                self.wfile.write(f"data: {body}\n\n".encode("utf-8"))
+                self.wfile.flush()
+
+                next_tick += period
+                delay = next_tick - time.monotonic()
+                if delay > 0:
+                    time.sleep(delay)
+                else:
+                    # Do not accumulate lag if the process was briefly busy.
+                    next_tick = time.monotonic()
+        except (BrokenPipeError, ConnectionResetError):
+            # Browser closed the EventSource or navigated away.
+            return
+
     # --- routing ---
 
     def do_GET(self) -> None:
@@ -3968,6 +4006,7 @@ _GET_ROUTES = {
     "/api/scene_plan": ConsoleRequestHandler._get_scene_plan,
     "/api/collection_slots": ConsoleRequestHandler._get_collection_slots,
     "/api/status": ConsoleRequestHandler._get_status,
+    "/api/teleop/feedback": ConsoleRequestHandler._stream_teleop_feedback,
     "/api/episodes": ConsoleRequestHandler._get_episodes,
     "/api/dashboard": ConsoleRequestHandler._get_dashboard,
     "/api/dashboard_upload": ConsoleRequestHandler._get_collect_quality_upload,

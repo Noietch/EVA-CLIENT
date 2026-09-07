@@ -40,6 +40,8 @@ let replayVideoFps = REPLAY_DEFAULT_FPS;
 
 const REAL_REPLAY_MAX_EXTRAPOLATE_S = 0.5;
 
+const REPLAY_UI_UPDATE_MS = 80;
+
 let realReplayVizRaf = null;
 
 let realReplayAnchorFrame = 0;
@@ -55,6 +57,10 @@ let replayLoadSeq = 0;
 let replayVideoAbortController = null;
 
 let replayLastRafAt = 0;
+
+let replayLastUiUpdateAt = 0;
+
+let replayLastUiFrame = -1;
 
 let replayTransformsUrl = "/api/replay_transforms";
 
@@ -76,6 +82,8 @@ function resetReplaySyncMetrics() {
     metrics.hardVideoSeeks = 0;
     metrics.playbackRateCorrections = 0;
     replayLastRafAt = 0;
+    replayLastUiUpdateAt = 0;
+    replayLastUiFrame = -1;
   }
 
 function recordReplaySync(frame) {
@@ -226,6 +234,7 @@ async function loadReplaySeries() {
     if (replayVideoAbortController) replayVideoAbortController.abort();
     replayVideoAbortController = new AbortController();
     replayStop();
+    stopRealReplayVisual();
     resetReplaySyncMetrics();
     LIVE.replayOwner = "replay";
     LIVE.replayError = "";
@@ -389,6 +398,7 @@ async function loadReviewPlayback(info, owner) {
     if (replayVideoAbortController) replayVideoAbortController.abort();
     replayVideoAbortController = new AbortController();
     replayStop();
+    stopRealReplayVisual();
     clientTrace("review.playback.begin", {
       episode: Number(info.episode || 0),
       dataset_dir: info.dataset_dir || "",
@@ -464,10 +474,16 @@ function replayApplyTransformFrame(frame) {
     const sceneReady = window.Scene3D && Scene3D.applyTransformFrame;
     if (!sceneReady) return false;
     const numericFrame = Math.max(0, Number(frame) || 0);
-    const chunk = [...replayTransformChunks.values()].find((candidate) => (
-      numericFrame >= candidate.start
-      && numericFrame < candidate.start + candidate.nFrames
-    ));
+    let chunk = null;
+    // Transform ranges are disjoint. Avoid spreading the whole Map and allocating
+    // an array on every animation frame, which becomes noticeable on long episodes.
+    for (const candidate of replayTransformChunks.values()) {
+      if (numericFrame >= candidate.start &&
+          numericFrame < candidate.start + candidate.nFrames) {
+        chunk = candidate;
+        break;
+      }
+    }
     if (!chunk) return false;
     Scene3D.applyTransformFrame(
       chunk.parts,
@@ -490,31 +506,48 @@ function syncRealReplayVisual(frame) {
       realReplayReportedFrame = reportedFrame;
       realReplayAnchorFrame = reportedFrame;
       realReplayAnchorWall = now;
-      syncReplayVideos(realReplayAnchorFrame);
+      syncReplayVideosToFrame(realReplayAnchorFrame, true);
       playStageVideos();
       realReplayLastVideoSync = realReplayAnchorWall;
       realReplayVizRaf = requestAnimationFrame(realReplayVisualFrame);
       return;
     }
-    if (reportedFrame > realReplayReportedFrame) {
-      const cursor = LIVE.cursorFrac != null ? LIVE.cursorFrac : LIVE.cursor;
+    const master = replayMasterVideo();
+    const masterReady = master && !master.error && master.readyState >= 2 &&
+      Number.isFinite(master.currentTime);
+    const visualFrame = masterReady
+      ? replayFrameAtTime(master.currentTime)
+      : realReplayAnchorFrame;
+    // The robot is authoritative, but only correct the browser clock when it has
+    // drifted materially. Seeking the video on every status poll causes visible
+    // stalls and makes the 3D model/cameras disagree during normal playback.
+    if (Math.abs(reportedFrame - visualFrame) > Math.max(2, replayVideoFps * 0.35)) {
       realReplayReportedFrame = reportedFrame;
-      realReplayAnchorFrame = Math.max(reportedFrame, cursor);
+      realReplayAnchorFrame = reportedFrame;
+      realReplayAnchorWall = now;
+      syncReplayVideosToFrame(reportedFrame, true);
+      playStageVideos();
+    } else if (reportedFrame > realReplayReportedFrame) {
+      realReplayReportedFrame = reportedFrame;
+      realReplayAnchorFrame = reportedFrame;
       realReplayAnchorWall = now;
     }
   }
 
 function realReplayVisualFrame() {
     if (realReplayVizRaf === null) return;
-    const elapsed = Math.min(
-      Math.max(0, (performance.now() - realReplayAnchorWall) / 1000),
-      REAL_REPLAY_MAX_EXTRAPOLATE_S,
-    );
+    const now = performance.now();
+    const master = replayMasterVideo();
+    const elapsed = Math.min(Math.max(0, (now - realReplayAnchorWall) / 1000), REAL_REPLAY_MAX_EXTRAPOLATE_S);
     const anchorTime = replayTimeAtFrame(realReplayAnchorFrame);
     const cursor = LIVE.cursorFrac != null ? LIVE.cursorFrac : LIVE.cursor;
-    const frame = Math.max(cursor, replayFrameAtTime(anchorTime + elapsed));
+    const masterReady = master && !master.error && master.readyState >= 2 &&
+      Number.isFinite(master.currentTime);
+    const frame = masterReady
+      ? Math.max(cursor, replayFrameAtTime(master.currentTime))
+      : Math.max(cursor, replayFrameAtTime(anchorTime + elapsed));
     setReplayCursorFrame(frame, false);
-    const now = performance.now();
+    if (masterReady) syncReplayVideos(frame, master);
     if (now - realReplayLastVideoSync > 250) {
       syncReplayVideos(frame);
       playStageVideos();
@@ -704,7 +737,7 @@ async function waitForStageVideosReady() {
     const signal = replayVideoAbortController ? replayVideoAbortController.signal : null;
     if (!videos.length) {
       clientTrace("review.videos.ready", { count: 0, errors: 0 });
-      return false;
+      return true;
     }
     setVideosLoading(videos, true, "loading video");
     await Promise.all(videos.map((v) => waitForVideoReady(v)));
@@ -719,7 +752,7 @@ async function waitForStageVideosReady() {
 
 async function waitForStageVideosPainted() {
     const videos = replayVideos();
-    if (!videos.length) return false;
+    if (!videos.length) return true;
     const signal = replayVideoAbortController ? replayVideoAbortController.signal : null;
     setVideosLoading(videos, true, "rendering video");
     await Promise.all(videos.map((v) => waitForVideoPainted(v)));
@@ -770,6 +803,28 @@ function syncReplayVideos(frame, master = null, force = false) {
         LIVE.replaySync.playbackRateCorrections += 1;
       } else {
         v.playbackRate = 1;
+      }
+    });
+  }
+
+function syncReplayVideosToFrame(frame, force = false) {
+    const target = replayTimeAtFrame(frame);
+    if (!Number.isFinite(target)) return;
+    const hardTolerance = 0.75 / replayVideoFps;
+    replayVideos().forEach((video) => {
+      if (video.error) return;
+      ensureVideoSource(video);
+      const drift = (video.currentTime || 0) - target;
+      if (!force && Math.abs(drift) <= hardTolerance) return;
+      const seek = () => {
+        if (!video.error) {
+          try { video.currentTime = target; } catch (e) { /* metadata not ready */ }
+        }
+      };
+      if (video.readyState >= 1) seek();
+      else {
+        video.addEventListener("loadedmetadata", seek, { once: true });
+        try { video.load(); } catch (e) { /* transient */ }
       }
     });
   }
@@ -865,6 +920,11 @@ function setReplayCursorFrame(frame, syncVideos = false) {
     LIVE.cursor = Math.max(0, Math.min(Math.floor(frac), LIVE.n - 1));
     replaySetUrdfFrame(frac);
     if (syncVideos) syncReplayVideos(frac, null, true);
+    const now = performance.now();
+    if (now - replayLastUiUpdateAt < REPLAY_UI_UPDATE_MS &&
+        Math.abs(frac - replayLastUiFrame) < 0.5) return;
+    replayLastUiUpdateAt = now;
+    replayLastUiFrame = frac;
     recordReplaySync(frac);
     updateScrub();
     drawReplayCharts();
@@ -909,12 +969,8 @@ async function replayPlay() {
     syncReplayRunButtons();
     const videos = replayVideos();
     const master = replayMasterVideo();
-    if (!master) {
-      LIVE.playing = false;
-      LIVE.replayError = "replay master camera unavailable";
-      updateScrub();
-      return;
-    }
+    const visualStartWall = performance.now();
+    const visualStartTime = replayTimeAtFrame(LIVE.cursor);
     pauseStageVideos();
     await alignStageVideos(LIVE.cursor);
     await Promise.all(videos.map((video) => video.play().catch(() => null)));
@@ -930,10 +986,15 @@ async function replayPlay() {
       replayLastRafAt = now;
       setStageVideoLoading(false, "");
       const cursor = LIVE.cursorFrac != null ? LIVE.cursorFrac : LIVE.cursor;
-      const framePos = Math.max(cursor, replayFrameAtTime(master.currentTime));
+      const masterReady = master && !master.error && master.readyState >= 2 &&
+        Number.isFinite(master.currentTime);
+      const framePos = masterReady
+        ? Math.max(cursor, replayFrameAtTime(master.currentTime))
+        : Math.max(cursor, replayFrameAtTime(
+            visualStartTime + Math.max(0, (now - visualStartWall) / 1000),
+          ));
       setReplayCursorFrame(framePos, false);
-      syncReplayVideos(framePos, master);
-      recordReplaySync(framePos);
+      if (masterReady) syncReplayVideos(framePos, master);
       if (framePos >= LIVE.n - 1) { replayStop(); return; }
       LIVE.raf = requestAnimationFrame(frame);
     };
@@ -1033,13 +1094,15 @@ async function pollFrame() {
           }
         }
       }
-      // manual mode: seed sliders (once) from command qpos. Fall back to live qpos
-      // only to seed the very first build; once built, never feed the lagging
-      // real-robot position back into the sliders or they snap backward mid-drag.
-      if (S.manualActive && uiMode(S.STATUS.cli_mode) === "manual") {
+      // DEVICE owns the manual controls. The backend mode can briefly lag behind
+      // the tab switch, and /api/frame returns qpos=null while Robot is stopped;
+      // neither condition should make the already-visible slider panel disappear.
+      // Seed from live qpos only for the first build. Once built, never feed the
+      // lagging real-robot position back into the sliders during a drag.
+      if (S.ACTIVE_TAB === "manual" && S.manualActive) {
         renderManualTarget(S.STATUS.manual_qpos || (S._manualSlidersBuilt ? null : f.qpos));
         renderManualCurrent(f.qpos);
-      } else if (S._manualSlidersBuilt) {
+      } else if (S.ACTIVE_TAB !== "manual" && S._manualSlidersBuilt) {
         S._manualSlidersBuilt = false;
         $("manual-sliders-m").innerHTML = "";
       }
