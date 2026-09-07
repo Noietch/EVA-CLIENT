@@ -77,7 +77,42 @@ class DevicePanel {
       row.append(label, select, actions);
       $("device-selections").append(row);
     }
+    this.renderRobotSettings();
     this.updateControls();
+  }
+
+  renderRobotSettings() {
+    const robot = this.data.catalog.robot[this.data.selected.robot];
+    const controls = robot.settings_ui || {};
+    const settings = this.data.values.robot.settings || {};
+    for (const [key, control] of Object.entries(controls)) {
+      const row = document.createElement("div");
+      row.className = "device-row device-setting-row";
+      const label = document.createElement("label");
+      const id = "device-setting-" + key.replaceAll("_", "-");
+      label.htmlFor = id;
+      label.textContent = control.label || key;
+      const select = document.createElement("select");
+      select.id = id;
+      select.dataset.deviceSetting = key;
+      for (const [value, text] of Object.entries(control.options || {})) {
+        select.add(new Option(text, value));
+      }
+      const current = settings[key];
+      const matchingValue = [...select.options].find(option =>
+        typeof current === "number"
+          ? Number(option.value) === current
+          : option.value === String(current)
+      )?.value;
+      if (matchingValue === undefined) {
+        select.add(new Option("Custom (" + current + ")", String(current)));
+      }
+      select.value = matchingValue ?? String(current);
+      select.onchange = () => this.setRobotSetting(key, select.value);
+      const spacer = document.createElement("div");
+      row.append(label, select, spacer);
+      $("device-selections").append(row);
+    }
   }
 
   async select(kind, value) {
@@ -86,11 +121,24 @@ class DevicePanel {
     if (kind === "robot") {
       values.robot.mode = value;
     } else selected[kind] = value;
+    const body = kind === "robot" ? {selected, values} : {selected};
+    await this.applySelection(body);
+  }
+
+  async setRobotSetting(key, value) {
+    const selected = {...this.data.selected};
+    const values = structuredClone(this.data.values);
+    const current = values.robot.settings[key];
+    values.robot.settings[key] = typeof current === "number" ? Number(value) : value;
+    await this.applySelection({selected, values});
+  }
+
+  async applySelection(body) {
     this.pending = true;
     this.updateControls();
     try {
       const before = await apiGet("/api/device_settings");
-      const response = await apiPost("/api/device_selection", kind === "robot" ? {selected, values} : {selected});
+      const response = await apiPost("/api/device_selection", body);
       if (response.ok === false) throw new Error(response.error);
       for (let attempt = 0; attempt < 120; attempt++) {
         await new Promise(resolve => setTimeout(resolve, 250));
@@ -191,6 +239,11 @@ class DevicePanel {
       $("device-select-" + kind).disabled = this.killBusy || this.pending || moving || this.busy.size > 0 ||
         Object.values(this.status.processes).some(code => code === null);
     }
+    const settingLocked = this.killBusy || this.pending || moving || this.busy.size > 0 ||
+      Object.values(this.status.processes).some(code => code === null);
+    document.querySelectorAll("[data-device-setting]").forEach(control => {
+      control.disabled = settingLocked;
+    });
     const kill = $("device-kill-all");
     if (kill) kill.disabled = this.killBusy || this.pending;
     const pico = $("device-open-pico");

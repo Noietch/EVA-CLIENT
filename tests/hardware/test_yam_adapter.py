@@ -54,6 +54,7 @@ class _Config:
     end_effector_mass: float | None = None
     gravity_comp_factor: tuple[float, ...] | None = None
     gripper_limits_override: tuple[float, float] | None = None
+    gripper_max_speed: float = 0.0
     tracking_ki: float = 0.0
     tracking_trim_limit: float = 0.12
     tracking_deadband: float = 0.002
@@ -180,6 +181,37 @@ def test_follower_commands_both_arms_and_watchdog(monkeypatch: pytest.MonkeyPatc
     followers.watchdog_tick()
     assert robots_by_channel["can0"].idle_count == 1
     assert robots_by_channel["can1"].idle_count == 1
+
+
+def test_follower_limits_only_gripper_speed(monkeypatch: pytest.MonkeyPatch) -> None:
+    robots_by_channel: dict[str, _FakeYam] = {}
+
+    def factory(**kwargs: object) -> _FakeYam:
+        robot = _FakeYam()
+        robots_by_channel[str(kwargs["channel"])] = robot
+        return robot
+
+    clock = 10.0
+    monkeypatch.setattr("examples.hardware.yam.robot.time.monotonic", lambda: clock)
+    followers = YamFollowers(_Config(gripper_max_speed=2.0), factory=factory)
+    target = np.asarray(
+        [0.1, 0.4, 0.5, 0.1, 0.1, 0.1, 0.0] * 2,
+        dtype=np.float32,
+    )
+
+    followers.apply_action(YamWireAction(t=clock, action=target, target="real"))
+    assert robots_by_channel["can0"].qpos[:6] == pytest.approx(target[:6])
+    assert robots_by_channel["can0"].qpos[6] == pytest.approx(1.0)
+
+    clock = 10.05
+    followers.watchdog_tick()
+    assert robots_by_channel["can0"].qpos[:6] == pytest.approx(target[:6])
+    assert robots_by_channel["can0"].qpos[6] == pytest.approx(0.9)
+
+    clock = 10.1
+    followers.watchdog_tick()
+    assert robots_by_channel["can0"].qpos[6] == pytest.approx(0.8)
+    assert robots_by_channel["can1"].qpos[6] == pytest.approx(0.8)
 
 
 def test_run_hardware_defaults_to_dual_leaders_and_gripper_calibration(

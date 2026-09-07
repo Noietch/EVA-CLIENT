@@ -19,7 +19,16 @@ robot:
       - right_arm=can1
       gripper_limits_override: []
       allow_gripper_calibration: true
+      gripper_max_speed: 2.0
       rate: 30
+    settings_ui:
+      gripper_max_speed:
+        label: Grip speed
+        options:
+          '1.0': Gentle (1.0 s)
+          '1.5': Smooth (0.67 s)
+          '2.0': Normal (0.5 s)
+          '0.0': Unlimited
     config:
       robot:
         type: dual_yam
@@ -87,9 +96,12 @@ camera_devices:
   orbbec_305_left_wrist:
     repeat:
     - orbbec_camera
+    - orbbec_startup_timeout
     settings:
       orbbec_camera:
       - cam_left_wrist=CV2R1610003Z
+      orbbec_startup_timeout:
+      - cam_left_wrist=3
       orbbec_width: 640
       orbbec_height: 480
       orbbec_fps: 30

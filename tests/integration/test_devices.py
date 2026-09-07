@@ -109,18 +109,23 @@ def test_device_catalog_composes_and_restores_each_robot(tmp_path, monkeypatch):
     values = workspace.resolve(selected)
     assert all("index:" not in value for value in values["camera"]["settings"]["camera"])
     values["robot"]["settings"]["gripper_limits_override"] = [0.0, 1.0]
+    values["robot"]["settings"]["gripper_max_speed"] = 1.5
     values["teleop"]["settings"]["leader_cans"] = ["can2", "can3"]
     workspace.save(selected, values)
     from examples.hardware.yam.node import build_arg_parser, build_config
 
     node_config = build_config(build_arg_parser().parse_args(workspace.commands()["robot"][3:]))
     assert node_config.startup_position == "zero"
+    assert node_config.gripper_max_speed == 1.5
     assert not node_config.direct_leader_control
     assert node_config.leader_can_channels
     camera_config = build_config(build_arg_parser().parse_args(workspace.commands()["camera"][3:]))
     assert len(camera_config.cameras) == 1
     assert len(camera_config.orbbec_cameras) == 2
     assert camera_config.cameras[0].auto_exposure_limit_us == 16000
+    assert camera_config.orbbec_cameras[0].image_key == "cam_left_wrist"
+    assert camera_config.orbbec_cameras[0].startup_timeout_s == 3.0
+    assert camera_config.orbbec_cameras[1].startup_timeout_s == 8.0
     selected["camera"] = "x5_d405_day"
     with pytest.raises(ValueError, match="not supported"):
         workspace.resolve(selected)

@@ -199,6 +199,13 @@ touches the CAN SDK. Override the rates independently with `CONTROL_RATE` and
 `PUBLISH_RATE`. The periodic hardware status log includes the achieved control
 rate and per-joint `target - current` tracking error in radians.
 
+Follower grippers independently limit fast target changes to `2.0` normalized
+travel units per second by default, giving a minimum full-stroke time of about
+0.5 seconds without slowing the six arm joints. Slow teaching-handle motion is
+passed through unchanged. Set `robot.dual_yam.settings.gripper_max_speed` in
+`config.yaml`, or choose `Grip speed` on the DEVICE page while the devices are
+stopped. Set it to `1.5` for a softer response or `0` to disable the limiter.
+
 After selecting a collection task and switching `ARM ON` in the Collection page,
 either leader's `RECORD` button starts an episode when idle and ends/saves it
 while recording. `SYNC` is the cancel button: while recording it stops and

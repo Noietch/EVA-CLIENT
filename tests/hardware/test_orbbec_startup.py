@@ -76,3 +76,54 @@ def test_camera_start_waits_for_first_frame_before_opening_next(monkeypatch):
 
     assert started == [spec.image_key for spec in specs]
     assert waits == [0.05, 0.05, 0.2]
+
+
+def test_camera_specs_support_per_camera_startup_timeout():
+    specs = camera.parse_orbbec_camera_specs(
+        ["cam_left_wrist=left", "cam_right_wrist=right"],
+        startup_timeouts={"cam_left_wrist": 3.0},
+    )
+
+    assert specs[0].startup_timeout_s == 3.0
+    assert specs[1].startup_timeout_s == 8.0
+
+
+def test_camera_specs_reject_unknown_startup_timeout_key():
+    with pytest.raises(ValueError, match="no matching camera"):
+        camera.parse_orbbec_camera_specs(
+            ["cam_left_wrist=left"],
+            startup_timeouts={"cam_right_wrist": 3.0},
+        )
+
+
+def test_camera_uses_fast_retry_until_first_frame(monkeypatch):
+    spec = camera.OrbbecCameraSpec("cam_left_wrist", serial="left")
+    frame_count = SimpleNamespace(value=0)
+    waits = []
+    attempts = 0
+
+    class Stop:
+        def is_set(self):
+            return attempts >= 2
+
+        def wait(self, timeout):
+            waits.append(timeout)
+            return False
+
+    def fail_start(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise TimeoutError("no frame")
+
+    monkeypatch.setattr(camera, "_run_orbbec_capture_loop", fail_start)
+    camera._capture_orbbec_camera(
+        spec,
+        None,
+        None,
+        frame_count,
+        None,
+        SimpleNamespace(value=0),
+        Stop(),
+    )
+
+    assert waits == [0.25, 0.25]

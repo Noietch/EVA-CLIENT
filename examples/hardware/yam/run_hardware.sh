@@ -184,6 +184,7 @@ node_args=(
   --idle-mode "${YAM_IDLE_MODE:-gravity_comp}"
   --startup-position "${YAM_STARTUP_POSITION:-zero}"
   --startup-duration "${YAM_STARTUP_DURATION:-5.0}"
+  --gripper-max-speed "${YAM_GRIPPER_MAX_SPEED:-2.0}"
   --tracking-ki "${YAM_TRACKING_KI:-0.0}"
   --tracking-trim-limit "${YAM_TRACKING_TRIM_LIMIT:-0.12}"
   --tracking-deadband "${YAM_TRACKING_DEADBAND:-0.002}"
