@@ -5,8 +5,13 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from core.app.handlers.recording import ingest_client_teleop_action
+from core.app.handlers.recording import (
+    collect_start,
+    ingest_client_teleop_action,
+    start_episode,
+)
 from core.app.handlers.teleop import PublishedTeleopAction
+from core.app.state import SessionState
 from core.types import RawCollectionSnapshot
 
 pytestmark = pytest.mark.unit
@@ -89,3 +94,33 @@ def test_client_collection_does_not_read_outside_active_episode() -> None:
 
     assert not ingest_client_teleop_action(None, runtime, _published())
     assert transport.calls == 0
+
+
+def test_eval_episode_clears_backlog_before_capture_starts() -> None:
+    calls: list[object] = []
+
+    class _EpisodeLogger:
+        _log_dir = "/tmp/eval"
+
+        def start_episode(self, *, task: str) -> None:
+            calls.append(("start_episode", task))
+
+    class _Transport:
+        def clear_collection_backlog(self) -> None:
+            calls.append("clear_collection_backlog")
+
+        def prepare_collection_capture(self, directory: str | None) -> None:
+            calls.append(("prepare_collection_capture", directory))
+
+    runtime = SimpleNamespace(
+        episode_logger=_EpisodeLogger(),
+        transport=_Transport(),
+    )
+
+    start_episode(runtime, SessionState(selected_task="pick"))
+
+    assert calls == [
+        "clear_collection_backlog",
+        ("prepare_collection_capture", "/tmp/eval"),
+        ("start_episode", "pick"),
+    ]
