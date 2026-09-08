@@ -87,6 +87,21 @@ class YamArmConfig(Protocol):
     def gripper_limits_override(self) -> tuple[float, float] | None: ...
 
     @property
+    def gripper_close_torque_limit(self) -> float: ...
+
+    @property
+    def gripper_open_torque_limit(self) -> float: ...
+
+    @property
+    def gripper_kp(self) -> float: ...
+
+    @property
+    def gripper_damping(self) -> float: ...
+
+    @property
+    def gripper_max_speed(self) -> float: ...
+
+    @property
     def tracking_ki(self) -> float: ...
 
     @property
@@ -168,6 +183,10 @@ def _sdk_factory(
     ee_mass: float | None = None,
     gravity_comp_factor: np.ndarray | None = None,
     gripper_limits_override: np.ndarray | None = None,
+    gripper_kp: float = 5.0,
+    gripper_damping: float = 0.5,
+    gripper_close_torque_limit: float = 0.29,
+    gripper_open_torque_limit: float = 0.29,
 ) -> Any:
     try:
         from i2rt.robots.get_robot import get_yam_robot
@@ -184,6 +203,10 @@ def _sdk_factory(
         ee_mass=ee_mass,
         gravity_comp_factor=gravity_comp_factor,
         gripper_limits_override=gripper_limits_override,
+        gripper_kp=gripper_kp,
+        gripper_kd=gripper_damping,
+        limit_gripper_force=-1.0,
+        gripper_torque_limits=(gripper_open_torque_limit, gripper_close_torque_limit),
         enable_auto_recovery=enable_auto_recovery,
     )
 
@@ -204,6 +227,9 @@ class YamFollowers:
         self._last_servo_time: float | None = None
         self._control_active = False
         self._active_targets: dict[str, np.ndarray] = {}
+        self._gripper_max_speed = float(getattr(config, "gripper_max_speed", 0.0))
+        self._gripper_commands: dict[str, float] = {}
+        self._last_gripper_servo_time: dict[str, float] = {}
         self._tracking_trim = {
             name: np.zeros(ARM_DOF, dtype=np.float64) for name in config.group_names
         }
@@ -290,6 +316,8 @@ class YamFollowers:
             except Exception:
                 logger.debug("Failed to close offline YAM %s", group_name, exc_info=True)
         self._offline_until[group_name] = time.monotonic() + RETRY_INTERVAL_SEC
+        self._gripper_commands.pop(group_name, None)
+        self._last_gripper_servo_time.pop(group_name, None)
         logger.warning(
             "YAM follower %s offline; retrying in %.1f s: %s",
             group_name,
@@ -322,6 +350,10 @@ class YamFollowers:
                     if self._config.gripper_limits_override is None
                     else np.asarray(self._config.gripper_limits_override, dtype=np.float64)
                 ),
+                gripper_kp=self._config.gripper_kp,
+                gripper_damping=self._config.gripper_damping,
+                gripper_close_torque_limit=self._config.gripper_close_torque_limit,
+                gripper_open_torque_limit=self._config.gripper_open_torque_limit,
             )
             if int(robot.num_dofs()) != GROUP_DOF:
                 raise ValueError(
@@ -337,15 +369,8 @@ class YamFollowers:
                 else:
                     kp = np.asarray([80.0, 80.0, 80.0, self._config.joint4_kp, 10.0, 10.0])
                     kd = np.asarray([5.0, 5.0, 5.0, 1.5, 1.5, 1.5])
-                    gripper_gains = {
-                        "linear_3507": (10.0, 0.3),
-                        "crank_4310": (20.0, 0.5),
-                        "linear_4310": (20.0, 0.5),
-                        "flexible_4310": (20.0, 0.5),
-                    }
-                    gripper_kp, gripper_kd = gripper_gains[self._config.gripper_type]
-                    kp = np.append(kp, gripper_kp)
-                    kd = np.append(kd, gripper_kd)
+                    kp = np.append(kp, self._config.gripper_kp)
+                    kd = np.append(kd, self._config.gripper_damping)
                     update_kp_kd(kp, kd)
                     logger.info(
                         "Set YAM follower %s joint4 kp to %.1f",
@@ -381,12 +406,24 @@ class YamFollowers:
         offset = self._offset(group_name)
         with self._lock:
             self._qpos[offset : offset + GROUP_DOF] = current
+        self._gripper_commands[group_name] = float(current[GRIPPER_INDEX])
+        self._last_gripper_servo_time[group_name] = time.monotonic()
         self._robots[group_name] = robot
         self._offline_until.pop(group_name, None)
         logger.info(
             "Connected YAM follower %s on %s",
             group_name,
             self._config.follower_can_channels[group_name],
+        )
+        logger.info(
+            "YAM %s gripper bounded impedance: kp=%.3f damping=%.3f "
+            "close_limit=%.3f Nm open_limit=%.3f Nm max_speed=%.3f/s",
+            group_name,
+            self._config.gripper_kp,
+            self._config.gripper_damping,
+            self._config.gripper_close_torque_limit,
+            self._config.gripper_open_torque_limit,
+            self._gripper_max_speed,
         )
         return robot
 
@@ -534,6 +571,12 @@ class YamFollowers:
                 qpos[offset : offset + GROUP_DOF] = measured
                 self._update_runtime_tracking_trim(group_name, part, measured, now)
                 command = self._tracking_command(group_name, part)
+                command[GRIPPER_INDEX] = self._limited_gripper_target(
+                    group_name,
+                    desired=float(part[GRIPPER_INDEX]),
+                    measured=float(measured[GRIPPER_INDEX]),
+                    now=now,
+                )
                 robot.command_joint_pos(command.astype(np.float64, copy=True))
             except Exception as exc:
                 self._mark_offline(group_name, exc)
@@ -542,6 +585,28 @@ class YamFollowers:
         with self._lock:
             self._qpos = qpos.astype(np.float32)
         self._last_servo_time = now
+
+    def _limited_gripper_target(
+        self,
+        group_name: str,
+        *,
+        desired: float,
+        measured: float,
+        now: float,
+    ) -> float:
+        """Limit only fast gripper target changes while preserving slow leader motion."""
+        if self._gripper_max_speed <= 0:
+            limited = desired
+        else:
+            previous = self._gripper_commands.get(group_name, measured)
+            previous_time = self._last_gripper_servo_time.get(group_name, now)
+            dt = min(max(now - previous_time, 0.0), 0.05)
+            max_step = self._gripper_max_speed * dt
+            limited = float(np.clip(desired, previous - max_step, previous + max_step))
+        limited = float(np.clip(limited, 0.0, 1.0))
+        self._gripper_commands[group_name] = limited
+        self._last_gripper_servo_time[group_name] = now
+        return limited
 
     def apply_action(self, wire_action: WireAction) -> None:
         parts = split_action(wire_action.action, self._config.group_names)
@@ -555,6 +620,13 @@ class YamFollowers:
             return
 
         now = time.monotonic()
+        if not self._control_active:
+            with self._lock:
+                cached_qpos = self._qpos.copy()
+            for group_name in self._config.group_names:
+                offset = self._offset(group_name)
+                self._gripper_commands[group_name] = float(cached_qpos[offset + GRIPPER_INDEX])
+                self._last_gripper_servo_time[group_name] = now
         for group_name, part in parts.items():
             self._active_targets[group_name] = part.astype(np.float64, copy=True)
         self._servo_active_targets(now)
@@ -604,6 +676,8 @@ class YamFollowers:
         self._last_command_time = None
         self._last_servo_time = None
         self._active_targets.clear()
+        self._gripper_commands.clear()
+        self._last_gripper_servo_time.clear()
 
     def hardware_status(self) -> dict[str, str]:
         now = time.monotonic()

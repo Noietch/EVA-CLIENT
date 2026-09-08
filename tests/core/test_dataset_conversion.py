@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import pickle
+import shutil
 import sys
 import types
 from collections.abc import Iterator
@@ -107,11 +108,18 @@ def _patch_video_io(monkeypatch: pytest.MonkeyPatch) -> None:
     import tools.conversion.hdf5 as hdf5_module
     import tools.conversion.lerobot_v3 as lerobot_v3_module
     import tools.conversion.mcap as mcap_module
+    import tools.conversion.native as native_module
 
     monkeypatch.setattr(hdf5_module, "video_frames", _read_fake_video)
     monkeypatch.setattr(lerobot_v3_module, "video_frames", _read_fake_video)
     monkeypatch.setattr(mcap_module, "video_frames", _read_fake_video)
     monkeypatch.setattr(lerobot_v3_module.imageio, "get_writer", _FakeVideoWriter)
+
+    def copy_video(source: Path, target: Path, **_: object) -> None:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+
+    monkeypatch.setattr(native_module, "_transcode_dataset_video", copy_video)
 
 
 def _source_dataset(
