@@ -10,6 +10,8 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from core.recorder.video_encoding import dataset_h264_ffmpeg_params
+
 from .source import LeRobotV21Source, SourceEpisode, video_frames, write_common_metadata
 
 _DATA_FILE_LIMIT = 100 * 1024 * 1024
@@ -117,14 +119,7 @@ class _LeRobotV3Writer:
             fps=self.source.fps,
             codec="libx264",
             macro_block_size=1,
-            ffmpeg_params=[
-                "-preset",
-                "ultrafast",
-                "-g",
-                str(max(1, round(self.source.fps))),
-                "-movflags",
-                "+faststart",
-            ],
+            ffmpeg_params=dataset_h264_ffmpeg_params(),
         )
         self.video_writers[key] = writer
         return writer

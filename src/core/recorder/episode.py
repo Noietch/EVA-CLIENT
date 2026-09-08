@@ -43,6 +43,7 @@ from core.recorder.collection_alignment import (
     image_skew_tolerance_sec,
 )
 from core.recorder.lerobot_meta import build_info, history_row, summarize_quality_issues
+from core.recorder.video_encoding import dataset_h264_ffmpeg_params
 from core.types import (
     CollectionRawBatch,
     CollectionRawImage,
@@ -1599,16 +1600,7 @@ class EpisodeLogger:
                 fps=video_fps,
                 codec="libx264",
                 macro_block_size=1,
-                ffmpeg_params=[
-                    "-preset",
-                    "ultrafast",
-                    "-threads",
-                    "1",
-                    "-g",
-                    str(max(1, round(video_fps))),
-                    "-movflags",
-                    "+faststart",
-                ],
+                ffmpeg_params=dataset_h264_ffmpeg_params(),
             )
             active_value: Any | None = None
             active_frame: np.ndarray | None = None
@@ -1664,25 +1656,13 @@ class EpisodeLogger:
         ]
         if size is not None:
             command.extend(["-vf", f"scale={size[1]}:{size[0]}:flags=fast_bilinear"])
-        keyframe_interval = max(1, round(fps))
         command.extend(
             [
                 "-c:v",
                 "libx264",
-                "-preset",
-                "ultrafast",
-                "-threads",
-                "1",
                 "-pix_fmt",
                 "yuv420p",
-                "-g",
-                str(keyframe_interval),
-                "-keyint_min",
-                str(keyframe_interval),
-                "-sc_threshold",
-                "0",
-                "-movflags",
-                "+faststart",
+                *dataset_h264_ffmpeg_params(),
                 str(path),
             ]
         )
@@ -1751,14 +1731,7 @@ class EpisodeLogger:
                 fps=video_fps,
                 codec="libx264",
                 macro_block_size=1,
-                ffmpeg_params=[
-                    "-preset",
-                    "ultrafast",
-                    "-threads",
-                    "1",
-                    "-movflags",
-                    "+faststart",
-                ],
+                ffmpeg_params=dataset_h264_ffmpeg_params(),
             )
             try:
                 for frame in frames:

@@ -35,6 +35,8 @@ class OrbbecCameraSpec:
     color_format: str = "MJPG"
     timeout_ms: int = 1000
     retry_interval_s: float = 3.0
+    startup_timeout_s: float = 8.0
+    startup_retry_interval_s: float = 0.25
     warmup_frames: int = 30
     # Keep auto exposure enabled while applying a moderate compensation for
     # the relatively dark workcell image.
@@ -50,6 +52,7 @@ def parse_orbbec_camera_specs(
     fps: int = 30,
     color_format: str = "MJPG",
     timeout_ms: int = 1000,
+    startup_timeouts: dict[str, float] | None = None,
     warmup_frames: int = 30,
     brightness: int = 25,
     power_line_frequency_hz: int = 50,
@@ -59,6 +62,9 @@ def parse_orbbec_camera_specs(
         raise ValueError("Orbbec width, height, fps, and timeout must be positive")
     if warmup_frames < 0:
         raise ValueError("Orbbec warmup frame count must be non-negative")
+    startup_timeouts = startup_timeouts or {}
+    if any(not np.isfinite(value) or value <= 0 for value in startup_timeouts.values()):
+        raise ValueError("Orbbec startup timeouts must be finite and positive")
     if not -64 <= brightness <= 64:
         raise ValueError("Orbbec brightness must be in [-64, 64]")
     if power_line_frequency_hz not in (0, 50, 60):
@@ -93,10 +99,16 @@ def parse_orbbec_camera_specs(
                 fps=fps,
                 color_format=color_format,
                 timeout_ms=timeout_ms,
+                startup_timeout_s=startup_timeouts.get(image_key, 8.0),
                 warmup_frames=warmup_frames,
                 brightness=brightness,
                 power_line_frequency_hz=power_line_frequency_hz,
             )
+        )
+    unknown_timeout_keys = set(startup_timeouts) - seen
+    if unknown_timeout_keys:
+        raise ValueError(
+            f"Orbbec startup timeout has no matching camera: {sorted(unknown_timeout_keys)}"
         )
     return tuple(cameras)
 
@@ -275,7 +287,7 @@ def frame_to_bgr_image(frame: Any, sdk: ModuleType) -> np.ndarray:
 
 
 _STATE_NAMES = ("starting", "connecting", "warming", "online", "retrying", "stopped")
-_CAMERA_START_TIMEOUT_S = 8.0
+_CAMERA_START_GATE_TIMEOUT_S = 8.0
 _STALE_FRAME_TIMEOUT_S = 3.0
 
 
@@ -309,13 +321,18 @@ def _capture_orbbec_camera(
             )
         except Exception as exc:
             _set_process_state(state, "retrying")
+            retry_interval_s = (
+                spec.startup_retry_interval_s
+                if frame_count.value == 0
+                else spec.retry_interval_s
+            )
             logger.warning(
                 "Orbbec camera %s stopped; retrying in %.1f s: %s",
                 spec.image_key,
-                spec.retry_interval_s,
+                retry_interval_s,
                 exc,
             )
-            stop.wait(spec.retry_interval_s)
+            stop.wait(retry_interval_s)
     _set_process_state(state, "stopped")
 
 
@@ -361,7 +378,7 @@ def _capture_orbbec_cameras(capture_args: tuple[tuple[Any, ...], ...], stop: Any
         threads.append(thread)
         if index + 1 < len(selected):
             state = args[5]
-            deadline = time.monotonic() + _CAMERA_START_TIMEOUT_S
+            deadline = time.monotonic() + _CAMERA_START_GATE_TIMEOUT_S
             # Wait for a real frame before opening the next SDK pipeline. Starting
             # multiple Gemini devices during warmup can leave one pipeline alive
             # but permanently starved of color frames.
@@ -437,7 +454,7 @@ def _run_orbbec_capture_loop(
     )
     remaining_warmup = spec.warmup_frames
     first_frame = True
-    first_frame_deadline = time.monotonic() + _CAMERA_START_TIMEOUT_S
+    first_frame_deadline = time.monotonic() + spec.startup_timeout_s
     shared_image = np.frombuffer(frame_buffer, dtype=np.uint8).reshape((spec.height, spec.width, 3))
     try:
         while not stop.is_set():
@@ -445,14 +462,14 @@ def _run_orbbec_capture_loop(
             if frameset is None:
                 if first_frame and time.monotonic() >= first_frame_deadline:
                     raise TimeoutError(
-                        f"no color frame received within {_CAMERA_START_TIMEOUT_S:.0f} s"
+                        f"no color frame received within {spec.startup_timeout_s:g} s"
                     )
                 continue
             color_frame = frameset.get_color_frame()
             if color_frame is None:
                 if first_frame and time.monotonic() >= first_frame_deadline:
                     raise TimeoutError(
-                        f"no color frame received within {_CAMERA_START_TIMEOUT_S:.0f} s"
+                        f"no color frame received within {spec.startup_timeout_s:g} s"
                     )
                 continue
             if remaining_warmup > 0:

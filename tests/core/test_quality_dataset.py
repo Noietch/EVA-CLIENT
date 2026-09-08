@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -9,8 +10,17 @@ import pyarrow.parquet as pq
 import pytest
 
 from core.utils.quality_dataset import split_dataset_by_quality
+from tools.conversion import native as native_module
 
 pytestmark = pytest.mark.integration
+
+
+@pytest.fixture(autouse=True)
+def _patch_video_transcode(monkeypatch: pytest.MonkeyPatch) -> None:
+    def copy_video(source: Path, target: Path, **_: object) -> None:
+        shutil.copy2(source, target)
+
+    monkeypatch.setattr(native_module, "_transcode_dataset_video", copy_video)
 
 
 def _read_jsonl(path: Path) -> list[dict]:
@@ -32,6 +42,7 @@ def _dataset(root: Path) -> None:
         "total_tasks": 3,
         "total_chunks": 1,
         "chunks_size": 1000,
+        "fps": 30,
         "splits": {"train": "0:3"},
         "data_path": "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet",
         "video_path": (

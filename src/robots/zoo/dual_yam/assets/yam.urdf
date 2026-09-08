@@ -6,13 +6,13 @@
       <origin xyz="-3.83908653914762e-05 2.40068589826393e-05 0.0247677998591499" rpy="0 1.5708 3.1415963267949" />
       <inertia ixx="0.00157059" ixy="-9.4753e-07" ixz="2.04071e-07" iyy="0.000678307" iyz="2.44292e-07" izz="0.00169404" />
     </inertial>
-    <visual>
+    <visual name="base_0">
       <origin xyz="0.0374957408313106 0.0464006377298596 0.187501137731438" rpy="0 1.5708 3.1415963267949" />
       <geometry>
         <mesh filename="base.stl" scale="1 1 1" />
       </geometry>
-      <material name="joint_housing">
-        <color rgba="0.20 0.20 0.20 1" />
+      <material name="step_77_77_77">
+        <color rgba="0.301961 0.301961 0.301961 1" />
       </material>
     </visual>
   </link>
@@ -22,13 +22,31 @@
       <origin xyz="-3.57064e-05 0.000249371 -0.0293133" rpy="0 -0 0" />
       <inertia ixx="0.000409669" ixy="5.44941e-07" ixz="7.91268e-07" iyy="0.000324942" iyz="-4.83959e-06" izz="0.000369249" />
     </inertial>
-    <visual>
+    <visual name="gripper_0">
       <origin xyz="-0.014 -0.0463995 0.0731" rpy="0 -0 0" />
       <geometry>
         <mesh filename="gripper.stl" scale="1 1 1" />
       </geometry>
-      <material name="joint_housing">
-        <color rgba="0.20 0.20 0.20 1" />
+      <material name="step_77_77_77">
+        <color rgba="0.301961 0.301961 0.301961 1" />
+      </material>
+    </visual>
+    <visual name="wrist_camera_0">
+      <origin xyz="-0.014 -0.0463995 0.0731" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="wrist_camera.stl" scale="1 1 1" />
+      </geometry>
+      <material name="step_77_77_77">
+        <color rgba="0.301961 0.301961 0.301961 1" />
+      </material>
+    </visual>
+    <visual name="wrist_camera_1">
+      <origin xyz="-0.014 -0.0463995 0.0731" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="wrist_camera_1.stl" scale="1 1 1" />
+      </geometry>
+      <material name="step_204_204_204">
+        <color rgba="0.8 0.8 0.8 1" />
       </material>
     </visual>
   </link>
@@ -38,13 +56,13 @@
       <origin xyz="-0.0233636 -0.00172503 -0.00727828" rpy="0 -0 0" />
       <inertia ixx="0.000114689" ixy="-4.62759e-06" ixz="-1.3427e-05" iyy="4.76603e-05" iyz="-2.58724e-06" izz="0.000125996" />
     </inertial>
-    <visual>
+    <visual name="link1_0">
       <origin xyz="-0.119501 -0.0464 -0.0374968" rpy="0 -0 0" />
       <geometry>
         <mesh filename="link1.stl" scale="1 1 1" />
       </geometry>
-      <material name="joint_housing">
-        <color rgba="0.20 0.20 0.20 1" />
+      <material name="step_77_77_77">
+        <color rgba="0.301961 0.301961 0.301961 1" />
       </material>
     </visual>
   </link>
@@ -54,13 +72,22 @@
       <origin xyz="0.000134495 -0.0331253 0.129165" rpy="0 -0 0" />
       <inertia ixx="0.0146686" ixy="-1.1067e-08" ixz="-4.33007e-07" iyy="0.014599" iyz="3.12564e-06" izz="0.000800089" />
     </inertial>
-    <visual>
+    <visual name="link2_0">
       <origin xyz="-0.0740001 -0.08025 -0.0174977" rpy="0 -0 0" />
       <geometry>
         <mesh filename="link2.stl" scale="1 1 1" />
       </geometry>
-      <material name="arm_shell">
-        <color rgba="0.88 0.88 0.88 1" />
+      <material name="step_77_77_77">
+        <color rgba="0.301961 0.301961 0.301961 1" />
+      </material>
+    </visual>
+    <visual name="link2_1">
+      <origin xyz="-0.0740001 -0.08025 -0.0174977" rpy="0 -0 0" />
+      <geometry>
+        <mesh filename="link2_1.stl" scale="1 1 1" />
+      </geometry>
+      <material name="step_255_255_255">
+        <color rgba="1.0 1.0 1.0 1" />
       </material>
     </visual>
   </link>
@@ -70,13 +97,22 @@
       <origin xyz="-0.0556042 -0.0340514 -0.135083" rpy="0 -0 0" />
       <inertia ixx="0.00758945" ixy="4.36076e-06" ixz="-0.00064069" iyy="0.00763097" iyz="-1.09984e-05" izz="0.000937606" />
     </inertial>
-    <visual>
+    <visual name="link3_0">
       <origin xyz="-0.0740003 -0.0813 -0.281499" rpy="0 -0 0" />
       <geometry>
         <mesh filename="link3.stl" scale="1 1 1" />
       </geometry>
-      <material name="arm_shell">
-        <color rgba="0.88 0.88 0.88 1" />
+      <material name="step_77_77_77">
+        <color rgba="0.301961 0.301961 0.301961 1" />
+      </material>
+    </visual>
+    <visual name="link3_1">
+      <origin xyz="-0.0740003 -0.0813 -0.281499" rpy="0 -0 0" />
+      <geometry>
+        <mesh filename="link3_1.stl" scale="1 1 1" />
+      </geometry>
+      <material name="step_255_255_255">
+        <color rgba="1.0 1.0 1.0 1" />
       </material>
     </visual>
   </link>
@@ -86,13 +122,13 @@
       <origin xyz="-0.0550959 0.032726 -0.0575534" rpy="0 -0 0" />
       <inertia ixx="0.000473594" ixy="3.00819e-05" ixz="-0.000238801" iyy="0.000764022" iyz="2.9261e-05" izz="0.000604492" />
     </inertial>
-    <visual>
+    <visual name="link4_0">
       <origin xyz="-0.0140003 -0.0125 -0.0364989" rpy="0 -0 0" />
       <geometry>
         <mesh filename="link4.stl" scale="1 1 1" />
       </geometry>
-      <material name="joint_housing">
-        <color rgba="0.20 0.20 0.20 1" />
+      <material name="step_77_77_77">
+        <color rgba="0.301961 0.301961 0.301961 1" />
       </material>
     </visual>
   </link>
@@ -102,13 +138,13 @@
       <origin xyz="0.0375847 -3.55003e-05 -0.000825911" rpy="0 -0 0" />
       <inertia ixx="0.000184284" ixy="2.10549e-07" ixz="1.29173e-05" iyy="0.000219791" iyz="-3.49657e-07" izz="0.000181053" />
     </inertial>
-    <visual>
+    <visual name="link5_0">
       <origin xyz="0.0265 -0.0463995 0.0375" rpy="0 -0 0" />
       <geometry>
         <mesh filename="link5.stl" scale="1 1 1" />
       </geometry>
-      <material name="joint_housing">
-        <color rgba="0.20 0.20 0.20 1" />
+      <material name="step_77_77_77">
+        <color rgba="0.301961 0.301961 0.301961 1" />
       </material>
     </visual>
   </link>
@@ -118,13 +154,13 @@
       <origin xyz="0.014584 -0.042586 -0.0228318" rpy="0 -0 0" />
       <inertia ixx="5.14494e-05" ixy="1.10836e-05" ixz="1.00197e-05" iyy="4.99137e-05" iyz="-1.14425e-05" izz="4.79405e-05" />
     </inertial>
-    <visual>
+    <visual name="tip_left_0">
       <origin xyz="0.00999321 -0.0914614 0.129783" rpy="0 -0 0" />
       <geometry>
         <mesh filename="tip_left.stl" scale="1 1 1" />
       </geometry>
-      <material name="joint_housing">
-        <color rgba="0.20 0.20 0.20 1" />
+      <material name="step_77_77_77">
+        <color rgba="0.301961 0.301961 0.301961 1" />
       </material>
     </visual>
   </link>
@@ -134,13 +170,13 @@
       <origin xyz="-0.014584 0.042586 -0.0228318" rpy="0 -0 0" />
       <inertia ixx="5.14494e-05" ixy="1.10836e-05" ixz="-1.00197e-05" iyy="4.99137e-05" iyz="1.14425e-05" izz="4.79405e-05" />
     </inertial>
-    <visual>
+    <visual name="tip_right_0">
       <origin xyz="-0.0379932 -0.00133753 0.129783" rpy="0 -0 0" />
       <geometry>
         <mesh filename="tip_right.stl" scale="1 1 1" />
       </geometry>
-      <material name="joint_housing">
-        <color rgba="0.20 0.20 0.20 1" />
+      <material name="step_77_77_77">
+        <color rgba="0.301961 0.301961 0.301961 1" />
       </material>
     </visual>
   </link>

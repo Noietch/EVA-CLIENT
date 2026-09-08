@@ -126,6 +126,11 @@ class YamZmqConfig:
     gravity_comp_factor: tuple[float, ...] | None
     gripper_limits_override: tuple[float, float] | None
     allow_gripper_calibration: bool
+    gripper_kp: float
+    gripper_damping: float
+    gripper_close_torque_limit: float
+    gripper_open_torque_limit: float
+    gripper_max_speed: float
     tracking_ki: float
     tracking_trim_limit: float
     tracking_deadband: float
@@ -748,6 +753,39 @@ def build_arg_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--gripper-close-torque-limit",
+        type=float,
+        default=0.29,
+        help="Maximum complete gripper closing torque command in Nm; in (0, 1].",
+    )
+    parser.add_argument(
+        "--gripper-open-torque-limit",
+        type=float,
+        default=0.29,
+        help="Maximum complete gripper opening torque command in Nm; in (0, 1].",
+    )
+    parser.add_argument(
+        "--gripper-kp",
+        type=float,
+        default=5.0,
+        help="Gripper software spring stiffness in Nm/rad; must be in (0, 20].",
+    )
+    parser.add_argument(
+        "--gripper-damping",
+        type=float,
+        default=0.5,
+        help="Gripper software damping in Nm/(rad/s); must be in (0, 5].",
+    )
+    parser.add_argument(
+        "--gripper-max-speed",
+        type=float,
+        default=1.0,
+        help=(
+            "Maximum normalized gripper travel per second; 2.0 gives a 0.5 s full stroke, "
+            "and 0 disables limiting."
+        ),
+    )
+    parser.add_argument(
         "--tracking-ki",
         type=float,
         default=0.0,
@@ -819,6 +857,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--orbbec-fps", type=int, default=30)
     parser.add_argument("--orbbec-color-format", default="MJPG")
     parser.add_argument("--orbbec-timeout-ms", type=int, default=1000)
+    parser.add_argument(
+        "--orbbec-startup-timeout",
+        action="append",
+        default=[],
+        metavar="IMAGE_KEY=SECONDS",
+        help="Per-camera deadline for receiving the first Orbbec color frame.",
+    )
     parser.add_argument("--orbbec-warmup-frames", type=int, default=30)
     parser.add_argument(
         "--orbbec-brightness",
@@ -916,6 +961,16 @@ def build_config(args: argparse.Namespace) -> YamZmqConfig:
             dataclasses.replace(camera, warmup_frames=args.camera_warmup_frames)
             for camera in cameras
         )
+    orbbec_startup_timeouts: dict[str, float] = {}
+    for value in args.orbbec_startup_timeout:
+        if "=" not in value:
+            raise ValueError(
+                f"Expected Orbbec startup timeout IMAGE_KEY=SECONDS, got {value!r}"
+            )
+        image_key, seconds = (part.strip() for part in value.split("=", 1))
+        if not image_key or image_key in orbbec_startup_timeouts:
+            raise ValueError(f"Invalid Orbbec startup timeout mapping {value!r}")
+        orbbec_startup_timeouts[image_key] = float(seconds)
     orbbec_cameras = parse_orbbec_camera_specs(
         args.orbbec_camera,
         width=args.orbbec_width,
@@ -923,6 +978,7 @@ def build_config(args: argparse.Namespace) -> YamZmqConfig:
         fps=args.orbbec_fps,
         color_format=args.orbbec_color_format,
         timeout_ms=args.orbbec_timeout_ms,
+        startup_timeouts=orbbec_startup_timeouts,
         warmup_frames=args.orbbec_warmup_frames,
         brightness=args.orbbec_brightness,
         power_line_frequency_hz=args.orbbec_power_line_frequency,
@@ -977,6 +1033,16 @@ def build_config(args: argparse.Namespace) -> YamZmqConfig:
         )
     if args.tracking_ki < 0 or args.tracking_ki > 10:
         raise ValueError("--tracking-ki must be in [0, 10]")
+    for name in ("gripper_close_torque_limit", "gripper_open_torque_limit"):
+        value = getattr(args, name)
+        if not np.isfinite(value) or not 0 < value <= 1:
+            raise ValueError(f"--{name.replace('_', '-')} must be finite and in (0, 1]")
+    if not np.isfinite(args.gripper_damping) or not 0 < args.gripper_damping <= 5:
+        raise ValueError("--gripper-damping must be finite and in (0, 5]")
+    if not np.isfinite(args.gripper_kp) or not 0 < args.gripper_kp <= 20:
+        raise ValueError("--gripper-kp must be finite and in (0, 20]")
+    if not np.isfinite(args.gripper_max_speed) or args.gripper_max_speed < 0:
+        raise ValueError("--gripper-max-speed must be finite and non-negative")
     if args.tracking_trim_limit < 0 or args.tracking_trim_limit > 0.3:
         raise ValueError("--tracking-trim-limit must be in [0, 0.3]")
     if args.tracking_deadband < 0 or args.tracking_deadband > 0.05:
@@ -1016,6 +1082,11 @@ def build_config(args: argparse.Namespace) -> YamZmqConfig:
         ),
         gripper_limits_override=gripper_limits_override,
         allow_gripper_calibration=bool(args.allow_gripper_calibration),
+        gripper_kp=float(args.gripper_kp),
+        gripper_damping=float(args.gripper_damping),
+        gripper_close_torque_limit=float(args.gripper_close_torque_limit),
+        gripper_open_torque_limit=float(args.gripper_open_torque_limit),
+        gripper_max_speed=float(args.gripper_max_speed),
         tracking_ki=float(args.tracking_ki),
         tracking_trim_limit=float(args.tracking_trim_limit),
         tracking_deadband=float(args.tracking_deadband),
