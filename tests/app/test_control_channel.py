@@ -90,3 +90,50 @@ def test_channel_start_binds_eval_sim_metadata_before_enqueueing_start() -> None
         "sim_metadata": sim_metadata,
     }
     assert runtime.command_queue.get_nowait() == "web:start"
+
+
+def test_channel_collect_start_binds_sim_metadata_before_enqueueing_collect() -> None:
+    runtime = SimpleNamespace(
+        console_ctx=SimpleNamespace(
+            active_tab="collect",
+            session=SimpleNamespace(
+                selected_collect_task="pick the block",
+                collection_sim_metadata=None,
+            ),
+        ),
+        command_queue=queue.Queue(),
+    )
+    sim_metadata = {
+        "schema_version": 4,
+        "scene": {"scene_id": "scene-01"},
+        "task_item": {"task_item_id": "task-01"},
+    }
+
+    reply = _handle_message(
+        runtime,
+        {"cmd": "web:collect_start", "sim_metadata": sim_metadata},
+    )
+
+    assert reply == {"ok": True, "cmd": "web:collect_start"}
+    assert runtime.console_ctx.session.collection_sim_metadata == sim_metadata
+    assert runtime.command_queue.get_nowait() == "web:collect_start"
+
+
+def test_channel_collect_start_preserves_slot_bound_sim_metadata() -> None:
+    sim_metadata = {"schema_version": 4, "scene": {"scene_id": "scene-01"}}
+    runtime = SimpleNamespace(
+        console_ctx=SimpleNamespace(
+            active_tab="collect",
+            session=SimpleNamespace(
+                selected_collect_task="pick the block",
+                collection_sim_metadata=sim_metadata,
+            ),
+        ),
+        command_queue=queue.Queue(),
+    )
+
+    reply = _handle_message(runtime, {"cmd": "web:collect_start"})
+
+    assert reply == {"ok": True, "cmd": "web:collect_start"}
+    assert runtime.console_ctx.session.collection_sim_metadata is sim_metadata
+    assert runtime.command_queue.get_nowait() == "web:collect_start"

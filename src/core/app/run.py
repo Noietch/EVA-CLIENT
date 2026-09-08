@@ -963,6 +963,7 @@ def _handle_web_command(
             session.collection_random_seed = None
             session.collection_slot_id = None
             session.collection_task_id = None
+            session.collection_sim_metadata = None
         runtime.collection_replay_qpos = None
         runtime.collection_replay_episode = None
         stop_rollout_intervention(config, runtime, session, required=False)

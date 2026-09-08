@@ -1543,6 +1543,14 @@ def _serialize_status(ctx: ConsoleContext, *, include_history: bool = False) -> 
         "collection_random_seed": s.collection_random_seed,
         "collection_slot_id": s.collection_slot_id,
         "collection_task_id": s.collection_task_id,
+        "collection_sim_metadata_ready": (
+            getattr(s, "collection_sim_metadata", None) is not None
+        ),
+        "collection_sim_metadata_schema_version": (
+            getattr(s, "collection_sim_metadata", {}).get("schema_version")
+            if isinstance(getattr(s, "collection_sim_metadata", None), dict)
+            else None
+        ),
         "selected_strategy": (
             resolve_inference_strategy_label(config, r.selected_inference_strategy_key)
             if r.selected_inference_strategy_key is not None
@@ -3259,6 +3267,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         self.ctx.session.collection_random_seed = None
         self.ctx.session.collection_slot_id = None
         self.ctx.session.collection_task_id = None
+        self.ctx.session.collection_sim_metadata = None
         self._send_json(
             200,
             {"ok": True, "task": task, "dataset": dataset, "task_index": task_index},
@@ -3280,6 +3289,11 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
     def _post_select_collection_slot(self, body: dict) -> None:
         dataset = str(body.get("dataset") or "").strip()
         slot_id = str(body.get("slot_id") or "").strip()
+        has_sim_metadata = "sim_metadata" in body
+        sim_metadata = body.get("sim_metadata")
+        if has_sim_metadata and sim_metadata is not None and not isinstance(sim_metadata, dict):
+            self._send_json(400, {"ok": False, "error": "sim_metadata must be an object"})
+            return
         logger_obj = self.ctx.runtime.episode_logger
         if logger_obj is not None and bool(getattr(logger_obj, "has_active_episode", False)):
             self._send_json(409, {"ok": False, "error": "cannot switch slot while recording"})
@@ -3300,14 +3314,26 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         if not dataset_dir:
             self._send_json(409, {"ok": False, "error": "collection recording is unavailable"})
             return
+        previous_slot_id = self.ctx.session.collection_slot_id
         select_collection_slot(Path(dataset_dir), slot_id, snapshot["slot_state"])
         active = dict(selected)
         active["repair"] = active["state"] in {"deferred", "rejected"}
         active["state"] = "active"
         self._apply_collection_slot(active)
+        if has_sim_metadata:
+            self.ctx.session.collection_sim_metadata = (
+                copy.deepcopy(sim_metadata) if sim_metadata is not None else None
+            )
+        elif previous_slot_id != slot_id:
+            self.ctx.session.collection_sim_metadata = None
         self._send_json(
             200,
-            {"ok": True, "active": active, "counts": snapshot["counts"]},
+            {
+                "ok": True,
+                "active": active,
+                "counts": snapshot["counts"],
+                "sim_metadata_attached": self.ctx.session.collection_sim_metadata is not None,
+            },
         )
 
     def _post_skip_collection_slot(self, body: dict) -> None:
@@ -3332,6 +3358,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             return
         defer_active_slot(Path(dataset_dir), slot_id, snapshot["slot_state"])
         updated = _collection_slots_snapshot(self.ctx, dataset)
+        self.ctx.session.collection_sim_metadata = None
         self._apply_collection_slot(updated["active"])
         self._send_json(
             200,
@@ -3556,6 +3583,12 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             self._send_json(200, {"ok": False, "error": self.ctx.session.last_error})
             return
         session = self.ctx.session
+        sim_metadata = body.get("sim_metadata")
+        if "sim_metadata" in body and sim_metadata is not None and not isinstance(
+            sim_metadata, dict
+        ):
+            self._send_json(400, {"ok": False, "error": "sim_metadata must be an object"})
+            return
         scene_id = str(body.get("scene_id") or session.collection_scene_id or "").strip()
         slot_id = str(body.get("slot_id") or session.collection_slot_id or "").strip()
         task_id = str(body.get("task_id") or session.collection_task_id or "").strip()
@@ -3601,6 +3634,10 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             )
         except (TypeError, ValueError):
             session.collection_random_seed = None
+        if "sim_metadata" in body:
+            session.collection_sim_metadata = (
+                copy.deepcopy(sim_metadata) if sim_metadata is not None else None
+            )
         self._enqueue_ok("web:collect_start")
 
     def _post_exit_collection_replay(self, _body: dict) -> None:

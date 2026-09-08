@@ -1175,14 +1175,20 @@ def _collection_target_meta(session: SessionState) -> dict[str, object]:
         "random_seed": session.collection_random_seed,
         "slot_id": session.collection_slot_id,
         "task_id": session.collection_task_id,
+        "sim_metadata": session.collection_sim_metadata,
     }
-    return {key: value for key, value in fields.items() if value is not None and value != ""}
+    return {
+        key: copy.deepcopy(value)
+        for key, value in fields.items()
+        if value is not None and value != ""
+    }
 
 
 def collect_start(config: ConfigDict, runtime: RuntimeState, session: SessionState) -> bool:
     """Begin one teleop collection episode. Backpressure: refuse to start when the
     async save queue is full so we never grow memory unbounded. Returns True when
     an episode was opened."""
+    target_meta = _collection_target_meta(session)
     if runtime.episode_logger is None:
         session.last_error = "Recording is disabled (log.enabled is false)"
         return False
@@ -1203,7 +1209,6 @@ def collect_start(config: ConfigDict, runtime: RuntimeState, session: SessionSta
                 collection_min_capture_time=collection_min_capture_time,
                 collection_dataset=session.selected_collect_set,
             )
-            target_meta = _collection_target_meta(session)
             if target_meta:
                 logger_obj.set_episode_meta(**target_meta)
             control_source = str(
@@ -1251,9 +1256,9 @@ def collect_start(config: ConfigDict, runtime: RuntimeState, session: SessionSta
             return False
     else:
         runtime.episode_logger.start_episode(task=format_task_label(session.selected_collect_task))
-        target_meta = _collection_target_meta(session)
         if target_meta:
             runtime.episode_logger.set_episode_meta(**target_meta)
+    session.collection_sim_metadata = None
     session.step_index = 0
     session.mode = SessionMode.COLLECT
     session.status = SessionStatus.RUNNING

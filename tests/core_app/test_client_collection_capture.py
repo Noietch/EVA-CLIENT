@@ -124,3 +124,39 @@ def test_eval_episode_clears_backlog_before_capture_starts() -> None:
         ("prepare_collection_capture", "/tmp/eval"),
         ("start_episode", "pick"),
     ]
+
+
+def test_collection_start_passes_sim_metadata_to_episode_logger() -> None:
+    calls: list[object] = []
+
+    class _EpisodeLogger:
+        is_collection_enabled = False
+        has_active_episode = False
+
+        def is_queue_full(self) -> bool:
+            return False
+
+        def start_episode(self, *, task: str) -> None:
+            calls.append(("start_episode", task))
+
+        def set_episode_meta(self, **fields: object) -> None:
+            calls.append(("set_episode_meta", fields))
+
+    sim_metadata = {
+        "schema_version": 4,
+        "scene": {"scene_id": "scene-01"},
+        "task_item": {"task_item_id": "task-01"},
+    }
+    session = SessionState(
+        selected_collect_task="pick up the block",
+        collection_sim_metadata=sim_metadata,
+    )
+    runtime = SimpleNamespace(episode_logger=_EpisodeLogger())
+
+    assert collect_start(None, runtime, session)
+
+    assert calls == [
+        ("start_episode", "pick up the block"),
+        ("set_episode_meta", {"sim_metadata": sim_metadata}),
+    ]
+    assert session.collection_sim_metadata is None

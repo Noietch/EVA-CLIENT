@@ -217,10 +217,20 @@ def test_collection_slots_api_filters_independently_and_selects_one_cursor(tmp_p
         idle = h.get("/api/collection_slots?dataset=cup_set")
         all_slots = h.get("/api/collection_slots?dataset=cup_set&all=1")
         no_match = h.get("/api/collection_slots?dataset=cup_set&scene=SC-B&task=TASK-PLATE")
+        sim_metadata = {
+            "schema_version": 4,
+            "scene": {"scene_id": "SC-A"},
+            "task_item": {"task_item_id": "sim-task-01"},
+        }
         selected = h.post(
             "/api/select_collection_slot",
-            {"dataset": "cup_set", "slot_id": "TASK-PLATE:SC-A:0"},
+            {
+                "dataset": "cup_set",
+                "slot_id": "TASK-PLATE:SC-A:0",
+                "sim_metadata": sim_metadata,
+            },
         )
+        assert h.session.collection_sim_metadata == sim_metadata
         skipped = h.post(
             "/api/skip_collection_slot",
             {"dataset": "cup_set", "slot_id": "TASK-PLATE:SC-A:0"},
@@ -239,8 +249,10 @@ def test_collection_slots_api_filters_independently_and_selects_one_cursor(tmp_p
     ]
     assert no_match.json["filtered_total"] == 0
     assert selected.json["active"]["slot_id"] == "TASK-PLATE:SC-A:0"
+    assert selected.json["sim_metadata_attached"] is True
     assert skipped.json["active"]["slot_id"] == "TASK-CUP:SC-A:0"
     assert status["collection_slot_id"] == "TASK-CUP:SC-A:0"
+    assert status["collection_sim_metadata_ready"] is False
 
 
 def test_collection_slots_api_builds_slots_for_inline_tasks(tmp_path, monkeypatch):

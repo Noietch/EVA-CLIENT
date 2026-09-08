@@ -100,6 +100,7 @@ class SessionState:
         collection_random_seed: Seed used to place every object for the scene round.
         collection_slot_id: Stable Scene + Task + Round slot selected for capture.
         collection_task_id: Scene-plan task identifier for the selected slot.
+        collection_sim_metadata: Simulator metadata bound to the next collection episode.
         interrupt_requested: True when a motion interrupt has been requested.
         follow_human_gripper: When True, mirror the human teleop gripper state.
         gripper_locks: Per-arm gripper override values keyed by arm name.
@@ -130,6 +131,7 @@ class SessionState:
     collection_random_seed: int | None = None
     collection_slot_id: str | None = None
     collection_task_id: str | None = None
+    collection_sim_metadata: dict[str, Any] | None = None
     interrupt_requested: bool = False
     follow_human_gripper: bool = False
     gripper_locks: dict[str, float] = dataclasses.field(default_factory=dict)
