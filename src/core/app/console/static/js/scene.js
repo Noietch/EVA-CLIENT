@@ -160,15 +160,11 @@ const Scene3D = (() => {
       return new THREE.Color().setHex(MESH_FALLBACK, THREE.SRGBColorSpace);
     }
     function solidMaterial(m) {
-      const whiteShell = m.file.startsWith("dual_yam/") && Array.isArray(m.color)
-        && m.color.slice(0, 3).every(value => value > 0.8);
-      const c = whiteShell ? "yam-white-shell" : Array.isArray(m.color) ? m.color.slice(0, 3).map((x) => Number(x).toFixed(4)).join(",") : "fallback";
+      const c = Array.isArray(m.color) ? m.color.slice(0, 3).map((x) => Number(x).toFixed(4)).join(",") : "fallback";
       if (!solidMats[c]) {
         solidMats[c] = new THREE.MeshStandardMaterial(
-          { color: whiteShell ? 0xFAFAF8 : meshColor(m), metalness: whiteShell ? 0 : 0.08,
-            roughness: whiteShell ? 0.36 : 0.42,
-            emissive: whiteShell ? 0xFFFFFF : 0x000000,
-            emissiveIntensity: whiteShell ? 0.35 : 0,
+          { color: meshColor(m), metalness: 0.08,
+            roughness: 0.42,
             side: THREE.DoubleSide });
       }
       return solidMats[c];
@@ -501,7 +497,7 @@ const ReplayScene = (() => {
       const c = Array.isArray(m.color) ? m.color.slice(0, 3) : null;
       const key = c ? c.map((x) => Number(x).toFixed(3)).join(",") : "fb";
       if (!mats[key]) mats[key] = new THREE.MeshStandardMaterial({
-        color: c ? new THREE.Color(c[0], c[1], c[2]) : new THREE.Color(0xE6EBED),
+        color: c ? new THREE.Color().setRGB(c[0], c[1], c[2], THREE.SRGBColorSpace) : new THREE.Color(0xE6EBED),
         metalness: 0.05, roughness: 0.72, side: THREE.DoubleSide });
       return mats[key];
     };
