@@ -1316,8 +1316,7 @@
     border: 2px solid var(--ink); background: var(--surface-2); color: var(--ink);
     box-shadow: none;
   }
-  .collect-tile.slot-active-repair {
-    border-color: var(--danger); background: var(--danger); color: #fff;
+  .collect-tile.slot-current {
     outline: 2px solid var(--ink); outline-offset: 1px;
   }
   .collect-tile.slot-deferred {

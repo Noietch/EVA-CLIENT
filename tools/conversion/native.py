@@ -8,12 +8,13 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import av
 import imageio.v2 as imageio
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from core.recorder.video_encoding import dataset_h264_ffmpeg_params
+from core.recorder.video_encoding import DATASET_VIDEO_GOP_SIZE, dataset_h264_ffmpeg_params
 
 from ._publish import publish_output_pair
 from .source import video_frames
@@ -131,6 +132,7 @@ def split_dataset_by_quality(
     rejected_dir: Path | None = None,
     *,
     replace_existing: bool = False,
+    normalize_videos: bool = True,
     progress_callback: Callable[[QualityExportProgress], None] | None = None,
 ) -> QualitySplitSummary:
     source_dir = Path(source_dir).resolve()
@@ -178,6 +180,7 @@ def split_dataset_by_quality(
             subset="accepted",
             episodes_offset=0,
             episodes_total=len(rows),
+            normalize_videos=normalize_videos,
             progress_callback=progress_callback,
         )
         rejected_frames = _export_subset(
@@ -187,6 +190,7 @@ def split_dataset_by_quality(
             subset="rejected",
             episodes_offset=len(accepted_rows),
             episodes_total=len(rows),
+            normalize_videos=normalize_videos,
             progress_callback=progress_callback,
         )
         publish_output_pair(
@@ -219,6 +223,7 @@ def _export_subset(
     subset: str,
     episodes_offset: int,
     episodes_total: int,
+    normalize_videos: bool,
     progress_callback: Callable[[QualityExportProgress], None] | None,
 ) -> int:
     info = json.loads((source_dir / "meta" / "info.json").read_text())
@@ -346,12 +351,15 @@ def _export_subset(
                 video_key=video_key,
             )
             output_video.parent.mkdir(parents=True, exist_ok=True)
-            _transcode_dataset_video(
-                source_video,
-                output_video,
-                fps=fps,
-                expected_frames=frame_count,
-            )
+            if normalize_videos:
+                _transcode_dataset_video(
+                    source_video,
+                    output_video,
+                    fps=fps,
+                    expected_frames=frame_count,
+                )
+            else:
+                _link_or_copy_video(source_video, output_video)
             written_videos += 1
         total_videos += written_videos
 
@@ -426,12 +434,15 @@ def _transcode_dataset_video(
     expected_frames: int,
 ) -> None:
     """Rewrite one LeRobot v2.1 video with the required dataset GOP."""
+    if _dataset_video_is_compatible(source, fps=fps, expected_frames=expected_frames):
+        _link_or_copy_video(source, target)
+        return
     writer = imageio.get_writer(
         str(target),
         fps=fps,
         codec="libx264",
         macro_block_size=1,
-        ffmpeg_params=dataset_h264_ffmpeg_params(),
+        ffmpeg_params=dataset_h264_ffmpeg_params(threads=None),
     )
     observed_frames = 0
     try:
@@ -442,9 +453,46 @@ def _transcode_dataset_video(
         writer.close()
     if observed_frames != expected_frames:
         raise ValueError(
-            f"LeRobot v2.1 video {source} has {observed_frames} frames; "
-            f"expected {expected_frames}"
+            f"LeRobot v2.1 video {source} has {observed_frames} frames; expected {expected_frames}"
         )
+
+
+def _dataset_video_is_compatible(
+    source: Path,
+    *,
+    fps: float,
+    expected_frames: int,
+) -> bool:
+    """Check frame count, rate, codec, and GOP from packets without decoding pixels."""
+    try:
+        with av.open(str(source)) as container:
+            stream = container.streams.video[0]
+            if stream.codec_context.name != "h264":
+                return False
+            rate = float(stream.average_rate) if stream.average_rate is not None else 0.0
+            if rate <= 0.0 or abs(rate - fps) > max(0.01, fps * 0.001):
+                return False
+            keyframes: list[int] = []
+            packet_count = 0
+            for packet in container.demux(stream):
+                if packet.size <= 0:
+                    continue
+                if packet.is_keyframe:
+                    keyframes.append(packet_count)
+                packet_count += 1
+    except (OSError, ValueError, av.error.FFmpegError):
+        return False
+    return packet_count == expected_frames and keyframes == list(
+        range(0, expected_frames, DATASET_VIDEO_GOP_SIZE)
+    )
+
+
+def _link_or_copy_video(source: Path, target: Path) -> None:
+    """Reuse source video bytes for an intermediate conversion dataset."""
+    try:
+        target.hardlink_to(source)
+    except OSError:
+        shutil.copy2(source, target)
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:

@@ -38,6 +38,8 @@ class CollectionSlotState:
 
     deferred: list[str]
     selected_slot_id: str = ""
+    selected_episode_index: int | None = None
+    selected_manually: bool = False
 
 
 def _scene_label(scene: dict[str, Any]) -> str:
@@ -144,9 +146,16 @@ def load_slot_state(dataset_dir: Path | None) -> CollectionSlotState:
             return CollectionSlotState([])
     deferred = payload.get("deferred") if isinstance(payload, dict) else None
     selected_slot_id = payload.get("selected_slot_id") if isinstance(payload, dict) else ""
+    selected_episode_index = (
+        payload.get("selected_episode_index") if isinstance(payload, dict) else None
+    )
     return CollectionSlotState(
         [str(slot_id) for slot_id in deferred] if isinstance(deferred, list) else [],
         str(selected_slot_id or ""),
+        selected_episode_index if type(selected_episode_index) is int else None,
+        bool(payload.get("selected_manually", selected_episode_index is not None))
+        if isinstance(payload, dict)
+        else False,
     )
 
 
@@ -160,6 +169,8 @@ def save_slot_state(dataset_dir: Path, state: CollectionSlotState) -> None:
                 {
                     "deferred": state.deferred,
                     "selected_slot_id": state.selected_slot_id,
+                    "selected_episode_index": state.selected_episode_index,
+                    "selected_manually": state.selected_manually,
                 },
                 ensure_ascii=False,
                 indent=2,
@@ -241,16 +252,14 @@ def collection_slot_status(
             (slot.task, slot.scene_id, slot.round_index)
         )
         outcome = (
-            "pending"
-            if slot.unbounded
-            else (_episode_outcome(episode) if episode else "pending")
+            "pending" if slot.unbounded else (_episode_outcome(episode) if episode else "pending")
         )
-        if outcome == "usable":
-            state = "complete"
-            counts["complete"] += 1
-        elif slot.slot_id in saving_ids:
+        if slot.slot_id in saving_ids:
             state = "saving"
             counts["pending"] += 1
+        elif outcome == "usable":
+            state = "complete"
+            counts["complete"] += 1
         elif slot.slot_id in deferred_set:
             state = "deferred"
             counts["deferred"] += 1
@@ -272,21 +281,33 @@ def collection_slot_status(
         row["slot_id"]: row for row in [*unresolved_regular, *unresolved_deferred.values()]
     }
     active = unresolved.get(slot_state.selected_slot_id)
-    if active is None:
-        active = (
-            unresolved_regular[0]
-            if unresolved_regular
-            else next(
-                (
-                    unresolved_deferred[slot_id]
-                    for slot_id in deferred
-                    if slot_id in unresolved_deferred
-                ),
-                None,
-            )
+    if active is not None and active["state"] in {"rejected", "deferred"}:
+        if not (
+            slot_state.selected_manually
+            and (active["episode"] or {}).get("episode_index") == slot_state.selected_episode_index
+        ):
+            active = None
+    # A manual retake stays selected only until a newer attempt exists.
+    if (
+        active is None
+        and slot_state.selected_manually
+        and slot_state.selected_episode_index is not None
+    ):
+        active = next(
+            (
+                row
+                for row in rows
+                if row["slot_id"] == slot_state.selected_slot_id
+                and row["state"] == "complete"
+                and (row["episode"] or {}).get("episode_index") == slot_state.selected_episode_index
+            ),
+            None,
         )
+    if active is None:
+        # Failed captures stay red until the operator explicitly selects a retake.
+        active = next((row for row in unresolved_regular if row["state"] == "pending"), None)
     if active is not None:
-        active["repair"] = active["state"] in {"deferred", "rejected"}
+        active["repair"] = active["state"] in {"complete", "deferred", "rejected"}
         active["state"] = "active"
     counts["total"] = len(slots)
     return rows, active, counts
@@ -309,8 +330,11 @@ def select_collection_slot(
     dataset_dir: Path,
     slot_id: str,
     state: CollectionSlotState,
+    *,
+    episode_index: int | None = None,
+    manual: bool = False,
 ) -> CollectionSlotState:
-    """Temporarily make any unresolved slot the next collection target."""
-    updated = CollectionSlotState(state.deferred, slot_id)
+    """Select a capture target, optionally retaining a completed episode for retake."""
+    updated = CollectionSlotState(state.deferred, slot_id, episode_index, manual)
     save_slot_state(dataset_dir, updated)
     return updated

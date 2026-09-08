@@ -27,7 +27,7 @@ fi
 
 command=(
   "${python_bin}" -m tools.datasets.app
-  --plans-root "${data_root}/task_tests"
+  --plans-root "${data_root}/task_sets"
   --assets-root "${data_root}/assets"
   --collection-root "${data_root}"
   --host "${host}"

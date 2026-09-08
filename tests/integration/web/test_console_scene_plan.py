@@ -54,13 +54,14 @@ def test_scene_catalog_keeps_legacy_placements_and_serves_photos(
     assert [group["random"] for group in scene["placement_groups"]] == [False, True]
     for placement in scene["placements"] + scene["placement_groups"]:
         assert placement["name"] == "Cup"
-        assert placement["photo_url"] == "/api/scene_plan/object-photo/AST-001/cup%20top.png"
+        assert placement["photo_url"] == "/api/scene_plan/object-photo/AST-001/cup%20top.png?set=example"
 
-    monkeypatch.setattr(server, "_scene_plan_root", lambda config: root)
+    monkeypatch.setattr(server, "_scene_plan_root", lambda config, dataset=None: root)
     delivered = []
     rejected = []
     handler = SimpleNamespace(
-        ctx=SimpleNamespace(config=None),
+        ctx=SimpleNamespace(config=None, runtime=SimpleNamespace(active_config=None)),
+        _query_str=lambda key: "example",
         _send_static=delivered.append,
         _send_empty=rejected.append,
     )

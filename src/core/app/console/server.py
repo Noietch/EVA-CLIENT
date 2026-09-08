@@ -634,6 +634,10 @@ class ConsoleContext:
         """Folder name of the active model's eval dataset (matches the recorder's rooting)."""
         return eval_model_name(self.config, self.runtime)
 
+    def sync_collection_slot(self) -> dict[str, Any] | None:
+        """Advance the backend collection cursor after an episode is queued."""
+        return _sync_collection_slot_session(self)
+
 
 def _run_quality_upload_scan(
     ctx: ConsoleContext,
@@ -952,12 +956,25 @@ def _resolve_dataset_dir(dataset_dir: str) -> str:
     return str(_resolve_runtime_path(dataset_dir))
 
 
-def _scene_plan_root(config: ConfigDict | None = None) -> Path:
+def _scene_plan_root(config: ConfigDict | None = None, dataset: str | None = None) -> Path:
+    task_set_dirs = (config.get("collection") or {}).get("task_set_dir") if config else None
+    if isinstance(task_set_dirs, (list, tuple)) and task_set_dirs:
+        roots = [_resolve_runtime_path(str(value)).expanduser().resolve() for value in task_set_dirs]
+        root = next((path for path in roots if path.name == dataset), None) if dataset else roots[0]
+        if root is None:
+            raise ValueError("unknown collection task-set directory")
+        if not root.is_dir():
+            raise ValueError(f"collection task-set directory is missing: {root}")
+        return root
     configured = os.environ.get("EVA_SCENE_PLAN_DIR", "").strip()
     if configured:
         return Path(configured).expanduser().resolve()
     if config is not None:
-        task_set_dir = str(((config.get("collection") or {}).get("task_set_dir", "")) or "").strip()
+        task_set_dirs = ((config.get("collection") or {}).get("task_set_dir", "")) or ""
+        if isinstance(task_set_dirs, (list, tuple)):
+            task_set_dir = str(task_set_dirs[0]).strip() if task_set_dirs else ""
+        else:
+            task_set_dir = str(task_set_dirs).strip()
         if task_set_dir:
             task_set_root = _resolve_runtime_path(task_set_dir).expanduser().resolve()
             if task_set_root.is_dir():
@@ -1116,7 +1133,7 @@ def _scene_plan_objects(root: Path) -> dict[str, dict[str, Any]]:
             "name_zh": str(row.get("object_name_zh") or row.get("名称") or ""),
             "name_en": str(row.get("object_name") or row.get("英文名") or ""),
             "color": str(row.get("color", "") or ""),
-            "photo_url": f"/api/scene_plan/object-photo/{quote(object_id)}/{quote(photo.name)}"
+            "photo_url": f"/api/scene_plan/object-photo/{quote(object_id)}/{quote(photo.name)}?set={quote(root.name)}"
             if photo
             else "",
         }
@@ -1248,9 +1265,9 @@ def _build_scene_plan(root: Path) -> dict[str, Any]:
     }
 
 
-def _load_scene_plan(config: ConfigDict | None = None) -> dict[str, Any]:
+def _load_scene_plan(config: ConfigDict | None = None, dataset: str | None = None) -> dict[str, Any]:
     """Load and signature-cache the optional normalized collection scene plan."""
-    root = _scene_plan_root(config)
+    root = _scene_plan_root(config, dataset)
     signature = _scene_plan_signature(root)
     with _SCENE_PLAN_CACHE_LOCK:
         cached = _SCENE_PLAN_CACHE.get(signature)
@@ -1435,7 +1452,7 @@ def _collection_slots_snapshot(ctx: ConsoleContext, dataset: str) -> dict[str, A
     config = ctx.runtime.active_config or ctx.config
     if dataset not in config.collection.tasks:
         raise ValueError("unknown collection dataset")
-    scene_plan = _load_scene_plan(config)
+    scene_plan = _load_scene_plan(config, dataset)
     slots = _cached_collection_slots(config, scene_plan, dataset)
     logger_obj = ctx.runtime.episode_logger
     dataset_dir: Path | None = None
@@ -1469,6 +1486,7 @@ def _collection_slots_snapshot(ctx: ConsoleContext, dataset: str) -> dict[str, A
             seen_tasks.add(row["task_id"])
     return {
         "dataset": dataset,
+        "scene_plan": scene_plan,
         "dataset_dir": "" if dataset_dir is None else str(dataset_dir),
         "rows": rows,
         "active": active,
@@ -1477,6 +1495,46 @@ def _collection_slots_snapshot(ctx: ConsoleContext, dataset: str) -> dict[str, A
         "tasks": tasks,
         "slot_state": slot_state,
     }
+
+
+def _apply_collection_slot_session(
+    session: SessionState, slot: dict[str, Any] | None
+) -> None:
+    if slot is None:
+        session.collection_scene_id = None
+        session.collection_scene_round = None
+        session.collection_random_seed = None
+        session.collection_slot_id = None
+        session.collection_task_id = None
+        return
+    session.selected_collect_task = slot["task"]
+    session.selected_collect_set = slot["dataset"]
+    session.selected_collect_task_index = int(slot["task_index"])
+    session.collection_scene_id = slot["scene_id"]
+    session.collection_scene_round = int(slot["round_index"])
+    session.collection_random_seed = None
+    session.collection_slot_id = slot["slot_id"]
+    session.collection_task_id = slot["task_id"]
+
+
+def _sync_collection_slot_session(ctx: ConsoleContext) -> dict[str, Any] | None:
+    """Select the next unresolved slot without waiting for a browser poll."""
+    dataset = str(ctx.session.selected_collect_set or "").strip()
+    logger_obj = ctx.runtime.episode_logger
+    if not dataset or logger_obj is None or bool(getattr(logger_obj, "has_active_episode", False)):
+        return None
+    snapshot = _collection_slots_snapshot(ctx, dataset)
+    active = snapshot["active"]
+    dataset_dir = str(snapshot["dataset_dir"] or "")
+    if active is not None and dataset_dir:
+        select_collection_slot(Path(dataset_dir), active["slot_id"], snapshot["slot_state"])
+    _apply_collection_slot_session(ctx.session, active)
+    logger.info(
+        "[COLLECTION_SLOT_SYNC] dataset=%s active=%s",
+        dataset,
+        None if active is None else active["slot_id"],
+    )
+    return active
 
 
 def _serialize_status(ctx: ConsoleContext, *, include_history: bool = False) -> dict:
@@ -1833,7 +1891,7 @@ def _serialize_scene(ctx: ConsoleContext) -> dict:
     elif session.mode is SessionMode.MANUAL and ctx.active_tab != "collect":
         state = reader.get_latest_qpos()
         if state is None:
-            state = runtime.robot.initial_qpos
+            state = ctx.runtime.robot.initial_qpos
         command = session.manual_qpos
         return {
             "available": True,
@@ -2353,14 +2411,29 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         self._send_json(200, _serialize_config(self.ctx))
 
     def _get_scene_plan(self) -> None:
-        self._send_json(200, _load_scene_plan(self.ctx.config))
+        try:
+            plan = _load_scene_plan(
+                self.ctx.runtime.active_config or self.ctx.config,
+                self._query_str("set").strip() or None,
+            )
+        except ValueError as error:
+            self._send_json(400, {"ok": False, "error": str(error)})
+            return
+        self._send_json(200, plan)
 
     def _send_scene_plan_photo(self, suffix: str) -> None:
         parts = [unquote(part) for part in suffix.split("/")]
         if len(parts) != 2:
             self._send_empty(404)
             return
-        root = _scene_plan_root(self.ctx.config).resolve()
+        try:
+            root = _scene_plan_root(
+                self.ctx.runtime.active_config or self.ctx.config,
+                self._query_str("set").strip() or None,
+            ).resolve()
+        except ValueError:
+            self._send_empty(404)
+            return
         info = _read_scene_plan_yaml(root, "info.yaml")
         objects_file = str(info.get("objects_file", "objects.csv") or "objects.csv")
         row = next(
@@ -2418,6 +2491,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             {
                 "ok": True,
                 "dataset": snapshot["dataset"],
+                "scene_plan": snapshot["scene_plan"],
                 "dataset_dir": snapshot["dataset_dir"],
                 "active": snapshot["active"],
                 "counts": snapshot["counts"],
@@ -3327,17 +3401,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         )
 
     def _apply_collection_slot(self, slot: dict[str, Any] | None) -> None:
-        if slot is None:
-            return
-        session = self.ctx.session
-        session.selected_collect_task = slot["task"]
-        session.selected_collect_set = slot["dataset"]
-        session.selected_collect_task_index = int(slot["task_index"])
-        session.collection_scene_id = slot["scene_id"]
-        session.collection_scene_round = int(slot["round_index"])
-        session.collection_random_seed = None
-        session.collection_slot_id = slot["slot_id"]
-        session.collection_task_id = slot["task_id"]
+        _apply_collection_slot_session(self.ctx.session, slot)
 
     def _post_select_collection_slot(self, body: dict) -> None:
         dataset = str(body.get("dataset") or "").strip()
@@ -3355,16 +3419,20 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         if selected is None:
             self._send_json(400, {"ok": False, "error": "unknown collection slot"})
             return
-        if selected["state"] in {"complete", "saving"}:
+        if selected["state"] == "saving":
             self._send_json(409, {"ok": False, "error": "collection slot is not selectable"})
             return
         dataset_dir = str(snapshot["dataset_dir"] or "")
         if not dataset_dir:
             self._send_json(409, {"ok": False, "error": "collection recording is unavailable"})
             return
-        select_collection_slot(Path(dataset_dir), slot_id, snapshot["slot_state"])
+        select_collection_slot(
+            Path(dataset_dir), slot_id, snapshot["slot_state"],
+            episode_index=(selected.get("episode") or {}).get("episode_index"),
+            manual=bool(body.get("manual", True)),
+        )
         active = dict(selected)
-        active["repair"] = active["state"] in {"deferred", "rejected"}
+        active["repair"] = active["state"] in {"complete", "deferred", "rejected"}
         active["state"] = "active"
         self._apply_collection_slot(active)
         self._send_json(
@@ -3757,18 +3825,22 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         if logger_obj is None:
             self._send_json(409, {"ok": False, "error": "collection recording is unavailable"})
             return None
-        task = str(body.get("task", ""))
-        active_task = format_task_label(self.ctx.session.selected_collect_task)
-        collection_dataset = str(body.get("dataset", "")).strip() or None
-        active_set = self.ctx.session.selected_collect_set
-        if task != active_task or collection_dataset not in {None, active_set}:
+        collection_dataset = str(body.get("dataset") or self.ctx.session.selected_collect_set or "").strip()
+        config = self.ctx.runtime.active_config or self.ctx.config
+        entries = config.collection.tasks.get(collection_dataset)
+        if not entries:
             self._send_json(
                 409,
-                {"ok": False, "error": "collection task is no longer active"},
+                {"ok": False, "error": "unknown collection dataset"},
             )
             return None
-        snapshot = _status_snapshot_for_poll(logger_obj, task, active_set)
-        dataset_dir = Path(str(snapshot.get("dataset_dir", ""))).resolve()
+        # Export belongs to the dataset, independently of the capture cursor.
+        snapshot = _status_snapshot_for_poll(logger_obj, str(entries[0][0]), collection_dataset)
+        raw_dataset_dir = str(snapshot.get("dataset_dir") or "")
+        if not raw_dataset_dir:
+            self._send_json(404, {"ok": False, "error": "collection dataset is unavailable"})
+            return None
+        dataset_dir = Path(raw_dataset_dir).resolve()
         if not dataset_dir.is_dir():
             self._send_json(404, {"ok": False, "error": "collection dataset is unavailable"})
             return None

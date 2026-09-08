@@ -1,6 +1,6 @@
 """Serve the task-plan, object-asset, and collection QC browser.
 
-Plans are discovered as batches below task_tests. Objects live in one shared
+Plans are discovered as batches below task_sets. Objects live in one shared
 asset catalog, while collected episodes remain in their existing LeRobot
 directories and are joined to plans through stable slot IDs.
 """
@@ -21,7 +21,7 @@ from tools.datasets.store import ConflictError, RecordNotFoundError
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DATA_ROOT = PROJECT_ROOT / "datasets/data_collection"
-DEFAULT_PLANS_ROOT = DEFAULT_DATA_ROOT / "task_tests"
+DEFAULT_PLANS_ROOT = DEFAULT_DATA_ROOT / "task_sets"
 DEFAULT_ASSETS_ROOT = DEFAULT_DATA_ROOT / "assets"
 DEFAULT_COLLECTION_ROOT = DEFAULT_DATA_ROOT
 CONSOLE_STATIC_ROOT = PROJECT_ROOT / "src/core/app/console/static"

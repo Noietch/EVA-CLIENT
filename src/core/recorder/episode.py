@@ -2031,8 +2031,9 @@ class EpisodeLogger:
             "slot_id",
             "task_id",
         ):
-            if key in row:
-                summary[key] = row[key]
+            value = row.get(key, job.episode_meta.get(key))
+            if value is not None:
+                summary[key] = value
         return summary
 
     def finalize(self) -> None:

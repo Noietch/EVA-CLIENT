@@ -70,7 +70,7 @@ def _task_set(
 
 
 def _workspace(tmp_path: Path):
-    plans = tmp_path / "task_tests"
+    plans = tmp_path / "task_sets"
     _task_set(plans / BATCH, objects_file="../../assets/objects.csv", write_objects=False)
     assets = tmp_path / "assets"
     ObjectCatalog(
@@ -345,7 +345,7 @@ def test_invalid_archive_and_write_guard(tmp_path):
     assert response.status_code == 400
     assert "missing" in response.get_json()["error"]
 
-    plans = tmp_path / "guard/task_tests"
+    plans = tmp_path / "guard/task_sets"
     _task_set(plans / BATCH)
     app = create_app(
         plans,

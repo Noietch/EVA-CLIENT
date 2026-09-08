@@ -2,6 +2,7 @@
 
 import io
 import threading
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -27,6 +28,153 @@ def browser():
         browser = playwright.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
         yield browser
         browser.close()
+
+
+def test_collection_slot_click_selects_and_double_click_previews(browser, tmp_path):
+    source = (
+        Path(__file__).resolve().parents[2] / "src/core/app/console/static/js/collect.js"
+    ).read_text()
+    renderer = source[
+        source.index("function renderCollectTiles(") : source.index("function pipeBadge(")
+    ]
+    page = browser.new_page()
+    try:
+        page.set_content('<div id="collect-queue-tiles"></div>')
+        css = Path(__file__).resolve().parents[2] / "src/core/app/console/static/css/console.css"
+        page.add_style_tag(path=str(css))
+        page.add_style_tag(content=":root { --danger: #ff0000; --ok: #00ff00; --accent: #ff8800; }")
+        page.evaluate("""() => {
+            window.S = {collectionSlots: {dataset: 'cup_set', slots: [], active: null},
+                STATUS: {collect: {collecting: false}}, collectTaskSelectionPending: false};
+            window.$ = (id) => document.getElementById(id);
+            window.collectionSlotClickTimer = null;
+            window.selected = [];
+            window.previews = [];
+            window.activateCollectionSlot = (slot) => selected.push(slot.slot_id);
+            window.selectCollectionQcTarget = () => {};
+            window.selectCollectEpisode = (episode) => previews.push(episode.episode_index);
+            window.savedEpisodeId = (episode) => episode?.status === 'saved'
+                ? episode.episode_index : null;
+        }""")
+        page.add_script_tag(content=renderer)
+        page.evaluate("""() => {
+            S.collectionSlots.slots = [
+                {slot_id:'done', dataset:'cup_set', ordinal:0, state:'complete',
+                 episode:{status:'saved', episode_index:4, quality:'green'}},
+                {slot_id:'red', dataset:'cup_set', ordinal:1, state:'complete',
+                 episode:{status:'saved', episode_index:5, quality:'red'}},
+                {slot_id:'busy', dataset:'cup_set', ordinal:2, state:'saving'}
+            ];
+            renderCollectTiles(S.collectionSlots.slots);
+        }""")
+        tiles = page.locator(".collect-tile")
+        assert "SLOT 2" in tiles.nth(1).get_attribute("title")
+        assert "EPISODE 5 · RED" in tiles.nth(1).get_attribute("title")
+        assert (
+            tiles.nth(1).evaluate("el => getComputedStyle(el).backgroundColor") == "rgb(255, 0, 0)"
+        )
+        assert (
+            tiles.nth(0).evaluate("el => getComputedStyle(el).backgroundColor") == "rgb(0, 255, 0)"
+        )
+        tiles.nth(0).click()
+        page.wait_for_function("selected.length === 1")
+        assert page.evaluate("selected") == ["done"]
+        assert page.evaluate("previews") == []
+        tiles.nth(1).dblclick()
+        page.wait_for_timeout(350)
+        assert page.evaluate("selected") == ["done"]
+        assert page.evaluate("previews") == [5]
+        assert tiles.nth(2).is_disabled()
+        assert "slot-saving" in tiles.nth(2).get_attribute("class")
+        assert (
+            tiles.nth(2).evaluate("el => getComputedStyle(el).backgroundColor")
+            == "rgb(255, 136, 0)"
+        )
+        page.evaluate(
+            "S.collectionSlots.active = S.collectionSlots.slots[1]; "
+            "renderCollectTiles(S.collectionSlots.slots)"
+        )
+        assert "slot-current" in tiles.nth(1).get_attribute("class")
+        assert (
+            tiles.nth(1).evaluate("el => getComputedStyle(el).backgroundColor") == "rgb(255, 0, 0)"
+        )
+        page.evaluate(
+            "S.STATUS.collect.collecting = true; renderCollectTiles(S.collectionSlots.slots)"
+        )
+        assert all(tiles.nth(index).is_disabled() for index in range(3))
+    finally:
+        page.close()
+
+
+def test_collection_qc_uses_clicked_episode_after_newer_save(browser):
+    source = (
+        Path(__file__).resolve().parents[2] / "src/core/app/console/static/js/collect.js"
+    ).read_text()
+    fragments = [
+        source[
+            source.index("function selectCollectionQcTarget(") : source.index(
+                "function renderCollectionSlotFilters("
+            )
+        ],
+        source[source.index("function renderCollectTiles(") : source.index("function pipeBadge(")],
+        source[
+            source.index("async function submitEpisodeQc(") : source.index(
+                "async function submitQc("
+            )
+        ],
+    ]
+    page = browser.new_page()
+    try:
+        page.set_content("""<div id="collect-queue-tiles"></div><div id="collect-qc-target"></div>
+            <div id="collect-qc-status"></div><textarea id="collect-qc-note"></textarea>
+            <button id="fail">FAIL</button><button id="note">SAVE NOTE</button>""")
+        page.evaluate("""() => {
+            window.S = {collectionSlots:{dataset:'set', datasetDir:'/dataset', slots:[]},
+                STATUS:{collect:{}}, collectReplayEpisode:99, collectTaskSelectionPending:false};
+            window.$ = id => document.getElementById(id);
+            window.collectionQcTarget = null;
+            window.collectionSlotClickTimer = null;
+            window.savedEpisodeId = item => item?.status === 'saved' ? item.episode_index : null;
+            window.collectTaskValue = () => 'task';
+            window.reviewDatasetFor = () => '/dataset';
+            window.historyFor = () => ({episodes:[], queue:[]});
+            window.requests = [];
+            window.apiPost = async (url, body) => {requests.push(body); return {ok:true};};
+            window.clientTrace = window.invalidateEpisodeHistory = window.applyStatus = () => {};
+            window.renderCollect = () => {};
+            window.apiGet = async () => ({});
+            window.pollEpisodeHistory = window.pollCollectionSlots = async () => {};
+            window.reviewNoteFor = () => $('collect-qc-note');
+            window.episodeQcEndpoint = () => '/api/collect_qc_mark';
+            window.activateCollectionSlot = slot => {
+                // A poll/selection response now carries a newer episode for this same slot.
+                S.collectionSlots.slots = [{...slot, episode:{...slot.episode, episode_index:100}}];
+            };
+        }""")
+        page.add_script_tag(content="\n".join(fragments))
+        page.evaluate("""() => {
+            renderCollectTiles([{slot_id:'A', dataset:'set', ordinal:0, state:'complete',
+                episode:{episode_index:7, status:'saved', quality:'green', task:'task'}}]);
+            $('fail').onclick = () => submitEpisodeQc('collect','fail');
+            $('note').onclick = () => submitEpisodeNote('collect');
+        }""")
+        page.locator(".collect-tile").click()
+        page.wait_for_function("collectionQcTarget !== null")
+        page.locator("#fail").click()
+        page.wait_for_function("requests.length === 1")
+        page.locator("#collect-qc-note").fill("selected record only")
+        page.locator("#note").click()
+        page.wait_for_function("requests.length === 2")
+        requests = page.evaluate("requests")
+        assert [request["episode"] for request in requests] == ["7", "7"]
+        assert [request["dataset"] for request in requests] == ["set", "set"]
+        assert requests[0]["verdict"] == "fail"
+        assert requests[1]["note"] == "selected record only"
+        page.evaluate("S.collectionSlots.dataset = 'other'")
+        page.locator("#fail").click()
+        assert page.evaluate("requests.length") == 2
+    finally:
+        page.close()
 
 
 @pytest.fixture(scope="module")

@@ -160,14 +160,36 @@ def load_config(path: str | Path, *, workspace: DeviceWorkspace | None = None) -
 def _normalize_collection_task_set(cfg: ConfigDict) -> None:
     """Load a mounted task set; otherwise retain configured tasks."""
     collection = cfg.get("collection") or {}
-    task_set_dir = str(collection.get("task_set_dir", "") or "").strip()
-    if not task_set_dir:
-        return
-    root = _resolve_collection_task_set_path(task_set_dir)
-    if not root.is_dir():
+    task_set_dirs = collection.get("task_set_dir", "") or ""
+    if isinstance(task_set_dirs, (str, Path)):
+        task_set_dirs = [str(task_set_dirs)] if str(task_set_dirs).strip() else []
+    if not task_set_dirs:
         return
     authored_tasks = collection.get("tasks") or {}
     dataset_name = str(collection.get("task_set_name", "") or "").strip()
+    if len(task_set_dirs) > 1:
+        task_sets = {}
+        for task_set_dir in task_set_dirs:
+            root = _resolve_collection_task_set_path(task_set_dir)
+            if root.is_dir() and (root / "tasks.csv").is_file():
+                task_sets.update(load_collection_task_set(root, root.name))
+        if task_sets:
+            collection["tasks"] = task_sets
+        return
+    task_set_dir = str(task_set_dirs[0]).strip()
+    root = _resolve_collection_task_set_path(task_set_dir)
+    if not root.is_dir():
+        return
+    # A task-sets parent directory exposes each child task set to the collection
+    # selector. The child directory name is the dataset name shown in the UI.
+    if not dataset_name and not (root / "tasks.csv").is_file():
+        task_sets = {}
+        for child in sorted(root.iterdir()):
+            if child.is_dir() and (child / "tasks.csv").is_file():
+                task_sets.update(load_collection_task_set(child, child.name))
+        if task_sets:
+            collection["tasks"] = task_sets
+        return
     if not dataset_name and len(authored_tasks) == 1:
         dataset_name = str(next(iter(authored_tasks)))
     collection["tasks"] = load_collection_task_set(root, dataset_name or None)

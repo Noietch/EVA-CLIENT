@@ -1311,8 +1311,9 @@ def ingest_client_teleop_action(
     return True
 
 
-def collect_stop(config: ConfigDict, runtime: RuntimeState, session: SessionState) -> None:
+def collect_stop(config: ConfigDict, runtime: RuntimeState, session: SessionState) -> bool:
     """End the collection episode and leave teleop active at its current pose."""
+    saved = False
     if runtime.episode_logger is not None and runtime.episode_logger.is_collection_enabled:
         stop_collection_capture(runtime)
         try:
@@ -1330,9 +1331,18 @@ def collect_stop(config: ConfigDict, runtime: RuntimeState, session: SessionStat
             logger.warning(session.last_error)
     else:
         if runtime.episode_logger is not None:
-            runtime.episode_logger.end_episode()
+            saved = runtime.episode_logger.end_episode()
         session.status = SessionStatus.READY
+    if saved:
+        console_ctx = getattr(runtime, "console_ctx", None)
+        sync_collection_slot = getattr(console_ctx, "sync_collection_slot", None)
+        if callable(sync_collection_slot):
+            try:
+                sync_collection_slot()
+            except Exception:
+                logger.exception("Failed to advance collection slot after queuing episode")
     logger.info("Collection episode stopped; leaving hardware at current pose")
+    return saved
 
 
 def collect_cancel(runtime: RuntimeState, session: SessionState) -> None:

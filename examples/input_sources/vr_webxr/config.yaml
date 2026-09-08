@@ -20,7 +20,7 @@ teleop:
       input_timeout_s: 0.25
       heartbeat_timeout_s: 2.0
       position_scale: 1.0
-      eef_filter_alpha: 1.0
+      eef_filter_alpha: 0.5
       base_from_xr_rotation: [[0, 0, -1], [-1, 0, 0], [0, 1, 0]]
       gripper:
         mode: linear

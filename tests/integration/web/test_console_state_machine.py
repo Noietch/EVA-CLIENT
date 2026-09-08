@@ -192,7 +192,9 @@ def test_collection_slots_api_filters_independently_and_selects_one_cursor(tmp_p
             },
         ],
     }
-    monkeypatch.setattr(console_server, "_load_scene_plan", lambda _config: scene_plan)
+    monkeypatch.setattr(
+        console_server, "_load_scene_plan", lambda _config, dataset=None: scene_plan
+    )
 
     class _Logger:
         has_active_episode = False
@@ -238,7 +240,7 @@ def test_collection_slots_api_builds_slots_for_inline_tasks(tmp_path, monkeypatc
     monkeypatch.setattr(
         console_server,
         "_load_scene_plan",
-        lambda _config: {"scenes": [], "tasks": []},
+        lambda _config, dataset=None: {"scenes": [], "tasks": []},
     )
 
     with serve_console(console_config()) as h:
@@ -252,6 +254,68 @@ def test_collection_slots_api_builds_slots_for_inline_tasks(tmp_path, monkeypatc
     assert response.json["active"]["unbounded"] is False
     assert response.json["slots"][-1]["task"] == "place cup"
     assert response.json["slots"][-1]["unbounded"] is True
+
+
+def test_completed_slot_retake_survives_polling_and_releases_after_save(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        console_server, "_load_scene_plan", lambda *_args: {"scenes": [], "tasks": []}
+    )
+    episodes = [
+        {"slot_id": "INLINE-0:0", "episode_index": 0, "status": "saved", "quality": "green"}
+    ]
+    monkeypatch.setattr(
+        console_server, "load_episode_history", lambda *_args: {"episodes": episodes}
+    )
+    queue = []
+
+    class Logger:
+        has_active_episode = False
+
+        def status_snapshot(self, *args, **kwargs):
+            return {"dataset_dir": str(tmp_path), "queue": queue}
+
+    with serve_console(console_config()) as h:
+        h.runtime.episode_logger = cast(Any, Logger())
+        body = {"dataset": "cup_set", "slot_id": "INLINE-0:0"}
+        selected = h.post("/api/select_collection_slot", body)
+        assert selected.status == 200
+        assert selected.json["active"]["repair"]
+        for _ in range(2):
+            snapshot = h.get("/api/collection_slots?dataset=cup_set&all=1").json
+            assert snapshot["active"]["slot_id"] == "INLINE-0:0"
+            assert snapshot["slots"][0]["episode"]["episode_index"] == 0
+
+        h.runtime.collection_teleop_armed = True
+        h.runtime.console_ctx.active_tab = "collect"
+        assert h.post("/api/collect_start", {}).json["ok"]
+
+        for status in ("queued", "saving"):
+            queue[:] = [{"slot_id": "INLINE-0:0", "episode_index": 1, "status": status}]
+            snapshot = h.get("/api/collection_slots?dataset=cup_set&all=1").json
+            assert snapshot["slots"][0]["state"] == "saving"
+            assert snapshot["active"]["slot_id"] == "INLINE-0:1"
+            assert h.post("/api/select_collection_slot", body).status == 409
+
+        queue.clear()
+        episodes.append({**episodes[0], "episode_index": 1})
+        snapshot = h.get("/api/collection_slots?dataset=cup_set&all=1").json
+        assert snapshot["slots"][0]["state"] == "complete"
+        assert snapshot["slots"][0]["episode"]["episode_index"] == 1
+        assert snapshot["active"]["slot_id"] == "INLINE-0:1"
+
+        # A later failed QC result must replace the earlier green attempt.
+        episodes.append({**episodes[0], "episode_index": 2, "quality": "red"})
+        snapshot = h.get("/api/collection_slots?dataset=cup_set&all=1").json
+        assert snapshot["slots"][0]["episode"]["episode_index"] == 2
+        assert snapshot["slots"][0]["episode"]["quality"] == "red"
+        assert snapshot["counts"]["complete"] == 0
+        assert snapshot["slots"][0]["state"] == "rejected"
+        assert snapshot["active"]["slot_id"] == "INLINE-0:1"
+        assert h.post("/api/select_collection_slot", body).json["active"]["repair"]
+        assert (
+            h.get("/api/collection_slots?dataset=cup_set&all=1").json["active"]["slot_id"]
+            == "INLINE-0:0"
+        )
 
 
 class _CollectDatasetLogger:
@@ -369,7 +433,8 @@ def _register_completed_quality_export(
     )
 
 
-def test_collect_quality_export_uses_active_task_dataset(tmp_path, monkeypatch):
+@pytest.mark.parametrize("cursor_changed", [False, True])
+def test_collect_quality_export_uses_selected_dataset(tmp_path, monkeypatch, cursor_changed):
     source = tmp_path / "pick_up_cup"
     source.mkdir()
     calls = []
@@ -404,9 +469,12 @@ def test_collect_quality_export_uses_active_task_dataset(tmp_path, monkeypatch):
     monkeypatch.setattr(console_server, "export_dataset_by_quality", export)
     with serve_console(console_config()) as h:
         _set_collect_dataset_logger(h, source)
+        if cursor_changed:
+            h.session.selected_collect_task = "pour soybean"
+            h.session.selected_collect_set = "pouring_set"
         response = h.post(
             "/api/collect_quality_export",
-            {"task": "pick up cup", "dataset_format": "lerobot_v21"},
+            {"task": "pick up cup", "dataset": "cup_set", "dataset_format": "lerobot_v21"},
         )
         assert response.status == 202
         assert response.json["dataset_format"] == "lerobot_v21"
