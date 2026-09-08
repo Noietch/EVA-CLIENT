@@ -8,11 +8,15 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import imageio.v2 as imageio
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from core.recorder.video_encoding import dataset_h264_ffmpeg_params
+
 from ._publish import publish_output_pair
+from .source import video_frames
 
 
 @dataclasses.dataclass(frozen=True)
@@ -232,6 +236,7 @@ def _export_subset(
             "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4",
         )
     )
+    fps = float(info["fps"])
     source_stats = json.loads((source_dir / "meta" / "stats.json").read_text())
     accumulators = {name: _StatsAccumulator() for name in source_stats}
     episode_stats_by_index = {
@@ -322,7 +327,7 @@ def _export_subset(
         pq.write_table(table, output_parquet)
         global_index += frame_count
 
-        copied_videos = 0
+        written_videos = 0
         for video_key in tuple(source_row.get("video_keys") or default_video_keys):
             source_video = _format_path(
                 source_dir,
@@ -341,14 +346,19 @@ def _export_subset(
                 video_key=video_key,
             )
             output_video.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source_video, output_video)
-            copied_videos += 1
-        total_videos += copied_videos
+            _transcode_dataset_video(
+                source_video,
+                output_video,
+                fps=fps,
+                expected_frames=frame_count,
+            )
+            written_videos += 1
+        total_videos += written_videos
 
         output_row = dict(source_row)
         output_row["episode_index"] = new_index
         output_row["length"] = frame_count
-        output_row["total_videos"] = copied_videos
+        output_row["total_videos"] = written_videos
         if row_tasks:
             output_row["tasks"] = row_tasks
         output_rows.append(output_row)
@@ -406,6 +416,35 @@ def _export_subset(
         + "\n"
     )
     return global_index
+
+
+def _transcode_dataset_video(
+    source: Path,
+    target: Path,
+    *,
+    fps: float,
+    expected_frames: int,
+) -> None:
+    """Rewrite one LeRobot v2.1 video with the required dataset GOP."""
+    writer = imageio.get_writer(
+        str(target),
+        fps=fps,
+        codec="libx264",
+        macro_block_size=1,
+        ffmpeg_params=dataset_h264_ffmpeg_params(),
+    )
+    observed_frames = 0
+    try:
+        for frame in video_frames(source):
+            writer.append_data(np.ascontiguousarray(frame))
+            observed_frames += 1
+    finally:
+        writer.close()
+    if observed_frames != expected_frames:
+        raise ValueError(
+            f"LeRobot v2.1 video {source} has {observed_frames} frames; "
+            f"expected {expected_frames}"
+        )
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
