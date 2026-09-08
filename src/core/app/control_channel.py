@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from copy import deepcopy
 
 from core.app.command_catalog import WEB_COMMAND_VERBS
 from core.app.state import RuntimeState
@@ -107,6 +108,8 @@ def _handle_command(runtime: RuntimeState, message: dict) -> dict:
             "prompt": message.get("prompt"),
             "trial": message.get("trial"),
         }
+        if message.get("sim_metadata") is not None:
+            runtime.current_cell["sim_metadata"] = deepcopy(message["sim_metadata"])
 
     assert runtime.command_queue is not None
     runtime.command_queue.put(command)

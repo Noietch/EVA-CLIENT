@@ -2129,6 +2129,8 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         trial = body.get("trial")
         runtime.current_clip_id = clip_id
         runtime.current_cell = {"prompt": prompt, "trial": trial} if clip_id else None
+        if runtime.current_cell is not None and body.get("sim_metadata") is not None:
+            runtime.current_cell["sim_metadata"] = copy.deepcopy(body["sim_metadata"])
         self._enqueue("web:start")
         self._send_json(200, {"ok": True, "clip_id": clip_id})
 
