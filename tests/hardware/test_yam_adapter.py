@@ -356,7 +356,7 @@ def test_run_hardware_defaults_to_dual_leaders_and_gripper_calibration(
         ("--gripper-close-torque-limit", "0.29"),
         ("--gripper-open-torque-limit", "0.29"),
         ("--gripper-damping", "0.5"),
-        ("--gripper-max-speed", "1.0"),
+        ("--gripper-max-speed", "2.0"),
     ):
         assert args[args.index(flag) + 1] == expected
     gripper_kp_index = args.index("--gripper-kp")

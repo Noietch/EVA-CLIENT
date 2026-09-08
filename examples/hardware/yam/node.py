@@ -779,7 +779,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--gripper-max-speed",
         type=float,
-        default=1.0,
+        default=2.0,
         help=(
             "Maximum normalized gripper travel per second; 2.0 gives a 0.5 s full stroke, "
             "and 0 disables limiting."

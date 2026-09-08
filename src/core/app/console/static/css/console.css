@@ -1255,6 +1255,11 @@
     min-width: 0; overflow: hidden; font: 700 8px/1.2 var(--sans);
     letter-spacing: 0; text-align: center; text-overflow: ellipsis; white-space: nowrap;
   }
+  .collect-scene-object-photo {
+    position: absolute; z-index: 1; inset: 18px 8px 22px; width: calc(100% - 16px);
+    height: calc(100% - 40px); object-fit: contain; border-radius: 3px;
+    background: var(--paper);
+  }
   .collect-scene-cell.empty { background: var(--surface-2); color: var(--ink-faint); }
   .collect-scene-cell.fixed {
     border-color: var(--ink); background: var(--ink); color: var(--paper);
@@ -1271,10 +1276,6 @@
     width: 12px; height: 12px; border: 2px solid var(--paper); border-radius: 50%;
     background: var(--accent); box-shadow: 0 0 0 1px rgba(31,30,28,.22);
     transform: translate(-50%, -50%);
-  }
-  @container (max-width: 36px) {
-    .collect-scene-cell b { display: none; }
-    .collect-scene-target { inset: 15px 3px 3px; }
   }
   .collect-episode-summary {
     display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; margin-top: 8px;

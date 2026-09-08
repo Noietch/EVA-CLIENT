@@ -1233,7 +1233,12 @@ async function applyManualTune() {
 
 function enterManualSim() {
     S.manualActive = !S.STATUS.collection_teleop_armed;
-    if (S.manualActive) apiPost("/api/select_mode", { mode: "manual" });
+    if (S.manualActive) {
+      // MANUAL is the real-device control surface; selecting it requests the
+      // transport immediately so START never depends on a separate connect click.
+      S.realRequested = true;
+      apiPost("/api/select_mode", { mode: "manual" });
+    }
     renderManualConn();
     renderControl();
   }
@@ -1272,6 +1277,7 @@ function renderManualConn() {
     const btn = $("bm-connect");
     const conn = $("manual-conn");
     const send = $("bm-send");
+    btn.hidden = true;
     setCommandMetadata(btn, S.realRequested ? "web:disconnect" : "web:connect");
     setCommandMetadata(send, S.manualDispatching ? "web:halt" : "web:manual_send");
     const capable = !!(S.CFG && S.CFG.manual_capable);

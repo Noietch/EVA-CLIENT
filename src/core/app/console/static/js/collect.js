@@ -422,6 +422,7 @@ function scenePlanSceneRecommendation(scene, roundIndex) {
       object_id: group.object_id,
       name: group.name,
       color: group.color,
+      photoUrl: group.photo_url,
       positionId: assignments.get(index),
       x: point.x,
       y: point.y,
@@ -434,6 +435,7 @@ function scenePlanSceneRecommendation(scene, roundIndex) {
       object_id: group.object_id,
       name: group.name,
       color: group.color,
+      photoUrl: group.photo_url,
       positionId,
       x: 0.5,
       y: 0.5,
@@ -523,6 +525,7 @@ function renderSceneGridCells(host, scene) {
     const label = document.createElement("span");
     const target = document.createElement("i");
     const object = document.createElement("b");
+    const photo = document.createElement("img");
     cell.className = "collect-scene-cell empty";
     cell.dataset.positionId = position.positionId;
     cell.style.gridColumn = String(position.column);
@@ -531,7 +534,11 @@ function renderSceneGridCells(host, scene) {
     label.textContent = position.positionId;
     target.className = "collect-scene-target";
     target.setAttribute("aria-hidden", "true");
-    cell.append(label, target, object);
+    photo.className = "collect-scene-object-photo";
+    photo.alt = "";
+    photo.hidden = true;
+    photo.onerror = () => { photo.hidden = true; };
+    cell.append(label, target, photo, object);
     return cell;
   }));
 }
@@ -568,6 +575,17 @@ function renderCurrentSceneGrid(scene, roundIndex) {
     const object = cell.querySelector("b");
     object.textContent = names.join(" / ");
     object.title = names.join(" / ");
+    const photo = cell.querySelector("img");
+    const photoUrl = placements.find((placement) => placement.photoUrl)?.photoUrl || "";
+    if (photoUrl) {
+      if (photo.getAttribute("src") !== photoUrl) {
+        photo.hidden = false;
+        photo.src = photoUrl;
+      }
+    } else {
+      photo.hidden = true;
+      photo.removeAttribute("src");
+    }
     cell.title = names.length
       ? `${cell.dataset.positionId} · ${names.join(" / ")}` : cell.dataset.positionId;
   });

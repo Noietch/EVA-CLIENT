@@ -2398,8 +2398,13 @@ class EpisodeLogger:
         self, task: str | None, collection_dataset: str | None = None
     ) -> Path:
         prompt = str(task or "")
-        configured_tasks = (self._collection or {}).get("tasks") or {}
+        collection = self._collection or {}
+        configured_tasks = collection.get("tasks") or {}
         if collection_dataset is not None:
+            # A mounted task set is authoritative. Its task definitions may be
+            # loaded by the dataset service and need not mirror collection.tasks.
+            if str(collection.get("task_set_dir", "") or "").strip():
+                return self._log_dir / sanitize_path_component(collection_dataset) / "raw"
             entries = configured_tasks.get(collection_dataset)
             if entries is None or prompt not in {str(entry[0]) for entry in entries}:
                 raise ValueError(

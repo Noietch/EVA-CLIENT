@@ -19,8 +19,8 @@ teleop:
       ack_endpoint: tcp://127.0.0.1:8766
       input_timeout_s: 0.25
       heartbeat_timeout_s: 2.0
-      position_scale: 1.2
-      eef_filter_alpha: 0.1
+      position_scale: 1.0
+      eef_filter_alpha: 1.0
       base_from_xr_rotation: [[0, 0, -1], [-1, 0, 0], [0, 1, 0]]
       gripper:
         mode: linear

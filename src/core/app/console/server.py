@@ -30,7 +30,7 @@ from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import cv2
 import imageio_ffmpeg
@@ -1018,7 +1018,7 @@ def _scene_plan_placements(value: Any) -> list[dict[str, Any]]:
             continue
         object_id = str(item.get("object_id", "") or "").strip()
         position_ids = item.get("position_ids")
-        randomized = item.get("random")
+        randomized = item.get("random", False)
         if not object_id or not isinstance(position_ids, list) or not isinstance(randomized, bool):
             continue
         position_ids = [str(position_id or "").strip() for position_id in position_ids]
@@ -1090,16 +1090,35 @@ def _scene_plan_objects(root: Path) -> dict[str, dict[str, Any]]:
     payload = {}
     info = _read_scene_plan_yaml(root, "info.yaml")
     objects_file = str(info.get("objects_file", "objects.csv") or "objects.csv")
+    objects_path = (root / objects_file).resolve()
+    photo_root = objects_path.parent / "object_photos"
     for row in _read_scene_plan_csv(root, objects_file):
-        object_id = str(row.get("object_id", "") or "").strip()
+        object_id = str(row.get("object_id") or row.get("物品代码") or "").strip()
         if not object_id:
             continue
+        photo_dir = str(
+            row.get("photo_dir") or row.get("照片目录") or row.get("名称") or ""
+        ).strip()
+        photos = sorted((photo_root / photo_dir).glob("*")) if photo_dir else []
+        photo = next(
+            (
+                path
+                for path in photos
+                if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}
+            ),
+            None,
+        )
         payload[object_id] = {
             "object_id": object_id,
-            "name": str(row.get("object_name_zh") or row.get("object_name") or object_id),
-            "name_zh": str(row.get("object_name_zh", "") or ""),
-            "name_en": str(row.get("object_name", "") or ""),
+            "name": str(
+                row.get("object_name_zh") or row.get("名称") or row.get("object_name") or object_id
+            ),
+            "name_zh": str(row.get("object_name_zh") or row.get("名称") or ""),
+            "name_en": str(row.get("object_name") or row.get("英文名") or ""),
             "color": str(row.get("color", "") or ""),
+            "photo_url": f"/api/scene_plan/object-photo/{quote(object_id)}/{quote(photo.name)}"
+            if photo
+            else "",
         }
     return payload
 
@@ -1135,6 +1154,7 @@ def _scene_plan_scenes(
                     "object_id": object_id,
                     "name": obj["name"],
                     "color": obj.get("color", ""),
+                    "photo_url": obj.get("photo_url", ""),
                     "random": placement["random"],
                 }
             )
@@ -1145,6 +1165,7 @@ def _scene_plan_scenes(
                         "object_id": object_id,
                         "name": obj["name"],
                         "color": obj.get("color", ""),
+                        "photo_url": obj.get("photo_url", ""),
                         "group_id": group_id,
                         "group_position_index": position_index,
                         "group_size": len(position_ids),
@@ -1806,12 +1827,22 @@ def _serialize_scene(ctx: ConsoleContext) -> dict:
     if collection_qpos is not None:
         qpos = collection_qpos
         source = f"collection_replay:{collection_frame_index}"
-    # MANUAL mode: the solid arm follows the hand-set command qpos. Bypass the cache
-    # since manual_qpos moves freely with the sliders.
+    # MANUAL mode: the solid arm follows live robot feedback. The hand-set command
+    # is rendered separately as a ghost so entering START never snaps the solid arm
+    # to the initial/target pose.
     elif session.mode is SessionMode.MANUAL and ctx.active_tab != "collect":
+        state = reader.get_latest_qpos()
+        if state is None:
+            state = runtime.robot.initial_qpos
+        command = session.manual_qpos
         return {
             "available": True,
-            "arms": ctx.scene.transforms(session.manual_qpos),  # type: ignore[attr-defined]
+            "arms": ctx.scene.transforms(state),  # type: ignore[attr-defined]
+            "ghost": (
+                ctx.scene.transforms(command)  # type: ignore[attr-defined]
+                if command is not None
+                else None
+            ),
         }
     elif session.sim_preview_qpos is not None and ctx.active_tab != "collect":
         # SIM run/preview: render the last command directly. A replay source may
@@ -2299,6 +2330,9 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         if path.startswith("/meshes/"):
             self._send_mesh(path[len("/meshes/") :])
             return
+        if path.startswith("/api/scene_plan/object-photo/"):
+            self._send_scene_plan_photo(path[len("/api/scene_plan/object-photo/") :])
+            return
         handler = _GET_ROUTES.get(path)
         if handler is None:
             self._send_empty(404)
@@ -2320,6 +2354,36 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
 
     def _get_scene_plan(self) -> None:
         self._send_json(200, _load_scene_plan(self.ctx.config))
+
+    def _send_scene_plan_photo(self, suffix: str) -> None:
+        parts = [unquote(part) for part in suffix.split("/")]
+        if len(parts) != 2:
+            self._send_empty(404)
+            return
+        root = _scene_plan_root(self.ctx.config).resolve()
+        info = _read_scene_plan_yaml(root, "info.yaml")
+        objects_file = str(info.get("objects_file", "objects.csv") or "objects.csv")
+        row = next(
+            (
+                item
+                for item in _read_scene_plan_csv(root, objects_file)
+                if str(item.get("object_id") or item.get("物品代码") or "").strip() == parts[0]
+            ),
+            None,
+        )
+        if not row:
+            self._send_empty(404)
+            return
+        objects_path = (root / objects_file).resolve()
+        photo_dir = str(
+            row.get("photo_dir") or row.get("照片目录") or row.get("名称") or ""
+        ).strip()
+        photo_root = (objects_path.parent / "object_photos").resolve()
+        target = (photo_root / photo_dir / parts[1]).resolve()
+        if photo_root not in target.parents or not target.is_file():
+            self._send_empty(404)
+            return
+        self._send_static(target)
 
     def _get_collection_slots(self) -> None:
         dataset = self._query_str("dataset").strip()
