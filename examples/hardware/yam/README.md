@@ -199,12 +199,29 @@ touches the CAN SDK. Override the rates independently with `CONTROL_RATE` and
 `PUBLISH_RATE`. The periodic hardware status log includes the achieved control
 rate and per-joint `target - current` tracking error in radians.
 
-Follower grippers independently limit fast target changes to `2.0` normalized
-travel units per second by default, giving a minimum full-stroke time of about
-0.5 seconds without slowing the six arm joints. Slow teaching-handle motion is
-passed through unchanged. Set `robot.dual_yam.settings.gripper_max_speed` in
-`config.yaml`, or choose `Grip speed` on the DEVICE page while the devices are
-stopped. Set it to `1.5` for a softer response or `0` to disable the limiter.
+Follower grippers independently limit fast target changes to `1.0` normalized
+travel unit per second by default, giving a minimum full-stroke time of about
+one second without slowing the six arm joints. Slow teaching-handle motion is
+passed through unchanged. Configure
+`robot.dual_yam.settings.gripper_max_speed` in `config.yaml`; set it to `0` to
+disable the limiter.
+
+Follower grippers use bounded software impedance on every SDK control tick:
+`torque = clip(kp * (target - position) - damping * velocity, torque_limits)`.
+The calculation uses motor radians and rad/s, and limits the complete torque
+command before sending it through MIT mode with onboard gripper kp/kd set to
+zero. The six arm joints retain their existing control. There is no contact
+state machine, blocked-gripper correction, or added gripper friction torque.
+
+Configure `gripper_kp: 5.0`, `gripper_damping: 0.5`,
+`gripper_close_torque_limit: 0.29` and `gripper_open_torque_limit: 0.29` under
+`robot.dual_yam.settings` in `config.yaml`. Torque limits are motor Nm, not
+measured fingertip force limits. They apply during position tracking and
+hold-position idle; gravity-comp idle retains zero gripper output. Restart the
+Robot process to apply changes. Automatic limit calibration uses its existing
+separate torque procedure and must run with an empty gripper. The former
+`gripper_force_limit` and `gripper_force_compensation` settings are replaced by
+these torque limits; remove any saved overrides for the former settings.
 
 After selecting a collection task and switching `ARM ON` in the Collection page,
 either leader's `RECORD` button starts an episode when idle and ends/saves it

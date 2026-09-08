@@ -54,6 +54,10 @@ class _Config:
     end_effector_mass: float | None = None
     gravity_comp_factor: tuple[float, ...] | None = None
     gripper_limits_override: tuple[float, float] | None = None
+    gripper_kp: float = 5.0
+    gripper_damping: float = 0.5
+    gripper_close_torque_limit: float = 0.29
+    gripper_open_torque_limit: float = 0.29
     gripper_max_speed: float = 0.0
     tracking_ki: float = 0.0
     tracking_trim_limit: float = 0.12
@@ -157,10 +161,13 @@ def test_yam_leader_gripper_uses_one_for_open() -> None:
 
 def test_follower_commands_both_arms_and_watchdog(monkeypatch: pytest.MonkeyPatch) -> None:
     robots_by_channel: dict[str, _FakeYam] = {}
+    factory_kwargs: dict[str, dict[str, object]] = {}
 
     def factory(**kwargs: object) -> _FakeYam:
         robot = _FakeYam()
-        robots_by_channel[str(kwargs["channel"])] = robot
+        channel = str(kwargs["channel"])
+        robots_by_channel[channel] = robot
+        factory_kwargs[channel] = kwargs
         return robot
 
     clock = 10.0
@@ -174,8 +181,14 @@ def test_follower_commands_both_arms_and_watchdog(monkeypatch: pytest.MonkeyPatc
 
     assert robots_by_channel["can0"].qpos == pytest.approx(target[:7])
     assert robots_by_channel["can1"].qpos == pytest.approx(target[7:])
-    assert robots_by_channel["can0"].last_kp == pytest.approx([80, 80, 80, 40, 10, 10, 20])
+    assert robots_by_channel["can0"].last_kp == pytest.approx([80, 80, 80, 40, 10, 10, 5])
     assert robots_by_channel["can0"].last_kd == pytest.approx([5, 5, 5, 1.5, 1.5, 1.5, 0.5])
+    for kwargs in factory_kwargs.values():
+        assert kwargs["gripper_close_torque_limit"] == 0.29
+        assert kwargs["gripper_open_torque_limit"] == 0.29
+        assert kwargs["gripper_damping"] == 0.5
+    assert factory_kwargs["can0"]["gripper_kp"] == 5.0
+    assert factory_kwargs["can1"]["gripper_kp"] == 5.0
 
     clock = 10.6
     followers.watchdog_tick()
@@ -214,6 +227,25 @@ def test_follower_limits_only_gripper_speed(monkeypatch: pytest.MonkeyPatch) -> 
     assert robots_by_channel["can1"].qpos[6] == pytest.approx(0.8)
 
 
+@pytest.mark.parametrize(
+    "flag,value",
+    [
+        ("--gripper-close-torque-limit", "0"),
+        ("--gripper-close-torque-limit", "nan"),
+        ("--gripper-open-torque-limit", "-0.1"),
+        ("--gripper-open-torque-limit", "inf"),
+        ("--gripper-damping", "0"),
+        ("--gripper-kp", "nan"),
+    ],
+)
+def test_gripper_impedance_rejects_invalid_parameters(flag: str, value: str) -> None:
+    from examples.hardware.yam.node import build_arg_parser, build_config
+
+    args = build_arg_parser().parse_args(["--gripper-limits-override", "0", "6.57", flag, value])
+    with pytest.raises(ValueError, match=flag):
+        build_config(args)
+
+
 def test_run_hardware_defaults_to_dual_leaders_and_gripper_calibration(
     tmp_path: Path,
 ) -> None:
@@ -237,6 +269,11 @@ def test_run_hardware_defaults_to_dual_leaders_and_gripper_calibration(
     for name in (
         "ENABLE_YAM_LEADERS",
         "YAM_ALLOW_GRIPPER_CALIBRATION",
+        "YAM_GRIPPER_CLOSE_TORQUE_LIMIT",
+        "YAM_GRIPPER_OPEN_TORQUE_LIMIT",
+        "YAM_GRIPPER_DAMPING",
+        "YAM_GRIPPER_MAX_SPEED",
+        "YAM_GRIPPER_KP",
         "YAM_GRIPPER_LIMITS",
         "LEFT_LEADER_GRIPPER_ENDPOINTS",
         "RIGHT_LEADER_GRIPPER_ENDPOINTS",
@@ -315,6 +352,15 @@ def test_run_hardware_defaults_to_dual_leaders_and_gripper_calibration(
     assert "--direct-leader-control" in args
     startup_index = args.index("--startup-position")
     assert args[startup_index + 1] == "zero"
+    for flag, expected in (
+        ("--gripper-close-torque-limit", "0.29"),
+        ("--gripper-open-torque-limit", "0.29"),
+        ("--gripper-damping", "0.5"),
+        ("--gripper-max-speed", "1.0"),
+    ):
+        assert args[args.index(flag) + 1] == expected
+    gripper_kp_index = args.index("--gripper-kp")
+    assert args[gripper_kp_index + 1] == "5.0"
     camera_indexes = [index for index, value in enumerate(args) if value == "--camera"]
     assert [args[index + 1] for index in camera_indexes] == ["cam_high=260422275306"]
     orbbec_indexes = [index for index, value in enumerate(args) if value == "--orbbec-camera"]

@@ -109,6 +109,10 @@ def test_device_catalog_composes_and_restores_each_robot(tmp_path, monkeypatch):
     values = workspace.resolve(selected)
     assert all("index:" not in value for value in values["camera"]["settings"]["camera"])
     values["robot"]["settings"]["gripper_limits_override"] = [0.0, 1.0]
+    values["robot"]["settings"]["gripper_close_torque_limit"] = 0.2
+    values["robot"]["settings"]["gripper_open_torque_limit"] = 0.3
+    values["robot"]["settings"]["gripper_damping"] = 0.4
+    values["robot"]["settings"]["gripper_kp"] = 5.0
     values["robot"]["settings"]["gripper_max_speed"] = 1.5
     values["teleop"]["settings"]["leader_cans"] = ["can2", "can3"]
     workspace.save(selected, values)
@@ -116,6 +120,10 @@ def test_device_catalog_composes_and_restores_each_robot(tmp_path, monkeypatch):
 
     node_config = build_config(build_arg_parser().parse_args(workspace.commands()["robot"][3:]))
     assert node_config.startup_position == "zero"
+    assert node_config.gripper_close_torque_limit == 0.2
+    assert node_config.gripper_open_torque_limit == 0.3
+    assert node_config.gripper_damping == 0.4
+    assert node_config.gripper_kp == 5.0
     assert node_config.gripper_max_speed == 1.5
     assert not node_config.direct_leader_control
     assert node_config.leader_can_channels
