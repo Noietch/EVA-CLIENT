@@ -126,6 +126,18 @@ def is_rejected_episode(row: dict[str, Any]) -> bool:
     return str(row.get("quality", "green")).lower() == "red"
 
 
+def _latest_slot_episodes(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep exactly the latest attempt for each capture slot, regardless of QC."""
+    selected: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in rows:
+        slot_id = str(row.get("slot_id") or "")
+        key = ("slot", slot_id) if slot_id else ("episode", str(row["episode_index"]))
+        previous = selected.get(key)
+        if previous is None or int(row["episode_index"]) > int(previous["episode_index"]):
+            selected[key] = row
+    return list(selected.values())
+
+
 def split_dataset_by_quality(
     source_dir: Path,
     accepted_dir: Path | None = None,
@@ -161,6 +173,7 @@ def split_dataset_by_quality(
     indices = [int(row["episode_index"]) for row in rows]
     if len(indices) != len(set(indices)):
         raise ValueError("episode indices must be unique")
+    rows = _latest_slot_episodes(rows)
     accepted_rows = [row for row in rows if not is_rejected_episode(row)]
     rejected_rows = [row for row in rows if is_rejected_episode(row)]
     if progress_callback is not None:
@@ -417,6 +430,7 @@ def _export_subset(
                 "subset": subset,
                 "dataset_format": "lerobot_v21",
                 "rule": "qc_verdict == pass overrides quality == red; qc_verdict == fail rejects",
+                "episode_selection": "latest attempt per slot; unassigned episodes retained",
                 "source_episode_indices": source_indices,
             },
             indent=2,
