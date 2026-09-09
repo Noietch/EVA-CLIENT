@@ -80,17 +80,12 @@ function scenePlanStartMetadata() {
   const task = scenePlanTask();
   const slot = S.collectionSlots && S.collectionSlots.active;
   if (!task || !scene || !slot || task.prompt_en !== collectTaskValue()) return {};
-  const recommendation = scenePlanSceneRecommendation(scene, S.scenePlanRoundIndex);
-  const metadata = {
+  return {
     scene_id: scene.scene_id,
     scene_round: S.scenePlanRoundIndex,
     slot_id: slot.slot_id,
     task_id: slot.task_id,
   };
-  if (recommendation && recommendation.seed !== null) {
-    metadata.random_seed = recommendation.seed;
-  }
-  return metadata;
 }
 
 function syncScenePlanTask(prompt) {
@@ -302,157 +297,6 @@ function changeCollectionSlotPage(delta) {
   renderCollect();
 }
 
-function scenePlanRng(seed) {
-  let state = (Number(seed) >>> 0) || 1;
-  return () => {
-    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
-    return state / 4294967296;
-  };
-}
-
-function scenePlanTextSeed(value) {
-  return Array.from(String(value || "")).reduce(
-    (total, character, index) => total + (index + 1) * character.charCodeAt(0), 0
-  ) >>> 0;
-}
-
-function scenePlanBalancedOffset(randomization, placementKey, roundIndex) {
-  if (roundIndex % 5 === 0) return { x: 0.5, y: 0.5 };
-  const [jitterMin, jitterMax] = randomization.jitterBounds;
-  const cycle = Math.floor(roundIndex / 5);
-  const jitter = scenePlanRng(
-    randomization.seed + scenePlanTextSeed(placementKey) + cycle * 7919
-  );
-  const edges = ["top", "right", "bottom", "left"];
-  for (let index = edges.length - 1; index > 0; index -= 1) {
-    const target = Math.floor(jitter() * (index + 1));
-    [edges[index], edges[target]] = [edges[target], edges[index]];
-  }
-  const along = jitterMin + (jitterMax - jitterMin) * jitter();
-  const edge = edges[(roundIndex - 1) % edges.length];
-  if (edge === "top") return { x: along, y: jitterMin };
-  if (edge === "right") return { x: jitterMax, y: along };
-  if (edge === "bottom") return { x: along, y: jitterMax };
-  return { x: jitterMin, y: along };
-}
-
-function scenePlanSceneRandomization(scene) {
-  const configured = scene && scene.randomization && typeof scene.randomization === "object"
-    ? scene.randomization : {};
-  const groups = scene && Array.isArray(scene.placement_groups)
-    ? scene.placement_groups : [];
-  if (!groups.some((group) => group.random) || configured.enabled === false) return null;
-  const configuredBounds = Array.isArray(configured.jitter_bounds)
-    ? configured.jitter_bounds.map((value) => Number(value)) : [];
-  const jitterBounds = configuredBounds.length === 2 && configuredBounds.every((value) =>
-    Number.isFinite(value) && value >= 0 && value <= 1
-  ) && configuredBounds[0] <= configuredBounds[1]
-    ? configuredBounds : [0.2, 0.8];
-  return {
-    seed: Number(configured.seed) >>> 0,
-    jitterBounds,
-  };
-}
-
-function scenePlanCandidatePositions(randomization, group, roundIndex) {
-  const positions = Array.isArray(group.position_ids)
-    ? group.position_ids.map((value) => String(value)).filter(Boolean) : [];
-  if (positions.length <= 1) return positions;
-  const cycle = Math.floor(roundIndex / positions.length);
-  const choices = positions.slice();
-  const random = scenePlanRng(
-    randomization.seed + scenePlanTextSeed(group.group_id) + cycle * 104729
-  );
-  for (let index = choices.length - 1; index > 0; index -= 1) {
-    const target = Math.floor(random() * (index + 1));
-    [choices[index], choices[target]] = [choices[target], choices[index]];
-  }
-  const offset = roundIndex % choices.length;
-  return choices.slice(offset).concat(choices.slice(0, offset));
-}
-
-function scenePlanAssignPositions(groups, reservedPositions = []) {
-  const assignments = new Map();
-  const occupied = new Set(reservedPositions);
-  const assign = (groupIndex) => {
-    if (groupIndex >= groups.length) return true;
-    const entry = groups[groupIndex];
-    for (const candidate of entry.candidates) {
-      if (occupied.has(candidate)) continue;
-      occupied.add(candidate);
-      assignments.set(entry.index, candidate);
-      if (assign(groupIndex + 1)) return true;
-      assignments.delete(entry.index);
-      occupied.delete(candidate);
-    }
-    return false;
-  };
-  assign(0);
-  groups.forEach((entry) => {
-    if (!assignments.has(entry.index)) {
-      assignments.set(entry.index, entry.candidates[0]);
-    }
-  });
-  return assignments;
-}
-
-function scenePlanSceneRecommendation(scene, roundIndex) {
-  const placementGroups = scene && Array.isArray(scene.placement_groups)
-    ? scene.placement_groups : [];
-  if (!placementGroups.length) return null;
-  const randomization = scenePlanSceneRandomization(scene);
-  const fixedGroups = placementGroups.map((group, index) => ({ group, index })).filter(
-    ({ group }) => !group.random
-  );
-  const reservedPositions = fixedGroups.flatMap(({ group }) => group.position_ids || []);
-  const groups = placementGroups.map((group, index) => ({ group, index })).filter(
-    ({ group }) => group.random
-  ).map(({ group, index }) => ({
-    group,
-    index,
-    candidates: scenePlanCandidatePositions(randomization, group, roundIndex),
-  })).sort((left, right) => (
-    left.candidates.length - right.candidates.length || left.index - right.index
-  ));
-  const assignments = scenePlanAssignPositions(groups, reservedPositions);
-  const randomizedPlacements = groups.map(({ group, index }) => {
-    const point = scenePlanBalancedOffset(randomization, group.group_id, roundIndex);
-    return {
-      index,
-      object_id: group.object_id,
-      name: group.name,
-      color: group.color,
-      positionId: assignments.get(index),
-      x: point.x,
-      y: point.y,
-      randomized: true,
-    };
-  });
-  const fixedPlacements = fixedGroups.flatMap(({ group, index }) => (
-    group.position_ids.map((positionId) => ({
-      index,
-      object_id: group.object_id,
-      name: group.name,
-      color: group.color,
-      positionId,
-      x: 0.5,
-      y: 0.5,
-      randomized: false,
-    }))
-  ));
-  const placements = fixedPlacements.concat(randomizedPlacements).sort(
-    (left, right) => left.index - right.index
-  );
-  return {
-    roundIndex,
-    seed: randomization
-      ? (randomization.seed + roundIndex * 1000003) >>> 0
-      : null,
-    randomizedCount: groups.length,
-    placements,
-  };
-}
-
 function scenePlanGridPositions(scene) {
   const configured = S.SCENE_PLAN && Array.isArray(S.SCENE_PLAN.positions)
     ? S.SCENE_PLAN.positions : [];
@@ -521,7 +365,6 @@ function renderSceneGridCells(host, scene) {
   host.replaceChildren(...geometry.cells.map((position) => {
     const cell = document.createElement("div");
     const label = document.createElement("span");
-    const target = document.createElement("i");
     const object = document.createElement("b");
     cell.className = "collect-scene-cell empty";
     cell.dataset.positionId = position.positionId;
@@ -529,21 +372,18 @@ function renderSceneGridCells(host, scene) {
     cell.style.gridRow = String(position.row);
     cell.title = position.positionId;
     label.textContent = position.positionId;
-    target.className = "collect-scene-target";
-    target.setAttribute("aria-hidden", "true");
-    cell.append(label, target, object);
+    cell.append(label, object);
     return cell;
   }));
 }
 
-function renderCurrentSceneGrid(scene, roundIndex) {
+function renderCurrentSceneGrid(scene) {
   const host = $("collect-current-scene-grid");
   if (!host) return;
   renderSceneGridCells(host, scene);
-  const recommendation = scenePlanSceneRecommendation(scene, roundIndex);
   const byPosition = new Map();
-  (recommendation && recommendation.placements || []).forEach((placement) => {
-    const positionId = String(placement.positionId || "");
+  (scene && scene.placements || []).forEach((placement) => {
+    const positionId = String(placement.position_id || "");
     if (!positionId) return;
     const values = byPosition.get(positionId) || [];
     values.push(placement);
@@ -553,18 +393,8 @@ function renderCurrentSceneGrid(scene, roundIndex) {
     const placements = byPosition.get(cell.dataset.positionId) || [];
     const names = [...new Set(placements.map((placement) => String(placement.name || "")))]
       .filter(Boolean);
-    const movablePlacement = placements.find((placement) => placement.randomized);
-    const movable = !!movablePlacement;
     cell.classList.toggle("empty", placements.length === 0);
-    cell.classList.toggle("fixed", placements.length > 0 && !movable);
-    cell.classList.toggle("movable", movable);
-    if (movablePlacement) {
-      cell.style.setProperty("--movable-x", `${Number(movablePlacement.x) * 100}%`);
-      cell.style.setProperty("--movable-y", `${Number(movablePlacement.y) * 100}%`);
-    } else {
-      cell.style.removeProperty("--movable-x");
-      cell.style.removeProperty("--movable-y");
-    }
+    cell.classList.toggle("fixed", placements.length > 0);
     const object = cell.querySelector("b");
     object.textContent = names.join(" / ");
     object.title = names.join(" / ");
@@ -1594,7 +1424,7 @@ function renderCollect() {
 
     $("collect-current-position").textContent = activeSlot
       ? `${Number(activeSlot.ordinal) + 1} / ${totalSlots}` : `${totalSlots} / ${totalSlots}`;
-    renderCurrentSceneGrid(scenePlanScene(), activeSlot ? Number(activeSlot.round_index) : 0);
+    renderCurrentSceneGrid(scenePlanScene());
     $("collect-current-task").textContent = activeSlot
       ? (activeSlot.task_zh || activeSlot.task) : "--";
     $("collect-current-task-en").textContent = activeSlot && activeSlot.task_zh

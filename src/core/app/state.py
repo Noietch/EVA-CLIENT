@@ -96,8 +96,7 @@ class SessionState:
         selected_collect_set: Dataset set containing the selected collection task.
         selected_collect_task_index: Task position within the selected collection set.
         collection_scene_id: Scene selected for the next collection episode.
-        collection_scene_round: Randomization round shared by all tasks in the scene.
-        collection_random_seed: Seed used to place every object for the scene round.
+        collection_scene_round: Collection round for the selected scene.
         collection_slot_id: Stable Scene + Task + Round slot selected for capture.
         collection_task_id: Scene-plan task identifier for the selected slot.
         interrupt_requested: True when a motion interrupt has been requested.
@@ -127,7 +126,6 @@ class SessionState:
     selected_collect_task_index: int | None = None
     collection_scene_id: str | None = None
     collection_scene_round: int | None = None
-    collection_random_seed: int | None = None
     collection_slot_id: str | None = None
     collection_task_id: str | None = None
     interrupt_requested: bool = False

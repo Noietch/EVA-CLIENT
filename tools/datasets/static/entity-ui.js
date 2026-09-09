@@ -19,7 +19,6 @@ let emptyList;
 let switchTab;
 let stopPlayback;
 let openSlot;
-let buildSceneLegend;
 
 const $ = (id) => document.getElementById(id);
 
@@ -46,7 +45,6 @@ function configureEntityUi(context) {
     switchTab,
     stopPlayback,
     openSlot,
-    buildSceneLegend,
   } = context);
 }
 
@@ -387,13 +385,12 @@ function renderGridCells(host, batch, scene, readOnly = false) {
   const placements = scene ? scene.placements : [];
   host.replaceChildren(...geometry.cells.map((point) => {
     const matches = placements.filter((placement) => placement.position_ids.includes(point.position_id));
-    const moving = matches.some((placement) => placement.random);
     const selected = !readOnly && app.placementIndex >= 0
       && placements[app.placementIndex]
       && placements[app.placementIndex].position_ids.includes(point.position_id);
     const cell = node(
       "button",
-      "scene-cell" + (matches.length ? (moving ? " movable" : " fixed") : "")
+      "scene-cell" + (matches.length ? " occupied" : "")
         + (selected ? " selected" : ""),
     );
     cell.type = "button";
@@ -454,7 +451,7 @@ function renderSceneEditor() {
   });
   const grid = node("div", "scene-grid");
   renderGridCells(grid, draft.batch_id, draft, !app.editMode);
-  canvas.append(field("Scene ID", idControl), grid, buildSceneLegend());
+  canvas.append(field("Scene ID", idControl), grid);
   const placements = node("section", "surface placement-panel");
   const head = node("div", "section-head");
   const heading = node("div");
@@ -465,7 +462,6 @@ function renderSceneEditor() {
     draft.placements.push({
       object_id: app.state.objects[0].object_id,
       position_ids: [],
-      random: false,
     });
     app.placementIndex = draft.placements.length - 1;
     renderSceneEditor();
@@ -511,19 +507,9 @@ function buildPlacementCard(placement, index) {
     app.placementIndex = Math.min(app.placementIndex, app.draft.scenes.placements.length - 1);
     renderSceneEditor();
   });
-  const toggle = node("label", "toggle");
-  const random = input("checkbox");
-  random.checked = Boolean(placement.random);
-  random.disabled = !app.editMode;
-  random.addEventListener("change", () => {
-    placement.random = random.checked;
-    renderSceneEditor();
-  });
-  toggle.addEventListener("click", (event) => event.stopPropagation());
-  toggle.append(random, node("span", "toggle-track"), node("span", "", "运动"));
   card.append(select);
   if (app.editMode) card.append(remove);
-  card.append(toggle, node("small", "", placement.position_ids.join(", ") || "未选择位置"));
+  card.append(node("small", "", placement.position_ids.join(", ") || "未选择位置"));
   return card;
 }
 

@@ -1259,22 +1259,8 @@
   .collect-scene-cell.fixed {
     border-color: var(--ink); background: var(--ink); color: var(--paper);
   }
-  .collect-scene-cell.movable {
-    border-color: var(--rule-strong); background: var(--surface-2); color: var(--ink);
-  }
-  .collect-scene-target {
-    position: absolute; inset: 18px 4px 22px; min-width: 0; min-height: 0;
-  }
-  .collect-scene-cell.movable .collect-scene-target::after {
-    content: ""; position: absolute; z-index: 1;
-    left: var(--movable-x, 50%); top: var(--movable-y, 50%);
-    width: 12px; height: 12px; border: 2px solid var(--paper); border-radius: 50%;
-    background: var(--accent); box-shadow: 0 0 0 1px rgba(31,30,28,.22);
-    transform: translate(-50%, -50%);
-  }
   @container (max-width: 36px) {
     .collect-scene-cell b { display: none; }
-    .collect-scene-target { inset: 15px 3px 3px; }
   }
   .collect-episode-summary {
     display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; margin-top: 8px;

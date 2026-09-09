@@ -1018,8 +1018,7 @@ def _scene_plan_placements(value: Any) -> list[dict[str, Any]]:
             continue
         object_id = str(item.get("object_id", "") or "").strip()
         position_ids = item.get("position_ids")
-        randomized = item.get("random")
-        if not object_id or not isinstance(position_ids, list) or not isinstance(randomized, bool):
+        if not object_id or not isinstance(position_ids, list):
             continue
         position_ids = [str(position_id or "").strip() for position_id in position_ids]
         position_ids = [position_id for position_id in position_ids if position_id]
@@ -1028,23 +1027,9 @@ def _scene_plan_placements(value: Any) -> list[dict[str, Any]]:
                 {
                     "position_ids": position_ids,
                     "object_id": object_id,
-                    "random": randomized,
                 }
             )
     return placements
-
-
-def _scene_plan_randomization(
-    scene_id: str,
-    enabled: bool,
-) -> dict[str, Any]:
-    """Describe deterministic whole-scene placement for each collection round."""
-    return {
-        "enabled": enabled,
-        "seed": sum((index + 1) * ord(char) for index, char in enumerate(scene_id)) & 0xFFFFFFFF,
-        "strategy": "scene_round_balanced_center_edges",
-        "jitter_bounds": [0.2, 0.8],
-    }
 
 
 def _scene_plan_signature(root: Path) -> tuple[Any, ...]:
@@ -1135,7 +1120,6 @@ def _scene_plan_scenes(
                     "object_id": object_id,
                     "name": obj["name"],
                     "color": obj.get("color", ""),
-                    "random": placement["random"],
                 }
             )
             for position_index, position_id in enumerate(position_ids):
@@ -1149,13 +1133,8 @@ def _scene_plan_scenes(
                         "group_position_index": position_index,
                         "group_size": len(position_ids),
                         "group_position_ids": position_ids,
-                        "random": placement["random"],
                     }
                 )
-    for scene_id, scene in scenes.items():
-        scene["randomization"] = _scene_plan_randomization(
-            scene_id, any(group["random"] for group in scene["placement_groups"])
-        )
     return list(scenes.values())
 
 
@@ -1540,7 +1519,6 @@ def _serialize_status(ctx: ConsoleContext, *, include_history: bool = False) -> 
         "selected_collect_task_index": s.selected_collect_task_index,
         "collection_scene_id": s.collection_scene_id,
         "collection_scene_round": s.collection_scene_round,
-        "collection_random_seed": s.collection_random_seed,
         "collection_slot_id": s.collection_slot_id,
         "collection_task_id": s.collection_task_id,
         "selected_strategy": (
@@ -3254,7 +3232,6 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         self.ctx.session.selected_collect_task_index = task_index
         self.ctx.session.collection_scene_id = None
         self.ctx.session.collection_scene_round = None
-        self.ctx.session.collection_random_seed = None
         self.ctx.session.collection_slot_id = None
         self.ctx.session.collection_task_id = None
         self._send_json(
@@ -3271,7 +3248,6 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         session.selected_collect_task_index = int(slot["task_index"])
         session.collection_scene_id = slot["scene_id"]
         session.collection_scene_round = int(slot["round_index"])
-        session.collection_random_seed = None
         session.collection_slot_id = slot["slot_id"]
         session.collection_task_id = slot["task_id"]
 
@@ -3592,13 +3568,6 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         session.collection_slot_id = slot_id[:256] or None
         session.collection_task_id = task_id[:128] or None
         session.collection_scene_round = scene_round
-        raw_seed = body.get("random_seed")
-        try:
-            session.collection_random_seed = (
-                int(raw_seed) if raw_seed is not None and str(raw_seed).strip() else None
-            )
-        except (TypeError, ValueError):
-            session.collection_random_seed = None
         self._enqueue_ok("web:collect_start")
 
     def _post_exit_collection_replay(self, _body: dict) -> None:

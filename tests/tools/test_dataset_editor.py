@@ -57,7 +57,7 @@ def _task_set(
         )
     (root / "scene.csv").write_text(
         '\ufeffscene_id,placements\nSC-1,"[{""position_ids"":[""P1""],'
-        '""object_id"":""OBJ-1"",""random"":true}]"\n',
+        '""object_id"":""OBJ-1""}]"\n',
         encoding="utf-8",
     )
     (root / "tasks.csv").write_text(
@@ -155,7 +155,7 @@ def test_batch_filter_and_plan_crud_round_trip(tmp_path):
             "/api/batches/" + BATCH + "/scenes",
             json={
                 "scene_id": "SC-2",
-                "placements": [{"object_id": "OBJ-2", "position_ids": ["P2"], "random": False}],
+                "placements": [{"object_id": "OBJ-2", "position_ids": ["P2"]}],
             },
         ).status_code
         == 200
@@ -178,6 +178,7 @@ def test_batch_filter_and_plan_crud_round_trip(tmp_path):
     state = response.get_json()
     assert len(state["tasks"]) == 2
     assert len(state["tasks"][1]["slots"]) == 3
+    assert state["scenes"][-1]["placements"] == [{"position_ids": ["P2"], "object_id": "OBJ-2"}]
     assert TaskSetStore(plans / BATCH).state()["info"]["target_episodes"] == 5
 
 

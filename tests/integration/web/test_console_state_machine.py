@@ -763,7 +763,7 @@ def test_collect_start_api_requires_activation_and_preserves_scene_metadata():
         assert h.status()["collection_teleop_armed"] is True
         resp = h.post(
             "/api/collect_start",
-            {"scene_id": "SC-002", "scene_round": 2, "random_seed": 91},
+            {"scene_id": "SC-002", "scene_round": 2},
         )
         command = h.runtime.command_queue.get_nowait()
         status = h.status()
@@ -772,7 +772,6 @@ def test_collect_start_api_requires_activation_and_preserves_scene_metadata():
     assert command == "web:collect_start"
     assert status["collection_scene_id"] == "SC-002"
     assert status["collection_scene_round"] == 2
-    assert status["collection_random_seed"] == 91
 
 
 def test_collect_start_rejects_a_slot_that_is_no_longer_active(monkeypatch):

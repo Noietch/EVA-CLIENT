@@ -2027,7 +2027,6 @@ class EpisodeLogger:
         for key in (
             "scene_id",
             "scene_round",
-            "random_seed",
             "slot_id",
             "task_id",
         ):

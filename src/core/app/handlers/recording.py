@@ -1167,11 +1167,10 @@ def collect_stop_teleop(config: ConfigDict, runtime: RuntimeState, session: Sess
 
 
 def _collection_target_meta(session: SessionState) -> dict[str, object]:
-    """Return the optional scene randomization target for the next episode."""
+    """Return the optional scene target for the next episode."""
     fields = {
         "scene_id": session.collection_scene_id,
         "scene_round": session.collection_scene_round,
-        "random_seed": session.collection_random_seed,
         "slot_id": session.collection_slot_id,
         "task_id": session.collection_task_id,
     }

@@ -957,7 +957,6 @@ def _handle_web_command(
             runtime.collection_teleop_armed = False
             session.collection_scene_id = None
             session.collection_scene_round = None
-            session.collection_random_seed = None
             session.collection_slot_id = None
             session.collection_task_id = None
         runtime.collection_replay_qpos = None
