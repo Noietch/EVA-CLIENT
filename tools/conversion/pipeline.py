@@ -93,6 +93,7 @@ def export_dataset_by_quality(
             source_dir,
             native_accepted,
             native_rejected,
+            normalize_videos=False,
             progress_callback=None,
         )
         if progress_callback is not None:

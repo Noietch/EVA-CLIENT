@@ -330,10 +330,9 @@ class TaskSetStore:
             raise ValueError("Each placement must be an object")
         position_ids = self._string_list(payload.get("position_ids", []))
         object_id = str(payload.get("object_id", "")).strip()
-        randomized = payload.get("random", False)
-        if not object_id or not position_ids or not isinstance(randomized, bool):
-            raise ValueError("Each placement needs object_id, position_ids, and boolean random")
-        return {"position_ids": position_ids, "object_id": object_id, "random": randomized}
+        if not object_id or not position_ids:
+            raise ValueError("Each placement needs object_id and position_ids")
+        return {"position_ids": position_ids, "object_id": object_id}
 
     @staticmethod
     def _string_list(value: Any) -> list[str]:

@@ -57,7 +57,7 @@ def _task_set(
         )
     (root / "scene.csv").write_text(
         '\ufeffscene_id,placements\nSC-1,"[{""position_ids"":[""P1""],'
-        '""object_id"":""OBJ-1"",""random"":true}]"\n',
+        '""object_id"":""OBJ-1""}]"\n',
         encoding="utf-8",
     )
     (root / "tasks.csv").write_text(
@@ -70,7 +70,7 @@ def _task_set(
 
 
 def _workspace(tmp_path: Path):
-    plans = tmp_path / "task_tests"
+    plans = tmp_path / "task_sets"
     _task_set(plans / BATCH, objects_file="../../assets/objects.csv", write_objects=False)
     assets = tmp_path / "assets"
     ObjectCatalog(
@@ -155,7 +155,7 @@ def test_batch_filter_and_plan_crud_round_trip(tmp_path):
             "/api/batches/" + BATCH + "/scenes",
             json={
                 "scene_id": "SC-2",
-                "placements": [{"object_id": "OBJ-2", "position_ids": ["P2"], "random": False}],
+                "placements": [{"object_id": "OBJ-2", "position_ids": ["P2"]}],
             },
         ).status_code
         == 200
@@ -178,6 +178,7 @@ def test_batch_filter_and_plan_crud_round_trip(tmp_path):
     state = response.get_json()
     assert len(state["tasks"]) == 2
     assert len(state["tasks"][1]["slots"]) == 3
+    assert state["scenes"][-1]["placements"] == [{"position_ids": ["P2"], "object_id": "OBJ-2"}]
     assert TaskSetStore(plans / BATCH).state()["info"]["target_episodes"] == 5
 
 
@@ -345,7 +346,7 @@ def test_invalid_archive_and_write_guard(tmp_path):
     assert response.status_code == 400
     assert "missing" in response.get_json()["error"]
 
-    plans = tmp_path / "guard/task_tests"
+    plans = tmp_path / "guard/task_sets"
     _task_set(plans / BATCH)
     app = create_app(
         plans,

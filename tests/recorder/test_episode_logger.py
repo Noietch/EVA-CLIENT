@@ -9,6 +9,7 @@ import gc
 import json
 import os
 import threading
+import time
 import weakref
 
 import numpy as np
@@ -444,6 +445,85 @@ def test_collection_raw_batches_report_image_skew_qc(tmp_path):
     assert episode["quality"] == "red"
     assert episode["alignment_image_max_skew_sec"]["cam_high"] == 0.1
     assert "image_skew_exceeded" in {issue["code"] for issue in episode["quality_issues"]}
+
+
+def test_collection_tolerates_isolated_image_skew(tmp_path):
+    logger = _collection_logger(tmp_path)
+    timestamps = [index / 10.0 for index in range(200)]
+    image_timestamps = [timestamp for index, timestamp in enumerate(timestamps) if index != 100]
+    batch = CollectionRawBatch(
+        images={
+            "cam_high": [
+                CollectionRawSample(
+                    timestamp,
+                    np.zeros((8, 8, 3), dtype=np.uint8),
+                )
+                for timestamp in image_timestamps
+            ]
+        },
+        vectors={
+            field: [
+                CollectionRawSample(timestamp, np.full(_DIM, timestamp, dtype=np.float32))
+                for timestamp in timestamps
+            ]
+            for field in ("state_qpos", "action_qpos")
+        },
+    )
+
+    logger.start_episode("t")
+    logger.ingest_collection_snapshot(
+        RawCollectionSnapshot(timestamp=timestamps[-1], decode_raw=lambda: batch)
+    )
+    assert logger.end_episode()
+
+    episode = _read_jsonl(_collection_task_dir(tmp_path) / "meta" / "episodes.jsonl")[0]
+    stats = episode["alignment_image_stream_stats"]["cam_high"]
+    assert episode["quality"] == "green"
+    assert stats["skew_violation_frames"] == 1
+    assert stats["skew_violation_budget"] == 2
+    assert stats["gaps_over_tolerance"] == 1
+
+
+def test_collection_repairs_impossible_source_clock_jump(tmp_path):
+    logger = _collection_logger(tmp_path)
+    timestamps = [index / 10.0 for index in range(5)] + [50.5 + index / 10.0 for index in range(5)]
+
+    logger.start_episode("t")
+    logger._episode_started_wall_time = time.time() - 1.0
+    for timestamp in timestamps:
+        logger.ingest_collection_snapshot(_collection_raw_snapshot(timestamp))
+    assert logger.end_episode()
+
+    task_dir = _collection_task_dir(tmp_path)
+    episode = _read_jsonl(task_dir / "meta" / "episodes.jsonl")[0]
+    table = pq.read_table(task_dir / "data" / "chunk-000" / "episode_000000.parquet")
+    assert table.num_rows == 10
+    assert episode["quality"] == "red"
+    assert "source_clock_discontinuity" in {issue["code"] for issue in episode["quality_issues"]}
+    assert episode["alignment_source_clock_repairs"] == 1
+    assert episode["alignment_source_clock_removed_sec"] == pytest.approx(50.0)
+    assert episode["alignment_grid_end"] - episode["alignment_grid_start"] == pytest.approx(0.9)
+
+
+def test_queued_collection_summary_retains_slot_metadata(tmp_path, monkeypatch):
+    logger = _collection_logger(tmp_path, async_save=True)
+    monkeypatch.setattr(logger, "_start_save_worker", lambda: None)
+    logger.start_episode("t")
+    logger.set_episode_meta(
+        slot_id="TASK-CUP:SC-A:0",
+        task_id="TASK-CUP",
+        scene_id="SC-A",
+        scene_round=0,
+    )
+    logger.ingest_collection_snapshot(_collection_raw_snapshot(1.0))
+    assert logger.end_episode()
+
+    queued = logger.status_snapshot("t")["queue"][0]
+    assert queued["status"] == "queued"
+    assert queued["slot_id"] == "TASK-CUP:SC-A:0"
+    assert queued["task_id"] == "TASK-CUP"
+    assert queued["scene_id"] == "SC-A"
+    assert queued["scene_round"] == 0
 
 
 def test_raw_episode_recomputes_image_skew_after_excluding_warmup(tmp_path):

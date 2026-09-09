@@ -119,7 +119,7 @@ class _LeRobotV3Writer:
             fps=self.source.fps,
             codec="libx264",
             macro_block_size=1,
-            ffmpeg_params=dataset_h264_ffmpeg_params(),
+            ffmpeg_params=dataset_h264_ffmpeg_params(threads=None),
         )
         self.video_writers[key] = writer
         return writer

@@ -106,7 +106,6 @@ def history_row(row: dict[str, Any], fallback_index: int) -> dict[str, Any]:
     for key in (
         "scene_id",
         "scene_round",
-        "random_seed",
         "slot_id",
         "task_id",
     ):

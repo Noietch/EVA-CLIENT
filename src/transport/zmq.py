@@ -378,6 +378,8 @@ class _ObservationReader:
     def _drain_latest(self) -> WireObservation | None:
         """Pop all queued SUB messages, keeping only the newest by timestamp."""
         with self._lock:
+            if self._closed:
+                return self._latest
             newest = self._latest
             got_message = False
             while True:
@@ -385,6 +387,11 @@ class _ObservationReader:
                     payload = self._sub.recv(self._zmq.NOBLOCK)
                 except self._zmq.Again:
                     break
+                except self._zmq.ZMQError:
+                    # A request can race with close() during application shutdown.
+                    if self._closed:
+                        break
+                    raise
                 got_message = True
                 obs = unpack_observation(payload)
                 self._image_rate.mark_many(obs.images.keys(), obs.t)
@@ -487,12 +494,22 @@ class _ObservationReader:
         return observation.operator_event
 
     def clear_collection_backlog(self) -> float | None:
-        """Drain the bounded socket backlog without reconnecting the hot reader."""
+        """Discard pre-episode data, including messages still in the ZMQ/TCP pipe."""
         with self._lock:
             journal = getattr(self, "_collection_journal", None)
             self._collection_journal = None
             if journal is not None:
                 journal.finish()
+            if self._preserve_collection_backlog:
+                # Draining recv(NOBLOCK) only empties messages currently visible to
+                # Python. Old messages can arrive later from the upstream pipe.
+                self._sub.close(linger=0)
+                self._sub = self._create_subscriber()
+                self._collection_queue.clear()
+                self._raw_collection_queue.clear()
+                self._latest = None
+                logger.info("[COLLECTION_BACKLOG] reset subscriber before new episode")
+                return None
             cutoff = None
             if self._collection_queue:
                 cutoff = max(obs.t for obs in self._collection_queue)

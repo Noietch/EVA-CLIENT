@@ -28,9 +28,11 @@ class _FakeFk:
         self.nonfinite = nonfinite
         self.nonfinite_on_call = nonfinite_on_call
         self.calls = 0
+        self.batch_sizes = []
 
     def fk_chunk(self, qpos: np.ndarray) -> np.ndarray:
         self.calls += 1
+        self.batch_sizes.append(len(qpos))
         qpos = np.asarray(qpos, dtype=np.float32)
         result = np.stack(
             [
@@ -145,6 +147,29 @@ def test_client_pairing_replaces_remote_action_stream(tmp_path) -> None:
     np.testing.assert_allclose(paired.vectors["state_qpos"][0].value, [1, 2, 3, 0.1])
     np.testing.assert_allclose(paired.vectors["action_qpos"][0].value, _CLIENT_ACTION_QPOS)
     assert paired.vectors["action_qpos"][0].timestamp == 1.0
+
+
+def test_collection_reuses_fk_with_fixed_batch_sizes(tmp_path):
+    logger = _logger(tmp_path, control_source="transport")
+    for count in (2, 130):
+        logger.start_episode("task")
+        batch = CollectionRawBatch(
+            vectors={
+                name: [CollectionRawSample(1 + i / 10, _STATE_QPOS.copy()) for i in range(count)]
+                for name in ("state_qpos", "action_qpos")
+            }
+        )
+        logger.ingest_collection_snapshot(
+            RawCollectionSnapshot(
+                timestamp=1 + (count - 1) / 10, decode_raw=lambda batch=batch: batch
+            )
+        )
+        assert logger.end_episode()
+    assert len(logger._robot.fk_builds) == 1
+    assert logger._collection_writer._client_fk_solver.batch_sizes == [128] * 6
+    table = pq.read_table(tmp_path / "task/raw/data/chunk-000/episode_000001.parquet")
+    assert table.num_rows == 130
+    np.testing.assert_allclose(table["observation.eef"].to_pylist()[-1][:3], _STATE_QPOS[:3])
 
 
 def test_high_rate_client_actions_are_interpolated_to_collection_fps(tmp_path) -> None:

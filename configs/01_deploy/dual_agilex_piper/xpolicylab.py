@@ -19,7 +19,7 @@ policy = dict(
 )
 
 inference_cfg = dict(
-    inference_rate=15,
+    inference_rate=3,
     publish_rate=30,
     setup_warmup_chunks=1,
 )

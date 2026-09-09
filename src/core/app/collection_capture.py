@@ -28,7 +28,6 @@ def _suspend_cyclic_gc() -> None:
     if _gc_collect_thread is not None:
         _gc_collect_thread.join()
         _gc_collect_thread = None
-    _collect_cycles()
     gc.disable()
     logger.info("[CAPTURE_GC] state=suspended")
 
@@ -72,6 +71,11 @@ class CollectionCaptureRunner:
         self._capture_ticks = 0
         self._deadline_misses = 0
         self._max_tick_ms = 0.0
+        self._previous_source_time: float | None = None
+        self._previous_receive_time: float | None = None
+        self._max_source_gap = 0.0
+        self._max_receive_gap = 0.0
+        self._source_gap_count = 0
 
     def start(self) -> None:
         """Start the background capture thread."""
@@ -90,6 +94,17 @@ class CollectionCaptureRunner:
             self._deadline_misses,
             self._max_tick_ms,
         )
+        logger_obj = self._runtime.episode_logger
+        rollout = getattr(self._runtime, "rollout_episode_logger", None)
+        if rollout is not None and getattr(rollout, "has_active_episode", False):
+            logger_obj = rollout
+        set_meta = getattr(logger_obj, "set_episode_meta", None)
+        if callable(set_meta):
+            set_meta(
+                capture_max_source_gap_sec=round(self._max_source_gap, 6),
+                capture_max_receive_gap_sec=round(self._max_receive_gap, 6),
+                capture_source_gap_count=self._source_gap_count,
+            )
         if self._error is not None:
             raise RuntimeError("collection capture runner failed") from self._error
 
@@ -126,6 +141,26 @@ class CollectionCaptureRunner:
             self._error = exc
             logger.exception("Collection capture runner failed")
 
+    def _track_capture_timing(self, timestamp: float) -> None:
+        received = time.monotonic()
+        if self._previous_source_time is not None and self._previous_receive_time is not None:
+            source_gap = timestamp - self._previous_source_time
+            receive_gap = received - self._previous_receive_time
+            self._max_source_gap = max(self._max_source_gap, source_gap)
+            self._max_receive_gap = max(self._max_receive_gap, receive_gap)
+            if source_gap > max(0.1, 3 * self._interval_s):
+                self._source_gap_count += 1
+                logger.warning(
+                    "[CAPTURE_GAP] source_gap_sec=%.6f receive_gap_sec=%.6f "
+                    "previous_source=%.6f source=%.6f",
+                    source_gap,
+                    receive_gap,
+                    self._previous_source_time,
+                    timestamp,
+                )
+        self._previous_source_time = timestamp
+        self._previous_receive_time = received
+
     def _capture_tick(self) -> bool:
         episode_logger = self._runtime.episode_logger
         rollout_logger = getattr(self._runtime, "rollout_episode_logger", None)
@@ -147,6 +182,7 @@ class CollectionCaptureRunner:
             if snapshot is None:
                 break
             self._runtime.last_collection_timestamp = float(snapshot.timestamp)
+            self._track_capture_timing(float(snapshot.timestamp))
             if rollout_mode:
                 self._runtime.rollout_raw_snapshots.put(snapshot)
             else:
@@ -175,6 +211,7 @@ class CollectionCaptureRunner:
             if snapshot is None:
                 return recorded
             self._runtime.last_collection_timestamp = float(snapshot.timestamp)
+            self._track_capture_timing(float(snapshot.timestamp))
             if rollout_mode:
                 self._runtime.rollout_raw_snapshots.put(snapshot)
             else:

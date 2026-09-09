@@ -17,7 +17,6 @@ import {
   validateDraft,
 } from "./entity-ui.js";
 import {
-  buildSceneLegend,
   configureReview,
   drawReviewCharts,
   openSlot,
@@ -565,7 +564,6 @@ configureEntityUi({
   switchTab,
   stopPlayback,
   openSlot,
-  buildSceneLegend,
 });
 configureReview({
   app,

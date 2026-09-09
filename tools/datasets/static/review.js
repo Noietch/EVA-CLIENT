@@ -191,17 +191,8 @@ function buildReadOnlyScene(batch, sceneId) {
   const grid = node("div", "scene-grid compact");
   const scene = sceneFor(batch, sceneId);
   renderGridCells(grid, batch, scene, true);
-  card.append(head, grid, buildSceneLegend());
+  card.append(head, grid);
   return card;
-}
-
-function buildSceneLegend() {
-  const legend = node("div", "scene-legend");
-  legend.append(
-    node("span", "legend-static", "静止"),
-    node("span", "legend-moving", "运动"),
-  );
-  return legend;
 }
 
 function buildCameraStrip(batch, slot, payload) {
@@ -548,7 +539,6 @@ function playbackTick(timestamp) {
 
 
 export {
-  buildSceneLegend,
   configureReview,
   drawReviewCharts,
   openSlot,

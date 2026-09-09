@@ -23,7 +23,7 @@ robot:
       gripper_damping: 0.5
       gripper_close_torque_limit: 0.29
       gripper_open_torque_limit: 0.29
-      gripper_max_speed: 1.0
+      gripper_max_speed: 2.0
       rate: 30
     config:
       robot:

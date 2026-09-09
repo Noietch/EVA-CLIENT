@@ -368,6 +368,10 @@ $("b-run").onclick    = () => {
     setTimeout(() => {
       if (S.runToggleBusy !== null) { S.runToggleBusy = null; applyStatus(S.STATUS); }
     }, 1500);
+    if (S.ACTIVE_TAB === "manual" && !live) {
+      S.realRequested = true;
+      applyStatus(S.STATUS);
+    }
     return live ? apiPost("/api/operator_action", { intent: "start" }) : startRunFromDebug();
   };
 $("b-reset").onclick  = () => apiPost("/api/reset");

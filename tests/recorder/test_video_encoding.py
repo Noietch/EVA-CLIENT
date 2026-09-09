@@ -10,6 +10,7 @@ from core.recorder.video_encoding import (
     DATASET_VIDEO_GOP_SIZE,
     dataset_h264_ffmpeg_params,
 )
+from tools.conversion import native as native_module
 from tools.conversion.native import _transcode_dataset_video
 
 pytestmark = pytest.mark.integration
@@ -36,10 +37,7 @@ def test_collection_video_output_has_keyframe_every_30_frames(tmp_path: Path) ->
         fps=30,
     )
 
-    path = (
-        tmp_path
-        / "videos/chunk-000/observation.images.cam/episode_000000.mp4"
-    )
+    path = tmp_path / "videos/chunk-000/observation.images.cam/episode_000000.mp4"
 
     keyframes = []
     packet_index = 0
@@ -85,3 +83,31 @@ def test_lerobot_v21_export_rewrites_video_to_gop_30(tmp_path: Path) -> None:
             packet_index += 1
 
     assert keyframes == [0, 30, 60]
+
+
+def test_lerobot_v21_export_copies_video_already_at_gop_30(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_root = tmp_path / "source"
+    logger = object.__new__(EpisodeLogger)
+    logger._log_dir = source_root
+    logger._fps = 30
+    frames = [np.full((16, 16, 3), index, dtype=np.uint8) for index in range(65)]
+    logger._write_videos(
+        episode_index=0,
+        videos={"observation.images.cam": frames},
+        fps=30,
+    )
+    source = source_root / "videos/chunk-000/observation.images.cam/episode_000000.mp4"
+    output = tmp_path / "output.mp4"
+
+    monkeypatch.setattr(
+        native_module.imageio,
+        "get_writer",
+        lambda *_args, **_kwargs: pytest.fail("compliant video must not be re-encoded"),
+    )
+    _transcode_dataset_video(source, output, fps=30, expected_frames=len(frames))
+
+    assert output.read_bytes() == source.read_bytes()
+    assert output.stat().st_ino == source.stat().st_ino

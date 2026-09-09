@@ -78,12 +78,6 @@
 .scene-grid.compact .scene-cell > small { font-size: 7px; }
 .scene-grid.compact .scene-cell > strong { margin-top: 2px; font-size: 8px; }
 
-.scene-legend { display: flex; justify-content: flex-end; gap: 14px; padding-top: 8px; color: var(--ink-dim); font: 8px/1 var(--mono); }
-.scene-legend span { display: inline-flex; align-items: center; gap: 5px; }
-.scene-legend span::before { content: ""; width: 9px; height: 9px; border-radius: 2px; }
-.legend-static::before { background: var(--ink); }
-.legend-moving::before { background: var(--accent); }
-
 .col-canvas {
   position: relative;
   flex: 1 1 auto;

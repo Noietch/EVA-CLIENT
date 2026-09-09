@@ -8,7 +8,7 @@ collection = dict(
     storage=dict(log_dir="work_dirs/collection/dual_yam/", image_skew_tolerance_sec=0.02),
     tasks=dict(
         pick_up_the_object_and_place_it_in_the_target_area=[
-            ("pick up the object and place it in the target area", 10)
+            ("pick up the object and place it in the target area", 100)
         ],
         put_cup_on_the_plate=[("put cup on the plate", 10)],
         put_all_objects_into_the_box=[("put all objects into the box", 10)],

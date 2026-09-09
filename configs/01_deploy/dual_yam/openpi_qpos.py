@@ -3,7 +3,7 @@
 _base_ = ["_base.py"]
 
 inference_cfg = dict(
-    inference_rate=15,
+    inference_rate=3,
     publish_rate=30,
     debug_tasks=[
         "pick up the object and place it in the target area",

@@ -61,6 +61,11 @@ def image_skew_tolerance_sec(fps: float) -> float:
     return 1.0 / (2.0 * (fps - 1.0))
 
 
+def image_skew_violation_budget(frame_count: int) -> int:
+    """Allow isolated misses without rejecting an otherwise healthy episode."""
+    return max(0, int(frame_count) // 100)
+
+
 def align_collection_samples(
     batch: CollectionRawBatch,
     *,
@@ -130,7 +135,10 @@ def align_collection_samples(
             )
         image_series[key] = bounded_samples
         image_times[key] = [sample.timestamp for sample in bounded_samples]
-        image_stream_stats[key] = _stream_stats(bounded_samples, image_skew_sec)
+        image_stream_stats[key] = _stream_stats(
+            bounded_samples,
+            1.0 / fps + image_skew_sec,
+        )
         start = bounded_samples[0].timestamp
         end = bounded_samples[-1].timestamp
         coverage_starts.append(start)
@@ -251,11 +259,16 @@ def align_collection_samples(
             )
         )
 
+    violation_budget = image_skew_violation_budget(n_frames)
     for key in required_images:
         violation = image_skew_violations.get(key)
         if violation is None:
             continue
         count, first_frame, last_frame, max_skew = violation
+        image_stream_stats[key]["skew_violation_frames"] = count
+        image_stream_stats[key]["skew_violation_budget"] = violation_budget
+        if count <= violation_budget:
+            continue
         issues.append(
             AlignmentIssue(
                 code="image_skew_exceeded",

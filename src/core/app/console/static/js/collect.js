@@ -49,6 +49,8 @@ let episodeHistoryPolling = false;
 let collectionSlotsPolling = false;
 let collectItemsRenderKey = "";
 let rolloutItemsRenderKey = "";
+let collectionSlotClickTimer = null;
+let collectionQcTarget = null;
 
 function scenePlanTasks() {
   return (S.SCENE_PLAN && Array.isArray(S.SCENE_PLAN.tasks)) ? S.SCENE_PLAN.tasks : [];
@@ -80,17 +82,12 @@ function scenePlanStartMetadata() {
   const task = scenePlanTask();
   const slot = S.collectionSlots && S.collectionSlots.active;
   if (!task || !scene || !slot || task.prompt_en !== collectTaskValue()) return {};
-  const recommendation = scenePlanSceneRecommendation(scene, S.scenePlanRoundIndex);
-  const metadata = {
+  return {
     scene_id: scene.scene_id,
     scene_round: S.scenePlanRoundIndex,
     slot_id: slot.slot_id,
     task_id: slot.task_id,
   };
-  if (recommendation && recommendation.seed !== null) {
-    metadata.random_seed = recommendation.seed;
-  }
-  return metadata;
 }
 
 function syncScenePlanTask(prompt) {
@@ -127,6 +124,7 @@ function collectionSlotQuery(dataset) {
 
 function applyCollectionSlotsPayload(payload) {
   const state = S.collectionSlots;
+  if (payload.scene_plan) S.SCENE_PLAN = payload.scene_plan;
   state.loaded = true;
   state.dataset = String(payload.dataset || state.dataset || "");
   state.datasetDir = String(payload.dataset_dir || "");
@@ -166,7 +164,7 @@ async function activateCollectionSlot(slot, { manual = false } = {}) {
   };
   setCollectError();
   S.collectTaskSelectionPending = true;
-  state.active = { ...slot, state: "active" };
+  if (slot.task) state.active = { ...slot, state: "active" };
   state.selectedSlotId = "";
   adoptCollectionSlot(state.active);
   renderCollect();
@@ -174,6 +172,7 @@ async function activateCollectionSlot(slot, { manual = false } = {}) {
     const response = await apiPost("/api/select_collection_slot", {
       dataset: slot.dataset,
       slot_id: slot.slot_id,
+      manual,
     }, { concurrent: true, timeoutMs: 5000 });
     if (!response.ok || !response.active) {
       setCollectError(response.error || "Unable to select this slot");
@@ -233,6 +232,9 @@ async function pollCollectionSlots(force = false) {
       payload = await apiGet(collectionSlotQuery(dataset));
       if (!payload || payload.ok === false) return;
     }
+    // A dataset switch can happen while the previous request is in flight.
+    if (dataset !== (state.dataset || collectSetValue()) ||
+        collectionSlotClickTimer !== null || S.collectTaskSelectionPending) return;
     applyCollectionSlotsPayload(payload);
     renderCollect();
     const active = state.active;
@@ -254,6 +256,11 @@ async function selectCollectionDataset(dataset) {
   const state = S.collectionSlots;
   state.dataset = value;
   state.loaded = false;
+  state.active = null;
+  state.slots = [];
+  state.scenes = [];
+  state.tasks = [];
+  S.SCENE_PLAN = { tasks: [], scenes: [], positions: [], objects: [] };
   state.page = 1;
   state.sceneFilter = "";
   state.taskFilter = "";
@@ -300,157 +307,6 @@ function changeCollectionSlotPage(delta) {
   state.followActivePage = false;
   pollCollectionSlots(true);
   renderCollect();
-}
-
-function scenePlanRng(seed) {
-  let state = (Number(seed) >>> 0) || 1;
-  return () => {
-    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
-    return state / 4294967296;
-  };
-}
-
-function scenePlanTextSeed(value) {
-  return Array.from(String(value || "")).reduce(
-    (total, character, index) => total + (index + 1) * character.charCodeAt(0), 0
-  ) >>> 0;
-}
-
-function scenePlanBalancedOffset(randomization, placementKey, roundIndex) {
-  if (roundIndex % 5 === 0) return { x: 0.5, y: 0.5 };
-  const [jitterMin, jitterMax] = randomization.jitterBounds;
-  const cycle = Math.floor(roundIndex / 5);
-  const jitter = scenePlanRng(
-    randomization.seed + scenePlanTextSeed(placementKey) + cycle * 7919
-  );
-  const edges = ["top", "right", "bottom", "left"];
-  for (let index = edges.length - 1; index > 0; index -= 1) {
-    const target = Math.floor(jitter() * (index + 1));
-    [edges[index], edges[target]] = [edges[target], edges[index]];
-  }
-  const along = jitterMin + (jitterMax - jitterMin) * jitter();
-  const edge = edges[(roundIndex - 1) % edges.length];
-  if (edge === "top") return { x: along, y: jitterMin };
-  if (edge === "right") return { x: jitterMax, y: along };
-  if (edge === "bottom") return { x: along, y: jitterMax };
-  return { x: jitterMin, y: along };
-}
-
-function scenePlanSceneRandomization(scene) {
-  const configured = scene && scene.randomization && typeof scene.randomization === "object"
-    ? scene.randomization : {};
-  const groups = scene && Array.isArray(scene.placement_groups)
-    ? scene.placement_groups : [];
-  if (!groups.some((group) => group.random) || configured.enabled === false) return null;
-  const configuredBounds = Array.isArray(configured.jitter_bounds)
-    ? configured.jitter_bounds.map((value) => Number(value)) : [];
-  const jitterBounds = configuredBounds.length === 2 && configuredBounds.every((value) =>
-    Number.isFinite(value) && value >= 0 && value <= 1
-  ) && configuredBounds[0] <= configuredBounds[1]
-    ? configuredBounds : [0.2, 0.8];
-  return {
-    seed: Number(configured.seed) >>> 0,
-    jitterBounds,
-  };
-}
-
-function scenePlanCandidatePositions(randomization, group, roundIndex) {
-  const positions = Array.isArray(group.position_ids)
-    ? group.position_ids.map((value) => String(value)).filter(Boolean) : [];
-  if (positions.length <= 1) return positions;
-  const cycle = Math.floor(roundIndex / positions.length);
-  const choices = positions.slice();
-  const random = scenePlanRng(
-    randomization.seed + scenePlanTextSeed(group.group_id) + cycle * 104729
-  );
-  for (let index = choices.length - 1; index > 0; index -= 1) {
-    const target = Math.floor(random() * (index + 1));
-    [choices[index], choices[target]] = [choices[target], choices[index]];
-  }
-  const offset = roundIndex % choices.length;
-  return choices.slice(offset).concat(choices.slice(0, offset));
-}
-
-function scenePlanAssignPositions(groups, reservedPositions = []) {
-  const assignments = new Map();
-  const occupied = new Set(reservedPositions);
-  const assign = (groupIndex) => {
-    if (groupIndex >= groups.length) return true;
-    const entry = groups[groupIndex];
-    for (const candidate of entry.candidates) {
-      if (occupied.has(candidate)) continue;
-      occupied.add(candidate);
-      assignments.set(entry.index, candidate);
-      if (assign(groupIndex + 1)) return true;
-      assignments.delete(entry.index);
-      occupied.delete(candidate);
-    }
-    return false;
-  };
-  assign(0);
-  groups.forEach((entry) => {
-    if (!assignments.has(entry.index)) {
-      assignments.set(entry.index, entry.candidates[0]);
-    }
-  });
-  return assignments;
-}
-
-function scenePlanSceneRecommendation(scene, roundIndex) {
-  const placementGroups = scene && Array.isArray(scene.placement_groups)
-    ? scene.placement_groups : [];
-  if (!placementGroups.length) return null;
-  const randomization = scenePlanSceneRandomization(scene);
-  const fixedGroups = placementGroups.map((group, index) => ({ group, index })).filter(
-    ({ group }) => !group.random
-  );
-  const reservedPositions = fixedGroups.flatMap(({ group }) => group.position_ids || []);
-  const groups = placementGroups.map((group, index) => ({ group, index })).filter(
-    ({ group }) => group.random
-  ).map(({ group, index }) => ({
-    group,
-    index,
-    candidates: scenePlanCandidatePositions(randomization, group, roundIndex),
-  })).sort((left, right) => (
-    left.candidates.length - right.candidates.length || left.index - right.index
-  ));
-  const assignments = scenePlanAssignPositions(groups, reservedPositions);
-  const randomizedPlacements = groups.map(({ group, index }) => {
-    const point = scenePlanBalancedOffset(randomization, group.group_id, roundIndex);
-    return {
-      index,
-      object_id: group.object_id,
-      name: group.name,
-      color: group.color,
-      positionId: assignments.get(index),
-      x: point.x,
-      y: point.y,
-      randomized: true,
-    };
-  });
-  const fixedPlacements = fixedGroups.flatMap(({ group, index }) => (
-    group.position_ids.map((positionId) => ({
-      index,
-      object_id: group.object_id,
-      name: group.name,
-      color: group.color,
-      positionId,
-      x: 0.5,
-      y: 0.5,
-      randomized: false,
-    }))
-  ));
-  const placements = fixedPlacements.concat(randomizedPlacements).sort(
-    (left, right) => left.index - right.index
-  );
-  return {
-    roundIndex,
-    seed: randomization
-      ? (randomization.seed + roundIndex * 1000003) >>> 0
-      : null,
-    randomizedCount: groups.length,
-    placements,
-  };
 }
 
 function scenePlanGridPositions(scene) {
@@ -521,29 +377,30 @@ function renderSceneGridCells(host, scene) {
   host.replaceChildren(...geometry.cells.map((position) => {
     const cell = document.createElement("div");
     const label = document.createElement("span");
-    const target = document.createElement("i");
     const object = document.createElement("b");
+    const photo = document.createElement("img");
     cell.className = "collect-scene-cell empty";
     cell.dataset.positionId = position.positionId;
     cell.style.gridColumn = String(position.column);
     cell.style.gridRow = String(position.row);
     cell.title = position.positionId;
     label.textContent = position.positionId;
-    target.className = "collect-scene-target";
-    target.setAttribute("aria-hidden", "true");
-    cell.append(label, target, object);
+    photo.className = "collect-scene-object-photo";
+    photo.alt = "";
+    photo.hidden = true;
+    photo.onerror = () => { photo.hidden = true; };
+    cell.append(label, photo, object);
     return cell;
   }));
 }
 
-function renderCurrentSceneGrid(scene, roundIndex) {
+function renderCurrentSceneGrid(scene) {
   const host = $("collect-current-scene-grid");
   if (!host) return;
   renderSceneGridCells(host, scene);
-  const recommendation = scenePlanSceneRecommendation(scene, roundIndex);
   const byPosition = new Map();
-  (recommendation && recommendation.placements || []).forEach((placement) => {
-    const positionId = String(placement.positionId || "");
+  (scene && scene.placements || []).forEach((placement) => {
+    const positionId = String(placement.position_id || "");
     if (!positionId) return;
     const values = byPosition.get(positionId) || [];
     values.push(placement);
@@ -553,21 +410,22 @@ function renderCurrentSceneGrid(scene, roundIndex) {
     const placements = byPosition.get(cell.dataset.positionId) || [];
     const names = [...new Set(placements.map((placement) => String(placement.name || "")))]
       .filter(Boolean);
-    const movablePlacement = placements.find((placement) => placement.randomized);
-    const movable = !!movablePlacement;
     cell.classList.toggle("empty", placements.length === 0);
-    cell.classList.toggle("fixed", placements.length > 0 && !movable);
-    cell.classList.toggle("movable", movable);
-    if (movablePlacement) {
-      cell.style.setProperty("--movable-x", `${Number(movablePlacement.x) * 100}%`);
-      cell.style.setProperty("--movable-y", `${Number(movablePlacement.y) * 100}%`);
-    } else {
-      cell.style.removeProperty("--movable-x");
-      cell.style.removeProperty("--movable-y");
-    }
+    cell.classList.toggle("fixed", placements.length > 0);
     const object = cell.querySelector("b");
     object.textContent = names.join(" / ");
     object.title = names.join(" / ");
+    const photo = cell.querySelector("img");
+    const photoUrl = placements.find((placement) => placement.photo_url)?.photo_url || "";
+    if (photoUrl) {
+      if (photo.getAttribute("src") !== photoUrl) {
+        photo.hidden = false;
+        photo.src = photoUrl;
+      }
+    } else {
+      photo.hidden = true;
+      photo.removeAttribute("src");
+    }
     cell.title = names.length
       ? `${cell.dataset.positionId} · ${names.join(" / ")}` : cell.dataset.positionId;
   });
@@ -1133,6 +991,10 @@ function installCollectKeyboardControls() {
 }
 
 async function startCollectFromTab() {
+    if (collectionSlotClickTimer !== null) {
+      S.collectToggleBusy = null;
+      return;
+    }
     if (S.reviewKind === "collect") {
       returnReviewToLive();
     }
@@ -1243,6 +1105,7 @@ function syncScenePlanToEpisode(item) {
 function selectCollectEpisode(item) {
     const episode = savedEpisodeId(item);
     if (episode == null) return;
+    selectCollectionQcTarget(item);
     syncScenePlanToEpisode(item);
     S.collectReplayEpisode = episode;
     reviewEpisode("collect", item);
@@ -1262,10 +1125,20 @@ function selectCollectEpisodePointer(event, item) {
     selectCollectEpisode(item);
   }
 
+function selectCollectionQcTarget(item) {
+    collectionQcTarget = savedEpisodeId(item) == null ? null : {
+      item: { ...item },
+      dataset: S.collectionSlots.dataset,
+      dataset_dir: reviewDatasetFor("collect"),
+      task: String(item.task || item.prompt || collectTaskValue()),
+    };
+    if ($("collect-qc-note")) $("collect-qc-note").value = item ? item.qc_note || "" : "";
+    if ($("collect-qc-status")) $("collect-qc-status").textContent = "";
+  }
+
 function selectedCollectEpisodeItem() {
-    const episode = S.collectReplayEpisode;
-    if (episode == null) return null;
-    if (!collectReviewMatchesSelection()) return null;
+    if (!collectionQcTarget || collectionQcTarget.dataset !== S.collectionSlots.dataset) return null;
+    const episode = collectionQcTarget.item.episode_index;
     const slotEpisode = (S.collectionSlots.slots || []).map((slot) => slot.episode).find(
       (item) => savedEpisodeId(item) === episode
     );
@@ -1273,7 +1146,7 @@ function selectedCollectEpisodeItem() {
     const collect = S.STATUS.collect || {};
     const history = historyFor("collect", collect);
     const items = history.episodes.concat(history.queue);
-    return items.find((item) => savedEpisodeId(item) === episode) || null;
+    return items.find((item) => savedEpisodeId(item) === episode) || collectionQcTarget.item;
   }
 
 function renderCollectionSlotFilters() {
@@ -1323,28 +1196,53 @@ function renderCollectTiles(items) {
       tile.type = "button";
       tile.title = `${slot.scene_label} · ${slot.task_zh || slot.task} · ` +
         `round ${Number(slot.round_index) + 1}/${slot.round_total}`;
+      const episode = savedEpisodeId(slot.episode);
+      tile.title = `SLOT ${Number(slot.ordinal) + 1} · ${tile.title}`;
+      if (episode != null) {
+        tile.title += ` · EPISODE ${episode} · ${String(slot.episode.quality || "unknown").toUpperCase()}`;
+        if (slot.episode.qc_verdict) tile.title += ` · QC ${slot.episode.qc_verdict.toUpperCase()}`;
+      }
+      if (slot.state === "saving") tile.title += " · CONVERTING";
       tile.textContent = String(Number(slot.ordinal) + 1);
       tile.setAttribute("aria-label", tile.title);
       const saved = savedEpisodeId(slot.episode) != null;
       const current = S.collectionSlots.active &&
         S.collectionSlots.active.slot_id === slot.slot_id;
-      const visibleState = current ? "active" : (slot.state === "active" ? "pending" : slot.state);
+      const rejected = saved && (
+        String(slot.episode.quality).toLowerCase() === "red" ||
+        String(slot.episode.qc_verdict).toLowerCase() === "fail"
+      );
+      const visibleState = slot.state === "saving" ? "saving"
+        : rejected ? "rejected"
+        : saved && String(slot.episode.quality).toLowerCase() === "green" ? "complete"
+        : current ? "active" : (slot.state === "active" ? "pending" : slot.state);
       tile.className = `collect-tile slot-${visibleState}` +
-        `${current && slot.repair ? " slot-active-repair" : ""}`;
+        `${current ? " slot-current" : ""}`;
       if (slot.slot_id === S.collectionSlots.selectedSlotId) tile.classList.add("selected");
       const locked = slot.state === "saving" || S.collectTaskSelectionPending ||
         !!(S.STATUS.collect && S.STATUS.collect.collecting);
       tile.disabled = locked || (current && !saved);
       tile.classList.toggle("actionable", !tile.disabled);
-      tile.onclick = () => {
-        S.collectionSlots.followActivePage = false;
-        if (slot.state === "complete" && saved) {
-          S.collectionSlots.selectedSlotId = slot.slot_id;
-          renderCollectTiles(S.collectionSlots.slots || []);
-          selectCollectEpisode(slot.episode);
-        } else {
+      tile.onclick = (event) => {
+        clearTimeout(collectionSlotClickTimer);
+        if (event.detail > 1) return;
+        // Delay selection so a double click can preview without changing the capture target.
+        collectionSlotClickTimer = setTimeout(() => {
+          collectionSlotClickTimer = null;
+          if (slot.dataset !== S.collectionSlots.dataset ||
+              S.collectTaskSelectionPending || (S.STATUS.collect && S.STATUS.collect.collecting)) return;
+          selectCollectionQcTarget(slot.episode);
           activateCollectionSlot(slot, { manual: true });
-        }
+        }, 300);
+      };
+      tile.ondblclick = (event) => {
+        event.preventDefault();
+        clearTimeout(collectionSlotClickTimer);
+        collectionSlotClickTimer = null;
+        if (!saved || S.collectTaskSelectionPending ||
+            (S.STATUS.collect && S.STATUS.collect.collecting)) return;
+        S.collectionSlots.selectedSlotId = slot.slot_id;
+        selectCollectEpisode(slot.episode);
       };
       host.appendChild(tile);
     });
@@ -1531,15 +1429,15 @@ function renderCollectionTransfer(enabled, usableCount, rejectedCount) {
 
 function renderCollectionReplayStatus(selectedEpisodeSaved) {
   const replayStatus = $("collect-replay-status");
+  const history = historyFor("collect", S.STATUS.collect || {});
+  const item = history.episodes.find((entry) => savedEpisodeId(entry) === S.collectReplayEpisode);
+  const label = `episode ${S.collectReplayEpisode} · ${String((item && item.quality) || "unknown").toUpperCase()}`;
   if (S.reviewKind === "collect" && LIVE.replayOwner === "collect") {
     replayStatus.textContent = LIVE.replayError
-      ? `episode ${S.collectReplayEpisode} · error · ${LIVE.replayError}`
+      ? `${label} · error · ${LIVE.replayError}`
       : (LIVE.replayLoading
-          ? `episode ${S.collectReplayEpisode} · loading`
-          : `episode ${S.collectReplayEpisode} · review`);
-    replayStatus.style.display = S.ACTIVE_TAB === "collect" ? "" : "none";
-  } else if (selectedEpisodeSaved) {
-    replayStatus.textContent = `episode ${S.collectReplayEpisode} selected`;
+          ? `${label} · loading`
+          : `${label} · review`);
     replayStatus.style.display = S.ACTIVE_TAB === "collect" ? "" : "none";
   } else {
     replayStatus.textContent = "";
@@ -1594,7 +1492,7 @@ function renderCollect() {
 
     $("collect-current-position").textContent = activeSlot
       ? `${Number(activeSlot.ordinal) + 1} / ${totalSlots}` : `${totalSlots} / ${totalSlots}`;
-    renderCurrentSceneGrid(scenePlanScene(), activeSlot ? Number(activeSlot.round_index) : 0);
+    renderCurrentSceneGrid(scenePlanScene());
     $("collect-current-task").textContent = activeSlot
       ? (activeSlot.task_zh || activeSlot.task) : "--";
     $("collect-current-task-en").textContent = activeSlot && activeSlot.task_zh
@@ -1636,9 +1534,12 @@ function renderCollect() {
     }
     const selectedEpisode = selectedCollectEpisodeItem();
     const selectedEpisodeSaved = savedEpisodeId(selectedEpisode) != null;
-    $("b-collect-qc-pass").disabled = !enabled || !selectedEpisodeSaved;
-    $("b-goto-qc").disabled = !enabled || !selectedEpisodeSaved;
-    $("b-collect-note-save").disabled = !selectedEpisodeSaved;
+    const qcPending = S.collectTaskSelectionPending || collectionSlotClickTimer !== null;
+    $("collect-qc-target").textContent = selectedEpisodeSaved
+      ? `EPISODE ${selectedEpisode.episode_index} · ${String(selectedEpisode.qc_verdict || selectedEpisode.quality || "unknown").toUpperCase()}` : "--";
+    $("b-collect-qc-pass").disabled = !enabled || !selectedEpisodeSaved || qcPending;
+    $("b-goto-qc").disabled = !enabled || !selectedEpisodeSaved || qcPending;
+    $("b-collect-note-save").disabled = !selectedEpisodeSaved || qcPending;
     renderCollectionTransfer(enabled, usableCount, rejectedCount);
 
     const recordState = collecting || (hasPrompt && !S.collectArmEnabled)
@@ -1647,7 +1548,7 @@ function renderCollect() {
     setPanel("collect-panel-task", enabled && hasPrompt ? "done" : "active");
     setPanel("collect-panel-record", recordState);
     setPanel("collect-panel-queue", slotPlan.viewerActive ? "active" : (slotPlan.loaded ? "done" : "pending"));
-    setPanel("collect-panel-replay", selectedEpisodeSaved ? "active" : "pending");
+    setPanel("collect-panel-replay", selectedEpisodeSaved || episodes.length ? "active" : "pending");
 
     const renderKey = [
       collectionSet,
@@ -1691,6 +1592,7 @@ async function exportCollectionQuality() {
     try {
       const result = await apiPost("/api/collect_quality_export", {
         task: collectTaskValue(),
+        dataset: S.collectionSlots.dataset || collectSetValue(),
         dataset_format: datasetFormat,
       }, { concurrent: true });
       if (!result.ok) {
@@ -1777,6 +1679,7 @@ async function uploadCollectionQuality() {
     renderCollect();
     try {
       const result = await apiPost("/api/collect_quality_upload", {
+        dataset: S.collectionSlots.dataset || collectSetValue(),
         task: collectTaskValue(),
         dataset_format: datasetFormat,
         confirmed,
@@ -1958,7 +1861,8 @@ async function reviewCollectEpisode(item) {
     LIVE.replayError = "";
     updateScrub();
     const title = reviewTitleFor("collect");
-    if (title) title.textContent = `episode ${episode} · loading`;
+    const qualityLabel = String(item.quality || "unknown").toUpperCase();
+    if (title) title.textContent = `episode ${episode} · ${qualityLabel} · loading`;
     const err = reviewErrorFor("collect");
     if (err) err.textContent = "";
     const r = await apiPost("/api/review_episode",
@@ -1984,7 +1888,7 @@ async function reviewCollectEpisode(item) {
       return;
     }
     clientTrace("review.collect.ready", { episode, request_id: requestId, frames: LIVE.n });
-    if (title) title.textContent = `episode ${episode} · review`;
+    if (title) title.textContent = `episode ${episode} · ${qualityLabel} · review`;
   }
 
 async function reviewRolloutEpisode(item) {
@@ -2029,26 +1933,21 @@ async function reviewRolloutEpisode(item) {
   }
 
 async function submitEpisodeQc(kind, verdict) {
-    const episode = kind === "rollout" ? S.rolloutSaveEpisode : S.collectReplayEpisode;
+    if (kind === "collect" && (collectionSlotClickTimer !== null || S.collectTaskSelectionPending)) return false;
+    const target = kind === "collect" && selectedCollectEpisodeItem() ? collectionQcTarget : null;
+    const episode = kind === "rollout" ? S.rolloutSaveEpisode : target && target.item.episode_index;
     if (episode == null) return false;
-    const rejectedSlot = kind === "collect" && verdict === "fail"
-      ? (S.collectionSlots.slots || []).find(
-          (item) => savedEpisodeId(item.episode) === episode
-        )
-      : null;
-    S.reviewKind = kind;
-    reviewDatasetDir = reviewDatasetFor(kind);
-    reviewEpisodeId = episode;
-    clientTrace("review.qc.begin", { kind, episode, verdict, dataset_dir: reviewDatasetDir });
+    const datasetDir = target ? target.dataset_dir : reviewDatasetFor(kind);
+    clientTrace("review.qc.begin", { kind, episode, verdict, dataset_dir: datasetDir });
     const r = await apiPost(episodeQcEndpoint(kind), {
-      dataset_dir: reviewDatasetDir,
-      task: reviewTask,
-      dataset: kind === "collect" ? reviewCollectionSet : "",
-      episode: String(reviewEpisodeId),
+      dataset_dir: datasetDir,
+      task: target ? target.task : reviewTask,
+      dataset: target ? target.dataset : "",
+      episode: String(episode),
       verdict,
       note: reviewNoteFor(kind).value || "",
     });
-    const title = reviewTitleFor(kind);
+    const title = kind === "collect" ? $("collect-qc-target") : reviewTitleFor(kind);
     const status = kind === "rollout" ? $("rollout-save-err") : $("collect-qc-status");
     clientTrace("review.qc.end", {
       kind, episode, verdict, ok: !!r.ok, error: r.error || "",
@@ -2058,32 +1957,42 @@ async function submitEpisodeQc(kind, verdict) {
       if (status) status.textContent = `✗ ${r.error || "QC failed"}`;
       return false;
     }
+    if (target) {
+      const patch = (item) => {
+        if (item && item.episode_index === episode) item.qc_verdict = verdict;
+      };
+      patch(target.item);
+      if (target.dataset === S.collectionSlots.dataset) {
+        (S.collectionSlots.slots || []).forEach((slot) => patch(slot.episode));
+        const cache = S.episodeHistory && S.episodeHistory.collect;
+        if (cache && cache.collectionSet === target.dataset) (cache.episodes || []).forEach(patch);
+        renderCollect();
+      }
+    }
     if (title) title.textContent = `episode ${episode} · ${verdict}`;
     if (status) status.textContent = `episode ${episode} marked ${verdict}`;
     invalidateEpisodeHistory(kind);
     await pollEpisodeHistory(true);
     applyStatus(await apiGet("/api/status"));
     if (kind === "collect") await pollCollectionSlots(true);
-    if (rejectedSlot) await activateCollectionSlot(rejectedSlot);
     return true;
   }
 
 async function submitEpisodeNote(kind) {
-    const episode = kind === "rollout" ? S.rolloutSaveEpisode : S.collectReplayEpisode;
+    if (kind === "collect" && (collectionSlotClickTimer !== null || S.collectTaskSelectionPending)) return;
+    const target = kind === "collect" && selectedCollectEpisodeItem() ? collectionQcTarget : null;
+    const episode = kind === "rollout" ? S.rolloutSaveEpisode : target && target.item.episode_index;
     const status = kind === "rollout" ? $("rollout-save-err") : $("collect-qc-status");
     if (episode == null) {
       if (status) status.textContent = "✗ select an episode first";
       return;
     }
-    S.reviewKind = kind;
-    reviewDatasetDir = reviewDatasetFor(kind);
-    reviewEpisodeId = episode;
     if (status) status.textContent = "saving…";
     const r = await apiPost(episodeQcEndpoint(kind), {
-      dataset_dir: reviewDatasetDir,
-      task: reviewTask,
-      dataset: kind === "collect" ? reviewCollectionSet : "",
-      episode: String(reviewEpisodeId),
+      dataset_dir: target ? target.dataset_dir : reviewDatasetFor(kind),
+      task: target ? target.task : reviewTask,
+      dataset: target ? target.dataset : "",
+      episode: String(episode),
       verdict: "",
       note: reviewNoteFor(kind).value || "",
     });
