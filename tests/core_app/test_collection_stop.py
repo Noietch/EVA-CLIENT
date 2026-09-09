@@ -148,6 +148,49 @@ def test_saving_slot_stays_busy_while_cursor_advances() -> None:
     assert active["state"] == "active"
 
 
+def test_completed_slot_advances_forward_past_earlier_pending_slots() -> None:
+    slots = build_collection_slots(
+        ConfigDict(collection=ConfigDict(tasks={"set": [("task", 8)]})), {}, "set"
+    )
+    current = slots[5]
+    episodes = [
+        {
+            "episode_index": 6,
+            "slot_id": current.slot_id,
+            "quality": "green",
+            "status": "saved",
+        }
+    ]
+
+    _rows, active, _counts = collection_slot_status(
+        slots, episodes, [], CollectionSlotState([], current.slot_id)
+    )
+
+    assert active is not None
+    assert active["slot_id"] == slots[6].slot_id
+
+
+def test_completed_last_slot_does_not_wrap_to_earlier_pending_slots() -> None:
+    slots = build_collection_slots(
+        ConfigDict(collection=ConfigDict(tasks={"set": [("task", 3)]})), {}, "set"
+    )
+    current = slots[-1]
+    episodes = [
+        {
+            "episode_index": 3,
+            "slot_id": current.slot_id,
+            "quality": "green",
+            "status": "saved",
+        }
+    ]
+
+    _rows, active, _counts = collection_slot_status(
+        slots, episodes, [], CollectionSlotState([], current.slot_id)
+    )
+
+    assert active is None
+
+
 def test_collection_slots_prioritize_scene_then_layout_ordered_task_object() -> None:
     config = ConfigDict(
         collection=ConfigDict(

@@ -232,8 +232,8 @@ def test_collection_slots_api_filters_independently_and_selects_one_cursor(tmp_p
     ]
     assert no_match.json["filtered_total"] == 0
     assert selected.json["active"]["slot_id"] == "TASK-PLATE:SC-A:0"
-    assert skipped.json["active"]["slot_id"] == "TASK-CUP:SC-A:0"
-    assert status["collection_slot_id"] == "TASK-CUP:SC-A:0"
+    assert skipped.json["active"]["slot_id"] == "TASK-CUP:SC-B:0"
+    assert status["collection_slot_id"] == "TASK-CUP:SC-B:0"
 
 
 def test_collection_slots_api_builds_slots_for_inline_tasks(tmp_path, monkeypatch):

@@ -157,17 +157,26 @@ def build_collection_slots(
             prompt_indices.setdefault(str(entry[0]), index)
 
     tasks = list(scene_plan.get("tasks") or [])
+    position_keys = _position_sort_keys(scene_plan)
     slots: list[CollectionSlot] = []
     for scene in scene_plan.get("scenes") or []:
         scene_id = str(scene.get("scene_id") or "").strip()
         if not scene_id:
             continue
-        for task in tasks:
+        scene_tasks = [
+            (task_index, task)
+            for task_index, task in enumerate(tasks)
+            if scene_id in list(task.get("scene_ids") or [])
+        ]
+        scene_tasks.sort(
+            key=lambda item: _task_spatial_sort_key(item[1], scene, position_keys, item[0])
+        )
+        for task_index, task in scene_tasks:
             prompt = str(task.get("prompt_en") or "").strip()
             task_index = prompt_indices.get(prompt)
-            scene_ids = list(task.get("scene_ids") or [])
-            if task_index is None or scene_id not in scene_ids:
+            if task_index is None:
                 continue
+            scene_ids = list(task.get("scene_ids") or [])
             scene_index = scene_ids.index(scene_id)
             counts = list(task.get("scene_epsiodes_count") or [])
             round_total = int(counts[scene_index]) if scene_index < len(counts) else 0
@@ -395,7 +404,19 @@ def collection_slot_status(
         )
     if active is None:
         # Failed captures stay red until the operator explicitly selects a retake.
-        active = next((row for row in unresolved_regular if row["state"] == "pending"), None)
+        selected = next(
+            (row for row in rows if row["slot_id"] == slot_state.selected_slot_id),
+            None,
+        )
+        active = next(
+            (
+                row
+                for row in unresolved_regular
+                if row["state"] == "pending"
+                and (selected is None or row["ordinal"] > selected["ordinal"])
+            ),
+            None,
+        )
     if active is not None:
         active["repair"] = active["state"] in {"complete", "deferred", "rejected"}
         active["state"] = "active"
@@ -411,7 +432,7 @@ def defer_active_slot(
     """Move the current slot to the tail of the deferred repair queue."""
     ordered = [slot_id for slot_id in state.deferred if slot_id != active_slot_id]
     ordered.append(active_slot_id)
-    updated = CollectionSlotState(ordered)
+    updated = CollectionSlotState(ordered, active_slot_id)
     save_slot_state(dataset_dir, updated)
     return updated
 
