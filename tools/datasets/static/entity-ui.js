@@ -87,7 +87,28 @@ function renderTaskList() {
     emptyList(host, query || action || category ? "没有匹配的任务" : "当前批次没有任务");
     return;
   }
-  host.replaceChildren(...tasks.map(buildTaskAccordion));
+  if ($("task-group-by").value === "task") {
+    host.replaceChildren(...tasks.map((task) => buildTaskAccordion(task)));
+    return;
+  }
+  const groups = new Map();
+  for (const task of tasks) {
+    for (const sceneId of task.scene_ids) {
+      const key = JSON.stringify([task.batch_id, sceneId]);
+      if (!groups.has(key)) {
+        const group = node("section", "scene-task-group");
+        const slots = node("div", "task-slots");
+        group.append(node("strong", "", sceneId + " · " + task.batch_id), slots);
+        groups.set(key, {group, slots});
+      }
+    }
+    for (const slot of task.slots) {
+      const key = JSON.stringify([task.batch_id, slot.scene_id]);
+      const {slots} = groups.get(key);
+      slots.append(buildSlotTile(task, slot, slots.childElementCount));
+    }
+  }
+  host.replaceChildren(...[...groups.values()].map(({group}) => group));
 }
 
 function compareTaskIds(left, right) {
@@ -148,29 +169,34 @@ function buildTaskAccordion(task) {
   if (app.expandedTask === key) {
     const slots = node("div", "task-slots");
     for (const [index, slot] of task.slots.entries()) {
-      const tile = node(
-        "button",
-        "slot-tile " + (slot.episode ? "collected" : "pending")
-          + (app.selectedSlot === slot.slot_id ? " active" : ""),
-      );
-      tile.type = "button";
-      tile.title = slot.slot_id + (slot.episode
-        ? " · 采集完成 · Episode " + slot.episode.episode_index
-        : " · 未采集");
-      tile.append(
-        node("b", "", String(index + 1).padStart(2, "0")),
-        node("small", "", slot.episode ? "完成" : "未采"),
-      );
-      tile.addEventListener("click", (event) => {
-        event.stopPropagation();
-        openSlot(task, slot);
-      });
-      slots.append(tile);
+      slots.append(buildSlotTile(task, slot, index));
     }
     if (!task.slots.length) emptyList(slots, "该任务尚未配置 episode slot");
     wrapper.append(slots);
   }
   return wrapper;
+}
+
+function buildSlotTile(task, slot, index) {
+  const tile = node(
+    "button",
+    "slot-tile " + (slot.episode ? "collected" : "pending")
+      + (app.selected.tasks === recordKey(task, "task_id")
+        && app.selectedSlot === slot.slot_id ? " active" : ""),
+  );
+  tile.type = "button";
+  tile.title = slot.slot_id + (slot.episode
+    ? " · 采集完成 · Episode " + slot.episode.episode_index
+    : " · 未采集");
+  tile.append(
+    node("b", "", String(index + 1).padStart(2, "0")),
+    node("small", "", slot.episode ? "完成" : "未采"),
+  );
+  tile.addEventListener("click", (event) => {
+    event.stopPropagation();
+    openSlot(task, slot);
+  });
+  return tile;
 }
 
 function selectTask(task) {
