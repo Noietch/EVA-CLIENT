@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import math
+import re
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -52,6 +54,94 @@ def _scene_label(scene: dict[str, Any]) -> str:
         if label and label not in labels:
             labels.append(label)
     return " / ".join(labels) or str(scene.get("scene_id") or "Scene")
+
+
+def _position_sort_keys(scene_plan: dict[str, Any]) -> dict[str, tuple[Any, ...]]:
+    """Build row-major layout keys without inferring spatial order from position IDs."""
+    keys: dict[str, tuple[Any, ...]] = {}
+    for index, position in enumerate(scene_plan.get("positions") or []):
+        if not isinstance(position, dict):
+            continue
+        position_id = str(position.get("position_id") or "").strip()
+        if not position_id:
+            continue
+        try:
+            x = float(position["x"])
+            y = float(position["y"])
+        except (KeyError, TypeError, ValueError):
+            x = y = math.nan
+        if math.isfinite(x) and math.isfinite(y):
+            keys[position_id] = (0, y, x, index, position_id)
+        else:
+            # An uncalibrated point still has a stable authored order, but it is
+            # deliberately ranked after points with usable coordinates.
+            keys[position_id] = (1, index, position_id)
+    return keys
+
+
+def _task_object_names(task: dict[str, Any]) -> list[str]:
+    value = task.get("operation_object") or task.get("operation_objects") or ""
+    return [item.strip() for item in str(value).split("/") if item.strip()]
+
+
+def _task_hand_priority(task: dict[str, Any]) -> int:
+    """Prefer the first-mentioned operating hand: left, then right, then unknown."""
+    text = " ".join(
+        str(task.get(field) or "") for field in ("prompt_en", "prompt_zh")
+    )
+    match = re.search(r"left\s+(?:arm|hand)|right\s+(?:arm|hand)|左手|左臂|右手|右臂", text, re.I)
+    if match is None:
+        return 2
+    return 0 if match.group(0).lower().startswith(("left", "左")) else 1
+
+
+def _placement_matches_reference(placement: dict[str, Any], reference: str) -> bool:
+    reference = str(reference).strip()
+    if not reference:
+        return False
+    aliases = {
+        str(placement.get(field) or "").strip()
+        for field in ("object_id", "name", "name_zh", "name_en")
+    }
+    aliases.discard("")
+    return any(reference == alias or reference in alias or alias in reference for alias in aliases)
+
+
+def _task_spatial_sort_key(
+    task: dict[str, Any],
+    scene: dict[str, Any],
+    position_keys: dict[str, tuple[Any, ...]],
+    task_index: int,
+) -> tuple[Any, ...]:
+    """Return the scene task's hand-first, then row-major object ordering key."""
+    references = [
+        str(value).strip()
+        for value in task.get("operation_object_ids") or []
+        if str(value).strip()
+    ]
+    references.extend(_task_object_names(task))
+    placements = scene.get("placements") or []
+    matched_keys: list[tuple[Any, ...]] = []
+    for reference in references:
+        matching_positions: list[tuple[Any, ...]] = []
+        for placement in placements:
+            if not isinstance(placement, dict):
+                continue
+            object_id = str(placement.get("object_id") or "").strip()
+            if reference != object_id and not _placement_matches_reference(placement, reference):
+                continue
+            matching_positions.extend(
+                position_keys[position_id]
+                for position_id in placement.get("group_position_ids")
+                or placement.get("position_ids")
+                or [placement.get("position_id")]
+                if position_id in position_keys
+            )
+        if matching_positions:
+            matched_keys.append(min(matching_positions))
+    if matched_keys:
+        return (0, _task_hand_priority(task), tuple(matched_keys), task_index)
+    return (0, _task_hand_priority(task), (), task_index)
 
 
 def build_collection_slots(

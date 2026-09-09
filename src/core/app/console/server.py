@@ -1155,6 +1155,8 @@ def _scene_plan_scenes(
                     "position_ids": position_ids,
                     "object_id": object_id,
                     "name": obj["name"],
+                    "name_zh": obj.get("name_zh", ""),
+                    "name_en": obj.get("name_en", ""),
                     "color": obj.get("color", ""),
                     "photo_url": obj.get("photo_url", ""),
                 }
@@ -1165,6 +1167,8 @@ def _scene_plan_scenes(
                         "position_id": position_id,
                         "object_id": object_id,
                         "name": obj["name"],
+                        "name_zh": obj.get("name_zh", ""),
+                        "name_en": obj.get("name_en", ""),
                         "color": obj.get("color", ""),
                         "photo_url": obj.get("photo_url", ""),
                         "group_id": group_id,
@@ -1189,6 +1193,9 @@ def _scene_plan_tasks(rows: list[dict[str, str]]) -> list[dict[str, Any]]:
                 "task_id": task_id,
                 "action": str(row.get("action", "") or ""),
                 "category": str(row.get("category", "") or ""),
+                "operation_object": str(
+                    row.get("operation_object") or row.get("操作对象") or ""
+                ).strip(),
                 "operation_object_ids": [
                     value.strip()
                     for value in str(row.get("operation_object_ids", "")).split(";")
