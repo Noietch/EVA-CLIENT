@@ -96,3 +96,14 @@ def test_capture_stop_restores_gc_when_transport_finish_fails(monkeypatch):
 
     assert runtime.collection_capture_runner is None
     assert events == ["runner_stop", "capture_finish", "gc_resume"]
+
+
+def test_capture_timing_distinguishes_source_gap_from_receive_stall(monkeypatch):
+    clock = iter([10.0, 10.01, 10.61])
+    monkeypatch.setattr(collection_capture.time, "monotonic", lambda: next(clock))
+    runner = CollectionCaptureRunner(SimpleNamespace(), fps=30, max_raw_snapshots_per_tick=16)
+    for stamp in (1.0, 2.0, 2.033):
+        runner._track_capture_timing(stamp)
+    assert runner._max_source_gap == pytest.approx(1.0)
+    assert runner._max_receive_gap == pytest.approx(0.6)
+    assert runner._source_gap_count == 1

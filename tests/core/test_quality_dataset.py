@@ -144,6 +144,36 @@ def _dataset(root: Path) -> None:
     _write_jsonl(root / "meta" / "episodes_stats.jsonl", stats_rows)
 
 
+@pytest.mark.parametrize("latest_quality", ["green", "red"])
+def test_export_only_latest_slot_attempt(tmp_path, latest_quality):
+    source = tmp_path / "source"
+    _dataset(source)
+    path = source / "meta/episodes.jsonl"
+    rows = _read_jsonl(path)
+    for row in rows:
+        row["slot_id"] = "slot-A"
+    rows[2]["quality"] = latest_quality
+    rows[2].pop("qc_verdict")
+    _write_jsonl(path, list(reversed(rows)))
+    progress = []
+    result = split_dataset_by_quality(source, progress_callback=progress.append)
+    assert result.source_episodes == 1
+    assert result.accepted_episodes == (1 if latest_quality == "green" else 0)
+    assert result.rejected_episodes == (1 if latest_quality == "red" else 0)
+    assert progress[-1].episodes_total == progress[-1].episodes_completed == 1
+    output = Path(result.accepted_dir if latest_quality == "green" else result.rejected_dir)
+    marker = json.loads((output / "meta/quality_split.json").read_text())
+    assert marker["source_episode_indices"] == [2]
+    table = pq.read_table(output / "data/chunk-000/episode_000000.parquet")
+    assert table["observation.state"][0].as_py() == [20.0]
+    assert len(_read_jsonl(path)) == 3
+
+
+def test_every_slot_exports_only_one_attempt():
+    rows = [{"episode_index": i, "slot_id": "same", "tasks": ["task"]} for i in range(3)]
+    assert native_module._latest_slot_episodes(rows) == [rows[-1]]
+
+
 def test_split_dataset_exports_contiguous_accepted_and_rejected_subsets(tmp_path: Path) -> None:
     source = tmp_path / "source"
     accepted = tmp_path / "accepted"

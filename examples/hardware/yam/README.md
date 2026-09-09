@@ -199,9 +199,10 @@ touches the CAN SDK. Override the rates independently with `CONTROL_RATE` and
 `PUBLISH_RATE`. The periodic hardware status log includes the achieved control
 rate and per-joint `target - current` tracking error in radians.
 
-Follower grippers independently limit fast target changes to `1.0` normalized
-travel unit per second by default, giving a minimum full-stroke time of about
-one second without slowing the six arm joints. Slow teaching-handle motion is
+Follower grippers independently limit fast target changes to `2.0` normalized
+travel units per second by default, giving a minimum full-stroke target ramp of
+0.5 seconds without slowing the six arm joints. Actual travel can take longer
+under the existing torque limits and damping. Slow teaching-handle motion is
 passed through unchanged. Configure
 `robot.dual_yam.settings.gripper_max_speed` in `config.yaml`; set it to `0` to
 disable the limiter.

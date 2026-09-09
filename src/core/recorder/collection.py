@@ -58,6 +58,10 @@ _COLUMN_TO_FIELD = {
     "action_eef": "action_eef",
 }
 
+_SOURCE_CLOCK_JUMP_MIN_SEC = 1.0
+_SOURCE_CLOCK_SPAN_GRACE_SEC = 1.0
+_FK_BATCH_SIZE = 128
+
 
 @dataclasses.dataclass
 class CollectionSavePayload:
@@ -98,6 +102,8 @@ class CollectionEpisodeWriter:
         self._skipped_before_start = 0
         self._min_capture_time: float | None = None
         self._max_capture_time: float | None = None
+        self._source_clock_repairs = 0
+        self._source_clock_removed_sec = 0.0
 
     def start_episode(self, min_capture_time: float | None = None) -> None:
         """Reset buffers for a new collection episode.
@@ -116,6 +122,8 @@ class CollectionEpisodeWriter:
         self._skipped_before_start = 0
         self._min_capture_time = min_capture_time
         self._max_capture_time = None
+        self._source_clock_repairs = 0
+        self._source_clock_removed_sec = 0.0
 
     def ingest(self, snapshot: RawCollectionSnapshot, *, count_frame: bool = True) -> None:
         """Store one pre-decode snapshot. O(1), never decodes raw messages.
@@ -241,6 +249,94 @@ class CollectionEpisodeWriter:
         for snapshot in snapshots:
             self._merge_raw_batch(snapshot.decode_raw())
 
+    def _repair_source_clock_discontinuities(self, expected_duration_sec: Any) -> None:
+        """Collapse impossible source-clock jumps while preserving sample order."""
+        try:
+            expected_duration = float(expected_duration_sec)
+        except (TypeError, ValueError):
+            return
+        if not np.isfinite(expected_duration) or expected_duration <= 0.0:
+            return
+
+        streams = [
+            samples
+            for family in (self._raw_batch.images, self._raw_batch.vectors)
+            for samples in family.values()
+            if samples
+        ]
+        timestamps = sorted(
+            {
+                float(sample.timestamp)
+                for samples in streams
+                for sample in samples
+                if np.isfinite(sample.timestamp)
+            }
+        )
+        if len(timestamps) < 2:
+            return
+        source_span = timestamps[-1] - timestamps[0]
+        allowed_span = expected_duration + max(
+            _SOURCE_CLOCK_SPAN_GRACE_SEC,
+            expected_duration * 0.2,
+        )
+        if source_span <= allowed_span:
+            return
+
+        positive_deltas = [
+            right - left
+            for left, right in zip(timestamps, timestamps[1:], strict=False)
+            if right > left
+        ]
+        if not positive_deltas:
+            return
+        fps = max(float(self._logger._fps), 1.0)
+        ordinary_deltas = [delta for delta in positive_deltas if delta <= 10.0 / fps]
+        nominal_delta = float(np.median(ordinary_deltas)) if ordinary_deltas else 1.0 / fps
+        jump_threshold = max(
+            _SOURCE_CLOCK_JUMP_MIN_SEC,
+            10.0 * nominal_delta,
+            10.0 / fps,
+        )
+
+        corrected: dict[float, float] = {timestamps[0]: timestamps[0]}
+        removed = 0.0
+        repairs = 0
+        for previous, current in zip(timestamps, timestamps[1:], strict=False):
+            delta = current - previous
+            if delta > jump_threshold:
+                removed += delta - nominal_delta
+                repairs += 1
+            corrected[current] = current - removed
+        if repairs == 0:
+            return
+
+        for samples in streams:
+            for sample in samples:
+                timestamp = float(sample.timestamp)
+                if timestamp in corrected:
+                    sample.timestamp = corrected[timestamp]
+        corrected_values = list(corrected.values())
+        self._raw_batch.start_time = min(corrected_values)
+        self._raw_batch.end_time = max(corrected_values)
+        self._min_capture_time = self._raw_batch.start_time
+        self._max_capture_time = self._raw_batch.end_time
+        self._source_clock_repairs = repairs
+        self._source_clock_removed_sec = removed
+        self._add_issue(
+            "source_clock_discontinuity",
+            f"source span {source_span:.6f}s exceeds recording duration "
+            f"{expected_duration:.6f}s; compressed {repairs} gaps totaling {removed:.6f}s",
+        )
+        logger.warning(
+            "[COLLECTION_CLOCK_REPAIR] jumps=%d removed_sec=%.3f source_span=%.3f "
+            "wall_duration=%.3f corrected_span=%.3f",
+            repairs,
+            removed,
+            source_span,
+            expected_duration,
+            self._raw_batch.end_time - self._raw_batch.start_time,
+        )
+
     def _image_skew_tolerance_sec(self) -> float:
         storage = self._collection.get("storage") or {}
         configured = storage.get("image_skew_tolerance_sec")
@@ -333,12 +429,20 @@ class CollectionEpisodeWriter:
         action_qpos = np.asarray(
             [np.asarray(frame.action_qpos, dtype=np.float32) for frame in frames]
         )
-        state_eef = np.asarray(solver.fk_chunk(state_qpos), dtype=np.float32).reshape(
-            len(frames), -1
-        )
-        action_eef = np.asarray(solver.fk_chunk(action_qpos), dtype=np.float32).reshape(
-            len(frames), -1
-        )
+
+        def solve(qpos: np.ndarray) -> np.ndarray:
+            # A fixed shape avoids a JAX compilation for every episode length.
+            results = []
+            for start in range(0, len(qpos), _FK_BATCH_SIZE):
+                batch = qpos[start : start + _FK_BATCH_SIZE]
+                count = len(batch)
+                padded = np.pad(batch, ((0, _FK_BATCH_SIZE - count), (0, 0)), mode="edge")
+                result = np.asarray(solver.fk_chunk(padded), dtype=np.float32)
+                results.append(result.reshape(_FK_BATCH_SIZE, -1)[:count])
+            return np.concatenate(results, axis=0)
+
+        state_eef = solve(state_qpos)
+        action_eef = solve(action_qpos)
         if state_eef.shape[1] < expected or action_eef.shape[1] < expected:
             raise ValueError(
                 f"FK returned too few EEF values: expected at least {expected}, "
@@ -429,15 +533,20 @@ class CollectionEpisodeWriter:
             return
         payload = job.collection_payload
         preparer = CollectionEpisodeWriter(self._logger, self._collection)
+        preparer._client_fk_solver = getattr(self, "_client_fk_solver", None)
         preparer._quality_issues = list(payload.quality_issues)
         preparer._raw_batch = CollectionRawBatch(start_time=payload.min_capture_time)
         preparer._min_capture_time = payload.min_capture_time
         preparer._max_capture_time = payload.max_capture_time
         preparer._image_shapes = dict(self._image_shapes)
         preparer._decode_raw_snapshots(payload.raw_snapshots)
+        preparer._repair_source_clock_discontinuities(job.episode_meta.get("duration_seconds"))
         if preparer._raw_batch.end_time is None:
             preparer._raw_batch.end_time = payload.max_capture_time
-        preparer._build_prepared_save_job(job)
+        try:
+            preparer._build_prepared_save_job(job)
+        finally:
+            self._client_fk_solver = getattr(preparer, "_client_fk_solver", None)
         self._image_shapes.update(preparer._image_shapes)
 
     def _build_prepared_save_job(self, job: SaveJob) -> None:
@@ -514,6 +623,13 @@ class CollectionEpisodeWriter:
                     "alignment_image_skew_tolerance_sec": self._image_skew_tolerance_sec(),
                     "alignment_image_max_skew_sec": self._alignment_report.image_max_skew,
                     "alignment_image_stream_stats": (self._alignment_report.image_stream_stats),
+                }
+            )
+        if self._source_clock_repairs:
+            row.update(
+                {
+                    "alignment_source_clock_repairs": self._source_clock_repairs,
+                    "alignment_source_clock_removed_sec": round(self._source_clock_removed_sec, 6),
                 }
             )
         if job.episode_meta:
