@@ -95,7 +95,7 @@ camera_devices:
     - orbbec_startup_timeout
     settings:
       orbbec_camera:
-      - cam_left_wrist=CV2R1610003Z
+      - cam_left_wrist=CV2L360000CL
       orbbec_startup_timeout:
       - cam_left_wrist=3
       orbbec_width: 640
@@ -108,7 +108,7 @@ camera_devices:
     - orbbec_camera
     settings:
       orbbec_camera:
-      - cam_right_wrist=CV2L360000CL
+      - cam_right_wrist=CV2R1610003Z
       orbbec_width: 640
       orbbec_height: 480
       orbbec_fps: 30

@@ -230,35 +230,6 @@ def prewarm_teleop_ik(config: ConfigDict, runtime: RuntimeState) -> bool:
     return True
 
 
-def configure_fixed_vr_home_eef(config: ConfigDict, runtime: RuntimeState) -> None:
-    """Anchor VR retargeting to the configured robot initial pose, never live qpos."""
-    client = getattr(runtime, "teleop_client", None)
-    setter = getattr(client, "set_home_eef", None)
-    if not callable(setter):
-        return
-    initial_qpos = np.asarray(runtime.robot.initial_qpos, dtype=np.float32).reshape(-1)
-    expected_qpos = int(runtime.robot.total_action_dim)
-    if initial_qpos.shape != (expected_qpos,) or not np.all(np.isfinite(initial_qpos)):
-        raise TeleopExecutionError(
-            f"configured VR home qpos must be finite shape ({expected_qpos},)"
-        )
-    initial_eef = np.asarray(
-        forward_canonical_eef(config, runtime, initial_qpos), dtype=np.float32
-    ).reshape(-1)
-    expected_eef = 8 * len(runtime.robot.arm_groups)
-    if initial_eef.shape != (expected_eef,) or not np.all(np.isfinite(initial_eef)):
-        raise TeleopExecutionError(
-            f"configured VR home EEF must be finite shape ({expected_eef},)"
-        )
-    setter(
-        {
-            group.name: initial_eef[index * 8 : (index + 1) * 8].copy()
-            for index, group in enumerate(runtime.robot.arm_groups)
-        }
-    )
-    logger.info("VR calibration origin set from robot.initial_qpos")
-
-
 def activate_teleop(config: ConfigDict, runtime: RuntimeState, session: SessionState) -> bool:
     """Enter the selected collection control lifecycle without opening an episode."""
     if not runtime.collection_teleop_armed:
@@ -288,10 +259,10 @@ def activate_teleop(config: ConfigDict, runtime: RuntimeState, session: SessionS
             if client is None:
                 raise TeleopExecutionError("Configured teleop client is unavailable")
             client.start()
-            configure_fixed_vr_home_eef(config, runtime)
             # Collection ARM is an explicit operator gate. Do not make the gate
             # depend on the transient neutral snapshot; the per-arm grip latch
-            # remains the source of which arm is allowed to follow.
+            # remains the source of which arm is allowed to follow and calibrates
+            # that arm against live feedback on its first unlock.
             client.reset(require_neutral=False)
         runtime.transport.reset_hil_control()
         _set_hil_relay_enabled(
@@ -830,7 +801,6 @@ __all__ = [
     "activate_teleop",
     "activate_rollout_teleop",
     "close_teleop",
-    "configure_fixed_vr_home_eef",
     "deactivate_rollout_teleop",
     "deactivate_teleop",
     "drain_teleop_events",

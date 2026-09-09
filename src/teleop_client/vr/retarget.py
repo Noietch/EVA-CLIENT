@@ -153,32 +153,13 @@ class ArmRetargeter:
         self._trigger_pressed = False
         self._gripper_closed: bool | None = None
         self._gripper_target: float | None = None
-        self._configured_home_eef: np.ndarray | None = None
         self._reference_position: np.ndarray | None = None
         self._reference_rotation: np.ndarray | None = None
         self._accumulated_position = np.zeros(3, dtype=np.float64)
         self._accumulated_rotation = np.eye(3, dtype=np.float64)
 
-    def set_home_eef(self, home_eef: np.ndarray) -> None:
-        """Use a configured robot EEF pose as the fixed VR origin."""
-        value = np.asarray(home_eef, dtype=np.float64).reshape(-1)
-        if value.shape != (8,) or not np.all(np.isfinite(value)):
-            raise ValueError("home_eef must be a finite vector of length 8")
-        quaternion = value[3:7]
-        norm = float(np.linalg.norm(quaternion))
-        if norm <= 1e-8:
-            raise ValueError("home_eef quaternion must be non-zero")
-        normalized = value.copy()
-        normalized[3:7] = quaternion / norm
-        self._configured_home_eef = normalized
-        self._home_eef = normalized.copy()
-
     def reset(self) -> None:
-        self._home_eef = (
-            None
-            if self._configured_home_eef is None
-            else self._configured_home_eef.copy()
-        )
+        self._home_eef = None
         self._last_target = None
         self._grip_engaged = False
         self._trigger_initialized = False
@@ -243,6 +224,8 @@ class ArmRetargeter:
         assert controller.pose is not None
         position_xr = np.asarray(controller.pose.position, dtype=np.float64)
         rotation_xr = Rotation.from_quat(controller.pose.orientation_xyzw).as_matrix()
+        # The grip long-press unlock is the calibration boundary. The first
+        # authorized frame anchors controller motion to the robot's live pose.
         latched = self._home_eef is None
         if latched:
             self._home_eef = measured.copy()

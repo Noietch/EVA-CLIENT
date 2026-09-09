@@ -108,8 +108,8 @@ eva --config configs/01_deploy/dual_yam/openpi_qpos.py --web-port 8080
 The default three-camera combination is:
 
 - `cam_high=260422275306` (RealSense D405)
-- `cam_left_wrist=CV2R1610003Z` (Orbbec Gemini 305)
-- `cam_right_wrist=CV2L360000CL` (Orbbec Gemini 305)
+- `cam_left_wrist=CV2L360000CL` (Orbbec Gemini 305)
+- `cam_right_wrist=CV2R1610003Z` (Orbbec Gemini 305)
 
 The DEVICE camera dropdown exposes two named three-camera combinations:
 `1 D405 + 2 Orbbec 305` (default) and

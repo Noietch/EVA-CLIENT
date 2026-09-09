@@ -236,8 +236,8 @@ def test_camera_readiness_accepts_frames_arriving_in_separate_messages(monkeypat
                 "settings": {
                     "camera": ["cam_high=260422275306"],
                     "orbbec_camera": [
-                        "cam_left_wrist=CV2R1610003Z",
-                        "cam_right_wrist=CV2L360000CL",
+                        "cam_left_wrist=CV2L360000CL",
+                        "cam_right_wrist=CV2R1610003Z",
                     ]
                 }
             },
