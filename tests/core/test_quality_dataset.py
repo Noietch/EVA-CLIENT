@@ -145,13 +145,18 @@ def _dataset(root: Path) -> None:
 
 
 @pytest.mark.parametrize("latest_quality", ["green", "red"])
-def test_export_only_latest_slot_attempt(tmp_path, latest_quality):
+@pytest.mark.parametrize("slot_metadata", ["explicit", "legacy", "mixed"])
+def test_export_only_latest_slot_attempt(tmp_path, latest_quality, slot_metadata):
     source = tmp_path / "source"
     _dataset(source)
     path = source / "meta/episodes.jsonl"
     rows = _read_jsonl(path)
     for row in rows:
-        row["slot_id"] = "slot-A"
+        row.update(task_id="task-A", scene_id="scene-A", scene_round=0)
+        if slot_metadata == "explicit" or (
+            slot_metadata == "mixed" and row["episode_index"] == 1
+        ):
+            row["slot_id"] = "slot-A"
     rows[2]["quality"] = latest_quality
     rows[2].pop("qc_verdict")
     _write_jsonl(path, list(reversed(rows)))
@@ -172,6 +177,47 @@ def test_export_only_latest_slot_attempt(tmp_path, latest_quality):
 def test_every_slot_exports_only_one_attempt():
     rows = [{"episode_index": i, "slot_id": "same", "tasks": ["task"]} for i in range(3)]
     assert native_module._latest_slot_episodes(rows) == [rows[-1]]
+
+
+def test_export_uses_only_episodes_selected_by_collection_plan(tmp_path):
+    source = tmp_path / "source"
+    _dataset(source)
+    progress = []
+    result = split_dataset_by_quality(
+        source, source_episode_indices={0}, progress_callback=progress.append,
+    )
+    assert result.source_episodes == result.accepted_episodes == 1
+    assert result.rejected_episodes == 0
+    assert progress[-1].episodes_completed == progress[-1].episodes_total == 1
+    marker = json.loads((Path(result.accepted_dir) / "meta/quality_split.json").read_text())
+    assert marker["source_episode_indices"] == [0]
+    assert len(_read_jsonl(source / "meta/episodes.jsonl")) == 3
+
+
+def test_legacy_prompt_attempts_match_explicit_slot():
+    rows = [
+        {"episode_index": 0, "task": "pick", "scene_id": "A", "scene_round": 0},
+        {"episode_index": 1, "prompt": "pick", "scene_id": "A", "scene_round": 0},
+        {"episode_index": 2, "tasks": ["pick"], "scene_id": "A", "scene_round": 0,
+         "slot_id": "task:A:0"},
+    ]
+    assert native_module._latest_slot_episodes(list(reversed(rows))) == [rows[-1]]
+
+
+def test_slot_selection_preserves_distinct_targets_and_unassigned_episodes():
+    rows = [
+        {"episode_index": 0, "task_id": "a", "scene_id": "A", "scene_round": 0},
+        {"episode_index": 1, "task_id": "b", "scene_id": "A", "scene_round": 0},
+        {"episode_index": 2, "task_id": "a", "scene_id": "B", "scene_round": 0},
+        {"episode_index": 3, "task_id": "a", "scene_id": "A", "scene_round": 1},
+        {"episode_index": 4, "tasks": ["pick"]},
+        {"episode_index": 5, "tasks": ["pick"], "scene_round": None},
+        {"episode_index": 6, "slot_id": "one", "prompt": "pick",
+         "scene_id": "A", "scene_round": 0},
+        {"episode_index": 7, "slot_id": "two", "prompt": "pick",
+         "scene_id": "A", "scene_round": 0},
+    ]
+    assert native_module._latest_slot_episodes(rows) == rows
 
 
 def test_split_dataset_exports_contiguous_accepted_and_rejected_subsets(tmp_path: Path) -> None:

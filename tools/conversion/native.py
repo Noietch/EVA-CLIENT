@@ -128,10 +128,49 @@ def is_rejected_episode(row: dict[str, Any]) -> bool:
 
 def _latest_slot_episodes(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Keep exactly the latest attempt for each capture slot, regardless of QC."""
+    def legacy_keys(row: dict[str, Any]) -> list[tuple[str, str]]:
+        scene_id = str(row.get("scene_id") or "").strip()
+        try:
+            round_index = int(row["scene_round"])
+        except (KeyError, TypeError, ValueError):
+            return []
+        if not scene_id or round_index < 0:
+            return []
+        keys = []
+        task_id = str(row.get("task_id") or "").strip()
+        if task_id:
+            keys.append(("slot", f"{task_id}:{scene_id}:{round_index}"))
+        tasks = row.get("tasks")
+        prompt = row.get("task") or row.get("prompt")
+        if not prompt and isinstance(tasks, list) and len(tasks) == 1:
+            prompt = tasks[0]
+        if prompt:
+            keys.append(("target", json.dumps([str(prompt), scene_id, round_index])))
+        return keys
+
+    # Resolve old target metadata to an explicit slot when the mapping is unique.
+    # Do not merge distinct explicit slots merely because their prompts match.
+    aliases: dict[tuple[str, str], set[str]] = {}
+    for row in rows:
+        slot_id = str(row.get("slot_id") or "").strip()
+        if slot_id:
+            for key in legacy_keys(row):
+                aliases.setdefault(key, set()).add(slot_id)
+
     selected: dict[tuple[str, str], dict[str, Any]] = {}
     for row in rows:
-        slot_id = str(row.get("slot_id") or "")
+        slot_id = str(row.get("slot_id") or "").strip()
         key = ("slot", slot_id) if slot_id else ("episode", str(row["episode_index"]))
+        if not slot_id:
+            keys = legacy_keys(row)
+            if keys:
+                key = keys[0]
+                # A task id is stronger than a shared human-readable prompt.
+                for candidate in keys[:1]:
+                    matches = aliases.get(candidate, set())
+                    if len(matches) == 1:
+                        key = ("slot", next(iter(matches)))
+                        break
         previous = selected.get(key)
         if previous is None or int(row["episode_index"]) > int(previous["episode_index"]):
             selected[key] = row
@@ -146,6 +185,7 @@ def split_dataset_by_quality(
     replace_existing: bool = False,
     normalize_videos: bool = True,
     progress_callback: Callable[[QualityExportProgress], None] | None = None,
+    source_episode_indices: set[int] | None = None,
 ) -> QualitySplitSummary:
     source_dir = Path(source_dir).resolve()
     accepted_dir = Path(
@@ -173,7 +213,13 @@ def split_dataset_by_quality(
     indices = [int(row["episode_index"]) for row in rows]
     if len(indices) != len(set(indices)):
         raise ValueError("episode indices must be unique")
-    rows = _latest_slot_episodes(rows)
+    if source_episode_indices is None:
+        rows = _latest_slot_episodes(rows)
+    else:
+        missing = source_episode_indices - set(indices)
+        if missing:
+            raise ValueError(f"selected episodes missing from dataset: {sorted(missing)}")
+        rows = [row for row in rows if int(row["episode_index"]) in source_episode_indices]
     accepted_rows = [row for row in rows if not is_rejected_episode(row)]
     rejected_rows = [row for row in rows if is_rejected_episode(row)]
     if progress_callback is not None:

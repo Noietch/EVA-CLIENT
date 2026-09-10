@@ -762,6 +762,7 @@ def _run_quality_export(
     accepted_dir: Path,
     rejected_dir: Path,
     dataset_format: str,
+    source_episode_indices: set[int] | None = None,
 ) -> None:
     with ctx.quality_upload_lock:
         job = ctx.quality_export_jobs[job_id]
@@ -785,6 +786,7 @@ def _run_quality_export(
             dataset_format=dataset_format,
             replace_existing=True,
             progress_callback=update_progress,
+            source_episode_indices=source_episode_indices,
         )
     except Exception as error:
         logger.exception("Failed to export collection quality split")
@@ -3847,6 +3849,18 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         dataset_format = self._requested_dataset_format(body)
         if dataset_format is None:
             return
+        dataset = str(body.get("dataset") or self.ctx.session.selected_collect_set or "").strip()
+        snapshot = _collection_slots_snapshot(self.ctx, dataset)
+        # Freeze the same per-slot selection shown by the collection page.
+        # Legacy datasets without a slot plan retain whole-dataset export.
+        source_episode_indices = None
+        if snapshot["rows"]:
+            source_episode_indices = {
+                int(row["episode"]["episode_index"])
+                for row in snapshot["rows"]
+                if row["state"] in {"complete", "rejected", "deferred"}
+                and row.get("episode") is not None
+            }
         accepted_dir, rejected_dir = _quality_export_paths(dataset_dir, dataset_format)
         with self.ctx.quality_upload_lock:
             if any(
@@ -3890,6 +3904,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                 accepted_dir,
                 rejected_dir,
                 dataset_format,
+                source_episode_indices,
             ),
             name=f"quality-export-{job_id[:8]}",
             daemon=True,

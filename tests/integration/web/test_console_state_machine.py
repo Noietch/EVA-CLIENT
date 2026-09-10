@@ -434,7 +434,10 @@ def _register_completed_quality_export(
 
 
 @pytest.mark.parametrize("cursor_changed", [False, True])
-def test_collect_quality_export_uses_selected_dataset(tmp_path, monkeypatch, cursor_changed):
+@pytest.mark.parametrize("has_slot_plan", [False, True])
+def test_collect_quality_export_uses_selected_dataset(
+    tmp_path, monkeypatch, cursor_changed, has_slot_plan
+):
     source = tmp_path / "pick_up_cup"
     source.mkdir()
     calls = []
@@ -447,8 +450,10 @@ def test_collect_quality_export_uses_selected_dataset(tmp_path, monkeypatch, cur
         dataset_format,
         replace_existing,
         progress_callback,
+        source_episode_indices,
     ):
         assert dataset_format == "lerobot_v21"
+        assert source_episode_indices == ({0, 2} if has_slot_plan else None)
         assert replace_existing is True
         calls.append((source_dir, accepted_dir, rejected_dir))
         progress_callback(QualityExportProgress(1, 3, "accepted", 0))
@@ -467,6 +472,15 @@ def test_collect_quality_export_uses_selected_dataset(tmp_path, monkeypatch, cur
         )
 
     monkeypatch.setattr(console_server, "export_dataset_by_quality", export)
+    monkeypatch.setattr(
+        console_server, "_collection_slots_snapshot",
+        lambda ctx, dataset: {"rows": [
+            {"state": "complete", "episode": {"episode_index": 0}},
+            {"state": "rejected", "episode": {"episode_index": 2}},
+            {"state": "pending", "episode": None},
+            {"state": "saving", "episode": {"episode_index": 3}},
+        ] if has_slot_plan else []},
+    )
     with serve_console(console_config()) as h:
         _set_collect_dataset_logger(h, source)
         if cursor_changed:

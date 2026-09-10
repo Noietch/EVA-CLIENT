@@ -49,6 +49,7 @@ def export_dataset_by_quality(
     dataset_format: str,
     replace_existing: bool = False,
     progress_callback: Callable[[DatasetExportProgress], None] | None = None,
+    source_episode_indices: set[int] | None = None,
 ) -> DatasetExportSummary:
     if dataset_format not in DATASET_EXPORT_FORMATS:
         expected = ", ".join(DATASET_EXPORT_FORMATS)
@@ -65,6 +66,7 @@ def export_dataset_by_quality(
             rejected_dir,
             replace_existing=replace_existing,
             progress_callback=_native_progress_callback(progress_callback),
+            source_episode_indices=source_episode_indices,
         )
         return _summary(summary, dataset_format)
 
@@ -94,6 +96,7 @@ def export_dataset_by_quality(
             native_accepted,
             native_rejected,
             normalize_videos=False,
+            source_episode_indices=source_episode_indices,
             progress_callback=None,
         )
         if progress_callback is not None:
