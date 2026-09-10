@@ -456,7 +456,7 @@ def test_collection_tolerates_isolated_image_skew(tmp_path):
             "cam_high": [
                 CollectionRawSample(
                     timestamp,
-                    np.zeros((8, 8, 3), dtype=np.uint8),
+                    np.full((8, 8, 3), round(timestamp * 10), dtype=np.uint8),
                 )
                 for timestamp in image_timestamps
             ]
@@ -804,3 +804,40 @@ def test_collection_start_cutoff_drops_cached_frames(tmp_path):
     table = pq.read_table(task_dir / "data" / "chunk-000" / "episode_000000.parquet")
     assert table.num_rows == 1
     np.testing.assert_allclose(table.column("capture_time").to_pylist(), [10.1])
+
+
+@pytest.mark.parametrize("failure", ["frozen", "missing", "disconnected_at_end"])
+def test_camera_failure_is_persisted_as_red_quality(tmp_path, failure):
+    logger = _collection_logger(tmp_path)
+    times = [index / 10 for index in range(21)]
+    image_times = times[:3] if failure == "disconnected_at_end" else times
+    batch = CollectionRawBatch(
+        start_time=0,
+        end_time=2,
+        images={}
+        if failure == "missing"
+        else {
+            "cam_high": [
+                CollectionRawSample(
+                    t,
+                    np.full((8, 8, 3), 0 if failure == "frozen" else round(t * 10), dtype=np.uint8),
+                )
+                for t in image_times
+            ]
+        },
+        vectors={
+            field: [CollectionRawSample(t, np.full(_DIM, t, dtype=np.float32)) for t in times]
+            for field in ("state_qpos", "action_qpos")
+        },
+    )
+    logger.start_episode("t")
+    logger.ingest_collection_snapshot(RawCollectionSnapshot(timestamp=2, decode_raw=lambda: batch))
+    assert logger.end_episode()
+    episode = _read_jsonl(_collection_task_dir(tmp_path) / "meta" / "episodes.jsonl")[0]
+    assert episode["quality"] == "red"
+    expected = {
+        "frozen": "frozen_camera",
+        "missing": "missing_camera_stream",
+        "disconnected_at_end": "camera_frame_timeout",
+    }[failure]
+    assert expected in {issue["code"] for issue in episode["quality_issues"]}

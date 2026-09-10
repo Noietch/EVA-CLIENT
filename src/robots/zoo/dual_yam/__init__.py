@@ -82,8 +82,8 @@ class DualYam(Robot):
             observation_schema=ObservationSchema(
                 cameras=(
                     CameraSpec("front", "cam_high"),
-                    CameraSpec("left_wrist", "cam_left_wrist"),
-                    CameraSpec("right_wrist", "cam_right_wrist"),
+                    CameraSpec("left_wrist", "cam_left_wrist", attached_to="left_arm"),
+                    CameraSpec("right_wrist", "cam_right_wrist", attached_to="right_arm"),
                 ),
                 state_composition=("left_arm", "right_arm"),
             ),

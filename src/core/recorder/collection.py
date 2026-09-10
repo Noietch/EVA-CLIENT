@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import pyarrow.parquet as pq
 
+from core.recorder.camera_quality import frozen_camera_issues
 from core.recorder.collection_alignment import (
     CollectionAlignmentReport,
     align_collection_samples,
@@ -356,18 +357,17 @@ class CollectionEpisodeWriter:
         self._active_camera_keys = tuple(
             key for key in configured_camera_keys if key in raw_image_keys
         )
-        if raw_image_keys:
-            for camera_key in configured_camera_keys:
-                if camera_key not in raw_image_keys:
-                    self._add_issue(
-                        "missing_camera_stream",
-                        f"configured camera {camera_key} has no raw image samples",
-                    )
-            for camera_key in sorted(raw_image_keys - set(configured_camera_keys)):
+        for camera_key in configured_camera_keys:
+            if camera_key not in raw_image_keys:
                 self._add_issue(
-                    "unexpected_image_stream",
-                    f"raw image stream {camera_key} is not configured",
+                    "missing_camera_stream",
+                    f"configured camera {camera_key} has no raw image samples",
                 )
+        for camera_key in sorted(raw_image_keys - set(configured_camera_keys)):
+            self._add_issue(
+                "unexpected_image_stream",
+                f"raw image stream {camera_key} is not configured",
+            )
 
         # qpos is the common source of truth for both transport- and client-driven
         # collection. EEF streams from the execution endpoint are optional and are
@@ -389,6 +389,10 @@ class CollectionEpisodeWriter:
             self._derive_eef(frames)
         for frame in frames:
             self._append_aligned_frame(frame)
+        for code, detail in frozen_camera_issues(
+            frames, self._logger._robot, self._active_camera_keys
+        ):
+            self._add_issue(code, detail)
 
     def _derive_eef(self, frames: list[Observation]) -> None:
         """Derive both EEF columns from aligned qpos in save-worker batches."""
