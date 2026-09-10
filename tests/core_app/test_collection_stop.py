@@ -19,7 +19,7 @@ from core.config import ConfigDict
 pytestmark = pytest.mark.unit
 
 
-def test_auto_red_stays_red_and_requires_manual_retake():
+def test_current_red_advances_forward_and_can_be_manually_retaken():
     slots = build_collection_slots(
         ConfigDict(collection=ConfigDict(tasks={"set": [("task", 2)]})), {}, "set"
     )
@@ -39,6 +39,67 @@ def test_auto_red_stays_red_and_requires_manual_retake():
     )
     assert active["slot_id"] == slots[0].slot_id
     assert active["repair"]
+
+
+@pytest.mark.parametrize("next_quality", ["red", None])
+def test_forward_selection_treats_red_and_pending_equally(next_quality):
+    slots = build_collection_slots(
+        ConfigDict(collection=ConfigDict(tasks={"set": [("task", 5)]})), {}, "set"
+    )
+    episodes = [
+        {"episode_index": 0, "slot_id": slots[0].slot_id, "quality": "red"},
+        {"episode_index": 1, "slot_id": slots[1].slot_id, "quality": "green"},
+        {"episode_index": 2, "slot_id": slots[2].slot_id, "quality": "green"},
+        {"episode_index": 4, "slot_id": slots[4].slot_id, "quality": "red"},
+    ]
+    if next_quality:
+        episodes.append(
+            {"episode_index": 3, "slot_id": slots[3].slot_id, "quality": next_quality}
+        )
+    for episode in episodes:
+        episode["status"] = "saved"
+
+    _, active, _ = collection_slot_status(
+        slots, episodes, [], CollectionSlotState([], slots[1].slot_id)
+    )
+
+    assert active["slot_id"] == slots[3].slot_id
+    assert active["repair"] == (next_quality == "red")
+
+
+@pytest.mark.parametrize("failed_save", [False, True])
+def test_automatic_red_retake_survives_sync_until_new_capture(tmp_path, monkeypatch, failed_save):
+    slots = build_collection_slots(
+        ConfigDict(collection=ConfigDict(tasks={"set": [("task", 3)]})), {}, "set"
+    )
+    episodes = [{"episode_index": 0, "slot_id": slots[0].slot_id, "quality": "green"}]
+    queue = []
+    if failed_save:
+        queue.append({"slot_id": slots[1].slot_id, "status": "failed"})
+    else:
+        episodes.append({"episode_index": 1, "slot_id": slots[1].slot_id, "quality": "red"})
+    for episode in episodes:
+        episode["status"] = "saved"
+    state = CollectionSlotState([], slots[0].slot_id)
+
+    def snapshot(_ctx, _dataset):
+        _, active, _ = collection_slot_status(slots, episodes, queue, state)
+        return {"active": active, "dataset_dir": str(tmp_path), "slot_state": state}
+
+    monkeypatch.setattr(console_server, "_collection_slots_snapshot", snapshot)
+    session = SessionState()
+    session.selected_collect_set = "set"
+    ctx = SimpleNamespace(
+        session=session,
+        runtime=SimpleNamespace(episode_logger=SimpleNamespace(has_active_episode=False)),
+    )
+    for _ in range(2):
+        active = console_server._sync_collection_slot_session(ctx)
+        assert active["slot_id"] == slots[1].slot_id
+        state = load_slot_state(tmp_path)
+
+    queue.append({"slot_id": slots[1].slot_id, "status": "saving"})
+    assert console_server._sync_collection_slot_session(ctx)["slot_id"] == slots[2].slot_id
 
 
 class _CollectionLogger:

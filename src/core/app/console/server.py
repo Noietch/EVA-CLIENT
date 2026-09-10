@@ -1511,7 +1511,12 @@ def _sync_collection_slot_session(ctx: ConsoleContext) -> dict[str, Any] | None:
     active = snapshot["active"]
     dataset_dir = str(snapshot["dataset_dir"] or "")
     if active is not None and dataset_dir:
-        select_collection_slot(Path(dataset_dir), active["slot_id"], snapshot["slot_state"])
+        select_collection_slot(
+            Path(dataset_dir), active["slot_id"], snapshot["slot_state"],
+            episode_index=(active.get("episode") or {}).get("episode_index"),
+            # Retain an automatic retake just like an explicitly selected retake.
+            manual=bool(active.get("repair")),
+        )
     _apply_collection_slot_session(ctx.session, active)
     logger.info(
         "[COLLECTION_SLOT_SYNC] dataset=%s active=%s",

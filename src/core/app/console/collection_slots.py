@@ -403,7 +403,7 @@ def collection_slot_status(
             None,
         )
     if active is None:
-        # Failed captures stay red until the operator explicitly selects a retake.
+        # Pending and rejected captures share the same forward plan order.
         selected = next(
             (row for row in rows if row["slot_id"] == slot_state.selected_slot_id),
             None,
@@ -412,7 +412,7 @@ def collection_slot_status(
             (
                 row
                 for row in unresolved_regular
-                if row["state"] == "pending"
+                if row["state"] in {"pending", "rejected"}
                 and (selected is None or row["ordinal"] > selected["ordinal"])
             ),
             None,
