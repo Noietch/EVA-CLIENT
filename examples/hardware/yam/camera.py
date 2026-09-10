@@ -401,6 +401,14 @@ class _D405Worker:
         with self._lock:
             return None if self._latest is None else self._latest.copy()
 
+    def snapshot_versioned(self) -> tuple[float, np.ndarray] | None:
+        with self._lock:
+            if self._latest is None or self._last_frame_time is None:
+                return None
+            if time.monotonic() - self._last_frame_time >= 1.0:
+                return None
+            return self._last_frame_time, self._latest.copy()
+
     def status(self) -> str:
         with self._lock:
             state = self._state
@@ -426,6 +434,14 @@ class RealSenseCameraCache:
             if frame is not None:
                 images[key] = frame
         return images
+
+    def snapshot_versioned(self) -> tuple[dict, dict]:
+        versions, images = {}, {}
+        for key, worker in self._workers.items():
+            frame = worker.snapshot_versioned()
+            if frame is not None:
+                versions[key], images[key] = frame
+        return versions, images
 
     def hardware_status(self) -> dict[str, str]:
         return {key: worker.status() for key, worker in self._workers.items()}

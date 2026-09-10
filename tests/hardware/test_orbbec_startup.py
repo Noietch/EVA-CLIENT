@@ -65,12 +65,18 @@ def test_camera_start_waits_for_first_frame_before_opening_next(monkeypatch):
     monkeypatch.setattr(camera.cv2, "setNumThreads", lambda *args: None)
     monkeypatch.setattr(camera.os, "nice", lambda *args: None)
     monkeypatch.setattr(camera.threading, "Thread", Thread)
-    monkeypatch.setattr(camera, "get_orbbec_sdk", lambda: SimpleNamespace(
-        Context=lambda: SimpleNamespace(query_devices=lambda: [])
-    ))
-    monkeypatch.setattr(camera, "select_orbbec_device", lambda devices, spec: SimpleNamespace(
-        get_device_info=lambda: SimpleNamespace(get_serial_number=lambda: spec.serial)
-    ))
+    monkeypatch.setattr(
+        camera,
+        "get_orbbec_sdk",
+        lambda: SimpleNamespace(Context=lambda: SimpleNamespace(query_devices=lambda: [])),
+    )
+    monkeypatch.setattr(
+        camera,
+        "select_orbbec_device",
+        lambda devices, spec: SimpleNamespace(
+            get_device_info=lambda: SimpleNamespace(get_serial_number=lambda: spec.serial)
+        ),
+    )
 
     camera._capture_orbbec_cameras(capture_args, Stop())
 
@@ -127,3 +133,146 @@ def test_camera_uses_fast_retry_until_first_frame(monkeypatch):
     )
 
     assert waits == [0.25, 0.25]
+
+
+def test_yam_camera_combinations_keep_independent_brightness():
+    from pathlib import Path
+
+    import yaml
+
+    from core.devices.hardware import HardwareCatalog
+    from examples.hardware.yam.node import build_arg_parser, build_config
+
+    path = Path(__file__).resolve().parents[2] / "examples/hardware/yam/config.yaml"
+    options = HardwareCatalog._expand_camera_combinations(yaml.safe_load(path.read_text()), path)
+    for name in ("yam_orbbec", "yam_d405_orbbec"):
+        option = options[name]
+        argv = ["--camera-only"]
+        for key, value in option["settings"].items():
+            flag = "--" + key.replace("_", "-")
+            if isinstance(value, bool):
+                if value:
+                    argv.append(flag)
+            elif key in option["repeat"]:
+                for item in value:
+                    argv.extend([flag, str(item)])
+            else:
+                argv.extend([flag, str(value)])
+        config = build_config(build_arg_parser().parse_args(argv))
+        brightness = {camera.image_key: camera.brightness for camera in config.orbbec_cameras}
+        assert brightness["cam_left_wrist"] == 0
+        assert brightness["cam_right_wrist"] == 0
+        for spec in config.orbbec_cameras:
+            if spec.image_key != "cam_high":
+                assert (spec.exposure, spec.gain) == (100, 16)
+        if name == "yam_orbbec":
+            assert brightness["cam_high"] == 25
+
+
+@pytest.mark.parametrize("mapping", ["missing=10", "cam_left_wrist=65", "cam_left_wrist=nope"])
+def test_yam_rejects_invalid_camera_brightness(mapping):
+    from examples.hardware.yam.node import build_arg_parser, build_config
+
+    args = build_arg_parser().parse_args(
+        [
+            "--orbbec-camera",
+            "cam_left_wrist=serial",
+            "--orbbec-camera-brightness",
+            mapping,
+        ]
+    )
+    with pytest.raises(ValueError):
+        build_config(args)
+
+
+def test_yam_manual_exposure_is_per_camera():
+    from examples.hardware.yam.node import build_arg_parser, build_config
+
+    args = build_arg_parser().parse_args(
+        [
+            "--camera-only",
+            "--orbbec-camera",
+            "cam_left_wrist=left",
+            "--orbbec-camera",
+            "cam_right_wrist=right",
+            "--orbbec-camera-exposure",
+            "cam_left_wrist=100",
+            "--orbbec-camera-gain",
+            "cam_left_wrist=16",
+        ]
+    )
+    left, right = build_config(args).orbbec_cameras
+    assert (left.exposure, left.gain) == (100, 16)
+    assert (right.exposure, right.gain) == (None, None)
+    args.orbbec_camera_exposure = []
+    with pytest.raises(ValueError, match="requires"):
+        build_config(args)
+
+
+def test_startup_reset_only_targets_enabled_devices():
+    reboots = []
+    devices = SimpleNamespace(
+        get_device_by_serial_number=lambda serial: SimpleNamespace(
+            reboot=lambda: reboots.append(serial)
+        )
+    )
+    sdk = SimpleNamespace(Context=lambda: SimpleNamespace(query_devices=lambda: devices))
+    specs = (
+        camera.OrbbecCameraSpec("cam_left_wrist", serial="left", reset_on_start=True),
+        camera.OrbbecCameraSpec("cam_right_wrist", serial="right"),
+    )
+    assert camera._reset_startup_devices(sdk, specs)
+    assert reboots == ["left"]
+    assert not camera._reset_startup_devices(sdk, specs[1:])
+    assert reboots == ["left"]
+
+
+def test_reset_process_exits_before_capture_process_starts(monkeypatch):
+    events = []
+
+    class Process:
+        exitcode = 0
+
+        def __init__(self, *, name, **kwargs):
+            self.name = name
+
+        def start(self):
+            events.append(("start", self.name))
+
+        def join(self, timeout):
+            events.append(("join", self.name))
+
+        def is_alive(self):
+            return False
+
+        def close(self):
+            events.append(("close", self.name))
+
+    context = SimpleNamespace(
+        Event=lambda: SimpleNamespace(wait=lambda seconds: events.append(("wait", seconds))),
+        Process=Process,
+    )
+    monkeypatch.setattr(camera.multiprocessing, "get_context", lambda method: context)
+    monkeypatch.setattr(
+        camera,
+        "_OrbbecCameraWorker",
+        lambda spec, ctx: SimpleNamespace(
+            capture_args=lambda: (spec,),
+        ),
+    )
+    camera.OrbbecCameraCache(
+        (
+            camera.OrbbecCameraSpec(
+                "cam_left_wrist",
+                serial="left",
+                reset_on_start=True,
+            ),
+        )
+    )
+    assert events == [
+        ("start", "orbbec-startup-reset"),
+        ("join", "orbbec-startup-reset"),
+        ("close", "orbbec-startup-reset"),
+        ("wait", 3.0),
+        ("start", "orbbec-camera-sidecar"),
+    ]

@@ -68,7 +68,7 @@ class CameraSource:
         images = {
             name: image
             for name, image in self.images.items()
-            if time.monotonic() - self.received_at[name] <= 0.5
+            if time.monotonic() - self.received_at[name] < 1.0
         }
         return {name: self.versions[name] for name in images}, images
 
@@ -93,6 +93,7 @@ class CameraPreview:
         self.lock = threading.Lock()
         self.images = {}
         self.updated = 0.0
+        self.received_at = {}
         self.thread = threading.Thread(target=self._run, name="eva-camera-preview", daemon=True)
         self.thread.start()
 
@@ -103,6 +104,7 @@ class CameraPreview:
                 images = source.snapshot()
                 with self.lock:
                     self.images = images
+                    self.received_at = dict(source.received_at)
                     self.updated = time.monotonic()
                 self.stopped.wait(0.03)
         finally:
@@ -115,13 +117,26 @@ class CameraPreview:
 
     def get_camera_keys(self) -> list[str]:
         with self.lock:
-            if time.monotonic() - self.updated > 0.5:
+            if time.monotonic() - self.updated >= 1.0:
                 return []
             return [key for key in self.keys if key in self.images]
 
+    def camera_health(self) -> dict:
+        with self.lock:
+            now = time.monotonic()
+            return {
+                key: {
+                    "stale": key not in self.received_at or now - self.received_at[key] >= 1.0,
+                    "age_s": None
+                    if key not in self.received_at
+                    else max(0.0, now - self.received_at[key]),
+                }
+                for key in self.keys
+            }
+
     def get_camera_frame(self, key: str):
         with self.lock:
-            if time.monotonic() - self.updated > 0.5:
+            if time.monotonic() - self.updated >= 1.0:
                 return None
             return self.images.get(key)
 

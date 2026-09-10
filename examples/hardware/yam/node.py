@@ -210,6 +210,7 @@ class YamZmqNode:
         self._leaders = YamLeaders(config)
         robot = ROBOT_REGISTRY.build(config.robot_name)
         self._fk_solver = robot.build_kinematics(initial_qpos_groups=robot.initial_qpos_by_group())
+        self._camera_versions: dict = {}
         self._camera_endpoint = camera_endpoint
         self._camera_caches = (
             CameraSource(camera_endpoint)
@@ -629,7 +630,11 @@ class YamZmqNode:
     def _camera_snapshot(self) -> dict[str, np.ndarray]:
         images: dict[str, np.ndarray] = {}
         for camera_cache in self._camera_caches:
-            images.update(camera_cache.snapshot())
+            versions, frames = camera_cache.snapshot_versioned()
+            for key, frame in frames.items():
+                if self._camera_versions.get(key) != versions[key]:
+                    images[key] = frame
+                    self._camera_versions[key] = versions[key]
         return images
 
     def _camera_status(self) -> dict[str, str]:
@@ -872,6 +877,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Orbbec color brightness compensation while auto exposure is enabled (-64..64).",
     )
     parser.add_argument(
+        "--orbbec-camera-brightness",
+        action="append",
+        default=[],
+        metavar="IMAGE_KEY=VALUE",
+        help="Per-camera brightness override (-64..64); repeatable.",
+    )
+    parser.add_argument("--orbbec-reset-on-start", action="store_true")
+    for control in ("exposure", "gain"):
+        parser.add_argument(
+            f"--orbbec-camera-{control}",
+            action="append",
+            default=[],
+            metavar="IMAGE_KEY=VALUE",
+            help=f"Per-camera manual {control} in SDK units; exposure disables auto exposure.",
+        )
+    parser.add_argument(
         "--orbbec-power-line-frequency",
         type=int,
         choices=(0, 50, 60),
@@ -964,9 +985,7 @@ def build_config(args: argparse.Namespace) -> YamZmqConfig:
     orbbec_startup_timeouts: dict[str, float] = {}
     for value in args.orbbec_startup_timeout:
         if "=" not in value:
-            raise ValueError(
-                f"Expected Orbbec startup timeout IMAGE_KEY=SECONDS, got {value!r}"
-            )
+            raise ValueError(f"Expected Orbbec startup timeout IMAGE_KEY=SECONDS, got {value!r}")
         image_key, seconds = (part.strip() for part in value.split("=", 1))
         if not image_key or image_key in orbbec_startup_timeouts:
             raise ValueError(f"Invalid Orbbec startup timeout mapping {value!r}")
@@ -981,8 +1000,45 @@ def build_config(args: argparse.Namespace) -> YamZmqConfig:
         startup_timeouts=orbbec_startup_timeouts,
         warmup_frames=args.orbbec_warmup_frames,
         brightness=args.orbbec_brightness,
+        reset_on_start=args.orbbec_reset_on_start,
         power_line_frequency_hz=args.orbbec_power_line_frequency,
     )
+    brightness_overrides: dict[str, int] = {}
+    orbbec_keys = {camera.image_key for camera in orbbec_cameras}
+    for value in args.orbbec_camera_brightness:
+        image_key, separator, raw_brightness = value.partition("=")
+        image_key = image_key.strip()
+        if not separator or image_key not in orbbec_keys or image_key in brightness_overrides:
+            raise ValueError(f"Invalid Orbbec camera brightness mapping {value!r}")
+        brightness = int(raw_brightness)
+        if not -64 <= brightness <= 64:
+            raise ValueError("Orbbec brightness must be in [-64, 64]")
+        brightness_overrides[image_key] = brightness
+    orbbec_cameras = tuple(
+        dataclasses.replace(camera, brightness=brightness_overrides[camera.image_key])
+        if camera.image_key in brightness_overrides
+        else camera
+        for camera in orbbec_cameras
+    )
+    for control in ("exposure", "gain"):
+        overrides: dict[str, int] = {}
+        for value in getattr(args, f"orbbec_camera_{control}"):
+            key, separator, raw_value = value.partition("=")
+            key = key.strip()
+            if not separator or key not in orbbec_keys or key in overrides:
+                raise ValueError(f"Invalid Orbbec {control} mapping {value!r}")
+            parsed = int(raw_value)
+            if parsed <= 0:
+                raise ValueError(f"Orbbec {control} must be positive")
+            overrides[key] = parsed
+        orbbec_cameras = tuple(
+            dataclasses.replace(camera, **{control: overrides[camera.image_key]})
+            if camera.image_key in overrides
+            else camera
+            for camera in orbbec_cameras
+        )
+    if any(camera.gain is not None and camera.exposure is None for camera in orbbec_cameras):
+        raise ValueError("Orbbec manual gain requires per-camera manual exposure")
     invalid_cameras = {
         camera.image_key
         for camera in cameras + orbbec_cameras

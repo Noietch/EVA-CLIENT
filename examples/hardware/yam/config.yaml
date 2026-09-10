@@ -89,9 +89,13 @@ camera_devices:
       orbbec_fps: 30
       orbbec_brightness: 25
       orbbec_power_line_frequency: 50
+      orbbec_reset_on_start: true
   orbbec_305_left_wrist:
     repeat:
     - orbbec_camera
+    - orbbec_camera_brightness
+    - orbbec_camera_exposure
+    - orbbec_camera_gain
     - orbbec_startup_timeout
     settings:
       orbbec_camera:
@@ -101,19 +105,34 @@ camera_devices:
       orbbec_width: 640
       orbbec_height: 480
       orbbec_fps: 30
-      orbbec_brightness: 25
+      orbbec_camera_brightness:
+      - cam_left_wrist=0
+      orbbec_camera_exposure:
+      - cam_left_wrist=100
+      orbbec_camera_gain:
+      - cam_left_wrist=16
       orbbec_power_line_frequency: 50
+      orbbec_reset_on_start: true
   orbbec_305_right_wrist:
     repeat:
     - orbbec_camera
+    - orbbec_camera_brightness
+    - orbbec_camera_exposure
+    - orbbec_camera_gain
     settings:
       orbbec_camera:
       - cam_right_wrist=CV2R1610003Z
       orbbec_width: 640
       orbbec_height: 480
       orbbec_fps: 30
-      orbbec_brightness: 25
+      orbbec_camera_brightness:
+      - cam_right_wrist=0
+      orbbec_camera_exposure:
+      - cam_right_wrist=100
+      orbbec_camera_gain:
+      - cam_right_wrist=16
       orbbec_power_line_frequency: 50
+      orbbec_reset_on_start: true
 camera:
   yam_d405_orbbec:
     separate: true

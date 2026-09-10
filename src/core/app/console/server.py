@@ -1849,6 +1849,10 @@ def _serialize_frame(ctx: ConsoleContext) -> dict:
         "qpos": None if qpos is None else np.asarray(qpos, dtype=float).tolist(),
         "cameras": _live_camera_keys(ctx),
     }
+    health = getattr(_camera_reader(ctx), "camera_health", None)
+    if source is None and health is not None:
+        enabled = set(_list_camera_keys(ctx))
+        out["camera_health"] = {key: value for key, value in health().items() if key in enabled}
     return out
 
 

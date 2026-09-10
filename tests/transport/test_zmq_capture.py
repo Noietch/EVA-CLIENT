@@ -53,3 +53,35 @@ def test_new_episode_discards_old_zmq_pipe(tmp_path):
     finally:
         reader.close()
         publisher.close(linger=0)
+
+
+def test_camera_health_does_not_count_cached_reads_as_new_frames(monkeypatch):
+    import numpy as np
+
+    from transport import zmq as module
+
+    now = [10.0]
+    monkeypatch.setattr(module.time, "monotonic", lambda: now[0])
+    reader = _ObservationReader(
+        ConfigDict(
+            transport=ConfigDict(
+                sub_endpoint="inproc://camera-health-test", disabled_cameras=[], disabled_groups=[]
+            )
+        ),
+        ROBOT_REGISTRY.build("agilex_piper"),
+        zmq,
+    )
+    try:
+        image = np.zeros((2, 2, 3), dtype=np.uint8)
+        observation = WireObservation(t=1, images={"cam_high": image}, state={})
+        reader._latest = observation
+        reader._cache_images(observation)
+        now[0] = 11.0
+        reader.get_camera_frame("cam_high")
+        reader.get_camera_keys()
+        assert reader.camera_health()["cam_high"]["stale"]
+        reader._cache_images(WireObservation(t=2, images={"cam_high": image}, state={}))
+        assert not reader.camera_health()["cam_high"]["stale"]
+        assert reader.camera_health()["cam_left_wrist"]["stale"]
+    finally:
+        reader.close()
