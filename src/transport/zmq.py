@@ -340,8 +340,6 @@ class _ObservationReader:
         self._latest_complete_image: WireObservation | None = None
         self._image_revision = 0
         self._latest_images: dict[str, np.ndarray] = {}
-        self._camera_received_at: dict[str, float] = {}
-        self._camera_timestamps: dict[str, float] = {}
         self._preserve_collection_backlog = preserve_collection_backlog
         self._collection_queue: collections.deque[WireObservation] = collections.deque()
         self._raw_collection_queue: collections.deque[bytes] = collections.deque()
@@ -612,22 +610,6 @@ class _ObservationReader:
             if camera.observation_key not in self._disabled_cameras
         ]
 
-    def camera_health(self) -> dict:
-        self._drain_latest()
-        with self._lock:
-            now = time.monotonic()
-            return {
-                camera.observation_key: {
-                    "stale": camera.observation_key not in self._camera_received_at
-                    or now - self._camera_received_at[camera.observation_key] >= 1.0,
-                    "age_s": None
-                    if camera.observation_key not in self._camera_received_at
-                    else max(0.0, now - self._camera_received_at[camera.observation_key]),
-                }
-                for camera in self._robot.observation_schema.cameras
-                if camera.observation_key not in self._disabled_cameras
-            }
-
     def _cache_images(self, wire_obs: WireObservation) -> None:
         with self._lock:
             self._cache_images_locked(wire_obs)
@@ -636,9 +618,6 @@ class _ObservationReader:
         for key, image in wire_obs.images.items():
             if key not in self._disabled_cameras:
                 self._latest_images[key] = np.asarray(image)
-                if self._camera_timestamps.get(key) != wire_obs.t:
-                    self._camera_timestamps[key] = wire_obs.t
-                    self._camera_received_at[key] = time.monotonic()
 
     def get_latest_qpos(self) -> np.ndarray | None:
         """Joint state from the freshest snapshot concatenated across groups.

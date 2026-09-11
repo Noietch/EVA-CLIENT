@@ -1,4 +1,4 @@
-"""Motion-aware camera QC, independent of transport frame liveness."""
+"""Motion-aware camera QC."""
 
 from __future__ import annotations
 
@@ -18,8 +18,7 @@ def frozen_camera_issues(
     Comparing every image with the first is equivalent to checking whether all
     adjacent diffs are zero, without allocating full-sized difference arrays.
     Joint travel below 0.02 rad is ignored as feedback noise. Gripper-only motion
-    does not move a wrist camera. Liveness is checked separately: even identical
-    pixels may be fresh frames, and sensor noise may conceal a frozen scene.
+    does not move a wrist camera. Sensor noise may conceal a frozen scene.
     """
     if len(frames) < 2:
         return []

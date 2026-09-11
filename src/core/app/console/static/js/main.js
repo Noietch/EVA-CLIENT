@@ -146,6 +146,7 @@ function startTeleopFeedbackStream() {
         S.TELEOP_FEEDBACK = feedback;
         S.STATUS.teleop = { ...(S.STATUS.teleop || {}), ...feedback };
         renderCollectControls();
+        if (S.ACTIVE_TAB === "collect") updateGuide();
       } catch {}
     };
     // EventSource reconnects automatically. Keep the last valid snapshot visible

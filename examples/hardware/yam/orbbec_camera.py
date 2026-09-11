@@ -573,8 +573,7 @@ class _OrbbecCameraWorker:
 
     def snapshot_versioned(self) -> tuple[int, np.ndarray] | None:
         with self._frame_lock:
-            if (self._frame_count.value == 0
-                    or time.monotonic() - self._last_frame_time.value >= 1.0):
+            if self._frame_count.value == 0:
                 return None
             image = np.frombuffer(self._frame_buffer, dtype=np.uint8).reshape(
                 (self.spec.height, self.spec.width, 3)

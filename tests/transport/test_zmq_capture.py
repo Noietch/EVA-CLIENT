@@ -55,7 +55,7 @@ def test_new_episode_discards_old_zmq_pipe(tmp_path):
         publisher.close(linger=0)
 
 
-def test_camera_health_does_not_count_cached_reads_as_new_frames(monkeypatch):
+def test_camera_cached_frame_remains_available_after_one_second(monkeypatch):
     import numpy as np
 
     from transport import zmq as module
@@ -79,9 +79,6 @@ def test_camera_health_does_not_count_cached_reads_as_new_frames(monkeypatch):
         now[0] = 11.0
         reader.get_camera_frame("cam_high")
         reader.get_camera_keys()
-        assert reader.camera_health()["cam_high"]["stale"]
-        reader._cache_images(WireObservation(t=2, images={"cam_high": image}, state={}))
-        assert not reader.camera_health()["cam_high"]["stale"]
-        assert reader.camera_health()["cam_left_wrist"]["stale"]
+        np.testing.assert_array_equal(reader.get_camera_frame("cam_high"), image)
     finally:
         reader.close()

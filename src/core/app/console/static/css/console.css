@@ -1900,13 +1900,3 @@
   }
   body select:not([multiple]):disabled { opacity: .45; cursor: not-allowed; box-shadow: none; }
   select option, select optgroup { color: var(--ink); background: var(--paper); }
-
-/* Liveness follows capture timestamps, including visually stationary scenes. */
-.cam-cell.camera-stale { outline: 3px solid #ef4444; outline-offset: -3px; }
-.cam-stale-warning { display: none; }
-.cam-cell.camera-stale .cam-stale-warning {
-  display: block; position: absolute; bottom: 8px; left: 8px; right: 8px;
-  padding: 6px; color: #fff; background: #991b1b; text-align: center;
-  font-size: 12px; z-index: 2;
-}
-.cam-cell.camera-stale .cam-lbl { color: #f87171; }

@@ -24,7 +24,7 @@ robot:
       gripper_close_torque_limit: 0.29
       gripper_open_torque_limit: 0.29
       gripper_max_speed: 2.0
-      rate: 30
+      rate: 60
     config:
       robot:
         type: dual_yam
@@ -74,7 +74,6 @@ camera_devices:
       - cam_high=260422275306
       camera_width: 640
       camera_height: 480
-      camera_fps: 30
       camera_auto_exposure_limit_us: 16000
       camera_auto_gain_limit: 32
       camera_warmup_frames: 90
@@ -86,7 +85,6 @@ camera_devices:
       - cam_high=CP0HC530000Z
       orbbec_width: 640
       orbbec_height: 480
-      orbbec_fps: 30
       orbbec_brightness: 25
       orbbec_power_line_frequency: 50
       orbbec_reset_on_start: true
@@ -104,7 +102,6 @@ camera_devices:
       - cam_left_wrist=3
       orbbec_width: 640
       orbbec_height: 480
-      orbbec_fps: 30
       orbbec_camera_brightness:
       - cam_left_wrist=0
       orbbec_camera_exposure:
@@ -124,7 +121,6 @@ camera_devices:
       - cam_right_wrist=CV2R1610003Z
       orbbec_width: 640
       orbbec_height: 480
-      orbbec_fps: 30
       orbbec_camera_brightness:
       - cam_right_wrist=0
       orbbec_camera_exposure:
@@ -137,6 +133,10 @@ camera:
   yam_d405_orbbec:
     separate: true
     label: 1 D405 + 2 Orbbec 305
+    settings:
+      camera_fps: 60
+      orbbec_fps: 60
+      orbbec_color_format: YUYV
     robots:
     - dual_yam
     cameras:
@@ -146,6 +146,8 @@ camera:
   yam_orbbec:
     separate: true
     label: 2 Orbbec 305 + 1 Orbbec 355
+    settings:
+      orbbec_fps: 30
     robots:
     - dual_yam
     cameras:

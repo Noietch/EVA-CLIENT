@@ -1856,10 +1856,6 @@ def _serialize_frame(ctx: ConsoleContext) -> dict:
         "qpos": None if qpos is None else np.asarray(qpos, dtype=float).tolist(),
         "cameras": _live_camera_keys(ctx),
     }
-    health = getattr(_camera_reader(ctx), "camera_health", None)
-    if source is None and health is not None:
-        enabled = set(_list_camera_keys(ctx))
-        out["camera_health"] = {key: value for key, value in health().items() if key in enabled}
     return out
 
 
@@ -2293,7 +2289,10 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                 reader = _camera_reader(ctx)
                 jpeg = None
                 payload, sig = _camera_jpeg_payload(reader, key, convert, last_sig)
-                if payload is not None and sig != last_sig:
+                if payload is None:
+                    last_sig = None
+                    last_jpeg = None
+                elif sig != last_sig:
                     jpeg = payload
                     last_sig = sig
                     last_jpeg = jpeg

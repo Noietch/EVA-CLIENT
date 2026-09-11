@@ -9,7 +9,7 @@ import pytest
 pytestmark = pytest.mark.integration
 
 
-def test_camera_warning_retains_panes_and_reconnects():
+def test_camera_streams_stay_open_across_polls():
     node = shutil.which("node")
     if node is None:
         pytest.skip("Node.js is required for the live UI state test")
@@ -28,8 +28,7 @@ function replaceCamStripContent(html) {
   builds++;
   images = [...html.matchAll(/data-key="([^"]+)"/g)].map((match) => ({
     dataset: {key: match[1]},
-    attributes: {}, stale: false,
-    closest() {return {classList: {toggle: (_, stale) => {this.stale = stale;}}};},
+    attributes: {},
     removeAttribute(key) {delete this.attributes[key];},
     hasAttribute(key) {return key in this.attributes;},
     set src(value) {this.attributes.src = value;},
@@ -39,29 +38,23 @@ function replaceCamStripContent(html) {
     script += "\nasync function pollFrame()" + poll
     script += r'''
 (async () => {
-  payload = {cameras: ["left", "right"], camera_health: {
-    left: {stale: false}, right: {stale: false}}};
+  payload = {cameras: ["left", "right"]};
   await pollFrame();
   assert.equal(images.length, 2);
   const original = images[0];
-  assert(original.hasAttribute("src"));
-  payload.cameras = ["right"];
-  payload.camera_health.left.stale = true;
+  assert.equal(original.attributes.src, "/api/camera/left");
   await pollFrame();
   assert.equal(images[0], original);
   assert.equal(builds, 1);
-  assert.equal(original.stale, true);
-  assert(!original.hasAttribute("src"));
-  assert.equal(images[1].stale, false);
-  assert(images[1].hasAttribute("src"));
-  payload.camera_health.left.stale = false;
-  await pollFrame();
-  assert.equal(original.stale, false);
   assert(original.hasAttribute("src"));
-  LIVE.replayMode = true;
-  payload.camera_health.left.stale = true;
+  payload.cameras = ["right"];
   await pollFrame();
-  assert.equal(original.stale, false);
+  assert.equal(images.length, 1);
+  assert.equal(images[0].attributes.src, "/api/camera/right");
+  LIVE.replayMode = true;
+  payload.cameras = [];
+  await pollFrame();
+  assert.equal(images.length, 1);
 })().catch(error => {console.error(error); process.exitCode = 1;});
 '''
     subprocess.run([node, "-e", script], check=True, capture_output=True, text=True)

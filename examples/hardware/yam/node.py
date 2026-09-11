@@ -210,7 +210,6 @@ class YamZmqNode:
         self._leaders = YamLeaders(config)
         robot = ROBOT_REGISTRY.build(config.robot_name)
         self._fk_solver = robot.build_kinematics(initial_qpos_groups=robot.initial_qpos_by_group())
-        self._camera_versions: dict = {}
         self._camera_endpoint = camera_endpoint
         self._camera_caches = (
             CameraSource(camera_endpoint)
@@ -630,11 +629,10 @@ class YamZmqNode:
     def _camera_snapshot(self) -> dict[str, np.ndarray]:
         images: dict[str, np.ndarray] = {}
         for camera_cache in self._camera_caches:
-            versions, frames = camera_cache.snapshot_versioned()
-            for key, frame in frames.items():
-                if self._camera_versions.get(key) != versions[key]:
-                    images[key] = frame
-                    self._camera_versions[key] = versions[key]
+            # Observations sample the latest image on the robot's publish clock.
+            # Independent camera clocks can repeat a capture across two ticks;
+            # omitting it creates artificial holes in the observation stream.
+            images.update(camera_cache.snapshot())
         return images
 
     def _camera_status(self) -> dict[str, str]:
@@ -1182,7 +1180,11 @@ def main() -> None:
         caches = (RealSenseCameraCache(config.cameras),)
         if config.orbbec_cameras:
             caches += (OrbbecCameraCache(config.orbbec_cameras),)
-        CameraPublisher(caches, args.camera_endpoint).run()
+        camera_rate = max(
+            (spec.fps or 30 for spec in config.cameras + config.orbbec_cameras),
+            default=30,
+        )
+        CameraPublisher(caches, args.camera_endpoint, rate=camera_rate).run()
         return
     node = YamZmqNode(config, args.camera_endpoint)
 

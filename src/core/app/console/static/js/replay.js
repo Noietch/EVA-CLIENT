@@ -1075,8 +1075,7 @@ async function pollFrame() {
       if (!liveStageActive() || S.ACTIVE_TAB === "replay" || LIVE.replayMode) return;
       syncGripperState(f.qpos);
       const strip = $("cam-strip");
-      const health = f.camera_health || {};
-      const keys = f.camera_health ? Object.keys(health) : (f.cameras || []);
+      const keys = f.cameras || [];
       // REPLAY owns the cam strip with native <video> elements driven by the scrub
       // clock; never let the live MJPEG rebuild clobber them.
       if (strip && !LIVE.replayMode) {
@@ -1090,17 +1089,13 @@ async function pollFrame() {
             keys.every((k, i) => existing[i].dataset.key === k);
           if (!sameSet) {
             replaceCamStripContent(keys.map((k) =>
-              `<div class="cam-cell"><div class="cam-lbl">${k}</div><img class="cam" data-key="${k}"><div class="cam-stale-warning">超过 1 秒未收到新帧</div></div>`
+              `<div class="cam-cell"><div class="cam-lbl">${k}</div><img class="cam" data-key="${k}"></div>`
             ).join(""));
           }
         }
         strip.querySelectorAll("img.cam").forEach((img) => {
           const key = img.dataset.key;
-          const stale = health[key]?.stale === true;
-          img.closest(".cam-cell").classList.toggle("camera-stale", stale);
-          // Close stalled streams so they do not occupy browser connection slots.
-          if (stale) img.removeAttribute("src");
-          else if (!img.hasAttribute("src")) {
+          if (!img.hasAttribute("src")) {
             img.src = `/api/camera/${encodeURIComponent(key)}`;
           }
         });

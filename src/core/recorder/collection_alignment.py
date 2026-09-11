@@ -141,19 +141,6 @@ def align_collection_samples(
         )
         start = bounded_samples[0].timestamp
         end = bounded_samples[-1].timestamp
-        # Check the full episode before intersecting stream coverage. Otherwise
-        # a camera lost near Stop silently shortens the grid and remains green.
-        bounds = [sample.timestamp for sample in bounded_samples]
-        if lower_bound is not None:
-            bounds.insert(0, lower_bound)
-        if upper_bound is not None:
-            bounds.append(upper_bound)
-        if any(right - left >= 1.0 for left, right in zip(bounds, bounds[1:], strict=False)):
-            issues.append(
-                AlignmentIssue(
-                    "camera_frame_timeout", f"{key} received no new frame for at least 1 second"
-                )
-            )
         coverage_starts.append(start)
         coverage_ends.append(end)
     for components in vector_series.values():

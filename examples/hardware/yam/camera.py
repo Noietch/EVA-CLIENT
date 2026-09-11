@@ -405,8 +405,6 @@ class _D405Worker:
         with self._lock:
             if self._latest is None or self._last_frame_time is None:
                 return None
-            if time.monotonic() - self._last_frame_time >= 1.0:
-                return None
             return self._last_frame_time, self._latest.copy()
 
     def status(self) -> str:

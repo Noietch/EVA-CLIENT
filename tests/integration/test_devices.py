@@ -119,6 +119,8 @@ def test_device_catalog_composes_and_restores_each_robot(tmp_path, monkeypatch):
     from examples.hardware.yam.node import build_arg_parser, build_config
 
     node_config = build_config(build_arg_parser().parse_args(workspace.commands()["robot"][3:]))
+    assert node_config.publish_rate_hz == 60
+    assert node_config.control_rate_hz == 200
     assert node_config.startup_position == "zero"
     assert node_config.gripper_close_torque_limit == 0.2
     assert node_config.gripper_open_torque_limit == 0.3

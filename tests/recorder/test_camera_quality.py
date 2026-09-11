@@ -9,6 +9,28 @@ from robots.base import ActuatorGroup, CameraSpec, ObservationSchema, Robot
 pytestmark = pytest.mark.unit
 
 
+@pytest.mark.parametrize("capture_fps,expected_red", [(30, True), (60, False)])
+def test_oversampling_tolerates_one_missing_sample_at_30fps_output(capture_fps, expected_red):
+    samples = [
+        CollectionRawSample(i / capture_fps, np.full((2, 2, 3), i, dtype=np.uint8))
+        for i in range(capture_fps + 1)
+        if i != capture_fps // 2
+    ]
+    batch = CollectionRawBatch(
+        start_time=0,
+        end_time=1,
+        images={"front": samples},
+        vectors={"state_qpos": [CollectionRawSample(t, np.full(4, t)) for t in (0, 1)]},
+    )
+    aligned, report = align_collection_samples(
+        batch, robot=robot(), camera_keys=("front",), vector_fields=("state_qpos",),
+        fps=30, image_skew_sec=0.02,
+    )
+    assert len(aligned) == 31
+    np.testing.assert_allclose(np.diff([frame.timestamp for frame in aligned]), 1 / 30)
+    assert ("image_skew_exceeded" in {issue.code for issue in report.issues}) == expected_red
+
+
 def robot():
     return Robot(
         name="test",
@@ -68,7 +90,7 @@ def test_disabled_camera_not_checked():
 
 
 @pytest.mark.parametrize("timestamps", [[0, 0.1], [1.1, 1.2, 2], [0, 0.1, 1.5, 2]])
-def test_timeout_at_end_start_or_reconnected_middle_is_not_trimmed_away(timestamps):
+def test_frame_gaps_do_not_generate_timeout_issues(timestamps):
     batch = CollectionRawBatch(
         start_time=0,
         end_time=2,
@@ -90,4 +112,4 @@ def test_timeout_at_end_start_or_reconnected_middle_is_not_trimmed_away(timestam
         fps=10,
         image_skew_sec=0.2,
     )
-    assert "camera_frame_timeout" in {issue.code for issue in report.issues}
+    assert "camera_frame_timeout" not in {issue.code for issue in report.issues}

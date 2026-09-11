@@ -806,11 +806,10 @@ def test_collection_start_cutoff_drops_cached_frames(tmp_path):
     np.testing.assert_allclose(table.column("capture_time").to_pylist(), [10.1])
 
 
-@pytest.mark.parametrize("failure", ["frozen", "missing", "disconnected_at_end"])
+@pytest.mark.parametrize("failure", ["frozen", "missing"])
 def test_camera_failure_is_persisted_as_red_quality(tmp_path, failure):
     logger = _collection_logger(tmp_path)
     times = [index / 10 for index in range(21)]
-    image_times = times[:3] if failure == "disconnected_at_end" else times
     batch = CollectionRawBatch(
         start_time=0,
         end_time=2,
@@ -822,7 +821,7 @@ def test_camera_failure_is_persisted_as_red_quality(tmp_path, failure):
                     t,
                     np.full((8, 8, 3), 0 if failure == "frozen" else round(t * 10), dtype=np.uint8),
                 )
-                for t in image_times
+                for t in times
             ]
         },
         vectors={
@@ -838,6 +837,5 @@ def test_camera_failure_is_persisted_as_red_quality(tmp_path, failure):
     expected = {
         "frozen": "frozen_camera",
         "missing": "missing_camera_stream",
-        "disconnected_at_end": "camera_frame_timeout",
     }[failure]
     assert expected in {issue["code"] for issue in episode["quality_issues"]}

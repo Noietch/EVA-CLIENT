@@ -1292,7 +1292,9 @@ def ingest_client_teleop_action(
     ``PublishedTeleopAction.timestamp`` belongs to this process's monotonic clock,
     while raw snapshots may be stamped by another process or host. Pairing both
     streams on ``snapshot.timestamp`` keeps collection alignment in one clock domain.
-    The call remains single-shot and non-blocking.
+    Drain a bounded batch so a faster observation stream cannot accumulate one
+    old frame per control tick. Keep all image/state samples, but pair the current
+    action only with the newest observation in this batch.
     """
     del config
     logger_obj = runtime.episode_logger
@@ -1302,7 +1304,14 @@ def ingest_client_teleop_action(
         or not logger_obj.has_active_episode
     ):
         return False
-    snapshot = runtime.transport.acquire_collection_raw()
+    snapshot = None
+    for _ in range(COLLECT_STEP_MAX_RAW_SNAPSHOTS):
+        incoming = runtime.transport.acquire_collection_raw()
+        if incoming is None:
+            break
+        if snapshot is not None:
+            logger_obj.ingest_collection_client_snapshot(snapshot)
+        snapshot = incoming
     if snapshot is None:
         return False
     runtime.last_collection_timestamp = float(snapshot.timestamp)

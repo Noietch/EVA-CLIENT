@@ -7,6 +7,25 @@ from examples.hardware.yam import orbbec_camera as camera
 pytestmark = pytest.mark.unit
 
 
+@pytest.mark.parametrize("fps", [30, 60])
+def test_camera_publisher_follows_capture_rate(monkeypatch, fps):
+    from examples.hardware.yam import node
+
+    parser = node.build_arg_parser()
+    args = parser.parse_args([
+        "--camera-only", "--camera", "cam_high=serial", "--camera-fps", str(fps),
+    ])
+    monkeypatch.setattr(node, "build_arg_parser", lambda: SimpleNamespace(parse_args=lambda: args))
+    monkeypatch.setattr(node, "RealSenseCameraCache", lambda _: object())
+    rates = []
+    monkeypatch.setattr(
+        node, "CameraPublisher",
+        lambda caches, endpoint, rate: SimpleNamespace(run=lambda: rates.append(rate)),
+    )
+    node.main()
+    assert rates == [fps]
+
+
 def test_power_line_frequency_maps_50hz_to_sdk_mode():
     writes = []
     prop = object()
@@ -167,6 +186,10 @@ def test_yam_camera_combinations_keep_independent_brightness():
                 assert (spec.exposure, spec.gain) == (100, 16)
         if name == "yam_orbbec":
             assert brightness["cam_high"] == 25
+            assert all(camera.fps == 30 for camera in config.orbbec_cameras)
+        else:
+            assert all(camera.fps == 60 for camera in config.cameras + config.orbbec_cameras)
+            assert all(camera.color_format == "YUYV" for camera in config.orbbec_cameras)
 
 
 @pytest.mark.parametrize("mapping", ["missing=10", "cam_left_wrist=65", "cam_left_wrist=nope"])
