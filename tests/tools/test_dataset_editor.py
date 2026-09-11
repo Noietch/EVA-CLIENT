@@ -131,6 +131,60 @@ def _episode_dataset(collection: Path) -> Path:
     return root
 
 
+def test_object_measurements_round_trip_and_read_only(tmp_path):
+    client, plans, assets, collection = _workspace(tmp_path)
+    # Existing catalogs without measurement columns remain readable without migration.
+    legacy = "object_id,object_name,object_name_zh,color,photo_dir\nOBJ-1,cup,杯子,white,杯子\n"
+    (assets / "objects.csv").write_text(legacy, encoding="utf-8")
+    catalog = ObjectCatalog(assets, [])
+    assert catalog.records()[0]["mass_g"] == ""
+    assert (assets / "objects.csv").read_text(encoding="utf-8") == legacy
+    payload = {
+        "object_id": "OBJ-1", "object_name": "cup", "length_cm": "20.5",
+        "width_cm": "15", "height_cm": "3.2", "mass_g": "180", "modeling_method": "A",
+    }
+    assert client.put("/api/objects/OBJ-1", json=payload).status_code == 200
+    saved = ObjectCatalog(assets, []).records()[0]
+    for key, value in payload.items():
+        assert saved[key] == value
+    for method in ("B", "C", "D", ""):
+        payload["modeling_method"] = method
+        payload["height_cm"] = ""
+        assert client.put("/api/objects/OBJ-1", json=payload).status_code == 200
+        saved = ObjectCatalog(assets, []).records()[0]
+        assert saved["modeling_method"] == method
+        assert saved["height_cm"] == ""
+    before = (assets / "objects.csv").read_bytes()
+    readonly = create_app(plans, assets, collection, read_only=True).test_client()
+    response = readonly.put("/api/objects/OBJ-1", json=payload, headers={
+        "X-EVA-Dataset-Editor": "1", "X-EVA-Edit-Mode": "1",
+    })
+    assert response.status_code == 403
+    assert (assets / "objects.csv").read_bytes() == before
+
+
+@pytest.mark.parametrize("field", ["length_cm", "width_cm", "height_cm", "mass_g"])
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "abc"])
+def test_object_rejects_invalid_measurements(tmp_path, field, value):
+    client, _, assets, _ = _workspace(tmp_path)
+    before = (assets / "objects.csv").read_bytes()
+    response = client.put("/api/objects/OBJ-1", json={
+        "object_id": "OBJ-1", "object_name": "cup", field: value,
+    })
+    assert response.status_code == 400
+    assert (assets / "objects.csv").read_bytes() == before
+
+
+def test_object_rejects_unknown_modeling_method(tmp_path):
+    client, _, assets, _ = _workspace(tmp_path)
+    before = (assets / "objects.csv").read_bytes()
+    response = client.put("/api/objects/OBJ-1", json={
+        "object_id": "OBJ-1", "object_name": "cup", "modeling_method": "E",
+    })
+    assert response.status_code == 400
+    assert (assets / "objects.csv").read_bytes() == before
+
+
 def test_batch_filter_and_plan_crud_round_trip(tmp_path):
     client, plans, _, _ = _workspace(tmp_path)
     _task_set(plans / "other_batch", "other")
