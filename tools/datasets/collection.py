@@ -316,11 +316,28 @@ class PlanCatalog:
             self.collection_root / batch / "raw",
             self.collection_root / robot_type / dataset_name / "raw",
             self.collection_root / robot_type / batch / "raw",
+            # Canonical datasets synced below data_collection/datasets may be
+            # grouped by source/robot and commonly have no ``raw`` level.
+            self.collection_root / "datasets" / dataset_name,
+            self.collection_root / "datasets" / dataset_name / "raw",
+            self.collection_root / "datasets" / robot_type / dataset_name,
+            self.collection_root / "datasets" / robot_type / dataset_name / "raw",
         ]
         if self.collection_root.is_dir():
             candidates.extend(
                 path / dataset_name / "raw" for path in self.collection_root.iterdir()
             )
+            datasets_root = self.collection_root / "datasets"
+            if datasets_root.is_dir():
+                # Support one additional grouping level (for example
+                # datasets/real_robot/dual_yam/<dataset>).
+                candidates.extend(
+                    path
+                    for group in datasets_root.iterdir()
+                    if group.is_dir()
+                    for path in group.rglob(dataset_name)
+                    if path.is_dir()
+                )
         return next(
             (path.resolve() for path in candidates if (path / "meta" / "episodes.jsonl").is_file()),
             candidates[0].resolve(),
