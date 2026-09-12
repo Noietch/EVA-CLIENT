@@ -67,7 +67,7 @@ class _EpisodeHistoryCacheEntry:
     signature: tuple[int, int, int]
     version: str
     rows: list[dict[str, Any]]
-    views: dict[str | None, tuple[list[dict[str, Any]], list[str]]]
+    views: dict[str | tuple[str, str | None] | None, tuple[list[dict[str, Any]], list[str]]]
 
 
 _EPISODE_HISTORY_CACHE: dict[Path, _EpisodeHistoryCacheEntry] = {}
@@ -152,6 +152,7 @@ def load_episode_history(
     dataset_dir: Path,
     *,
     task: str | None = None,
+    task_id: str | None = None,
     since: int = 0,
     limit: int | None = None,
     cursor: str | None = None,
@@ -163,11 +164,13 @@ def load_episode_history(
     rows already held by the caller (an offset, not an episode id). This remains
     correct when episode ids have gaps or a QC update rewrites an existing row.
     The returned ``version`` lets a client reset the cursor when an old row was edited.
+    When provided, ``task_id`` takes precedence over text for identified records;
+    records without an ID retain the legacy exact-text fallback.
     """
     resolved = Path(dataset_dir).resolve()
     path = resolved / "meta" / "episodes.jsonl"
     signature = _episode_history_signature(path)
-    if limit == 0 and task is None and not cursor and not exclude_episode_indices:
+    if limit == 0 and task is None and not task_id and not cursor and not exclude_episode_indices:
         total, version = _count_episode_history(resolved)
         offset = min(max(0, int(since)), total)
         return {
@@ -200,11 +203,19 @@ def load_episode_history(
                 _EPISODE_HISTORY_CACHE.pop(next(iter(_EPISODE_HISTORY_CACHE)))
             while len(_EPISODE_HISTORY_COUNT_CACHE) > _EPISODE_HISTORY_CACHE_MAX:
                 _EPISODE_HISTORY_COUNT_CACHE.pop(next(iter(_EPISODE_HISTORY_COUNT_CACHE)))
-        view = cached.views.get(task)
+        view_key = (task_id, task) if task_id else task
+        view = cached.views.get(view_key)
         if view is None:
-            filtered_rows = [row for row in cached.rows if str(row.get("task", "")) == task]
+            filtered_rows = [
+                row for row in cached.rows
+                if (
+                    str(row["task_id"]) == task_id
+                    if task_id and row.get("task_id")
+                    else task is not None and str(row.get("task", "")) == task
+                )
+            ]
             view = (filtered_rows, _episode_history_cursors(filtered_rows))
-            cached.views[task] = view
+            cached.views[view_key] = view
 
     filtered_rows, cursors = view
     if exclude_episode_indices:

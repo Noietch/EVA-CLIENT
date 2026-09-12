@@ -28,16 +28,21 @@ FIELDS = {
     ).split(),
 }
 ID_FIELDS = {"objects": "object_id", "scenes": "scene_id", "tasks": "task_id"}
+DEFAULT_POSITION_ROWS = (
+    (10, 11, 1, 2, 3, 12, 13),
+    (14, 15, 4, 5, 6, 16, 17),
+    (18, 19, 7, 8, 9, 20, 21),
+)
 DEFAULT_LAYOUT = {
     "coordinate_frame": "table_top_left",
     "unit": "mm",
     "orientation": "x_right_y_down",
     "calibration_status": "unverified",
-    "bounds": {"width": 500, "height": 500},
+    "bounds": {"width": 1500, "height": 500},
     "sampling_points": [
-        {"position_id": f"P{row * 3 + column + 1}", "x": column * 250, "y": row * 250}
-        for row in range(3)
-        for column in range(3)
+        {"position_id": f"P{position}", "x": column * 250, "y": row * 250}
+        for row, positions in enumerate(DEFAULT_POSITION_ROWS)
+        for column, position in enumerate(positions)
     ],
 }
 

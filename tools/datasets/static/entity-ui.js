@@ -365,9 +365,17 @@ function editorShell(kind, title, label) {
 
 function gridGeometry(batch) {
   const plan = planFor(batch);
-  const points = plan && Array.isArray(plan.layout.sampling_points)
+  const configured = plan && Array.isArray(plan.layout.sampling_points)
     ? plan.layout.sampling_points
     : [];
+  const defaultRows = [
+    [10, 11, 1, 2, 3, 12, 13],
+    [14, 15, 4, 5, 6, 16, 17],
+    [18, 19, 7, 8, 9, 20, 21],
+  ];
+  const points = configured.length ? configured : defaultRows.flatMap((row, y) => (
+    row.map((id, x) => ({ position_id: "P" + id, x: x * 250, y: y * 250 }))
+  ));
   const normalized = points.map((point, index) => ({
     position_id: String(point.position_id || "P" + (index + 1)),
     x: Number(point.x),
@@ -408,6 +416,7 @@ function renderGridCells(host, batch, scene, readOnly = false) {
   const geometry = gridGeometry(batch);
   host.style.setProperty("--grid-columns", geometry.columns);
   host.style.setProperty("--grid-rows", geometry.rows);
+  host.style.setProperty("--grid-aspect", geometry.columns / geometry.rows);
   const placements = scene ? scene.placements : [];
   host.replaceChildren(...geometry.cells.map((point) => {
     const matches = placements.filter((placement) => placement.position_ids.includes(point.position_id));

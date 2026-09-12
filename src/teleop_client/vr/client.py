@@ -49,6 +49,11 @@ _EVENT_INTENTS = frozenset(
         "arm_toggle",
         "home",
         "intervention_toggle",
+        "review_left",
+        "review_right",
+        "review_up",
+        "review_down",
+        "review_select",
     }
 )
 

@@ -244,6 +244,7 @@ class RuntimeState:
     prompt_ready: threading.Event | None = None
     infer_strategy: BaseInferStrategy | None = None  # pyright: ignore[reportGeneralTypeIssues]
     episode_logger: EpisodeLogger | None = None
+    collection_review_events: tuple[dict[str, object], ...] = ()
     collection_teleop_armed: bool = False
     collection_teleop_active: bool = False
     teleop_client: Any | None = None

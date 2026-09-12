@@ -1256,13 +1256,17 @@ def _build_scene_plan(root: Path) -> dict[str, Any]:
 def _load_scene_plan(config: ConfigDict | None = None, dataset: str | None = None) -> dict[str, Any]:
     """Load and signature-cache the optional normalized collection scene plan."""
     root = _scene_plan_root(config, dataset)
-    signature = _scene_plan_signature(root)
+    collection = (config.get("collection") or {}) if config is not None else {}
+    bindings = (collection.get("task_prompt_bindings") or {}).get(dataset) or {}
+    signature = (*_scene_plan_signature(root), tuple(sorted(bindings.items())))
     with _SCENE_PLAN_CACHE_LOCK:
         cached = _SCENE_PLAN_CACHE.get(signature)
         if cached is not None:
             _SCENE_PLAN_CACHE.move_to_end(signature)
             return cached
     payload = _build_scene_plan(root)
+    for task in payload["tasks"]:
+        task["runtime_prompt"] = bindings.get(task["task_id"], task["prompt_en"])
     with _SCENE_PLAN_CACHE_LOCK:
         _SCENE_PLAN_CACHE[signature] = payload
         _SCENE_PLAN_CACHE.move_to_end(signature)
@@ -2339,6 +2343,11 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                     "connected": bool(status.get("connected", False)),
                     "pressed_controls": status.get("pressed_controls", []),
                     "hold_progress": status.get("hold_progress", {}),
+                    "review_events": [
+                        {"id": event["id"], "action": event["action"]}
+                        for event in self.ctx.runtime.collection_review_events
+                        if time.monotonic() - float(event["created_at"]) < 2.0
+                    ],
                 }
                 body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
                 self.wfile.write(f"data: {body}\n\n".encode("utf-8"))
@@ -2532,6 +2541,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         queue: list[dict[str, Any]] = []
         dataset_dir: str = ""
         task_filter = None
+        task_id_filter = None
         collection_set = None
         if scope == "rollout":
             status = rollout_save_status(config, runtime, include_history=False)
@@ -2545,6 +2555,13 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                 else format_task_label(self.ctx.session.selected_task)
             ) or None
             collection_set = self._query_str("set").strip() or None
+            if scope == "collect" and collection_set and task_filter:
+                plan = _load_scene_plan(config, collection_set)
+                linked = next((
+                    task for task in plan["tasks"]
+                    if task.get("runtime_prompt", task["prompt_en"]) == task_filter
+                ), None)
+                task_id_filter = linked["task_id"] if linked else None
             if logger_obj is not None:
                 status = _status_snapshot_for_poll(
                     logger_obj,
@@ -2557,7 +2574,11 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                     queue = [
                         row
                         for row in queue
-                        if str(row.get("task") or row.get("prompt") or "") == task_filter
+                        if (
+                            str(row["task_id"]) == task_id_filter
+                            if task_id_filter and row.get("task_id")
+                            else str(row.get("task") or row.get("prompt") or "") == task_filter
+                        )
                     ]
 
         explicit_dir = self._query_str("dataset_dir")
@@ -2592,6 +2613,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         history = load_episode_history(
             Path(dataset_dir),
             task=task_filter,
+            task_id=task_id_filter,
             since=since,
             limit=limit,
             cursor=cursor,

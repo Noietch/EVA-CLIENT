@@ -151,6 +151,7 @@ def build_collection_slots(
 ) -> list[CollectionSlot]:
     """Expand a dataset plan into stable slots in operator workflow order."""
     entries = list(config.collection.tasks.get(dataset) or [])
+    bindings = (config.collection.get("task_prompt_bindings") or {}).get(dataset) or {}
     prompt_indices: dict[str, int] = {}
     for index, entry in enumerate(entries):
         if isinstance(entry, (list, tuple)) and entry:
@@ -172,7 +173,10 @@ def build_collection_slots(
             key=lambda item: _task_spatial_sort_key(item[1], scene, position_keys, item[0])
         )
         for task_index, task in scene_tasks:
-            prompt = str(task.get("prompt_en") or "").strip()
+            task_id = str(task.get("task_id") or "")
+            if bindings and task_id not in bindings:
+                continue
+            prompt = str(bindings.get(task_id) or task.get("prompt_en") or "").strip()
             task_index = prompt_indices.get(prompt)
             if task_index is None:
                 continue
@@ -198,7 +202,7 @@ def build_collection_slots(
                         round_total=round_total,
                     )
                 )
-    if slots:
+    if slots or tasks:
         return slots
 
     # Inline collection configs do not have scene.csv/tasks.csv, but they still
@@ -297,6 +301,12 @@ def _episode_indices(
     by_legacy_target: dict[tuple[str, str, int], dict[str, Any]] = {}
     for episode in episodes:
         slot_id = str(episode.get("slot_id") or "")
+        if not slot_id and episode.get("task_id") and episode.get("scene_id"):
+            try:
+                scene_round = int(episode["scene_round"])
+                slot_id = f"{episode['task_id']}:{episode['scene_id']}:{scene_round}"
+            except (KeyError, TypeError, ValueError):
+                pass
         if slot_id:
             current = by_slot.get(slot_id)
             if current is None or int(episode.get("episode_index", -1)) > int(

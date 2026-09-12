@@ -46,4 +46,4 @@ def test_teleop_feedback_is_sse(console: WebHarness):
     assert b"retry: 1000" in body
     data_line = next(line for line in body.splitlines() if line.startswith(b"data: "))
     payload = json.loads(data_line.removeprefix(b"data: "))
-    assert set(payload) == {"connected", "pressed_controls", "hold_progress"}
+    assert set(payload) == {"connected", "pressed_controls", "hold_progress", "review_events"}

@@ -419,17 +419,17 @@ input[type="color"] { padding: 4px; cursor: pointer; }
 .scene-grid {
   display: grid;
   grid-template-columns: repeat(var(--grid-columns, 1), minmax(58px, 1fr));
-  grid-template-rows: repeat(var(--grid-rows, 1), minmax(58px, 1fr));
+  grid-template-rows: repeat(var(--grid-rows, 1), auto);
   gap: 7px;
   width: 100%;
-  aspect-ratio: var(--grid-aspect, 1);
-  max-height: 66vh;
+  align-content: start;
 }
 
 .scene-cell {
   position: relative;
   min-width: 0;
   min-height: 58px;
+  aspect-ratio: 1;
   overflow: hidden;
   padding: 19px 6px 7px;
   border: 1px solid var(--rule-strong);

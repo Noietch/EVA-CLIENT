@@ -81,7 +81,7 @@ function scenePlanStartMetadata() {
   const scene = scenePlanScene();
   const task = scenePlanTask();
   const slot = S.collectionSlots && S.collectionSlots.active;
-  if (!task || !scene || !slot || task.prompt_en !== collectTaskValue()) return {};
+  if (!task || !scene || !slot || (task.runtime_prompt || task.prompt_en) !== collectTaskValue()) return {};
   return {
     scene_id: scene.scene_id,
     scene_round: S.scenePlanRoundIndex,
@@ -92,7 +92,7 @@ function scenePlanStartMetadata() {
 
 function syncScenePlanTask(prompt) {
   if (S.scenePlanTaskPromptKey === prompt) return;
-  const linked = scenePlanTasks().find((task) => task.prompt_en === prompt);
+  const linked = scenePlanTasks().find((task) => (task.runtime_prompt || task.prompt_en) === prompt);
   S.scenePlanTaskId = linked ? linked.task_id : "";
   const preferredIndex = linked && S.scenePlanSceneId
     ? linked.scene_ids.indexOf(S.scenePlanSceneId) : -1;
@@ -469,8 +469,13 @@ function renderCurrentSceneGrid(scene) {
 }
 
 function itemsForPrompt(items, prompt) {
+  const task = scenePlanTasks().find((entry) => (
+    (entry.runtime_prompt || entry.prompt_en) === prompt
+  ));
   return (items || []).filter(
-    (item) => String((item && (item.task || item.prompt)) || "") === prompt
+    (item) => task && item && item.task_id
+      ? String(item.task_id) === task.task_id
+      : String((item && (item.task || item.prompt)) || "") === prompt
   );
 }
 
@@ -1121,9 +1126,10 @@ function savedEpisodeId(item) {
 
 function syncScenePlanToEpisode(item) {
     const prompt = String((item && (item.task || item.prompt)) || "");
-    const task = scenePlanTasks().find((entry) => (
-      entry.task_id === String((item && item.task_id) || "") || entry.prompt_en === prompt
-    ));
+    const taskId = String((item && item.task_id) || "");
+    const task = taskId
+      ? scenePlanTasks().find((entry) => entry.task_id === taskId)
+      : scenePlanTasks().find((entry) => (entry.runtime_prompt || entry.prompt_en) === prompt);
     if (!task) return;
     S.scenePlanTaskId = task.task_id;
     const sceneIndex = task.scene_ids.indexOf(String((item && item.scene_id) || ""));
@@ -1186,6 +1192,179 @@ function selectedCollectEpisodeItem() {
     return items.find((item) => savedEpisodeId(item) === episode) || collectionQcTarget.item;
   }
 
+// Input events retain IDs through the VR retry and SSE transports. Consume each
+// once, and baseline new connections so reopening the page cannot mark old data.
+let collectionReviewSeen = null;
+let collectionReviewBusy = false;
+let collectionReviewClick = null;
+
+function cancelCollectionReviewClick() {
+  if (collectionReviewClick) clearTimeout(collectionReviewClick.timer);
+  collectionReviewClick = null;
+}
+
+function previewCollectionSlot(slot) {
+  if (!slot || savedEpisodeId(slot.episode) == null || slot.state === "saving" ||
+      slot.dataset !== S.collectionSlots.dataset || S.collectTaskSelectionPending ||
+      S.STATUS.collect?.collecting) return;
+  S.collectionSlots.selectedSlotId = slot.slot_id;
+  selectCollectEpisode(slot.episode);
+}
+
+function clickCollectionReviewSlot(slot) {
+  const previous = collectionReviewClick;
+  cancelCollectionReviewClick();
+  if (previous && previous.slotId === slot.slot_id && previous.dataset === slot.dataset) {
+    previewCollectionSlot(slot);
+    return;
+  }
+  // Match the mouse double-click window; don't switch the capture target on
+  // the first half of a double click. Cancel if the cursor/context changes.
+  collectionReviewClick = {
+    slotId: slot.slot_id,
+    dataset: slot.dataset,
+    timer: setTimeout(() => {
+      collectionReviewClick = null;
+      const state = S.collectionSlots;
+      const current = (state.slots || []).find((item) => item.slot_id === slot.slot_id);
+      if (S.ACTIVE_TAB !== "collect" || state.dataset !== slot.dataset ||
+          state.selectedSlotId !== slot.slot_id || !current || current.state === "saving" ||
+          S.STATUS.collect?.collecting || S.collectTaskSelectionPending || collectionReviewBusy) return;
+      collectionReviewBusy = true;
+      selectCollectionQcTarget(current.episode);
+      activateCollectionSlot(current, { manual: true }).then((selected) => {
+        if (selected && state.dataset === slot.dataset) {
+          state.selectedSlotId = slot.slot_id;
+          renderCollect();
+        }
+      }).catch((error) => {
+        setCollectError(`选择采集位置失败：${error.message || error}`);
+      }).finally(() => { collectionReviewBusy = false; });
+    }, 300),
+  };
+}
+
+function resetCollectionReviewInput() {
+  cancelCollectionReviewClick();
+  collectionReviewSeen = null;
+}
+
+function handleCollectionReviewInput(feedback) {
+  const events = feedback.review_events || [];
+  const ids = new Set(events.map((event) => event.id));
+  if (collectionReviewSeen === null) {
+    collectionReviewSeen = ids;
+    return;
+  }
+  const fresh = events.filter((event) => !collectionReviewSeen.has(event.id));
+  collectionReviewSeen = ids;
+  if (!feedback.connected || S.ACTIVE_TAB !== "collect" ||
+      collectControlsConfig().mode !== "vr" || !collectEnabled()) {
+    cancelCollectionReviewClick();
+    return;
+  }
+  for (const event of fresh) {
+    const direction = ["left", "right", "up", "down"].includes(event.action);
+    if (event.action !== "select") cancelCollectionReviewClick();
+    if (direction && reviewActiveInCurrentTab()) {
+      returnReviewToLive();
+      continue;
+    }
+    if (collectionReviewBusy || S.collectTaskSelectionPending || collectionSlotClickTimer !== null) continue;
+    if (event.action === "select") {
+      const state = S.collectionSlots;
+      const slot = (state.slots || []).find((item) => item.slot_id === state.selectedSlotId);
+      if (!slot) {
+        setCollectError("请先用左摇杆选择采集位置");
+        continue;
+      }
+      if (S.STATUS.collect?.collecting || slot.state === "saving") {
+        setCollectError("请等待当前采集或保存完成后再选择采集位置");
+        continue;
+      }
+      clickCollectionReviewSlot(slot);
+      continue;
+    }
+    if (event.action === "toggle_qc" || event.action === "mark_red") {
+      const selected = selectedCollectEpisodeItem();
+      if (!selected) {
+        if ($("collect-qc-status")) $("collect-qc-status").textContent = "先选择已保存的数据";
+        continue;
+      }
+      collectionReviewBusy = true;
+      const verdict = collectOutcome(selected) === "rejected" ? "pass" : "fail";
+      submitEpisodeQc("collect", verdict)
+        .catch((error) => {
+          if ($("collect-qc-status")) $("collect-qc-status").textContent = `状态切换失败：${error.message || error}`;
+        })
+        .finally(() => { collectionReviewBusy = false; });
+      continue;
+    }
+    moveCollectionReviewCursor(event.action);
+  }
+}
+
+function moveCollectionReviewCursor(direction) {
+  if (!["left", "right", "up", "down"].includes(direction)) return;
+  const host = $("collect-queue-tiles");
+  const tiles = Array.from(host?.querySelectorAll("[data-slot-id]") || []);
+  if (!tiles.length) return;
+  const state = S.collectionSlots;
+  const current = tiles.find((tile) => tile.dataset.slotId === state.selectedSlotId);
+  let target = tiles[0];
+  if (current) {
+    const index = tiles.indexOf(current);
+    const firstRowY = tiles[0].getBoundingClientRect().y;
+    const columns = tiles.filter((tile) => Math.abs(tile.getBoundingClientRect().y - firstRowY) < 2).length;
+    const offset = { left: -1, right: 1, up: -columns, down: columns }[direction];
+    const nextIndex = index + offset;
+    if (nextIndex >= 0 && nextIndex < tiles.length) {
+      target = tiles[nextIndex];
+    } else {
+      if (collectionSlotsPolling) return;
+      const delta = offset < 0 ? -1 : 1;
+      const page = Math.max(1, Math.min(state.pageCount, Number(state.page) + delta));
+      if (page === state.page) return;
+      const dataset = state.dataset;
+      const column = index % columns;
+      collectionReviewBusy = true;
+      state.page = page;
+      state.selectedSlotId = "";
+      state.followActivePage = false;
+      selectCollectionQcTarget(null);
+      pollCollectionSlots(true).then(() => {
+        if (state.dataset !== dataset || Number(state.page) !== page) return;
+        const slots = state.slots || [];
+        const lastRow = Math.floor((slots.length - 1) / columns) * columns;
+        const destination = direction === "up" ? lastRow + column
+          : direction === "down" ? column
+          : delta > 0 ? 0 : slots.length - 1;
+        const slot = slots[Math.min(slots.length - 1, destination)];
+        if (slot) {
+          state.selectedSlotId = slot.slot_id;
+          selectCollectionQcTarget(slot.episode);
+        }
+        renderCollect();
+        Array.from(host.querySelectorAll("[data-slot-id]"))
+          .find((tile) => tile.dataset.slotId === state.selectedSlotId)
+          ?.scrollIntoView({ block: "nearest", inline: "nearest" });
+      }).catch((error) => {
+        setCollectError(`翻页失败：${error.message || error}`);
+      }).finally(() => { collectionReviewBusy = false; });
+      return;
+    }
+  }
+  const slot = (state.slots || []).find((item) => item.slot_id === target.dataset.slotId);
+  if (!slot) return;
+  state.selectedSlotId = slot.slot_id;
+  state.followActivePage = false;
+  selectCollectionQcTarget(slot.episode);
+  renderCollect();
+  const selected = Array.from(host.querySelectorAll("[data-slot-id]"))
+    .find((tile) => tile.dataset.slotId === slot.slot_id);
+  selected?.scrollIntoView({ block: "nearest", inline: "nearest" });
+}
+
 function renderCollectionSlotFilters() {
     const state = S.collectionSlots;
     const scene = $("collect-slot-scene-filter");
@@ -1231,6 +1410,7 @@ function renderCollectTiles(items) {
     items.forEach((slot) => {
       const tile = document.createElement("button");
       tile.type = "button";
+      tile.dataset.slotId = slot.slot_id;
       tile.title = `${slot.scene_label} · ${slot.task_zh || slot.task} · ` +
         `round ${Number(slot.round_index) + 1}/${slot.round_total}`;
       const episode = savedEpisodeId(slot.episode);
@@ -1245,13 +1425,11 @@ function renderCollectTiles(items) {
       const saved = savedEpisodeId(slot.episode) != null;
       const current = S.collectionSlots.active &&
         S.collectionSlots.active.slot_id === slot.slot_id;
-      const rejected = saved && (
-        String(slot.episode.quality).toLowerCase() === "red" ||
-        String(slot.episode.qc_verdict).toLowerCase() === "fail"
-      );
+      const outcome = saved ? collectOutcome(slot.episode) : "pending";
+      const rejected = outcome === "rejected";
       const visibleState = slot.state === "saving" ? "saving"
         : rejected ? "rejected"
-        : saved && String(slot.episode.quality).toLowerCase() === "green" ? "complete"
+        : outcome === "usable" ? "complete"
         : current ? "active" : (slot.state === "active" ? "pending" : slot.state);
       tile.className = `collect-tile slot-${visibleState}` +
         `${current ? " slot-current" : ""}`;
@@ -1261,6 +1439,7 @@ function renderCollectTiles(items) {
       tile.disabled = locked || (current && !saved);
       tile.classList.toggle("actionable", !tile.disabled);
       tile.onclick = (event) => {
+        cancelCollectionReviewClick();
         clearTimeout(collectionSlotClickTimer);
         if (event.detail > 1) return;
         // Delay selection so a double click can preview without changing the capture target.
@@ -1276,10 +1455,8 @@ function renderCollectTiles(items) {
         event.preventDefault();
         clearTimeout(collectionSlotClickTimer);
         collectionSlotClickTimer = null;
-        if (!saved || S.collectTaskSelectionPending ||
-            (S.STATUS.collect && S.STATUS.collect.collecting)) return;
-        S.collectionSlots.selectedSlotId = slot.slot_id;
-        selectCollectEpisode(slot.episode);
+        cancelCollectionReviewClick();
+        previewCollectionSlot(slot);
       };
       host.appendChild(tile);
     });
@@ -1533,10 +1710,13 @@ function renderCollect() {
     $("collect-current-task").textContent = activeSlot
       ? (activeSlot.task_zh || activeSlot.task) : "--";
     $("collect-current-task-en").textContent = activeSlot && activeSlot.task_zh
-      ? activeSlot.task : "";
+      ? (scenePlanTask()?.prompt_en || activeSlot.task) : "";
     $("collect-current-round").textContent = activeSlot
       ? `ROUND ${Number(activeSlot.round_index) + 1} / ${activeSlot.round_total}` : "ROUND -- / --";
     renderCollectionSlotFilters();
+    if ($("collect-vr-review-hint")) {
+      $("collect-vr-review-hint").hidden = collectControlsConfig().mode !== "vr";
+    }
     const allButton = $("collect-queue-toggle");
     allButton.setAttribute("aria-pressed", slotPlan.showAll ? "true" : "false");
     const page = $("collect-slot-page");
@@ -2085,6 +2265,7 @@ export {
   clearReviewPlayback, loadAnnotation, reviewActiveInCurrentTab, reviewEpisode,
   exportCollectionQuality, saveAnnotation, submitEpisodeNote, submitEpisodeQc, submitQc,
   installCollectKeyboardControls, renderCollectControls, uploadCollectionQuality,
+  handleCollectionReviewInput, resetCollectionReviewInput,
   changeCollectionExportFormat, invalidateEpisodeHistory, pollEpisodeHistory,
   pollCollectionSlots, selectCollectionDataset,
   changeCollectionSlotFilter, changeCollectionSlotPage, toggleCollectionSlotAll,

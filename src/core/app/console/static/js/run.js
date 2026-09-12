@@ -665,7 +665,7 @@ function collectTaskSets() {
 
 function collectTaskPlan(prompt) {
     return ((S.SCENE_PLAN && S.SCENE_PLAN.tasks) || []).find(
-      (task) => task.prompt_en === prompt
+      (task) => (task.runtime_prompt || task.prompt_en) === prompt
     ) || null;
   }
 

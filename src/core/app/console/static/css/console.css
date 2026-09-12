@@ -555,8 +555,23 @@
     flex: 1 1 auto; min-height: 220px; overflow: visible;
     display: flex; flex-direction: row; gap: 12px; margin-bottom: 18px;
   }
-  .stage.collect-review .stage-charts { flex: 0 0 150px; min-height: 150px; max-height: 150px; margin-bottom: 8px; }
-  .stage.collect-review .stage-top { flex: 1 1 auto; height: auto; min-height: 460px; }
+  .stage.collect-review .stage-top { flex: 0 0 auto; height: auto; min-height: 460px; }
+  .stage.collect-review .stage-charts,
+  #view-replay .stage-charts {
+    flex: 0 0 auto; min-height: 260px; margin-bottom: 12px;
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr));
+    grid-auto-rows: 260px;
+  }
+  .stage.collect-review .cam-strip,
+  #view-replay .cam-strip {
+    flex-direction: column; overflow-x: hidden; overflow-y: auto;
+  }
+  .stage.collect-review .cam-strip .cam-cell,
+  #view-replay .cam-strip .cam-cell { flex: 1 0 140px; min-height: 140px; }
+  .stage.collect-review .cam-strip .cam,
+  #view-replay .cam-strip .cam {
+    flex: 1 1 0; min-height: 0; height: 0; object-fit: contain;
+  }
   /* each chart is its own elevated card; stretches to fill the charts row height */
   .stage-chart {
     flex: 1 1 0; min-width: 0; min-height: 0; display: flex; flex-direction: column;
@@ -617,6 +632,20 @@
   .chart-modal-body { flex: 1 1 auto; min-height: 0; position: relative; }
   .chart-modal-body canvas { width: 100%; height: 100%; display: block; }
 
+  @media (min-width: 721px) {
+    #view-debug.collect-mode .stage-visual-stack {
+      flex: 8 1 0; height: auto; max-width: none; aspect-ratio: auto;
+    }
+    #view-debug.collect-mode .cam-strip { flex: 2 1 0; }
+    #view-debug.collect-mode .collect-current-slot {
+      flex: 0 0 auto; grid-template-columns: minmax(0, 1fr);
+      grid-template-rows: auto auto;
+    }
+    #view-debug.collect-mode .stage-top .col-canvas {
+      flex: 0 0 120px; height: 120px;
+    }
+  }
+
   @media (max-width: 720px) {
     #view-debug.collect-mode {
       display: block; overflow-y: auto; overflow-x: hidden;
@@ -634,7 +663,7 @@
     }
     #view-debug.collect-mode .collect-current-slot { grid-template-columns: minmax(0, 1fr); }
     #view-debug.collect-mode .stage-top .col-canvas {
-      flex: 0 0 auto; height: min(calc(100vw - 24px), 420px);
+      flex: 0 0 auto; height: 160px;
     }
     #view-debug.collect-mode .cam-strip {
       flex: 0 0 620px; flex-direction: column;
@@ -670,7 +699,7 @@
   }
   .chart-allbtn:hover { border-color: var(--rule-strong); color: var(--ink); box-shadow: var(--shadow); }
   .chart-body { flex: 1 1 auto; min-height: 76px; position: relative; }
-  .chart-body canvas { width: 100%; height: 100%; display: block; }
+  .chart-body canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
   /* scrub bar: sticks to the bottom of the visible stage while the stage scrolls */
   .stage-scrub {
     position: sticky; bottom: 12px; margin: 0 6px; z-index: 8;
@@ -967,13 +996,19 @@
     align-items: stretch;
   }
   .collect-current-slot {
-    display: none; grid-template-columns: minmax(0, 1fr) minmax(0, .9fr);
+    display: none; grid-template-columns: minmax(0, 1fr);
     gap: 14px; flex: 0 0 auto; width: 100%; padding: 12px 14px;
     border: 1px solid var(--rule); border-radius: var(--radius);
     background: var(--paper); box-shadow: var(--shadow);
   }
   #view-debug.collect-mode .collect-current-slot { display: grid; }
-  .collect-current-copy { display: grid; align-content: start; gap: 9px; min-width: 0; }
+  .collect-current-copy {
+    display: grid; grid-template-columns: minmax(0, 1fr) auto;
+    align-content: start; gap: 6px 12px; min-width: 0;
+  }
+  .collect-current-copy .collect-current-head { grid-column: 1; grid-row: 1; }
+  .collect-current-copy .collect-current-foot { grid-column: 2; grid-row: 1; }
+  .collect-current-copy .collect-current-field { grid-column: 1 / -1; grid-row: 2; }
   .collect-current-head, .collect-current-foot {
     display: flex; align-items: center; justify-content: space-between; gap: 8px;
     color: var(--ink-dim); font: 700 9px/1.2 var(--mono); letter-spacing: .04em;
@@ -1238,11 +1273,12 @@
   .collect-scene-grid {
     display: grid;
     grid-template-columns: repeat(var(--scene-grid-columns, 1), minmax(0, 1fr));
-    grid-template-rows: repeat(var(--scene-grid-rows, 1), minmax(0, 1fr)); gap: 5px;
-    width: 100%; min-width: 0; aspect-ratio: var(--scene-grid-aspect, 1);
+    grid-template-rows: repeat(var(--scene-grid-rows, 1), auto); gap: 5px;
+    width: 100%; min-width: 0; align-content: start;
   }
   .collect-scene-cell {
-    position: relative; min-width: 0; overflow: hidden; padding: 16px 5px 5px;
+    position: relative; min-width: 0; min-height: 0; aspect-ratio: 1;
+    overflow: hidden; padding: 16px 5px 5px;
     border: 1px solid var(--rule-strong); border-radius: 4px;
     background: var(--surface-2); color: var(--ink-faint); container-type: inline-size;
   }
@@ -1809,12 +1845,12 @@
 
   /* trial-pop 3D + camera strip (shared structure) */
   #tp-urdf .canvas-tag { position: absolute; top: 16px; right: 16px; z-index: 2; }
-  #tp-cam-strip { display: flex; flex-direction: row; gap: 10px; height: 100%; min-height: 280px; }
-  #rv-detail-replay #tp-cam-strip { gap: 12px; min-height: 0; overflow-x: auto; overflow-y: hidden; }
+  #tp-cam-strip { display: flex; flex-direction: column; gap: 10px; height: 100%; min-height: 280px; overflow-y: auto; }
+  #rv-detail-replay #tp-cam-strip { gap: 12px; min-height: 0; overflow-x: hidden; overflow-y: auto; }
   #tp-cam-strip .miss { margin: auto; font-family: var(--mono); font-size: 11px; color: var(--ink-faint); font-style: italic; }
-  .tp-cam-cell { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+  .tp-cam-cell { flex: 1 0 140px; min-height: 140px; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
   .tp-cam-lbl { font-family: var(--mono); font-size: 9px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-dim); }
-  .tp-cam { width: 100%; flex: 1 1 auto; min-height: 0; object-fit: contain; background: var(--surface-2); border-radius: var(--radius-sm); }
+  .tp-cam { width: 100%; height: 0; flex: 1 1 0; min-height: 0; object-fit: contain; background: var(--surface-2); border-radius: var(--radius-sm); }
 
   .rt-chart-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
   #rv-detail-replay .rt-chart-head { flex: 0 0 auto; height: 20px; overflow: hidden; }
@@ -1826,8 +1862,13 @@
   .rt-cdims .dim.off { opacity: 0.32; text-decoration: line-through; }
   #tp-achart-cv, #tp-chart-cv { width: 100%; height: 180px; background: var(--surface); display: block; }
   #rv-detail-replay #tp-achart-cv, #rv-detail-replay #tp-chart-cv {
-    flex: 1 1 auto; min-height: 76px; height: 100%;
+    flex: 0 0 200px; min-height: 0; height: 200px;
   }
+  #rv-detail-replay .rt-charts {
+    flex: 0 0 auto; display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr));
+  }
+  #rv-detail-replay .rt-chart-card { overflow: hidden; }
 
   /* trial-pop shared panes */
   #tp-urdf-wrap { position: relative; width: 100%; height: 440px; background: #fff; overflow: hidden; border-radius: var(--radius-sm); }
