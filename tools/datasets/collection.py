@@ -45,9 +45,33 @@ class PlanCatalog:
         self._state_lock = threading.RLock()
         self._plan_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
-    def state(self, batch: str = "") -> dict[str, Any]:
+    def state(self, batch: str = "", robot_type: str = "") -> dict[str, Any]:
         batches = self.batch_ids()
-        selected = [self._batch_id(batch)] if batch else batches
+        summaries = [self._batch_summary(value) for value in batches]
+        robot_types = sorted(
+            {
+                str(summary["robot_type"]).strip()
+                for summary in summaries
+                if str(summary["robot_type"]).strip()
+            }
+        )
+        robot_type = str(robot_type).strip()
+        if batch:
+            batch_id = self._batch_id(batch)
+            if not any(summary["batch_id"] == batch_id for summary in summaries):
+                raise RecordNotFoundError(batch_id)
+            selected = [
+                batch_id
+                for summary in summaries
+                if summary["batch_id"] == batch_id
+                and (not robot_type or summary["robot_type"] == robot_type)
+            ]
+        else:
+            selected = [
+                summary["batch_id"]
+                for summary in summaries
+                if not robot_type or summary["robot_type"] == robot_type
+            ]
         plan_states = [self._plan_state(value) for value in selected]
         tasks = [task for plan in plan_states for task in plan["tasks"]]
         scenes = [scene for plan in plan_states for scene in plan["scenes"]]
@@ -56,7 +80,12 @@ class PlanCatalog:
         plans = [{key: plan[key] for key in PLAN_PAYLOAD_KEYS} for plan in plan_states]
         return {
             "batch_filter": batch,
-            "batches": [self._batch_summary(value, plans_by_batch.get(value)) for value in batches],
+            "batches": [
+                summary
+                for summary in summaries
+                if not robot_type or summary["robot_type"] == robot_type
+            ],
+            "robot_types": robot_types,
             "plans": plans,
             "tasks": tasks,
             "scenes": scenes,
@@ -395,10 +424,23 @@ class PlanCatalog:
     def _batch_summary(self, batch: str, state: dict[str, Any] | None = None) -> dict[str, Any]:
         if state is None:
             state = self._store(batch).state()
+        robot_type = str(state["info"].get("robot_type", ""))
+        cameras = []
+        if robot_type:
+            robot = ROBOT_REGISTRY.build(robot_type)
+            cameras = [
+                {
+                    "name": camera.name,
+                    "observation_key": camera.observation_key,
+                    "attached_to": camera.attached_to,
+                }
+                for camera in robot.observation_schema.cameras
+            ]
         return {
             "batch_id": batch,
             "dataset_name": state["info"].get("dataset_name", batch),
-            "robot_type": state["info"].get("robot_type", ""),
+            "robot_type": robot_type,
+            "cameras": cameras,
             "tasks": len(state["tasks"]),
             "episodes": sum(task["total_epsiodes_count"] for task in state["tasks"]),
         }

@@ -29,6 +29,7 @@ const app = {
   state: null,
   tab: "tasks",
   batch: "",
+  robot: "",
   selected: { scenes: "", tasks: "", objects: "" },
   draft: { scenes: null, tasks: null, objects: null },
   original: { scenes: "", tasks: "", objects: "" },
@@ -228,7 +229,10 @@ async function runWrite(control, operation, successMessage) {
 
 async function loadState(preserveReview = false) {
   showGlobalError();
-  const query = app.batch ? "?batch=" + encodeURIComponent(app.batch) : "";
+  const params = new URLSearchParams();
+  if (app.batch) params.set("batch", app.batch);
+  if (app.robot) params.set("robot_type", app.robot);
+  const query = params.toString() ? "?" + params.toString() : "";
   try {
     const state = await api("/api/state" + query);
     applyState(state, preserveReview);
@@ -245,6 +249,7 @@ function applyState(state, preserveReview = false) {
   app.state = state;
   retainSelections();
   renderBatchSelect();
+  renderRobotSelect();
   updateSummary();
   if (app.tab === "tasks") {
     renderTaskFilters();
@@ -291,6 +296,15 @@ function renderBatchSelect() {
     link.classList.toggle("disabled", !url);
     link.setAttribute("aria-disabled", String(!url));
   }
+}
+
+function renderRobotSelect() {
+  const select = $("robot-select");
+  select.replaceChildren(new Option("全部机器人", ""));
+  for (const robot of app.state.robot_types || []) {
+    select.add(new Option(robot, robot));
+  }
+  select.value = app.robot;
 }
 
 function updateSummary() {
@@ -505,6 +519,14 @@ function bindEvents() {
   });
   $("batch-select").addEventListener("change", async (event) => {
     app.batch = event.target.value;
+    clearEditors();
+    $("loading-state").hidden = false;
+    $("app").hidden = true;
+    await loadState();
+  });
+  $("robot-select").addEventListener("change", async (event) => {
+    app.robot = event.target.value;
+    app.batch = "";
     clearEditors();
     $("loading-state").hidden = false;
     $("app").hidden = true;

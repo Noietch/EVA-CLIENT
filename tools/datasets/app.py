@@ -120,7 +120,12 @@ class DatasetService:
         return send_from_directory(CONSOLE_STATIC_ROOT / "vendor", name)
 
     def state(self) -> Any:
-        return jsonify(self.catalog.state(request.args.get("batch", "")))
+        return jsonify(
+            self.catalog.state(
+                request.args.get("batch", ""),
+                request.args.get("robot_type", ""),
+            )
+        )
 
     def create_plan_record(self, batch: str, kind: str) -> Any:
         return jsonify(self.catalog.upsert_plan(batch, kind, None, request.get_json()))

@@ -486,7 +486,7 @@ function renderSceneEditor() {
   });
   const grid = node("div", "scene-grid");
   renderGridCells(grid, draft.batch_id, draft, !app.editMode);
-  canvas.append(field("Scene ID", idControl), grid);
+  canvas.append(field("Scene ID", idControl), grid, buildCameraPositionLegend(draft.batch_id));
   const placements = node("section", "surface placement-panel");
   const head = node("div", "section-head");
   const heading = node("div");
@@ -513,6 +513,24 @@ function renderSceneEditor() {
   layout.append(canvas, placements);
   editor.body.append(layout);
   host.replaceChildren(editor.shell);
+}
+
+function buildCameraPositionLegend(batch) {
+  const section = node("div", "camera-position-list");
+  const cameras = (app.state.batches.find((item) => item.batch_id === batch) || {}).cameras || [];
+  section.append(node("span", "field-label", "相机位置"));
+  if (!cameras.length) {
+    section.append(node("span", "camera-position", "未配置"));
+    return section;
+  }
+  for (const camera of cameras) {
+    section.append(node(
+      "span",
+      "camera-position",
+      camera.name + " · " + (camera.attached_to || "外置"),
+    ));
+  }
+  return section;
 }
 
 function buildPlacementCard(placement, index) {
@@ -823,6 +841,7 @@ function renderInfo() {
   planDir.disabled = true;
   const collected = input("text", "", plan.collection.dataset_dir);
   collected.disabled = true;
+  const cameras = buildCameraPositionLegend(app.batch);
   const save = button("保存元数据", "", "button primary");
   save.addEventListener("click", () => runWrite(save, async () => {
     await writeJson("/api/batches/" + encodeURIComponent(app.batch) + "/info", "PUT", {
@@ -838,6 +857,7 @@ function renderInfo() {
     field("Plan directory", planDir, true),
     field("Collection directory override", collectionDir, true, "留空时按 dataset_name 自动发现"),
     field("Resolved collection directory", collected, true),
+    cameras,
   );
   const actions = node("div", "field full");
   if (app.editMode) {
