@@ -53,3 +53,32 @@ def test_new_episode_discards_old_zmq_pipe(tmp_path):
     finally:
         reader.close()
         publisher.close(linger=0)
+
+
+def test_camera_cached_frame_remains_available_after_one_second(monkeypatch):
+    import numpy as np
+
+    from transport import zmq as module
+
+    now = [10.0]
+    monkeypatch.setattr(module.time, "monotonic", lambda: now[0])
+    reader = _ObservationReader(
+        ConfigDict(
+            transport=ConfigDict(
+                sub_endpoint="inproc://camera-health-test", disabled_cameras=[], disabled_groups=[]
+            )
+        ),
+        ROBOT_REGISTRY.build("agilex_piper"),
+        zmq,
+    )
+    try:
+        image = np.zeros((2, 2, 3), dtype=np.uint8)
+        observation = WireObservation(t=1, images={"cam_high": image}, state={})
+        reader._latest = observation
+        reader._cache_images(observation)
+        now[0] = 11.0
+        reader.get_camera_frame("cam_high")
+        reader.get_camera_keys()
+        np.testing.assert_array_equal(reader.get_camera_frame("cam_high"), image)
+    finally:
+        reader.close()

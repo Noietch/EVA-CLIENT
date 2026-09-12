@@ -361,7 +361,21 @@ function collectInputSourceSuffix(status) {
     const faulted = !!(teleop && (teleop.last_fault || teleop.source_error));
     const state = faulted ? "ERROR" : (teleop && teleop.connected ? "LINKED" : "DOWN");
     const stateClass = state === "LINKED" ? "linked" : (state === "DOWN" ? "down" : "error");
-    return ` | <span class="vr-input-status ${stateClass}">${label} ${state}</span>`;
+    let suffix = ` | <span class="vr-input-status ${stateClass}">${label} ${state}</span>`;
+    if (teleopCfg.client_type === "vr_webxr") {
+      const groups = (S.CFG.collection.controls || {}).groups || [];
+      const authorized = new Set((teleop && teleop.authorized_groups) || []);
+      const engaged = new Set((teleop && teleop.engaged_groups) || []);
+      ["left", "right"].forEach((hand) => {
+        const group = groups.find((item) => item.control === `${hand}.grip`);
+        const available = state === "LINKED" && !!group;
+        const enabled = available && S.collectArmEnabled &&
+          (authorized.has(group.id) || engaged.has(group.id));
+        const armState = !available ? "UNAVAILABLE" : (enabled ? "ENABLED" : "DISABLED");
+        suffix += ` | <span class="vr-input-status ${enabled ? "linked" : "down"}">${hand.toUpperCase()} ARM ${armState}</span>`;
+      });
+    }
+    return suffix;
   }
 
 function autoSetup(ready, done, errored) {

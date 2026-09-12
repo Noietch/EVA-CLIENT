@@ -510,6 +510,10 @@ function bindEvents() {
     $("app").hidden = true;
     await loadState();
   });
+  $("task-group-by").addEventListener("change", () => {
+    app.expandedTask = "";
+    renderTaskList();
+  });
   $("task-search").addEventListener("input", renderTaskList);
   $("task-action-filter").addEventListener("change", renderTaskList);
   $("task-category-filter").addEventListener("change", renderTaskList);

@@ -359,6 +359,39 @@ function scenePlanGridGeometry(positions) {
   };
 }
 
+function normalizedObjectText(value) {
+  return String(value || "").normalize("NFKC").toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+}
+
+function taskObjectReferences(task) {
+  const references = (task && Array.isArray(task.operation_object_ids))
+    ? task.operation_object_ids : [];
+  return references.concat(String(task && task.operation_object || "").split("/"))
+    .map(normalizedObjectText).filter(Boolean);
+}
+
+function placementAliases(placement) {
+  return ["object_id", "name", "name_zh", "name_en"]
+    .map((field) => normalizedObjectText(placement && placement[field])).filter(Boolean);
+}
+
+function taskHighlightsPlacement(task, placement) {
+  if (!task || !placement) return false;
+  const objectIds = Array.isArray(task.operation_object_ids)
+    ? task.operation_object_ids.map((value) => String(value || "").trim()).filter(Boolean) : [];
+  if (objectIds.length) {
+    return objectIds.includes(String(placement.object_id || "").trim());
+  }
+  const aliases = placementAliases(placement);
+  const references = taskObjectReferences(task);
+  if (references.some((reference) => aliases.some((alias) => (
+    reference === alias || reference.includes(alias) || alias.includes(reference)
+  )))) return true;
+  const prompt = normalizedObjectText(`${task.prompt_en || ""} ${task.prompt_zh || ""}`);
+  return aliases.some((alias) => prompt.includes(alias));
+}
+
 function renderSceneGridCells(host, scene) {
   const geometry = scenePlanGridGeometry(scenePlanGridPositions(scene));
   const bounds = S.SCENE_PLAN && S.SCENE_PLAN.bounds || {};
@@ -398,6 +431,7 @@ function renderCurrentSceneGrid(scene) {
   const host = $("collect-current-scene-grid");
   if (!host) return;
   renderSceneGridCells(host, scene);
+  const task = scenePlanTask();
   const byPosition = new Map();
   (scene && scene.placements || []).forEach((placement) => {
     const positionId = String(placement.position_id || "");
@@ -412,6 +446,9 @@ function renderCurrentSceneGrid(scene) {
       .filter(Boolean);
     cell.classList.toggle("empty", placements.length === 0);
     cell.classList.toggle("fixed", placements.length > 0);
+    cell.classList.toggle(
+      "task-relevant", placements.some((placement) => taskHighlightsPlacement(task, placement))
+    );
     const object = cell.querySelector("b");
     object.textContent = names.join(" / ");
     object.title = names.join(" / ");

@@ -106,6 +106,64 @@ def test_collection_slot_click_selects_and_double_click_previews(browser, tmp_pa
         page.close()
 
 
+def test_collection_scene_grid_highlights_task_objects(browser):
+    source = (
+        Path(__file__).resolve().parents[2] / "src/core/app/console/static/js/collect.js"
+    ).read_text()
+    renderer = source[
+        source.index("function scenePlanGridPositions(") : source.index("function itemsForPrompt(")
+    ]
+    page = browser.new_page()
+    try:
+        page.set_content('<div id="collect-current-scene-grid"></div>')
+        css = Path(__file__).resolve().parents[2] / "src/core/app/console/static/css/console.css"
+        page.add_style_tag(path=str(css))
+        page.evaluate("""() => {
+            window.$ = (id) => document.getElementById(id);
+            window.S = {SCENE_PLAN: {
+                bounds: {width: 500, height: 500},
+                positions: [
+                    {position_id:'P1', x:0, y:0},
+                    {position_id:'P2', x:250, y:0},
+                    {position_id:'P3', x:500, y:0},
+                    {position_id:'P4', x:0, y:250}
+                ],
+                tasks: [{
+                    task_id:'TASK-130', operation_object:'塑料刀-绿',
+                    operation_object_ids: ['knife', 'plate'],
+                    prompt_en:'pick up the green knife and place it on the green plate',
+                    prompt_zh:'拿起绿色塑料刀并放到绿色小盘子上'
+                }]
+            }};
+            window.scenePlanTask = () => S.SCENE_PLAN.tasks[0];
+        }""")
+        page.add_script_tag(content=renderer)
+        page.evaluate("""() => renderCurrentSceneGrid({placements: [
+            {position_id:'P1', object_id:'knife', name:'塑料刀-绿',
+             name_zh:'塑料刀-绿', name_en:'Green Knife'},
+            {position_id:'P2', object_id:'plate', name:'小盘子-绿',
+             name_zh:'小盘子-绿', name_en:'Green Plate'},
+            {position_id:'P3', object_id:'utility-knife', name:'美工刀-绿',
+             name_zh:'美工刀-绿', name_en:'Green Utility Knife'},
+            {position_id:'P4', object_id:'bottle', name:'蓝色水瓶',
+             name_zh:'蓝色水瓶', name_en:'Blue Water Bottle'}
+        ]})""")
+
+        cells = page.locator(".collect-scene-cell")
+        assert cells.nth(0).evaluate("el => el.classList.contains('task-relevant')")
+        assert cells.nth(1).evaluate("el => el.classList.contains('task-relevant')")
+        assert not cells.nth(2).evaluate("el => el.classList.contains('task-relevant')")
+        assert not cells.nth(3).evaluate("el => el.classList.contains('task-relevant')")
+        backgrounds = cells.evaluate_all(
+            "nodes => nodes.map((node) => getComputedStyle(node).backgroundColor)"
+        )
+        assert backgrounds[:2] == ["rgb(255, 255, 255)", "rgb(255, 255, 255)"]
+        assert backgrounds[2] != "rgb(255, 255, 255)"
+        assert backgrounds[3] != "rgb(255, 255, 255)"
+    finally:
+        page.close()
+
+
 def test_collection_qc_uses_clicked_episode_after_newer_save(browser):
     source = (
         Path(__file__).resolve().parents[2] / "src/core/app/console/static/js/collect.js"

@@ -1264,6 +1264,10 @@
   .collect-scene-cell.fixed {
     border-color: var(--ink); background: var(--ink); color: var(--paper);
   }
+  .collect-scene-cell.fixed.task-relevant {
+    border-color: var(--ink); background: var(--paper); color: var(--ink);
+    box-shadow: inset 0 0 0 1px var(--ink);
+  }
   .collect-episode-summary {
     display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; margin-top: 8px;
   }

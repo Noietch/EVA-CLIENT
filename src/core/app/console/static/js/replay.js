@@ -1089,10 +1089,16 @@ async function pollFrame() {
             keys.every((k, i) => existing[i].dataset.key === k);
           if (!sameSet) {
             replaceCamStripContent(keys.map((k) =>
-              `<div class="cam-cell"><div class="cam-lbl">${k}</div><img class="cam" data-key="${k}" src="/api/camera/${encodeURIComponent(k)}"></div>`
+              `<div class="cam-cell"><div class="cam-lbl">${k}</div><img class="cam" data-key="${k}"></div>`
             ).join(""));
           }
         }
+        strip.querySelectorAll("img.cam").forEach((img) => {
+          const key = img.dataset.key;
+          if (!img.hasAttribute("src")) {
+            img.src = `/api/camera/${encodeURIComponent(key)}`;
+          }
+        });
       }
       // DEVICE owns the manual controls. The backend mode can briefly lag behind
       // the tab switch, and /api/frame returns qpos=null while Robot is stopped;

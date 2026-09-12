@@ -139,34 +139,32 @@ def test_client_connection_requires_fresh_vr_frames(monkeypatch) -> None:
     assert not client.status().connected
 
 
-def test_client_uses_configured_robot_pose_as_vr_home(monkeypatch) -> None:
+def test_client_calibrates_from_live_pose_on_first_grip_unlock(monkeypatch) -> None:
     clock = [10.0]
     monkeypatch.setattr(vr_client_module.time, "monotonic", lambda: clock[0])
     client = _client()
-    configured_home = np.asarray(
-        [0.8, -0.2, 0.6, 0.9238795, 0.0, 0.3826834, 0.0, 1.0],
-        dtype=np.float32,
-    )
-    client.set_home_eef({"left_arm": configured_home})
+    locked = _frame()
+    locked["controllers"]["left"]["grip_engaged"] = False
+    locked["controllers"]["left"]["position"] = [4.0, 0.0, 0.0]
+    client._ingest(json.dumps(locked).encode())
+    locked_result = client.poll(_context(now=10.0))
+    assert locked_result.command is not None
+    assert locked_result.command.active_arms == (False,)
 
-    active_frame = _frame(squeeze=0.0)
-    active_frame["controllers"]["left"]["position"] = [0.0, 0.0, 0.0]
-    client._ingest(json.dumps(active_frame).encode())
-    result = client.poll(_context(now=10.0))
+    unlocked = _frame(1)
+    unlocked["controllers"]["left"]["position"] = [5.0, 0.0, 0.0]
+    client._ingest(json.dumps(unlocked).encode())
+    calibrated = client.poll(_context(now=10.0))
+    assert calibrated.command is not None
+    assert calibrated.command.active_arms == (True,)
+    np.testing.assert_allclose(calibrated.command.value, _context().measured_eef, atol=1e-6)
 
-    assert result.command is not None
-    np.testing.assert_allclose(result.command.value[:3], configured_home[:3], atol=1e-6)
-    np.testing.assert_allclose(
-        result.command.value[3:7],
-        configured_home[3:7] / np.linalg.norm(configured_home[3:7]),
-        atol=1e-6,
-    )
-
-    client.reset()
-    client._ingest(json.dumps(_frame(1, squeeze=0.0)).encode())
-    reset_result = client.poll(_context(now=10.0))
-    assert reset_result.command is not None
-    np.testing.assert_allclose(reset_result.command.value[:3], configured_home[:3], atol=1e-6)
+    moved = _frame(2)
+    moved["controllers"]["left"]["position"] = [5.2, 0.0, 0.0]
+    client._ingest(json.dumps(moved).encode())
+    moved_result = client.poll(_context(now=10.0))
+    assert moved_result.command is not None
+    np.testing.assert_allclose(moved_result.command.value[:3], [0.5, 0.1, 0.3], atol=1e-6)
 
 
 def test_client_event_flood_rejects_and_fails_closed() -> None:

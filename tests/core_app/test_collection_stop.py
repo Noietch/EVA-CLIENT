@@ -19,7 +19,7 @@ from core.config import ConfigDict
 pytestmark = pytest.mark.unit
 
 
-def test_auto_red_stays_red_and_requires_manual_retake():
+def test_current_red_advances_forward_and_can_be_manually_retaken():
     slots = build_collection_slots(
         ConfigDict(collection=ConfigDict(tasks={"set": [("task", 2)]})), {}, "set"
     )
@@ -39,6 +39,67 @@ def test_auto_red_stays_red_and_requires_manual_retake():
     )
     assert active["slot_id"] == slots[0].slot_id
     assert active["repair"]
+
+
+@pytest.mark.parametrize("next_quality", ["red", None])
+def test_forward_selection_treats_red_and_pending_equally(next_quality):
+    slots = build_collection_slots(
+        ConfigDict(collection=ConfigDict(tasks={"set": [("task", 5)]})), {}, "set"
+    )
+    episodes = [
+        {"episode_index": 0, "slot_id": slots[0].slot_id, "quality": "red"},
+        {"episode_index": 1, "slot_id": slots[1].slot_id, "quality": "green"},
+        {"episode_index": 2, "slot_id": slots[2].slot_id, "quality": "green"},
+        {"episode_index": 4, "slot_id": slots[4].slot_id, "quality": "red"},
+    ]
+    if next_quality:
+        episodes.append(
+            {"episode_index": 3, "slot_id": slots[3].slot_id, "quality": next_quality}
+        )
+    for episode in episodes:
+        episode["status"] = "saved"
+
+    _, active, _ = collection_slot_status(
+        slots, episodes, [], CollectionSlotState([], slots[1].slot_id)
+    )
+
+    assert active["slot_id"] == slots[3].slot_id
+    assert active["repair"] == (next_quality == "red")
+
+
+@pytest.mark.parametrize("failed_save", [False, True])
+def test_automatic_red_retake_survives_sync_until_new_capture(tmp_path, monkeypatch, failed_save):
+    slots = build_collection_slots(
+        ConfigDict(collection=ConfigDict(tasks={"set": [("task", 3)]})), {}, "set"
+    )
+    episodes = [{"episode_index": 0, "slot_id": slots[0].slot_id, "quality": "green"}]
+    queue = []
+    if failed_save:
+        queue.append({"slot_id": slots[1].slot_id, "status": "failed"})
+    else:
+        episodes.append({"episode_index": 1, "slot_id": slots[1].slot_id, "quality": "red"})
+    for episode in episodes:
+        episode["status"] = "saved"
+    state = CollectionSlotState([], slots[0].slot_id)
+
+    def snapshot(_ctx, _dataset):
+        _, active, _ = collection_slot_status(slots, episodes, queue, state)
+        return {"active": active, "dataset_dir": str(tmp_path), "slot_state": state}
+
+    monkeypatch.setattr(console_server, "_collection_slots_snapshot", snapshot)
+    session = SessionState()
+    session.selected_collect_set = "set"
+    ctx = SimpleNamespace(
+        session=session,
+        runtime=SimpleNamespace(episode_logger=SimpleNamespace(has_active_episode=False)),
+    )
+    for _ in range(2):
+        active = console_server._sync_collection_slot_session(ctx)
+        assert active["slot_id"] == slots[1].slot_id
+        state = load_slot_state(tmp_path)
+
+    queue.append({"slot_id": slots[1].slot_id, "status": "saving"})
+    assert console_server._sync_collection_slot_session(ctx)["slot_id"] == slots[2].slot_id
 
 
 class _CollectionLogger:
@@ -146,3 +207,243 @@ def test_saving_slot_stays_busy_while_cursor_advances() -> None:
     assert active is not None
     assert active["slot_id"] == slots[1].slot_id
     assert active["state"] == "active"
+
+
+def test_completed_slot_advances_forward_past_earlier_pending_slots() -> None:
+    slots = build_collection_slots(
+        ConfigDict(collection=ConfigDict(tasks={"set": [("task", 8)]})), {}, "set"
+    )
+    current = slots[5]
+    episodes = [
+        {
+            "episode_index": 6,
+            "slot_id": current.slot_id,
+            "quality": "green",
+            "status": "saved",
+        }
+    ]
+
+    _rows, active, _counts = collection_slot_status(
+        slots, episodes, [], CollectionSlotState([], current.slot_id)
+    )
+
+    assert active is not None
+    assert active["slot_id"] == slots[6].slot_id
+
+
+def test_completed_last_slot_does_not_wrap_to_earlier_pending_slots() -> None:
+    slots = build_collection_slots(
+        ConfigDict(collection=ConfigDict(tasks={"set": [("task", 3)]})), {}, "set"
+    )
+    current = slots[-1]
+    episodes = [
+        {
+            "episode_index": 3,
+            "slot_id": current.slot_id,
+            "quality": "green",
+            "status": "saved",
+        }
+    ]
+
+    _rows, active, _counts = collection_slot_status(
+        slots, episodes, [], CollectionSlotState([], current.slot_id)
+    )
+
+    assert active is None
+
+
+def test_collection_slots_prioritize_scene_then_layout_ordered_task_object() -> None:
+    config = ConfigDict(
+        collection=ConfigDict(
+            tasks={
+                "set": [
+                    ("right task", 1),
+                    ("left task", 1),
+                    ("top task", 1),
+                    ("other scene", 1),
+                ]
+            }
+        )
+    )
+    scene_plan = {
+        "positions": [
+            {"position_id": "P1", "x": 0, "y": 0},
+            {"position_id": "P2", "x": 250, "y": 0},
+            {"position_id": "P3", "x": 0, "y": 250},
+        ],
+        "scenes": [
+            {
+                "scene_id": "SC-A",
+                "placements": [
+                    {"object_id": "OBJ-R", "position_ids": ["P2"]},
+                    {"object_id": "OBJ-L", "position_ids": ["P1"]},
+                    {"object_id": "OBJ-T", "position_ids": ["P3"]},
+                    {"object_id": "OBJ-FIXED", "position_ids": ["P3"]},
+                ],
+            },
+            {
+                "scene_id": "SC-B",
+                "placements": [{"object_id": "OBJ-B", "position_ids": ["P1"]}],
+            },
+        ],
+        "tasks": [
+            {
+                "task_id": "TASK-R",
+                "prompt_en": "right task",
+                "scene_ids": ["SC-A"],
+                "scene_epsiodes_count": [1],
+                "operation_object_ids": ["OBJ-FIXED", "OBJ-R"],
+            },
+            {
+                "task_id": "TASK-L",
+                "prompt_en": "left task",
+                "scene_ids": ["SC-A"],
+                "scene_epsiodes_count": [1],
+                "operation_object_ids": ["OBJ-FIXED", "OBJ-L"],
+            },
+            {
+                "task_id": "TASK-T",
+                "prompt_en": "top task",
+                "scene_ids": ["SC-A"],
+                "scene_epsiodes_count": [1],
+                "operation_object_ids": ["OBJ-FIXED", "OBJ-T"],
+            },
+            {
+                "task_id": "TASK-B",
+                "prompt_en": "other scene",
+                "scene_ids": ["SC-B"],
+                "scene_epsiodes_count": [1],
+                "operation_object_ids": ["OBJ-B"],
+            },
+        ],
+    }
+
+    slots = build_collection_slots(config, scene_plan, "set")
+
+    assert [slot.slot_id for slot in slots] == [
+        "TASK-L:SC-A:0",
+        "TASK-R:SC-A:0",
+        "TASK-T:SC-A:0",
+        "TASK-B:SC-B:0",
+    ]
+
+
+def test_collection_slots_fall_back_to_legacy_operation_object_names() -> None:
+    config = ConfigDict(
+        collection=ConfigDict(tasks={"set": [("right task", 1), ("left task", 1)]})
+    )
+    scene_plan = {
+        "positions": [
+            {"position_id": "P1", "x": 0, "y": 0},
+            {"position_id": "P2", "x": 250, "y": 0},
+        ],
+        "scenes": [
+            {
+                "scene_id": "SC-A",
+                "placements": [
+                    {"object_id": "OBJ-R", "name": "右侧物体", "position_ids": ["P2"]},
+                    {"object_id": "OBJ-L", "name": "左侧物体", "position_ids": ["P1"]},
+                ],
+            }
+        ],
+        "tasks": [
+            {
+                "task_id": "TASK-R",
+                "prompt_en": "right task",
+                "operation_object": "右侧物体",
+                "scene_ids": ["SC-A"],
+                "scene_epsiodes_count": [1],
+            },
+            {
+                "task_id": "TASK-L",
+                "prompt_en": "left task",
+                "operation_object": "左侧物体",
+                "scene_ids": ["SC-A"],
+                "scene_epsiodes_count": [1],
+            },
+        ],
+    }
+
+    slots = build_collection_slots(config, scene_plan, "set")
+
+    assert [slot.task_id for slot in slots] == ["TASK-L", "TASK-R"]
+
+
+def test_collection_slots_put_left_hand_before_right_hand_at_same_position() -> None:
+    right_prompt = "use the right arm to move the object"
+    left_prompt = "use the left arm to move the object"
+    config = ConfigDict(
+        collection=ConfigDict(tasks={"set": [(right_prompt, 1), (left_prompt, 1)]})
+    )
+    scene_plan = {
+        "positions": [{"position_id": "P1", "x": 0, "y": 0}],
+        "scenes": [
+            {
+                "scene_id": "SC-A",
+                "placements": [{"object_id": "OBJ", "position_ids": ["P1"]}],
+            }
+        ],
+        "tasks": [
+            {
+                "task_id": "TASK-R",
+                "prompt_en": right_prompt,
+                "scene_ids": ["SC-A"],
+                "scene_epsiodes_count": [1],
+                "operation_object_ids": ["OBJ"],
+            },
+            {
+                "task_id": "TASK-L",
+                "prompt_en": left_prompt,
+                "scene_ids": ["SC-A"],
+                "scene_epsiodes_count": [1],
+                "operation_object_ids": ["OBJ"],
+            },
+        ],
+    }
+
+    slots = build_collection_slots(config, scene_plan, "set")
+
+    assert [slot.task_id for slot in slots] == ["TASK-L", "TASK-R"]
+
+
+def test_collection_slots_prioritize_hand_before_object_position() -> None:
+    right_prompt = "use the right arm to move the left object"
+    left_prompt = "use the left arm to move the right object"
+    config = ConfigDict(
+        collection=ConfigDict(tasks={"set": [(right_prompt, 1), (left_prompt, 1)]})
+    )
+    scene_plan = {
+        "positions": [
+            {"position_id": "P1", "x": 0, "y": 0},
+            {"position_id": "P2", "x": 250, "y": 0},
+        ],
+        "scenes": [
+            {
+                "scene_id": "SC-A",
+                "placements": [
+                    {"object_id": "OBJ-R", "position_ids": ["P2"]},
+                    {"object_id": "OBJ-L", "position_ids": ["P1"]},
+                ],
+            }
+        ],
+        "tasks": [
+            {
+                "task_id": "TASK-R",
+                "prompt_en": right_prompt,
+                "scene_ids": ["SC-A"],
+                "scene_epsiodes_count": [1],
+                "operation_object_ids": ["OBJ-R"],
+            },
+            {
+                "task_id": "TASK-L",
+                "prompt_en": left_prompt,
+                "scene_ids": ["SC-A"],
+                "scene_epsiodes_count": [1],
+                "operation_object_ids": ["OBJ-L"],
+            },
+        ],
+    }
+
+    slots = build_collection_slots(config, scene_plan, "set")
+
+    assert [slot.task_id for slot in slots] == ["TASK-L", "TASK-R"]

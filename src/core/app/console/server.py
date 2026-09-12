@@ -762,6 +762,7 @@ def _run_quality_export(
     accepted_dir: Path,
     rejected_dir: Path,
     dataset_format: str,
+    source_episode_indices: set[int] | None = None,
 ) -> None:
     with ctx.quality_upload_lock:
         job = ctx.quality_export_jobs[job_id]
@@ -785,6 +786,7 @@ def _run_quality_export(
             dataset_format=dataset_format,
             replace_existing=True,
             progress_callback=update_progress,
+            source_episode_indices=source_episode_indices,
         )
     except Exception as error:
         logger.exception("Failed to export collection quality split")
@@ -1155,6 +1157,8 @@ def _scene_plan_scenes(
                     "position_ids": position_ids,
                     "object_id": object_id,
                     "name": obj["name"],
+                    "name_zh": obj.get("name_zh", ""),
+                    "name_en": obj.get("name_en", ""),
                     "color": obj.get("color", ""),
                     "photo_url": obj.get("photo_url", ""),
                 }
@@ -1165,6 +1169,8 @@ def _scene_plan_scenes(
                         "position_id": position_id,
                         "object_id": object_id,
                         "name": obj["name"],
+                        "name_zh": obj.get("name_zh", ""),
+                        "name_en": obj.get("name_en", ""),
                         "color": obj.get("color", ""),
                         "photo_url": obj.get("photo_url", ""),
                         "group_id": group_id,
@@ -1189,6 +1195,9 @@ def _scene_plan_tasks(rows: list[dict[str, str]]) -> list[dict[str, Any]]:
                 "task_id": task_id,
                 "action": str(row.get("action", "") or ""),
                 "category": str(row.get("category", "") or ""),
+                "operation_object": str(
+                    row.get("operation_object") or row.get("操作对象") or ""
+                ).strip(),
                 "operation_object_ids": [
                     value.strip()
                     for value in str(row.get("operation_object_ids", "")).split(";")
@@ -1504,7 +1513,12 @@ def _sync_collection_slot_session(ctx: ConsoleContext) -> dict[str, Any] | None:
     active = snapshot["active"]
     dataset_dir = str(snapshot["dataset_dir"] or "")
     if active is not None and dataset_dir:
-        select_collection_slot(Path(dataset_dir), active["slot_id"], snapshot["slot_state"])
+        select_collection_slot(
+            Path(dataset_dir), active["slot_id"], snapshot["slot_state"],
+            episode_index=(active.get("episode") or {}).get("episode_index"),
+            # Retain an automatic retake just like an explicitly selected retake.
+            manual=bool(active.get("repair")),
+        )
     _apply_collection_slot_session(ctx.session, active)
     logger.info(
         "[COLLECTION_SLOT_SYNC] dataset=%s active=%s",
@@ -2285,7 +2299,10 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                 reader = _camera_reader(ctx)
                 jpeg = None
                 payload, sig = _camera_jpeg_payload(reader, key, convert, last_sig)
-                if payload is not None and sig != last_sig:
+                if payload is None:
+                    last_sig = None
+                    last_jpeg = None
+                elif sig != last_sig:
                     jpeg = payload
                     last_sig = sig
                     last_jpeg = jpeg
@@ -3872,6 +3889,18 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         dataset_format = self._requested_dataset_format(body)
         if dataset_format is None:
             return
+        dataset = str(body.get("dataset") or self.ctx.session.selected_collect_set or "").strip()
+        snapshot = _collection_slots_snapshot(self.ctx, dataset)
+        # Freeze the same per-slot selection shown by the collection page.
+        # Legacy datasets without a slot plan retain whole-dataset export.
+        source_episode_indices = None
+        if snapshot["rows"]:
+            source_episode_indices = {
+                int(row["episode"]["episode_index"])
+                for row in snapshot["rows"]
+                if row["state"] in {"complete", "rejected", "deferred"}
+                and row.get("episode") is not None
+            }
         accepted_dir, rejected_dir = _quality_export_paths(dataset_dir, dataset_format)
         with self.ctx.quality_upload_lock:
             if any(
@@ -3915,6 +3944,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                 accepted_dir,
                 rejected_dir,
                 dataset_format,
+                source_episode_indices,
             ),
             name=f"quality-export-{job_id[:8]}",
             daemon=True,

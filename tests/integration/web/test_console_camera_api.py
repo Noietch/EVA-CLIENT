@@ -95,3 +95,18 @@ def test_camera_stream_is_multipart_mjpeg(console: WebHarness):
     # At least one part boundary + a JPEG content-type arrives in the first read window.
     assert b"--evaframe" in buf
     assert b"image/jpeg" in buf
+
+
+def test_frame_api_reports_cameras_without_timeout_health(monkeypatch):
+    from core.app.console import server
+
+    reader = SimpleNamespace(get_latest_qpos=lambda: None)
+    ctx = SimpleNamespace(runtime=object())
+    monkeypatch.setattr(server, "_observation_reader", lambda _: reader)
+    monkeypatch.setattr(server, "_uses_replay_observation", lambda _: False)
+    monkeypatch.setattr(server, "_active_collection_replay_qpos", lambda _: (None, None))
+    monkeypatch.setattr(server, "_live_camera_keys", lambda _: ["right"])
+    monkeypatch.setattr(server, "_list_camera_keys", lambda _: ["left", "right"])
+    payload = server._serialize_frame(ctx)
+    assert payload["cameras"] == ["right"]
+    assert "camera_health" not in payload

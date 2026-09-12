@@ -633,19 +633,6 @@ class VrTeleopClient:
             self._held_groups = tuple(item.group_name for item in self._bindings)
             self._awaiting_neutral = bool(require_neutral)
 
-    def set_home_eef(self, home_eef_by_group: Mapping[str, np.ndarray]) -> None:
-        """Set the fixed robot-pose origin used when VR motion is re-armed."""
-        with self._lock:
-            expected = {binding.group_name for binding in self._bindings}
-            provided = {str(name) for name in home_eef_by_group}
-            if provided != expected:
-                raise ValueError(
-                    "VR home EEF groups must match configured arms: "
-                    f"expected {sorted(expected)}, got {sorted(provided)}"
-                )
-            for binding in self._bindings:
-                binding.retargeter.set_home_eef(home_eef_by_group[binding.group_name])
-
     def poll(self, context: TeleopContext) -> TeleopResult:
         with self._lock:
             worker = self._thread

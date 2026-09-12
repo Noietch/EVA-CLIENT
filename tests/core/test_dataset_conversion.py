@@ -220,6 +220,23 @@ def _source_dataset(
 
 
 @pytest.mark.parametrize("dataset_format", DATASET_EXPORT_FORMATS)
+def test_quality_export_limits_all_formats_to_selected_episodes(tmp_path, dataset_format):
+    source = tmp_path / "source"
+    _source_dataset(source)
+    progress = []
+    summary = export_dataset_by_quality(
+        source, tmp_path / "accepted", tmp_path / "rejected",
+        dataset_format=dataset_format, source_episode_indices={0},
+        progress_callback=progress.append,
+    )
+    assert summary.source_episodes == summary.accepted_episodes == 1
+    assert summary.rejected_episodes == 0
+    assert progress[-1].episodes_completed == progress[-1].episodes_total == 1
+    marker = json.loads((tmp_path / "accepted/meta/quality_split.json").read_text())
+    assert marker["source_episode_indices"] == [0]
+
+
+@pytest.mark.parametrize("dataset_format", DATASET_EXPORT_FORMATS)
 def test_quality_export_converts_each_supported_format(
     tmp_path: Path,
     dataset_format: str,

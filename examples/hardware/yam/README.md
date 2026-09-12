@@ -108,13 +108,27 @@ eva --config configs/01_deploy/dual_yam/openpi_qpos.py --web-port 8080
 The default three-camera combination is:
 
 - `cam_high=260422275306` (RealSense D405)
-- `cam_left_wrist=CV2R1610003Z` (Orbbec Gemini 305)
-- `cam_right_wrist=CV2L360000CL` (Orbbec Gemini 305)
+- `cam_left_wrist=CV2L360000CL` (Orbbec Gemini 305)
+- `cam_right_wrist=CV2R1610003Z` (Orbbec Gemini 305)
 
 The DEVICE camera dropdown exposes two named three-camera combinations:
 `1 D405 + 2 Orbbec 305` (default) and
 `2 Orbbec 305 + 1 Orbbec 355`. `None` disables all camera streams. Each
 combination is a list of three entries from `camera_devices` in `config.yaml`.
+
+The DEVICE camera combinations configure each wrist independently with brightness
+`0`, manual exposure `100` (Orbbec SDK units), and gain `16`. These settings were
+checked under the current workcell lighting to reduce temporal noise; lighting
+changes may require retuning. The overhead camera retains its own settings.
+The node accepts repeatable `--orbbec-camera-brightness KEY=VALUE`,
+`--orbbec-camera-exposure KEY=VALUE`, and `--orbbec-camera-gain KEY=VALUE` options.
+An exposure override disables auto exposure for that camera; remove both exposure
+and gain overrides to return to auto exposure. Values apply on camera startup.
+The standalone shell launcher below retains its separate defaults.
+DEVICE combinations also enable `--orbbec-reset-on-start`: selected Orbbec
+devices reboot once in a temporary process before capture starts. This clears
+stale streams after Stop/Kill; capture uses a fresh SDK context after reboot.
+Allow several seconds for the cameras to reconnect before they become ready.
 
 For single-camera diagnosis with `run_hardware.sh`, set
 `D405_ENABLED_CAMERAS=` and `ORBBEC_ENABLED_CAMERAS=cam_right_wrist`. Streams

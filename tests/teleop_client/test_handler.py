@@ -74,7 +74,6 @@ class _Client:
         self.fail_reset = False
         self.fail_close = False
         self.worker_running = False
-        self.home_eef_by_group = None
 
     def start(self):
         self.starts += 1
@@ -98,9 +97,6 @@ class _Client:
         self.resets.append(require_neutral)
         if self.fail_reset:
             raise RuntimeError("client reset failed")
-
-    def set_home_eef(self, home_eef_by_group):
-        self.home_eef_by_group = home_eef_by_group
 
     def status(self):
         return TeleopStatus(
@@ -259,31 +255,7 @@ def test_handler_solves_canonical_eef_and_checks_residual(monkeypatch) -> None:
     assert len(runtime.transport.published) == 1
 
 
-def test_fixed_vr_home_uses_robot_initial_qpos_not_live_feedback(monkeypatch) -> None:
-    client = _Client([])
-    runtime = _runtime(client)
-    config = _config()
-    configured_eef = np.asarray(
-        [0.8, -0.2, 0.6, 1.0, 0.0, 0.0, 0.0, 1.0] * 2,
-        dtype=np.float32,
-    )
-    captured_qpos = []
-
-    def fake_forward(_config, _runtime, qpos):
-        captured_qpos.append(np.asarray(qpos).copy())
-        return configured_eef
-
-    monkeypatch.setattr(teleop, "forward_canonical_eef", fake_forward)
-    teleop.configure_fixed_vr_home_eef(config, runtime)
-
-    assert captured_qpos
-    np.testing.assert_allclose(captured_qpos[0], runtime.robot.initial_qpos)
-    assert client.home_eef_by_group is not None
-    np.testing.assert_allclose(client.home_eef_by_group["left_arm"], configured_eef[:8])
-    np.testing.assert_allclose(client.home_eef_by_group["right_arm"], configured_eef[8:])
-
-
-def test_activate_teleop_calibrates_vr_home_before_reset(monkeypatch) -> None:
+def test_activate_teleop_defers_vr_calibration_until_grip_unlock(monkeypatch) -> None:
     client = _Client([])
     runtime = _runtime(client)
     runtime.collection_teleop_armed = True
@@ -291,16 +263,14 @@ def test_activate_teleop_calibrates_vr_home_before_reset(monkeypatch) -> None:
     runtime.teleop_execution.active = False
     config = _config()
     config.inference_cfg = ConfigDict(publish_rate=30.0)
-    configured_eef = np.asarray(
-        [0.8, -0.2, 0.6, 1.0, 0.0, 0.0, 0.0, 1.0] * 2,
-        dtype=np.float32,
-    )
-    monkeypatch.setattr(teleop, "forward_canonical_eef", lambda *_args: configured_eef)
+
+    def fail_if_calibrated(*_args):
+        raise AssertionError("calibrated while pressing B")
+
+    monkeypatch.setattr(teleop, "forward_canonical_eef", fail_if_calibrated)
 
     assert teleop.activate_teleop(config, runtime, SessionState())
-    assert client.home_eef_by_group is not None
-    np.testing.assert_allclose(client.home_eef_by_group["left_arm"], configured_eef[:8])
-    np.testing.assert_allclose(client.home_eef_by_group["right_arm"], configured_eef[8:])
+    assert client.resets == [False]
 
 
 class _CollectionLogger:

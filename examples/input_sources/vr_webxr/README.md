@@ -32,8 +32,10 @@ toggle that hand's `grip_engaged` state after a long press. One long press
 enables it and the next disables it. The raw grip button is not sent to EVA
 Client; only the debounced state is sent with the absolute pose. For an
 unauthorized hand, the client uses the inactive-arm mask to hold the current
-robot joint positions. When authorization is restored, the new controller-pose
-delta is added to the previously accumulated delta.
+robot joint positions. The first long-press unlock calibrates that controller
+against the arm's live measured EEF pose. When authorization is restored after
+a later lock, the new controller-pose delta is added to the previously
+accumulated delta.
 
 When ARM is OFF or teleop is reset, the client clears the accumulated deltas
 and reference poses for both hands. After each grip long-press toggle, the node
@@ -43,7 +45,8 @@ in the device browser.
 
 The existing short-press `arm_toggle` event for the right-hand B button (WebXR
 gamepad button 5) is unchanged; `client/app` still owns the global ARM state.
-Grip authorization and the B-button ARM state are independent data streams.
+Pressing B does not calibrate the controllers. Grip authorization and the
+B-button ARM state are independent data streams.
 
 ## Ubuntu Port Forwarding
 

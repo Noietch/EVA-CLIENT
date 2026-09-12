@@ -621,6 +621,8 @@ dialog::backdrop { background: rgba(31, 30, 28, .38); backdrop-filter: blur(2px)
 .collection-legend .pending::before { background: var(--rule-strong); }
 .task-sidebar .search-field { margin-top: 10px; }
 .task-list { gap: 7px; }
+.scene-task-group { display: grid; gap: 7px; }
+.scene-task-group > strong { padding: 8px 0; font-size: 12px; overflow-wrap: anywhere; }
 
 .task-accordion {
   flex: 0 0 auto;

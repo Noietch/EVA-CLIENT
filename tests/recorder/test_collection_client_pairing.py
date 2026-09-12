@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import json
+from collections import deque
+from types import SimpleNamespace
 
 import numpy as np
 import pyarrow.parquet as pq
 import pytest
 
+from core.app.handlers.recording import ingest_client_teleop_action
+from core.app.handlers.teleop import PublishedTeleopAction
 from core.config import ConfigDict
 from core.recorder import episode as episode_module
 from core.recorder.episode import EpisodeLogger
@@ -89,11 +93,11 @@ def _collection_config(control_source: str = "client") -> ConfigDict:
     )
 
 
-def _logger(tmp_path, *, control_source: str = "client"):
+def _logger(tmp_path, *, control_source: str = "client", fps: float = 10):
     return EpisodeLogger(
         tmp_path,
         _FakeRobot(),
-        fps=10,
+        fps=fps,
         dataset_keys=ConfigDict(
             state_key="observations.state.qpos",
             eef_key="observations.state.eef",
@@ -102,6 +106,55 @@ def _logger(tmp_path, *, control_source: str = "client"):
         ),
         collection=_collection_config(control_source),
         async_save=False,
+    )
+
+
+def test_60hz_observations_with_30hz_actions_preserve_recording_duration(tmp_path):
+    logger = _logger(tmp_path, fps=30)
+    logger.start_episode("task")
+    pending = deque()
+    runtime = SimpleNamespace(
+        episode_logger=logger,
+        transport=SimpleNamespace(
+            acquire_collection_raw=lambda: pending.popleft() if pending else None
+        ),
+        last_collection_timestamp=None,
+    )
+
+    def snapshot(index):
+        timestamp = 1 + index / 60
+        vector = np.asarray([timestamp, timestamp, timestamp, 0.2], dtype=np.float32)
+        batch = CollectionRawBatch(
+            images={
+                "cam_high": [
+                    CollectionRawSample(timestamp, np.full((2, 2, 3), index % 255, dtype=np.uint8))
+                ]
+            },
+            vectors={"state_qpos": [CollectionRawSample(timestamp, vector)]},
+        )
+        return RawCollectionSnapshot(timestamp=timestamp, decode_raw=lambda: batch)
+
+    for tick in range(300):
+        # Two new observations arrive during each 30 Hz control tick.
+        pending.extend((snapshot(2 * tick), snapshot(2 * tick + 1)))
+        latest_time = 1 + (2 * tick + 1) / 60
+        published = PublishedTeleopAction(
+            np.asarray([latest_time, latest_time, latest_time, 0.2], dtype=np.float32),
+            timestamp=10000 + tick / 30,
+        )
+        assert ingest_client_teleop_action(None, runtime, published)
+        assert not pending
+
+    assert logger.end_episode()
+    table = pq.read_table(tmp_path / "task/raw/data/chunk-000/episode_000000.parquet")
+    times = np.asarray(table["timestamp"].to_pylist())
+    assert len(times) == 300
+    assert times[-1] == pytest.approx(299 / 30)
+    assert np.ptp(table["capture_time"].to_numpy()) == pytest.approx(299 / 30)
+    np.testing.assert_allclose(
+        table["observation.qpos"].to_pylist(),
+        table["action.qpos"].to_pylist(),
+        atol=1e-5,
     )
 
 

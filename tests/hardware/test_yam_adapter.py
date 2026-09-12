@@ -365,8 +365,8 @@ def test_run_hardware_defaults_to_dual_leaders_and_gripper_calibration(
     assert [args[index + 1] for index in camera_indexes] == ["cam_high=260422275306"]
     orbbec_indexes = [index for index, value in enumerate(args) if value == "--orbbec-camera"]
     assert [args[index + 1] for index in orbbec_indexes] == [
-        "cam_left_wrist=CV2R1610003Z",
-        "cam_right_wrist=CV2L360000CL",
+        "cam_left_wrist=CV2L360000CL",
+        "cam_right_wrist=CV2R1610003Z",
     ]
     camera_width_index = args.index("--camera-width")
     camera_height_index = args.index("--camera-height")

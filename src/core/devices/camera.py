@@ -7,6 +7,7 @@ import time
 import msgpack
 import numpy as np
 import zmq
+from zmq.utils.monitor import recv_monitor_message
 
 
 class CameraPublisher:
@@ -52,10 +53,10 @@ class CameraSource:
         self.socket = zmq.Context.instance().socket(zmq.SUB)
         self.socket.setsockopt(zmq.SUBSCRIBE, b"")
         self.socket.setsockopt(zmq.CONFLATE, 1)
+        self.monitor = self.socket.get_monitor_socket(events=zmq.EVENT_DISCONNECTED)
         self.socket.connect(endpoint)
         self.images = {}
         self.versions = {}
-        self.received_at = {}
 
     def snapshot_versioned(self) -> tuple[dict, dict]:
         if self.socket.poll(0):
@@ -63,14 +64,14 @@ class CameraSource:
             for name, (version, shape, dtype, data) in payload.items():
                 if self.versions.get(name) != version:
                     self.images[name] = np.frombuffer(data, dtype=dtype).reshape(shape)
-                    self.received_at[name] = time.monotonic()
                     self.versions[name] = version
-        images = {
-            name: image
-            for name, image in self.images.items()
-            if time.monotonic() - self.received_at[name] <= 0.5
-        }
-        return {name: self.versions[name] for name in images}, images
+        # Stop/exit invalidates cached frames through the connection lifecycle,
+        # without treating a pause in capture as a timeout.
+        while self.monitor.poll(0):
+            if recv_monitor_message(self.monitor)["event"] == zmq.EVENT_DISCONNECTED:
+                self.images.clear()
+                self.versions.clear()
+        return dict(self.versions), dict(self.images)
 
     def snapshot(self) -> dict:
         return self.snapshot_versioned()[1]
@@ -79,6 +80,8 @@ class CameraSource:
         return {"camera_stream": "online" if self.snapshot() else "offline"}
 
     def close(self) -> None:
+        self.socket.disable_monitor()
+        self.monitor.close(linger=0)
         self.socket.close(linger=0)
 
 
@@ -92,7 +95,6 @@ class CameraPreview:
         self.stopped = threading.Event()
         self.lock = threading.Lock()
         self.images = {}
-        self.updated = 0.0
         self.thread = threading.Thread(target=self._run, name="eva-camera-preview", daemon=True)
         self.thread.start()
 
@@ -103,7 +105,6 @@ class CameraPreview:
                 images = source.snapshot()
                 with self.lock:
                     self.images = images
-                    self.updated = time.monotonic()
                 self.stopped.wait(0.03)
         finally:
             source.close()
@@ -115,14 +116,10 @@ class CameraPreview:
 
     def get_camera_keys(self) -> list[str]:
         with self.lock:
-            if time.monotonic() - self.updated > 0.5:
-                return []
             return [key for key in self.keys if key in self.images]
 
     def get_camera_frame(self, key: str):
         with self.lock:
-            if time.monotonic() - self.updated > 0.5:
-                return None
             return self.images.get(key)
 
     def close(self) -> None:
