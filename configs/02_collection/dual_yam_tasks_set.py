@@ -18,5 +18,6 @@ collection = dict(
         "datasets/data_collection/task_sets/larybench2_20260908_dual_yam_scoop",
         "datasets/data_collection/task_sets/larybench2_20260908_dual_yam_sweep",
         "datasets/data_collection/task_sets/larybench2_20260908_dual_yam_wipe",
+        "datasets/data_collection/task_sets/eva-sim_test_0909",
     ],
 )
