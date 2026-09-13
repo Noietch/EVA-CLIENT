@@ -37,7 +37,8 @@ def test_collection_history_survives_description_change_with_task_identity(tmp_p
         console.runtime.episode_logger = _CollectionHistoryLogger(
             dataset_dir,
             [{"episode_index": 2, "task": "historical wording", "task_id": "TASK-1"}],
-            expected_task="old wording", expected_collection_dataset="pour",
+            expected_task="old wording",
+            expected_collection_dataset="pour",
         )
         scene_plan = console.get("/api/scene_plan?set=pour").json
         assert scene_plan["tasks"][0]["prompt_zh"] == "新描述"

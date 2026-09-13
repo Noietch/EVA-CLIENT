@@ -76,7 +76,6 @@ class PlanCatalog:
         tasks = [task for plan in plan_states for task in plan["tasks"]]
         scenes = [scene for plan in plan_states for scene in plan["scenes"]]
         issues = [issue for plan in plan_states for issue in plan["issues"]]
-        plans_by_batch = {plan["batch_id"]: plan for plan in plan_states}
         plans = [{key: plan[key] for key in PLAN_PAYLOAD_KEYS} for plan in plan_states]
         return {
             "batch_filter": batch,

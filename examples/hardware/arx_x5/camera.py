@@ -70,9 +70,7 @@ def parse_realsense_color_profiles(raw: Any) -> dict[str, RealSenseColorProfile]
         bgr_gains = tuple(float(value) for value in values["bgr_gains"])
         if len(bgr_gains) != 3 or any(value <= 0 for value in bgr_gains):
             raise ValueError(f"RealSense profile {image_key!r} bgr_gains must be 3 positive values")
-        numeric = {
-            field: float(values[field]) for field in ("exposure", "gain", "white_balance")
-        }
+        numeric = {field: float(values[field]) for field in ("exposure", "gain", "white_balance")}
         if any(not math.isfinite(value) or value <= 0 for value in numeric.values()):
             raise ValueError(f"RealSense profile {image_key!r} values must be positive")
         profiles[image_key] = RealSenseColorProfile(
@@ -101,9 +99,7 @@ def load_default_realsense_color_profiles(
     combination = raw["camera"]["x5_d405_day"]
     profiles: dict[str, Any] = {}
     for camera_name in combination["cameras"]:
-        profiles.update(
-            raw["camera_devices"][camera_name]["settings"]["realsense_color_profiles"]
-        )
+        profiles.update(raw["camera_devices"][camera_name]["settings"]["realsense_color_profiles"])
     return parse_realsense_color_profiles(profiles)
 
 

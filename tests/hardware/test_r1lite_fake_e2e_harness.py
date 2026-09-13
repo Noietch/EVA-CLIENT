@@ -8,9 +8,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
+from tools.run_r1lite_fake_e2e import write_e2e_configs
 
 from core.config import load_config
-from tools.run_r1lite_fake_e2e import write_e2e_configs
 
 pytestmark = pytest.mark.integration
 

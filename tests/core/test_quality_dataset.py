@@ -153,9 +153,7 @@ def test_export_only_latest_slot_attempt(tmp_path, latest_quality, slot_metadata
     rows = _read_jsonl(path)
     for row in rows:
         row.update(task_id="task-A", scene_id="scene-A", scene_round=0)
-        if slot_metadata == "explicit" or (
-            slot_metadata == "mixed" and row["episode_index"] == 1
-        ):
+        if slot_metadata == "explicit" or (slot_metadata == "mixed" and row["episode_index"] == 1):
             row["slot_id"] = "slot-A"
     rows[2]["quality"] = latest_quality
     rows[2].pop("qc_verdict")
@@ -184,7 +182,9 @@ def test_export_uses_only_episodes_selected_by_collection_plan(tmp_path):
     _dataset(source)
     progress = []
     result = split_dataset_by_quality(
-        source, source_episode_indices={0}, progress_callback=progress.append,
+        source,
+        source_episode_indices={0},
+        progress_callback=progress.append,
     )
     assert result.source_episodes == result.accepted_episodes == 1
     assert result.rejected_episodes == 0
@@ -198,8 +198,13 @@ def test_legacy_prompt_attempts_match_explicit_slot():
     rows = [
         {"episode_index": 0, "task": "pick", "scene_id": "A", "scene_round": 0},
         {"episode_index": 1, "prompt": "pick", "scene_id": "A", "scene_round": 0},
-        {"episode_index": 2, "tasks": ["pick"], "scene_id": "A", "scene_round": 0,
-         "slot_id": "task:A:0"},
+        {
+            "episode_index": 2,
+            "tasks": ["pick"],
+            "scene_id": "A",
+            "scene_round": 0,
+            "slot_id": "task:A:0",
+        },
     ]
     assert native_module._latest_slot_episodes(list(reversed(rows))) == [rows[-1]]
 
@@ -212,10 +217,8 @@ def test_slot_selection_preserves_distinct_targets_and_unassigned_episodes():
         {"episode_index": 3, "task_id": "a", "scene_id": "A", "scene_round": 1},
         {"episode_index": 4, "tasks": ["pick"]},
         {"episode_index": 5, "tasks": ["pick"], "scene_round": None},
-        {"episode_index": 6, "slot_id": "one", "prompt": "pick",
-         "scene_id": "A", "scene_round": 0},
-        {"episode_index": 7, "slot_id": "two", "prompt": "pick",
-         "scene_id": "A", "scene_round": 0},
+        {"episode_index": 6, "slot_id": "one", "prompt": "pick", "scene_id": "A", "scene_round": 0},
+        {"episode_index": 7, "slot_id": "two", "prompt": "pick", "scene_id": "A", "scene_round": 0},
     ]
     assert native_module._latest_slot_episodes(rows) == rows
 

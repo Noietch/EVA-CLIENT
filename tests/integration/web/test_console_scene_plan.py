@@ -54,7 +54,10 @@ def test_scene_catalog_keeps_legacy_placements_and_serves_photos(
     assert all("random" not in group for group in scene["placement_groups"])
     for placement in scene["placements"] + scene["placement_groups"]:
         assert placement["name"] == "Cup"
-        assert placement["photo_url"] == "/api/scene_plan/object-photo/AST-001/cup%20top.png?set=example"
+        assert (
+            placement["photo_url"]
+            == "/api/scene_plan/object-photo/AST-001/cup%20top.png?set=example"
+        )
 
     monkeypatch.setattr(server, "_scene_plan_root", lambda config, dataset=None: root)
     delivered = []

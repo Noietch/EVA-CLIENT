@@ -329,8 +329,8 @@ class OperatorEventMapper:
         x, y = axes
         direction = ""
         if not stick_pressed and max(abs(x), abs(y)) >= 0.6:
-            direction = ("right" if x > 0 else "left") if abs(x) > abs(y) else (
-                "down" if y > 0 else "up"
+            direction = (
+                ("right" if x > 0 else "left") if abs(x) > abs(y) else ("down" if y > 0 else "up")
             )
         if direction and direction != self._stick_direction:
             intents.append(f"review_{direction}")

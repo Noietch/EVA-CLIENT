@@ -16,7 +16,7 @@ def test_device_command_polling():
     result = subprocess.run(
         [node, "--experimental-vm-modules", "--input-type=module"],
         cwd=ROOT,
-        input=r'''
+        input=r"""
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
@@ -70,7 +70,7 @@ await check({ok: true, request_id: "new"}, [
 await check({ok: true, request_id: "new"}, [
   {processes: {}, operations: {robot: {id: "new", state: "failed", error: "Homing failed"}}},
 ], /Homing failed/);
-''',
+""",
         text=True,
         capture_output=True,
         timeout=15,

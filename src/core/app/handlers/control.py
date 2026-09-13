@@ -251,6 +251,7 @@ def toggle_gripper_immediate(
     Returns:
         True when a gripper was toggled, False if no feedback / no gripper.
     """
+
     def decide(cur: float) -> float:
         return opposite_gripper_value(
             cur,

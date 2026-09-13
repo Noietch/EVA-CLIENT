@@ -16,9 +16,7 @@ def _read_sse_event(port: int, max_bytes: int = 4096) -> tuple[str, bytes]:
     sock = socket.create_connection(("127.0.0.1", port), timeout=5)
     sock.settimeout(5)
     sock.sendall(
-        b"GET /api/teleop/feedback HTTP/1.1\r\n"
-        b"Host: localhost\r\n"
-        b"Accept: text/event-stream\r\n\r\n"
+        b"GET /api/teleop/feedback HTTP/1.1\r\nHost: localhost\r\nAccept: text/event-stream\r\n\r\n"
     )
     buf = b""
     try:

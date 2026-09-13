@@ -15,7 +15,7 @@ def test_camera_streams_stay_open_across_polls():
         pytest.skip("Node.js is required for the live UI state test")
     source = Path("src/core/app/console/static/js/replay.js").read_text()
     poll = source.split("async function pollFrame()", 1)[1].split("let liveSeriesPolling", 1)[0]
-    script = r'''
+    script = r"""
 const assert = require("node:assert/strict");
 let framePolling = false;
 const S = {ACTIVE_TAB: "collect"}, LIVE = {replayMode: false};
@@ -34,9 +34,9 @@ function replaceCamStripContent(html) {
     set src(value) {this.attributes.src = value;},
   }));
 }
-'''
+"""
     script += "\nasync function pollFrame()" + poll
-    script += r'''
+    script += r"""
 (async () => {
   payload = {cameras: ["left", "right"]};
   await pollFrame();
@@ -56,5 +56,5 @@ function replaceCamStripContent(html) {
   await pollFrame();
   assert.equal(images.length, 1);
 })().catch(error => {console.error(error); process.exitCode = 1;});
-'''
+"""
     subprocess.run([node, "-e", script], check=True, capture_output=True, text=True)

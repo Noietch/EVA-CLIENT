@@ -224,12 +224,18 @@ class DeviceWorkspace:
             if kind == "robot" and values[kind].get("mode", "real") == "fake":
                 settings = values[kind]["settings"]
                 commands[kind] = [
-                    sys.executable, "-m", "examples.hardware.fake_common",
+                    sys.executable,
+                    "-m",
+                    "examples.hardware.fake_common",
                     selected["robot"],
-                    "--dynamics-mode", "direct",
-                    "--obs-endpoint", settings.get("obs_endpoint", "tcp://127.0.0.1:5555"),
-                    "--action-endpoint", settings.get("action_endpoint", "tcp://127.0.0.1:5556"),
-                    "--rate", str(settings.get("rate", 30)),
+                    "--dynamics-mode",
+                    "direct",
+                    "--obs-endpoint",
+                    settings.get("obs_endpoint", "tcp://127.0.0.1:5555"),
+                    "--action-endpoint",
+                    settings.get("action_endpoint", "tcp://127.0.0.1:5556"),
+                    "--rate",
+                    str(settings.get("rate", 30)),
                 ]
                 continue
             launch = (

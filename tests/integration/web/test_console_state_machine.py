@@ -473,13 +473,18 @@ def test_collect_quality_export_uses_selected_dataset(
 
     monkeypatch.setattr(console_server, "export_dataset_by_quality", export)
     monkeypatch.setattr(
-        console_server, "_collection_slots_snapshot",
-        lambda ctx, dataset: {"rows": [
-            {"state": "complete", "episode": {"episode_index": 0}},
-            {"state": "rejected", "episode": {"episode_index": 2}},
-            {"state": "pending", "episode": None},
-            {"state": "saving", "episode": {"episode_index": 3}},
-        ] if has_slot_plan else []},
+        console_server,
+        "_collection_slots_snapshot",
+        lambda ctx, dataset: {
+            "rows": [
+                {"state": "complete", "episode": {"episode_index": 0}},
+                {"state": "rejected", "episode": {"episode_index": 2}},
+                {"state": "pending", "episode": None},
+                {"state": "saving", "episode": {"episode_index": 3}},
+            ]
+            if has_slot_plan
+            else []
+        },
     )
     with serve_console(console_config()) as h:
         _set_collect_dataset_logger(h, source)

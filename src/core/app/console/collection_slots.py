@@ -86,9 +86,7 @@ def _task_object_names(task: dict[str, Any]) -> list[str]:
 
 def _task_hand_priority(task: dict[str, Any]) -> int:
     """Prefer the first-mentioned operating hand: left, then right, then unknown."""
-    text = " ".join(
-        str(task.get(field) or "") for field in ("prompt_en", "prompt_zh")
-    )
+    text = " ".join(str(task.get(field) or "") for field in ("prompt_en", "prompt_zh"))
     match = re.search(r"left\s+(?:arm|hand)|right\s+(?:arm|hand)|左手|左臂|右手|右臂", text, re.I)
     if match is None:
         return 2
@@ -115,9 +113,7 @@ def _task_spatial_sort_key(
 ) -> tuple[Any, ...]:
     """Return the scene task's hand-first, then row-major object ordering key."""
     references = [
-        str(value).strip()
-        for value in task.get("operation_object_ids") or []
-        if str(value).strip()
+        str(value).strip() for value in task.get("operation_object_ids") or [] if str(value).strip()
     ]
     references.extend(_task_object_names(task))
     placements = scene.get("placements") or []

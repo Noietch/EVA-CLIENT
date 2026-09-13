@@ -32,21 +32,44 @@ def plan_files(tmp_path):
     root = tmp_path / "pour"
     root.mkdir()
     tasks = [
-        dict(task_id="TASK-L", prompt_en="left pour and support", prompt_zh="左手倒，右手扶稳。",
-             total_epsiodes_count=2, scene_ids="SC-L", scene_epsiodes_count=2),
-        dict(task_id="TASK-R", prompt_en="right pour and support", prompt_zh="右手倒，左手扶稳。",
-             total_epsiodes_count=2, scene_ids="SC-R", scene_epsiodes_count=2),
+        dict(
+            task_id="TASK-L",
+            prompt_en="left pour and support",
+            prompt_zh="左手倒，右手扶稳。",
+            total_epsiodes_count=2,
+            scene_ids="SC-L",
+            scene_epsiodes_count=2,
+        ),
+        dict(
+            task_id="TASK-R",
+            prompt_en="right pour and support",
+            prompt_zh="右手倒，左手扶稳。",
+            total_epsiodes_count=2,
+            scene_ids="SC-R",
+            scene_epsiodes_count=2,
+        ),
     ]
     _write_csv(root / "tasks.csv", tasks)
-    _write_csv(root / "scene.csv", [
-        {"scene_id": scene, "placements": json.dumps([
-            {"position_ids": [position], "object_id": "CUP"},
-        ])}
-        for scene, position in [("SC-L", "P1"), ("SC-R", "P3")]
-    ])
-    _write_csv(root / "objects.csv", [
-        {"object_id": "CUP", "object_name_zh": "杯子", "photo_dir": "cup"},
-    ])
+    _write_csv(
+        root / "scene.csv",
+        [
+            {
+                "scene_id": scene,
+                "placements": json.dumps(
+                    [
+                        {"position_ids": [position], "object_id": "CUP"},
+                    ]
+                ),
+            }
+            for scene, position in [("SC-L", "P1"), ("SC-R", "P3")]
+        ],
+    )
+    _write_csv(
+        root / "objects.csv",
+        [
+            {"object_id": "CUP", "object_name_zh": "杯子", "photo_dir": "cup"},
+        ],
+    )
     photos = root / "object_photos" / "cup"
     photos.mkdir(parents=True)
     (photos / "cup.png").write_bytes(b"photo fixture")
@@ -63,14 +86,23 @@ def _config(root):
 @pytest.mark.parametrize("restart", [False, True])
 @pytest.mark.parametrize("explicit_slot_id", [False, True])
 def test_description_edit_preserves_slots_chinese_photos_and_history(
-    plan_files, restart, explicit_slot_id,
+    plan_files,
+    restart,
+    explicit_slot_id,
 ):
     root, tasks = plan_files
     config = _config(root)
     old_plan = _load_scene_plan(config, "pour")
     old_slots = build_collection_slots(config, old_plan, "pour")
-    episode = dict(episode_index=7, task="left pour and support", task_id="TASK-L",
-                   scene_id="SC-L", scene_round=0, quality="green", status="saved")
+    episode = dict(
+        episode_index=7,
+        task="left pour and support",
+        task_id="TASK-L",
+        scene_id="SC-L",
+        scene_round=0,
+        quality="green",
+        status="saved",
+    )
     if explicit_slot_id:
         episode["slot_id"] = "TASK-L:SC-L:0"
     tasks[0].update(prompt_en="left pour", prompt_zh="左手倒。")
@@ -86,8 +118,9 @@ def test_description_edit_preserves_slots_chinese_photos_and_history(
     assert left.task_zh == "左手倒。"
     assert left.task == ("left pour" if restart else "left pour and support")
     assert config.collection.tasks["pour"][left.task_index][0] == left.task
-    assert plan["scenes"][0]["placements"][0]["photo_url"] == (
-        old_plan["scenes"][0]["placements"][0]["photo_url"]
+    assert (
+        plan["scenes"][0]["placements"][0]["photo_url"]
+        == (old_plan["scenes"][0]["placements"][0]["photo_url"])
     )
     assert plan["scenes"][0]["placements"][0]["photo_url"]
     rows, _, counts = collection_slot_status(slots, [episode], [], CollectionSlotState([]))
@@ -129,8 +162,12 @@ def test_history_filters_by_identity_before_pagination(tmp_path):
     first = load_episode_history(tmp_path, task="new wording", task_id="TASK-L", limit=1)
     assert first["total"] == 3
     second = load_episode_history(
-        tmp_path, task="new wording", task_id="TASK-L", since=first["next_since"],
-        cursor=first["cursor"], limit=5,
+        tmp_path,
+        task="new wording",
+        task_id="TASK-L",
+        since=first["next_since"],
+        cursor=first["cursor"],
+        limit=5,
     )
     assert not second["reset"]
     ids = {row["episode_index"] for row in first["episodes"] + second["episodes"]}
