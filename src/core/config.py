@@ -59,6 +59,8 @@ def _resolve_collection_task_set_path(path: str | Path) -> Path:
 def load_collection_task_set(
     path: str | Path,
     dataset_name: str | None = None,
+    *,
+    task_prompts: dict[str, str] | None = None,
 ) -> dict[str, list[tuple[str, int]]]:
     """Load normalized collection tasks from a task-set directory."""
     root = _resolve_collection_task_set_path(path)
@@ -78,6 +80,11 @@ def load_collection_task_set(
                 prompt = str(row.get("prompt_en", "") or "").strip()
                 if not prompt:
                     raise ValueError(f"{tasks_path}:{row_number} prompt_en must not be empty")
+                task_id = str(row.get("task_id") or "").strip()
+                if task_prompts is not None and task_id:
+                    if task_id in task_prompts:
+                        raise ValueError(f"{tasks_path}:{row_number} duplicate task_id {task_id}")
+                    task_prompts[task_id] = prompt
                 try:
                     target = int(str(row.get("total_epsiodes_count", "") or "").strip())
                 except ValueError as error:
@@ -165,6 +172,16 @@ def _normalize_collection_task_set(cfg: ConfigDict) -> None:
         task_set_dirs = [str(task_set_dirs)] if str(task_set_dirs).strip() else []
     if not task_set_dirs:
         return
+    # Keep task identity alongside the startup recorder prompts. Scene-plan text
+    # can be edited while this config and the recorder are still running.
+    collection["task_prompt_bindings"] = {}
+
+    def load_bound_task_set(root: Path, name: str | None = None):
+        bindings: dict[str, str] = {}
+        tasks = load_collection_task_set(root, name, task_prompts=bindings)
+        collection["task_prompt_bindings"][next(iter(tasks))] = bindings
+        return tasks
+
     authored_tasks = collection.get("tasks") or {}
     dataset_name = str(collection.get("task_set_name", "") or "").strip()
     if len(task_set_dirs) > 1:
@@ -172,7 +189,7 @@ def _normalize_collection_task_set(cfg: ConfigDict) -> None:
         for task_set_dir in task_set_dirs:
             root = _resolve_collection_task_set_path(task_set_dir)
             if root.is_dir() and (root / "tasks.csv").is_file():
-                task_sets.update(load_collection_task_set(root, root.name))
+                task_sets.update(load_bound_task_set(root, root.name))
         if task_sets:
             collection["tasks"] = task_sets
         return
@@ -186,13 +203,13 @@ def _normalize_collection_task_set(cfg: ConfigDict) -> None:
         task_sets = {}
         for child in sorted(root.iterdir()):
             if child.is_dir() and (child / "tasks.csv").is_file():
-                task_sets.update(load_collection_task_set(child, child.name))
+                task_sets.update(load_bound_task_set(child, child.name))
         if task_sets:
             collection["tasks"] = task_sets
         return
     if not dataset_name and len(authored_tasks) == 1:
         dataset_name = str(next(iter(authored_tasks)))
-    collection["tasks"] = load_collection_task_set(root, dataset_name or None)
+    collection["tasks"] = load_bound_task_set(root, dataset_name or None)
 
 
 def resolve_video_key(dataset_keys: ConfigDict | dict, cam_key: str) -> str | None:

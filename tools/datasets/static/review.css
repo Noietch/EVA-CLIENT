@@ -73,7 +73,7 @@
 }
 
 .review-scene-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 7px; }
-.scene-grid.compact { min-height: 150px; max-height: 190px; aspect-ratio: auto; }
+.scene-grid.compact { min-height: 0; max-height: none; aspect-ratio: auto; }
 .scene-grid.compact .scene-cell { min-height: 45px; padding: 13px 3px 3px; }
 .scene-grid.compact .scene-cell > small { font-size: 7px; }
 .scene-grid.compact .scene-cell > strong { margin-top: 2px; font-size: 8px; }
@@ -100,7 +100,9 @@
   min-width: 0;
   display: flex;
   gap: 12px;
-  overflow-x: auto;
+  flex-direction: column;
+  overflow-x: hidden;
+  overflow-y: auto;
   padding: 12px;
   border: 1px solid var(--rule);
   border-radius: var(--radius);
@@ -109,13 +111,13 @@
 }
 
 .cam-empty { margin: auto; color: var(--ink-faint); font: 10px/1 var(--mono); }
-.cam-cell { flex: 1 1 0; min-width: 230px; display: flex; flex-direction: column; gap: 7px; }
+.cam-cell { flex: 1 0 140px; min-height: 140px; min-width: 0; display: flex; flex-direction: column; gap: 7px; }
 .cam-label { color: var(--ink-dim); font: 700 8px/1 var(--mono); text-transform: uppercase; }
-.cam { flex: 1 1 auto; width: 100%; min-height: 0; object-fit: contain; background: var(--ink); }
+.cam { flex: 1 1 0; height: 0; width: 100%; min-height: 0; object-fit: contain; background: var(--ink); }
 
-.stage-charts { height: 180px; display: flex; gap: 12px; }
+.stage-charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr)); grid-auto-rows: 260px; gap: 12px; }
 .stage-chart { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; padding: 7px 12px 8px; border: 1px solid var(--rule); border-radius: var(--radius); background: var(--paper); box-shadow: var(--shadow); }
-.chart-head { height: 30px; display: flex; align-items: center; gap: 8px; }
+.chart-head { flex: 0 0 30px; height: 30px; display: flex; align-items: center; gap: 8px; }
 .chart-title { flex: 0 0 auto; font: 700 10px/1 var(--mono); }
 .chart-title small { margin-left: 5px; color: var(--ink-faint); font-weight: 400; }
 .chart-dims { min-width: 0; flex: 1 1 auto; display: flex; gap: 4px; overflow-x: auto; }
@@ -123,7 +125,7 @@
 .chart-dims .dim.off { opacity: .3; text-decoration: line-through; }
 .chart-allbtn { flex: 0 0 auto; padding: 3px 7px; border: 1px solid var(--rule); border-radius: 999px; background: var(--paper); font: 8px/1 var(--mono); cursor: pointer; }
 .chart-body { flex: 1 1 auto; min-height: 0; position: relative; }
-.chart-body canvas { width: 100%; height: 100%; display: block; }
+.chart-body canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
 
 .stage-scrub {
   position: sticky;

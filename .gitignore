@@ -64,3 +64,4 @@ example/r5_orbbec/thirdparty/
 configs/01_deploy/*/*.local.py
 configs/02_collection/*.local.py
 configs/04_rl/*.local.py
+/configs/02_collection/dual_yam_tasks_set.py
