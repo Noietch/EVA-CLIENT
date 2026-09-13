@@ -542,6 +542,7 @@ function bindEvents() {
   $("scene-search").addEventListener("input", renderSceneList);
   $("object-search").addEventListener("input", renderObjectList);
   $("object-photo-filter").addEventListener("change", renderObjectList);
+  $("object-modeling-filter").addEventListener("change", renderObjectList);
   $("retry-button").addEventListener("click", () => loadState());
   $("validate-button").addEventListener("click", (event) => validatePlan(event.currentTarget));
   $("import-trigger").addEventListener("click", () => {

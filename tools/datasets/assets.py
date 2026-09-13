@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import io
+import math
 import os
 import re
 import tempfile
@@ -16,7 +17,19 @@ from PIL import Image, ImageOps
 
 from tools.datasets.store import ConflictError, RecordNotFoundError
 
-FIELDS = ("object_id", "object_name", "object_name_zh", "scan_status", "color", "photo_dir")
+MEASUREMENT_FIELDS = ("length_cm", "width_cm", "height_cm", "mass_g")
+ASSET_REFERENCE_FIELDS = ("image2assets_id", "eva_sim_id")
+FIELDS = (
+    "object_id",
+    "object_name",
+    "object_name_zh",
+    "scan_status",
+    "color",
+    "photo_dir",
+    *MEASUREMENT_FIELDS,
+    "modeling_method",
+    *ASSET_REFERENCE_FIELDS,
+)
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
 ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 MAX_PHOTOS_PER_UPLOAD = 16
@@ -54,6 +67,8 @@ class ObjectCatalog:
             with self.path.open("r", encoding="utf-8-sig", newline="") as handle:
                 rows = [dict(row) for row in csv.DictReader(handle)]
             for row in rows:
+                for key in (*MEASUREMENT_FIELDS, "modeling_method", *ASSET_REFERENCE_FIELDS):
+                    row[key] = row.get(key) or ""
                 directory = self.photo_root / row.get("photo_dir", "")
                 row["photos"] = (
                     sorted(
@@ -234,7 +249,28 @@ class ObjectCatalog:
         ).strip(" .")
         if Path(photo_dir).name != photo_dir or photo_dir in {".", ".."}:
             raise ValueError("photo_dir must be one directory name")
+        measurements = {}
+        for key in MEASUREMENT_FIELDS:
+            value = payload.get(key)
+            text = "" if value is None else str(value).strip()
+            if text:
+                try:
+                    number = float(text)
+                except ValueError:
+                    raise ValueError(f"{key} 必须是大于 0 的有限数值，或留空") from None
+                if not math.isfinite(number) or number <= 0:
+                    raise ValueError(f"{key} 必须是大于 0 的有限数值，或留空")
+            measurements[key] = text
+        method = str(payload.get("modeling_method") or "").strip()
+        if method not in {"", "A", "B", "C", "D"}:
+            raise ValueError("建模方法必须为 A、B、C、D，或留空")
+        asset_references = {
+            key: str(payload.get(key) or "").strip() for key in ASSET_REFERENCE_FIELDS
+        }
         return {
+            **measurements,
+            **asset_references,
+            "modeling_method": method,
             "object_id": object_id,
             "object_name": name_en,
             "object_name_zh": name_zh,

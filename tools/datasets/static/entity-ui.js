@@ -21,6 +21,23 @@ let stopPlayback;
 let openSlot;
 
 const $ = (id) => document.getElementById(id);
+const OBJECT_MEASUREMENTS = [
+  ["length_cm", "长（cm）"], ["width_cm", "宽（cm）"],
+  ["height_cm", "高（cm）"], ["mass_g", "质量（g）"],
+];
+const MODELING_METHODS = {
+  A: "image2assets",
+  B: "agent-primitive",
+  C: "agent-cad",
+  D: "agent-blender",
+};
+
+function objectMeasurementsText(object) {
+  const dimensions = [object.length_cm, object.width_cm, object.height_cm];
+  return dimensions.some(Boolean)
+    ? dimensions.map((value) => value || "—").join(" × ") + " cm"
+    : "未填写";
+}
 
 function configureEntityUi(context) {
   ({
@@ -236,23 +253,34 @@ function renderSceneList() {
   }));
 }
 
+function objectMatchesFilters(object, query, photoFilter, modelingFilter) {
+  const matchesQuery = [object.object_id, object.object_name, object.object_name_zh]
+    .join(" ").toLowerCase().includes(query);
+  const matchesPhoto = !photoFilter
+    || (photoFilter === "missing" && !object.photos.length)
+    || (photoFilter === "ready" && object.photos.length);
+  const matchesModeling = !modelingFilter
+    || (modelingFilter === "missing" && !object.modeling_method)
+    || object.modeling_method === modelingFilter;
+  return matchesQuery && matchesPhoto && matchesModeling;
+}
+
 function renderObjectList() {
   if (!app.state) return;
   const query = $("object-search").value.trim().toLowerCase();
   const photoFilter = $("object-photo-filter").value;
-  const objects = app.state.objects.filter((object) => {
-    const matchesQuery = [object.object_id, object.object_name, object.object_name_zh]
-      .join(" ").toLowerCase().includes(query);
-    const matchesPhoto = !photoFilter
-      || (photoFilter === "missing" && !object.photos.length)
-      || (photoFilter === "ready" && object.photos.length);
-    return matchesQuery && matchesPhoto;
-  });
+  const modelingFilter = $("object-modeling-filter").value;
+  const objects = app.state.objects.filter(
+    (object) => objectMatchesFilters(object, query, photoFilter, modelingFilter),
+  );
   $("object-filter-count").textContent = objects.length + " / " + app.state.objects.length;
   const host = $("object-list");
   if (!objects.length) {
     if (app.objectThumbObserver) app.objectThumbObserver.disconnect();
-    emptyList(host, query || photoFilter ? "没有匹配的物体" : "还没有物体资产");
+    emptyList(
+      host,
+      query || photoFilter || modelingFilter ? "没有匹配的物体" : "还没有物体资产",
+    );
     return;
   }
   host.replaceChildren(...objects.map((object) => {
@@ -740,10 +768,25 @@ function renderObjectEditor() {
     field("扫描状态", input("text", "scan_status", draft.scan_status), true),
     field("Photo directory", input("text", "photo_dir", draft.photo_dir), true),
   );
-  if (!app.editMode) {
-    form.querySelectorAll("input").forEach((control) => { control.disabled = true; });
+  form.append(node("p", "full", "尺寸按自然放置时的外接长、宽、高填写；圆盘长宽均填直径。未知可留空。"));
+  for (const [name, label] of OBJECT_MEASUREMENTS) {
+    const control = input("number", name, draft[name] || "", "未填写");
+    control.min = "0";
+    control.step = "any";
+    form.append(field(label, control));
   }
-  form.addEventListener("input", () => {
+  const methodControl = node("select");
+  methodControl.name = "modeling_method";
+  methodControl.add(new Option("未填写", ""));
+  for (const [code, label] of Object.entries(MODELING_METHODS)) {
+    methodControl.add(new Option(code + " · " + label, code));
+  }
+  methodControl.value = draft.modeling_method || "";
+  form.append(field("建模方法", methodControl, true));
+  if (!app.editMode) {
+    form.querySelectorAll("input, select").forEach((control) => { control.disabled = true; });
+  }
+  const updateDraft = () => {
     for (const name of [
       "object_id",
       "object_name",
@@ -751,11 +794,15 @@ function renderObjectEditor() {
       "scan_status",
       "color",
       "photo_dir",
+      ...OBJECT_MEASUREMENTS.map(([name]) => name),
+      "modeling_method",
     ]) {
       draft[name] = form.elements[name].value.trim();
     }
     editor.shell.querySelector("h1").textContent = draft.object_id || "新物体";
-  });
+  };
+  form.addEventListener("input", updateDraft);
+  form.addEventListener("change", updateDraft);
   editor.body.append(form, buildPhotoGallery(draft, true));
   host.replaceChildren(editor.shell);
 }
@@ -813,6 +860,11 @@ function openObjectDialog(objectId) {
     node("span", "", "扫描状态 · " + (object.scan_status || "未填写")),
     node("span", "", "颜色 · " + (object.color || "未标注")),
     node("span", "", "照片目录 · " + (object.photo_dir || "未绑定")),
+    node("span", "", "尺寸（长 × 宽 × 高）· " + objectMeasurementsText(object)),
+    node("span", "", "质量 · " + (object.mass_g ? object.mass_g + " g" : "未填写")),
+    node("span", "", "建模方法 · " + (object.modeling_method
+      ? object.modeling_method + " · " + (MODELING_METHODS[object.modeling_method] || "未知方法")
+      : "未填写")),
   );
   body.replaceChildren(header, meta, buildPhotoGallery(object));
   $("object-dialog").showModal();
@@ -961,6 +1013,11 @@ function newEntity(kind) {
       scan_status: "",
       color: "",
       photo_dir: "",
+      length_cm: "",
+      width_cm: "",
+      height_cm: "",
+      mass_g: "",
+      modeling_method: "",
       photos: [],
     };
     app.selected.objects = "";
@@ -986,6 +1043,17 @@ function validateDraft(kind) {
   } else if (!draft.object_id || (!draft.object_name && !draft.object_name_zh)) {
     throw new Error("Object ID 和至少一种名称不能为空");
   }
+  if (kind === "objects") {
+    for (const [name, label] of OBJECT_MEASUREMENTS) {
+      const value = String(draft[name] ?? "").trim();
+      if (value && (!Number.isFinite(Number(value)) || Number(value) <= 0)) {
+        throw new Error(label + "必须是大于 0 的有限数值，或留空");
+      }
+    }
+    if (draft.modeling_method && !Object.hasOwn(MODELING_METHODS, draft.modeling_method)) {
+      throw new Error("建模方法必须为 A、B、C、D，或留空");
+    }
+  }
   return draft;
 }
 
@@ -994,6 +1062,7 @@ export {
   configureEntityUi,
   jumpScene,
   newEntity,
+  objectMatchesFilters,
   openObjectDialog,
   renderCurrentEditor,
   renderGridCells,

@@ -426,7 +426,9 @@ class PlanCatalog:
             state = self._store(batch).state()
         robot_type = str(state["info"].get("robot_type", ""))
         cameras = []
-        if robot_type:
+        # Plans may describe robots that this client does not implement. Camera
+        # metadata is optional; such plans must still be browsable and editable.
+        if robot_type and robot_type in ROBOT_REGISTRY:
             robot = ROBOT_REGISTRY.build(robot_type)
             cameras = [
                 {

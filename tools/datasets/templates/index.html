@@ -101,6 +101,14 @@
               <option value="missing">未拍照片</option>
               <option value="ready">已有照片</option>
             </select>
+            <select id="object-modeling-filter" aria-label="按建模方法筛选">
+              <option value="">全部建模方法</option>
+              <option value="missing">未填写建模方法</option>
+              <option value="A">A · image2assets</option>
+              <option value="B">B · agent-primitive</option>
+              <option value="C">C · agent-cad</option>
+              <option value="D">D · agent-blender</option>
+            </select>
             <span id="object-filter-count">0 / 0</span>
             <button class="icon-btn dark" data-action="new-object" data-edit-only title="新增物体" aria-label="新增物体" hidden>+</button>
           </div>
@@ -140,9 +148,8 @@
   </main>
 
   <input id="import-file" type="file" accept=".zip,application/zip" hidden>
-  <input id="photo-file" type="file" accept="image/jpeg,image/png,image/webp" multiple hidden>
 
-  <dialog id="object-dialog"><div class="object-dialog-card"><button class="dialog-close" data-close-object aria-label="关闭">&times;</button><div id="object-dialog-body"></div></div></dialog>
+  <dialog id="object-dialog"><div class="object-dialog-card"><button class="dialog-close" data-close-object aria-label="关闭">&times;</button><div id="object-dialog-body"></div><input id="photo-file" type="file" accept="image/jpeg,image/png,image/webp" multiple hidden></div></dialog>
   <dialog id="confirm-dialog">
     <form method="dialog" class="dialog-card">
       <span class="dialog-icon">!</span><h2 id="confirm-title">确认操作</h2><p id="confirm-message"></p>

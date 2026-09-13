@@ -746,9 +746,16 @@ body.read-only .selected-record.scene-record { grid-template-columns: minmax(100
 }
 
 .object-catalog-head h1 { margin-top: 3px; font-size: 21px; line-height: 1.1; }
-.object-toolbar { min-width: 0; display: flex; align-items: center; gap: 8px; }
-.object-toolbar .search-field { width: min(360px, 32vw); margin: 0; }
-.object-toolbar select { height: 40px; }
+.object-toolbar {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.object-toolbar .search-field { width: min(360px, 32vw); margin: 0; flex: 1 1 240px; }
+.object-toolbar select { width: auto; height: 40px; }
 .object-toolbar > span { color: var(--ink-faint); font: 8px/1 var(--mono); white-space: nowrap; }
 
 .object-grid {
@@ -856,8 +863,9 @@ body.read-only .selected-record.scene-record { grid-template-columns: minmax(100
   .transfer-actions { grid-template-columns: 1fr; }
   .object-catalog-view.active { height: calc(100vh - 160px); min-height: 560px; }
   .object-catalog-head { align-items: stretch; flex-direction: column; }
-  .object-toolbar { align-items: stretch; flex-wrap: wrap; }
+  .object-toolbar { align-items: stretch; justify-content: flex-start; }
   .object-toolbar .search-field { width: 100%; flex: 1 1 100%; }
+  .object-toolbar select { flex: 1 1 180px; }
   .object-grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); }
 }
 
