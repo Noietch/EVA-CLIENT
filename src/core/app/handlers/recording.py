@@ -207,7 +207,8 @@ def load_episode_history(
         view = cached.views.get(view_key)
         if view is None:
             filtered_rows = [
-                row for row in cached.rows
+                row
+                for row in cached.rows
                 if (
                     str(row["task_id"]) == task_id
                     if task_id and row.get("task_id")

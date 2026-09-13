@@ -40,5 +40,3 @@ def test_camera_preview_clears_on_disconnect_and_recovers_on_restart():
     finally:
         preview.close()
         publisher.close(linger=0)
-
-

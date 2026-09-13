@@ -8,8 +8,11 @@ directories and are joined to plans through stable slot IDs.
 from __future__ import annotations
 
 import argparse
+import csv
 import gzip
+import io
 import re
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -30,14 +33,19 @@ CONSOLE_STATIC_ROOT = PROJECT_ROOT / "src/core/app/console/static"
 class DatasetService:
     """Own the dataset catalog and its HTTP endpoints."""
 
-    def __init__(self, plans_root, assets_root, collection_root, read_only):
+    def __init__(self, plans_root, assets_root, collection_root, read_only, locale="en"):
         self.app = app = Flask(__name__)
         app.config["MAX_CONTENT_LENGTH"] = 64 * 1024 * 1024
+        # The editor is frequently updated during collection; avoid browsers
+        # retaining stale module code after a service restart.
+        app.config["SEND_FILE_MAX_AGE_DEFAULT"] = 0
         app.config["DATASET_READ_ONLY"] = read_only
+        app.config["DATASET_LOCALE"] = locale
         self.catalog = PlanCatalog(plans_root, assets_root, collection_root)
 
         # Register the catalog and review endpoints
         app.after_request(self.compress_json)
+        app.after_request(self.disable_static_cache)
         app.before_request(self.protect_writes)
         app.get("/")(self.index)
         app.get("/assets/eva-logo.svg")(self.logo)
@@ -55,6 +63,7 @@ class DatasetService:
         app.get("/api/batches/<batch>/validate")(self.validate)
         app.post("/api/batches/<batch>/import")(self.import_plan)
         app.get("/api/batches/<batch>/export")(self.export_plan)
+        app.get("/api/batches/<batch>/qc/export")(self.export_qc)
         app.post("/api/objects")(self.create_object)
         app.put("/api/objects/<object_id>")(self.update_object)
         app.delete("/api/objects/<object_id>")(self.delete_object)
@@ -97,6 +106,13 @@ class DatasetService:
         response.vary.add("Accept-Encoding")
         return response
 
+    @staticmethod
+    def disable_static_cache(response: Any) -> Any:
+        """Ensure a restarted editor immediately serves changed UI modules."""
+        if request.path.startswith("/static/"):
+            response.headers["Cache-Control"] = "no-store"
+        return response
+
     def protect_writes(self) -> None:
         if request.method not in {"POST", "PUT", "DELETE"}:
             return
@@ -108,7 +124,7 @@ class DatasetService:
             raise Forbidden("Enable edit mode before changing dataset files")
 
     def index(self) -> str:
-        return render_template("index.html")
+        return render_template("index.html", locale=self.app.config["DATASET_LOCALE"])
 
     def logo(self) -> Any:
         return send_file(PROJECT_ROOT / "assets/eva-logo.svg")
@@ -159,6 +175,47 @@ class DatasetService:
             download_name=f"{name}.zip",
         )
 
+    def export_qc(self, batch: str) -> Any:
+        rows = self.catalog.qc_rows(batch)
+        stream = io.StringIO(newline="")
+        fields = [
+            "batch_id",
+            "robot_type",
+            "task_id",
+            "scene_id",
+            "slot_id",
+            "round_index",
+            "round_total",
+            "status",
+            "episode_index",
+            "prompt_en",
+            "prompt_zh",
+            "qc_reason",
+            "qc_note",
+        ]
+        writer = csv.DictWriter(stream, fieldnames=fields, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+        csv_content = stream.getvalue().encode("utf-8-sig")
+        name = re.sub(r"[^A-Za-z0-9._-]+", "-", batch)
+        content = io.BytesIO()
+        supplement_root = f"{name}-supplement"
+        with zipfile.ZipFile(content, "w", zipfile.ZIP_DEFLATED) as bundle:
+            bundle.writestr(f"{name}-qc-missing.csv", csv_content)
+            plan_stream = self.catalog.export_qc_plan(batch)
+            with zipfile.ZipFile(plan_stream) as plan_archive:
+                for member in plan_archive.infolist():
+                    filename = Path(member.filename).name
+                    if filename in {"info.yaml", "layout.yaml", "scene.csv", "tasks.csv"}:
+                        bundle.writestr(f"{supplement_root}/{filename}", plan_archive.read(member))
+        content.seek(0)
+        return send_file(
+            content,
+            mimetype="application/zip",
+            as_attachment=True,
+            download_name=f"{name}-qc-bundle.zip",
+        )
+
     def create_object(self) -> Any:
         self.catalog.upsert_asset(None, request.get_json())
         return jsonify(self.catalog.state(request.args.get("batch", "")))
@@ -176,7 +233,7 @@ class DatasetService:
             (uploaded.filename or "photo", uploaded.read())
             for uploaded in request.files.getlist("photos")
         ]
-        return jsonify(self.catalog.assets.save_photos(object_id, uploads))
+        return jsonify(self.catalog.upload_photos(object_id, uploads))
 
     def object_photo(self, object_id: str, filename: str) -> Any:
         return send_file(
@@ -206,6 +263,7 @@ class DatasetService:
                 episode_index,
                 str(payload.get("verdict", "")),
                 str(payload.get("note", "")),
+                str(payload.get("reason", "")),
             )
         )
 
@@ -261,9 +319,12 @@ def create_app(
     assets_root: str | Path = DEFAULT_ASSETS_ROOT,
     collection_root: str | Path = DEFAULT_COLLECTION_ROOT,
     read_only: bool = False,
+    locale: str = "en",
 ) -> Flask:
     """Build the dataset management application."""
-    return DatasetService(plans_root, assets_root, collection_root, read_only).app
+    if locale not in {"zh", "en"}:
+        raise ValueError("locale must be 'zh' or 'en'")
+    return DatasetService(plans_root, assets_root, collection_root, read_only, locale).app
 
 
 def main() -> None:
@@ -272,14 +333,23 @@ def main() -> None:
     parser.add_argument("--assets-root", default=str(DEFAULT_ASSETS_ROOT))
     parser.add_argument("--collection-root", default=str(DEFAULT_COLLECTION_ROOT))
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8418)
+    parser.add_argument("--port", type=int, default=8416)
     parser.add_argument("--read-only", action="store_true")
+    parser.add_argument(
+        "--language",
+        "--locale",
+        dest="locale",
+        choices=("zh", "en"),
+        default="en",
+        help="Interface language (default: en)",
+    )
     args = parser.parse_args()
     create_app(
         args.plans_root,
         args.assets_root,
         args.collection_root,
         read_only=args.read_only,
+        locale=args.locale,
     ).run(host=args.host, port=args.port)
 
 

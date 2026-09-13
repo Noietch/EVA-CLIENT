@@ -4,47 +4,25 @@
   background: var(--surface-2);
 }
 
-.review-context {
-  min-width: 0;
-  display: grid;
-  grid-template-columns: minmax(260px, 1fr) minmax(180px, auto) auto;
-  align-items: center;
-  gap: 16px;
-  margin-bottom: 12px;
-  padding: 12px 14px;
-  border: 1px solid var(--rule);
-  border-radius: var(--radius);
-  background: var(--paper);
-}
-
-.review-task-copy { min-width: 0; display: grid; gap: 3px; }
-.review-task-copy strong, .review-task-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.review-task-copy small { color: var(--ink-dim); }
-.object-chip-row { min-width: 0; display: flex; gap: 5px; flex-wrap: wrap; }
-
-.object-chip {
-  max-width: 170px;
-  padding: 5px 8px;
-  overflow: hidden;
-  border: 1px solid var(--rule-strong);
-  border-radius: 999px;
-  background: var(--surface);
-  font: 700 9px/1 var(--mono);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.slot-status { min-width: 100px; display: grid; gap: 4px; text-align: right; }
-.slot-status span { color: var(--ink-faint); font: 8px/1 var(--mono); }
-.slot-status b { font: 700 10px/1 var(--mono); }
+.robot-variant-select { max-width: 220px; min-width: 150px; }
 
 .qc-stage {
   min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  gap: 16px;
 }
+
+.qc-main-column { min-width: 0; display: flex; flex-direction: column; gap: 12px; }
+.qc-side-panel { min-width: 0; position: sticky; top: 14px; display: grid; gap: 10px; }
+.qc-side-head { display: grid; gap: 5px; padding: 3px 2px 8px; }
+.qc-side-head h2 { font-size: 19px; line-height: 1.05; }
+.qc-side-head p { color: var(--ink-dim); font-size: 11px; line-height: 1.4; }
+.review-head-side { min-width: 0; display: grid; gap: 10px; justify-items: end; }
+.qc-header-title { min-width: 0; display: grid; gap: 4px; text-align: right; }
+.qc-header-title strong { font-size: 13px; line-height: 1; }
+.qc-header-title small { max-width: 280px; color: var(--ink-dim); font-size: 10px; line-height: 1.3; overflow-wrap: anywhere; }
 
 .stage-top {
   min-width: 0;
@@ -123,7 +101,6 @@
 .chart-dims { min-width: 0; flex: 1 1 auto; display: flex; gap: 4px; overflow-x: auto; }
 .chart-dims .dim { flex: 0 0 auto; max-width: 100px; padding: 3px 7px; overflow: hidden; border: 1px solid var(--rule); border-left-width: 7px; border-radius: 999px; background: var(--surface); font: 8px/1 var(--mono); text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
 .chart-dims .dim.off { opacity: .3; text-decoration: line-through; }
-.chart-allbtn { flex: 0 0 auto; padding: 3px 7px; border: 1px solid var(--rule); border-radius: 999px; background: var(--paper); font: 8px/1 var(--mono); cursor: pointer; }
 .chart-body { flex: 1 1 auto; min-height: 0; position: relative; }
 .chart-body canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
 
@@ -153,7 +130,7 @@
 
 .qc-controls {
   display: grid;
-  grid-template-columns: auto minmax(160px, 1fr) auto auto;
+  grid-template-columns: auto minmax(170px, .85fr) minmax(160px, 1fr) auto auto auto;
   align-items: center;
   gap: 8px;
   padding: 10px 12px;
@@ -163,17 +140,33 @@
 }
 
 .qc-controls input { height: 36px; }
+.qc-controls select { min-width: 0; height: 36px; }
 .qc-controls.read-only { grid-template-columns: auto minmax(0, 1fr); }
 .qc-summary { color: var(--ink); font: 700 9px/1 var(--mono); }
 .qc-note-readonly { min-width: 0; overflow: hidden; color: var(--ink-dim); text-overflow: ellipsis; white-space: nowrap; }
 .qc-pass { border-color: rgba(47, 158, 68, .5); color: var(--ok); }
 .qc-pass.selected { background: var(--ok); color: var(--paper); }
 .button.danger.selected { background: var(--danger); color: var(--paper); }
-.pending-copy { grid-column: 1 / -1; color: var(--ink-dim); }
+.qc-export-inline { white-space: nowrap; }
+.qc-side-panel .qc-controls,
+.qc-side-panel .qc-controls.read-only { grid-template-columns: 1fr; align-items: stretch; }
+.qc-side-panel .qc-controls .eyebrow,
+.qc-side-panel .qc-controls input,
+.qc-side-panel .qc-controls select,
+.qc-side-panel .qc-controls button,
+.qc-side-panel .qc-controls a { grid-column: 1; width: 100%; }
+.qc-side-panel .qc-controls .button { display: flex; justify-content: center; }
+.qc-side-panel .qc-controls.read-only .qc-export-inline { margin-top: 4px; }
 
 @media (max-width: 1050px) {
-  .review-context { grid-template-columns: minmax(0, 1fr) auto; }
-  .object-chip-row { grid-column: 1 / -1; grid-row: 2; }
+  .qc-stage { grid-template-columns: 1fr; }
+  .qc-side-panel { position: static; }
+  .qc-side-panel .qc-controls { grid-template-columns: auto minmax(170px, .85fr) minmax(160px, 1fr) auto auto auto; align-items: center; }
+  .qc-side-panel .qc-controls .eyebrow,
+  .qc-side-panel .qc-controls input,
+  .qc-side-panel .qc-controls select,
+  .qc-side-panel .qc-controls button,
+  .qc-side-panel .qc-controls a { width: auto; }
   .stage-top { height: auto; min-height: 0; flex-direction: column; }
   .stage-visual-stack { width: 100%; min-width: 0; flex-basis: auto; display: grid; grid-template-columns: minmax(260px, .7fr) minmax(320px, 1.3fr); }
   .col-canvas { min-height: 330px; }
@@ -183,9 +176,8 @@
 @media (max-width: 760px) {
   .task-sidebar { max-height: 460px; }
   .review-head { flex-direction: column; }
-  .review-context { grid-template-columns: minmax(0, 1fr); }
-  .slot-status { text-align: left; }
-  .object-chip-row { grid-column: auto; grid-row: auto; }
+  .review-head-side { width: 100%; justify-items: start; }
+  .qc-header-title { text-align: left; }
   .stage-visual-stack { display: flex; }
   .col-canvas { min-height: min(88vw, 390px); }
   .cam-strip { min-height: 300px; flex-direction: column; }
@@ -196,6 +188,7 @@
   .scrub-state { display: none; }
   .qc-controls { grid-template-columns: 1fr 1fr; }
   .qc-controls .eyebrow, .qc-controls input { grid-column: 1 / -1; }
+  .qc-export-inline { grid-column: 1 / -1; text-align: center; }
   .selected-record { grid-template-columns: 88px minmax(0, 1fr) auto; }
   .selected-record.scene-record { grid-template-columns: minmax(80px, 1fr) 70px auto auto; }
 }

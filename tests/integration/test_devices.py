@@ -62,9 +62,7 @@ def test_device_catalog_composes_and_restores_each_robot(tmp_path, monkeypatch):
         restored = DeviceWorkspace(workspace.path)
         assert restored.saved["selected"] == selected
         assert restored.saved["overrides"]["robot"][name] == {}
-        config = load_config(
-            REPOSITORY_ROOT / "configs/00_base/defaults.py", workspace=restored
-        )
+        config = load_config(REPOSITORY_ROOT / "configs/00_base/defaults.py", workspace=restored)
         assert config.robot.type == name
         robot_defaults = workspace.catalog["robot"][name]["config"]
         assert set(robot_defaults["collection"]["schema"]["cameras"]) == {
@@ -195,9 +193,7 @@ def test_disabled_cameras_use_camera_ids_independently_of_dataset_column_names(t
 def test_device_http_camera_combination_restart_request(tmp_path, monkeypatch, device_daemon):
     monkeypatch.setenv("EVA_WORKSTATION_PATH", str(device_daemon))
     with serve_console(console_config()) as console:
-        response = console.get(
-            "/api/devices?robot=arx_x5&teleop=vr_webxr&camera=x5_d405_night"
-        )
+        response = console.get("/api/devices?robot=arx_x5&teleop=vr_webxr&camera=x5_d405_night")
         assert response.status == 200
         payload = response.json
         assert payload["selected"]["camera"] == "x5_d405_night"
@@ -225,11 +221,7 @@ def test_device_http_camera_combination_restart_request(tmp_path, monkeypatch, d
 def test_saved_x5_camera_selection_migrates_to_day_combination(tmp_path):
     path = tmp_path / "workstation.yaml"
     path.write_text(
-        "selected:\n"
-        "  robot: arx_x5\n"
-        "  teleop: vr_webxr\n"
-        "  camera: x5_d405\n"
-        "overrides: {}\n"
+        "selected:\n  robot: arx_x5\n  teleop: vr_webxr\n  camera: x5_d405\noverrides: {}\n"
     )
 
     assert DeviceWorkspace(path).saved["selected"]["camera"] == "x5_d405_day"

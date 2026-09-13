@@ -225,8 +225,11 @@ def test_quality_export_limits_all_formats_to_selected_episodes(tmp_path, datase
     _source_dataset(source)
     progress = []
     summary = export_dataset_by_quality(
-        source, tmp_path / "accepted", tmp_path / "rejected",
-        dataset_format=dataset_format, source_episode_indices={0},
+        source,
+        tmp_path / "accepted",
+        tmp_path / "rejected",
+        dataset_format=dataset_format,
+        source_episode_indices={0},
         progress_callback=progress.append,
     )
     assert summary.source_episodes == summary.accepted_episodes == 1

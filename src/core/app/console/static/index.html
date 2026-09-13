@@ -1,10 +1,10 @@
 <!doctype html>
-<html lang="zh">
+<html lang="__EVA_LANGUAGE__" data-eva-language="__EVA_LANGUAGE__">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>EVA · CLIENT</title>
-<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='30 35 190 190'%3E%3Cpath d='M192.09 91 A74 74 0 1 1 85.56 67.38' fill='none' stroke='%23686870' stroke-width='26'/%3E%3Cpath d='M85.56 67.38 A74 74 0 0 1 192.09 91' fill='none' stroke='%23FB8C2E' stroke-width='26'/%3E%3C/svg%3E" />
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='30 35 190 190'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='70' y1='58' x2='196' y2='140' gradientUnits='userSpaceOnUse'%3E%3Cstop stop-color='%23FFC98A'/%3E%3Cstop offset='.45' stop-color='%23FB8C2E'/%3E%3Cstop offset='1' stop-color='%23C2410C'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cpath d='M192.09 91 A74 74 0 1 1 85.56 67.38' fill='none' stroke='%23AAAAAF' stroke-width='26'/%3E%3Cpath d='M85.56 67.38 A74 74 0 0 1 192.09 91' fill='none' stroke='url(%23g)' stroke-width='26'/%3E%3C/svg%3E" />
 <link rel="stylesheet" href="/css/console.css" />
 </head>
 <body>
@@ -303,8 +303,8 @@
             </div>
             <div class="collect-progress"><i id="collect-progress-fill"></i></div>
             <div class="kv"><span class="k">eta</span><span class="v tnum" id="collect-eta">—</span></div>
-            <div class="collect-tiles" id="collect-queue-tiles" aria-label="采集数据：左摇杆四向移动、单击下压选择采集位置、双击回放、拨动返回实时，左手 Y 键切换通过或不合格"></div>
-            <div class="collect-tiles-hint" id="collect-vr-review-hint" hidden>左摇杆：四向移动、边缘自动翻页 · 单击下压：选择采集位置 · 双击下压：回放 · 回放时拨动：返回实时 · Y：PASS ↔ FAIL</div>
+            <div class="collect-tiles" id="collect-queue-tiles" aria-label="采集数据：左摇杆四向移动、单击下压选择采集位置、双击回放、拨动返回实时，左手 Y 键切换通过或不合格" data-i18n-aria-label="collect.vrReviewAria"></div>
+            <div class="collect-tiles-hint" id="collect-vr-review-hint" data-i18n="collect.vrReviewHint" hidden>左摇杆：四向移动、边缘自动翻页 · 单击下压：选择采集位置 · 双击下压：回放 · 回放时拨动：返回实时 · Y：PASS ↔ FAIL</div>
             <div class="collect-slot-page" id="collect-slot-page" hidden>
               <button class="btn collect-page-btn" id="b-collect-slot-prev" title="Previous 50 slots" aria-label="Previous 50 slots">&#8592;</button>
               <span id="collect-slot-page-label">1 / 1</span>
@@ -858,6 +858,7 @@
 } }
 </script>
 
+<script type="module" src="/js/i18n.js"></script>
 <script type="module" src="/js/scene.js"></script>
 
 

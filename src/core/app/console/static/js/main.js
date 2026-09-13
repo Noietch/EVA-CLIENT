@@ -1,6 +1,7 @@
 // main.js: app entry — wires DOM events, exposes inline handlers, boots polling
 // (main); tab switching + active-tab thumb + per-tab render dispatch (tabs).
 import { $, LIVE, S, apiGet, apiPost, setCommandMetadata } from "./core.js";
+import { initLocale } from "./i18n.js";
 import { closeChartModal, drawLiveCharts, liveDimsAll, onScrubInput, openChartModal, resetLiveSeries } from "./charts.js";
 import { applyTune, applyManualTune, renderConfig, manualConnect, manualDisconnect, manualDispatchToggle, enterManualSim, applyStatus, pauseSetup, replayIsLocalMode, resumeSetup, retrySetup, startRunFromDebug, updateGuide } from "./run.js";
 import { handleCollectionReviewInput, resetCollectionReviewInput, changeCollectionExportFormat, changeCollectionSlotFilter, changeCollectionSlotPage, clearReviewPlayback, collectConfigured, exportCollectionQuality, installCollectKeyboardControls, pollEpisodeHistory, renderCollect, renderCollectControls, renderRolloutSave, returnReviewToLive, reviewActiveInCurrentTab, saveAnnotation, startCollectFromTab, submitEpisodeNote, submitEpisodeQc, submitQc, toggleCollectionSlotAll, uploadCollectionQuality } from "./collect.js";
@@ -56,6 +57,8 @@ function annotateFixedCommands() {
   setCommandMetadata($("rl-critic-list"), "web:rl_select_critic:{slot}", true);
   setCommandMetadata($("scrub-range"), "web:replay_seek:{frame}", true);
 }
+
+initLocale();
 
 // ===== tabs =====
 function moveTabThumb() {

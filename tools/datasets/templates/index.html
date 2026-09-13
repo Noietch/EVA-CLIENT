@@ -1,9 +1,10 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="{{ locale }}" data-locale="{{ locale }}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>EVA Collection Dataset</title>
+  <link rel="icon" type="image/svg+xml" href="/assets/eva-logo.svg">
   <link rel="stylesheet" href="{{ url_for('static', filename='editor.css') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='review.css') }}">
   <script type="importmap">
@@ -12,94 +13,108 @@
 </head>
 <body>
   <header class="topbar">
-    <div class="brand"><img src="/assets/eva-logo.svg" alt="EVA Client"><span>Collection Dataset</span></div>
-    <div class="dataset-path" title="计划文件目录">
+    <div class="brand"><img src="/assets/eva-logo.svg" alt="EVA Client"><span data-i18n="brand.dataset">采集数据</span></div>
+    <div class="dataset-path" title="计划文件目录" data-i18n-title="filters.planDirectory">
       <span class="status-dot" id="dataset-dot"></span>
-      <span id="dataset-path">正在读取计划批次...</span>
+      <span id="dataset-path" data-i18n="path.loading">正在读取计划批次...</span>
     </div>
     <div class="topbar-actions">
-      <label class="edit-mode-toggle" title="开启后才能修改计划、物体和 QC">
+      <label class="edit-mode-toggle" title="开启后才能修改计划、物体和 QC" data-i18n-title="edit.toggleTitle">
         <input id="edit-mode" type="checkbox">
         <span class="toggle-track"></span>
-        <span id="edit-mode-label">只读</span>
+        <span id="edit-mode-label" data-i18n="edit.readonly">只读</span>
       </label>
-      <button class="icon-btn" id="import-trigger" data-edit-only title="导入计划 ZIP" aria-label="导入计划 ZIP" hidden>&#8593;</button>
-      <a class="icon-btn disabled" id="export-trigger" title="导出计划 ZIP" aria-label="导出计划 ZIP">&#8595;</a>
-      <button class="button primary" id="validate-button">检查计划</button>
+      <button class="icon-btn" id="import-trigger" data-edit-only title="导入计划压缩包" data-i18n-title="actions.importPlan" aria-label="导入计划压缩包" data-i18n-aria-label="actions.importPlan" hidden>&#8593;</button>
+      <a class="icon-btn disabled" id="export-trigger" title="导出计划压缩包" data-i18n-title="actions.exportPlan" aria-label="导出计划压缩包" data-i18n-aria-label="actions.exportPlan">&#8595;</a>
+      <button class="button primary" id="validate-button" data-i18n="actions.validate">检查计划</button>
     </div>
   </header>
 
-  <nav class="tabs" aria-label="数据管理">
+  <nav class="tabs" aria-label="数据管理" data-i18n-aria-label="tabs.aria">
     <span class="tab-thumb" id="tab-thumb"></span>
-    <button class="tab active" data-tab="tasks"><span>01</span>Tasks <b id="task-count">0</b></button>
-    <button class="tab" data-tab="scenes"><span>02</span>Scenes <b id="scene-count">0</b></button>
-    <button class="tab" data-tab="objects"><span>03</span>Objects <b id="object-count">0</b></button>
-    <button class="tab" data-tab="dataset"><span>04</span>Dataset <b id="issue-count">0</b></button>
+    <button class="tab active" data-tab="dataset"><span>01</span><span class="tab-label" data-i18n="tabs.dashboard">看板</span> <b id="issue-count">0</b></button>
+    <button class="tab" data-tab="tasks"><span>02</span><span class="tab-label" data-i18n="tabs.qc">质检</span> <b id="task-count">0</b></button>
+    <button class="tab" data-tab="objects"><span>03</span><span class="tab-label" data-i18n="tabs.objects">物体</span> <b id="object-count">0</b></button>
   </nav>
 
   <div class="notice error" id="global-error" role="alert" hidden>
     <span id="global-error-text"></span>
-    <button class="text-button" id="retry-button">重试</button>
+    <button class="text-button" id="retry-button" data-i18n="actions.retry">重试</button>
   </div>
 
   <main>
     <section class="loading-state" id="loading-state" aria-live="polite">
-      <span class="spinner"></span><strong>正在载入计划与采集数据</strong>
+      <span class="spinner"></span><strong data-i18n="loading.state">正在载入计划与采集数据</strong>
     </section>
 
     <div id="app" hidden>
-      <section class="view active" id="view-tasks" data-view="tasks">
+      <section class="view" id="view-tasks" data-view="tasks">
         <aside class="list-panel task-sidebar">
           <div class="list-head">
-            <div><span class="eyebrow">Task Collection</span><h1>任务</h1></div>
+            <div><span class="eyebrow" data-i18n="qc.eyebrow">质量检查</span><h1 data-i18n="qc.title">质检审核</h1></div>
             <button class="icon-btn dark" data-action="new-task" data-edit-only title="新增任务" aria-label="新增任务" hidden>+</button>
           </div>
-          <label class="batch-field"><span>机器人</span><select id="robot-select"><option value="">全部机器人</option></select></label>
-          <label class="batch-field"><span>计划批次</span><select id="batch-select"><option value="">全部批次</option></select></label>
-          <div class="collection-summary" aria-live="polite">
-            <div class="collection-total">
-              <strong><span id="collected-count">0</span> / <span id="slot-total-count">0</span></strong>
-              <small>完成</small>
+          <section class="collection-control-panel" aria-label="Dataset selection" data-i18n-aria-label="filters.batch">
+            <div class="collection-panel-head"><span class="step-badge">1</span><span data-i18n="filters.batch">计划批次</span></div>
+            <div class="collection-panel-card">
+              <label class="batch-field"><span data-i18n="filters.robot">机器人</span><select id="robot-select"><option value="" data-i18n="filters.allRobots">全部机器人</option></select></label>
+              <label class="batch-field"><span data-i18n="filters.batch">计划批次</span><select id="batch-select"><option value="" data-i18n="filters.chooseBatch">选择批次</option></select></label>
             </div>
-            <div class="collection-legend">
-              <span class="collected">采集完成</span>
-              <span class="pending">未采集 <b id="pending-count">0</b></span>
+          </section>
+          <section class="collection-qc-panel" id="collection-qc-panel" aria-label="Quality check slot overview" data-i18n-aria-label="qc.slotOverview">
+            <div class="qc-loading-indicator" id="qc-loading-indicator" aria-live="polite" hidden>
+              <div class="qc-loading-card"><span class="qc-loading-spinner" aria-hidden="true"></span><strong data-i18n="qc.loadingState">正在加载质检数据</strong><small data-i18n="qc.loadingHint">正在读取批次、槽位和质检状态…</small></div>
             </div>
-          </div>
-          <label class="search-field"><span aria-hidden="true">&#8981;</span><input id="task-search" type="search" placeholder="搜索任务、动作或提示词"></label>
-          <div class="filter-row">
-            <select id="task-action-filter" aria-label="按动作筛选"><option value="">全部动作</option></select>
-            <select id="task-category-filter" aria-label="按分类筛选"><option value="">全部分类</option></select>
-          </div>
-          <label class="batch-field"><span>分组方式</span><select id="task-group-by"><option value="task">按任务</option><option value="scene">按场景</option></select></label>
-          <div class="entity-list task-list" id="task-list"></div>
+            <div class="collection-qc-head">
+              <div class="collection-panel-head"><span class="step-badge">2</span><span data-i18n="qc.slotOverview">质检槽位概览</span></div>
+              <div class="collection-qc-total"><strong><span id="collected-count">0</span> / <span id="slot-total-count">0</span></strong><span data-i18n="qc.collected">已采集</span></div>
+            </div>
+            <div class="collection-qc-filters">
+              <label class="batch-field"><span data-i18n="filters.scene">场景</span><select id="qc-scene-select"><option value="" data-i18n="filters.allScenes">全部场景</option></select></label>
+              <label class="batch-field"><span data-i18n="filters.task">任务</span><select id="qc-task-select"><option value="" data-i18n="filters.allTasks">全部任务</option></select></label>
+            </div>
+            <div class="collection-qc-counts" aria-live="polite">
+              <div class="complete"><b id="qc-complete-count">0</b><span data-i18n="status.passed">已质检通过</span></div>
+              <div class="unreviewed"><b id="qc-unreviewed-count">0</b><span data-i18n="status.unreviewed">未质检</span></div>
+              <div class="repair"><b id="qc-repair-count">0</b><span data-i18n="status.failed">质检未通过</span></div>
+              <div class="pending"><b id="qc-pending-slot-count">0</b><span data-i18n="status.pending">待采集</span></div>
+            </div>
+            <div class="collection-qc-plan"><div><span data-i18n="qc.fixedPlan">固定计划 · 质检状态</span><strong id="qc-plan-progress">0 / 0</strong></div><b id="qc-remaining" data-i18n="qc.remaining">待处理</b></div>
+            <div class="collection-qc-progress"><span id="qc-progress-fill"></span></div>
+            <div class="collection-qc-eta"><span data-i18n="qc.eta">预计完成</span><b id="qc-eta">—</b></div>
+            <div class="collection-slot-grid" id="task-list"></div>
+            <div class="collection-qc-nav"><button class="icon-btn" id="qc-prev-slot" type="button" aria-label="上一个槽位" data-i18n-aria-label="qc.previousSlot">←</button><strong id="qc-position">— / —</strong><button class="icon-btn" id="qc-next-slot" type="button" aria-label="下一个槽位" data-i18n-aria-label="qc.nextSlot">→</button></div>
+          </section>
+          <section class="collection-qc-operation" aria-label="Quality check operation" data-i18n-aria-label="qc.operation">
+            <div class="collection-panel-head"><span class="step-badge">3</span><span data-i18n="qc.operation">质检操作</span></div>
+            <div class="collection-panel-card">
+              <div id="qc-left-controls" class="collection-qc-controls"></div>
+              <a class="button qc-export-left disabled" id="qc-export" href="#" aria-disabled="true" data-i18n="actions.exportQc">导出补采清单</a>
+            </div>
+          </section>
         </aside>
         <article class="editor-panel task-review-panel" id="task-editor">
-          <div class="empty-state"><strong>选择任务并展开 episode slot</strong><span>有数据和无数据的 slot 都会保留</span></div>
+          <div class="empty-state"><strong data-i18n="qc.chooseSlotTitle">选择槽位开始质检</strong></div>
         </article>
-      </section>
-
-      <section class="view" id="view-scenes" data-view="scenes">
-        <aside class="list-panel">
-          <div class="list-head">
-            <div><span class="eyebrow">Scene Library</span><h1>场景</h1></div>
-            <button class="icon-btn dark" data-action="new-scene" data-edit-only title="新增场景" aria-label="新增场景" hidden>+</button>
-          </div>
-          <label class="search-field"><span aria-hidden="true">&#8981;</span><input id="scene-search" type="search" placeholder="搜索 scene ID"></label>
-          <div class="entity-list" id="scene-list"></div>
-        </aside>
-        <article class="editor-panel" id="scene-editor"><div class="empty-state"><strong>未选择场景</strong></div></article>
       </section>
 
       <section class="view object-catalog-view" id="view-objects" data-view="objects">
         <header class="object-catalog-head">
-          <div><span class="eyebrow">Shared Assets</span><h1>公用物体表</h1></div>
+          <div><span class="eyebrow" data-i18n="objects.eyebrow">共享资产</span><h1 data-i18n="objects.title">公用物体表</h1></div>
           <div class="object-toolbar">
-            <label class="search-field"><span aria-hidden="true">&#8981;</span><input id="object-search" type="search" placeholder="搜索 ID 或名称"></label>
+            <label class="search-field"><span aria-hidden="true">&#8981;</span><input id="object-search" type="search" placeholder="搜索编号或名称" data-i18n-placeholder="objects.search"></label>
             <select id="object-photo-filter" aria-label="按照片状态筛选">
-              <option value="">全部物体</option>
-              <option value="missing">未拍照片</option>
-              <option value="ready">已有照片</option>
+              <option value="" data-i18n="objects.all">全部物体</option>
+              <option value="missing" data-i18n="objects.missingPhotos">未拍照片</option>
+              <option value="ready" data-i18n="objects.readyPhotos">已有照片</option>
+            </select>
+            <select id="object-modeling-filter" aria-label="按建模方法筛选">
+              <option value="">全部建模方法</option>
+              <option value="missing">未填写建模方法</option>
+              <option value="A">A · image2assets</option>
+              <option value="B">B · agent-primitive</option>
+              <option value="C">C · agent-cad</option>
+              <option value="D">D · agent-blender</option>
             </select>
             <span id="object-filter-count">0 / 0</span>
             <button class="icon-btn dark" data-action="new-object" data-edit-only title="新增物体" aria-label="新增物体" hidden>+</button>
@@ -109,40 +124,36 @@
       </section>
 
       <section class="view dataset-view" id="view-dataset" data-view="dataset">
-        <header class="page-head">
-          <div><span class="eyebrow">Plan Control</span><h1>计划与数据</h1></div>
-          <div class="metric-strip">
-            <span><small>Batches</small><b id="metric-batches">0</b></span>
-            <span><small>Tasks</small><b id="metric-tasks">0</b></span>
-            <span><small>Objects</small><b id="metric-objects">0</b></span>
-            <span><small>Collected</small><b id="metric-episodes">0</b></span>
-          </div>
+        <header class="page-head dashboard-page-head">
+          <div><span class="eyebrow" data-i18n="dashboard.eyebrow">原始数据运营</span><h1 data-i18n="dashboard.title">运营看板</h1><p data-i18n="dashboard.subtitle">原始数据产出、采集需求与质检健康度。</p></div>
+          <span class="dashboard-scope" data-i18n="dashboard.allData">全部数据</span>
         </header>
-        <div class="dataset-grid">
-          <section class="surface">
-            <div class="section-head"><div><span class="eyebrow">Metadata</span><h2>当前批次</h2></div></div>
-            <form id="info-form" class="form-grid"></form>
-          </section>
-          <section class="surface issues-surface">
-            <div class="section-head"><div><span class="eyebrow">Validation</span><h2>检查结果</h2></div><button class="button" data-action="validate">重新检查</button></div>
-            <div class="issues" id="issues-list"></div>
-          </section>
-          <section class="surface transfer-surface">
-            <div class="section-head"><div><span class="eyebrow">Transfer</span><h2>计划导入与导出</h2></div></div>
-            <div class="transfer-actions">
-              <button class="transfer-button" data-action="import" data-edit-only hidden><b>&#8593;</b><span><strong>导入 ZIP</strong></span></button>
-              <a class="transfer-button disabled" id="dataset-export"><b>&#8595;</b><span><strong>导出 ZIP</strong></span></a>
-            </div>
-          </section>
+        <div class="dashboard-filterbar"><span class="dashboard-filter-label" data-i18n="dashboard.range">采集范围</span><span class="dashboard-filter-value" data-i18n="dashboard.allPlans">全部计划</span><span class="dashboard-filter-summary" id="dashboard-range-summary" data-i18n="dashboard.calculating">正在统计...</span></div>
+        <section class="dashboard-section dashboard-overview-section">
+          <header class="dashboard-section-head"><span class="dashboard-section-number">01</span><div><span class="eyebrow" data-i18n="dashboard.overviewEyebrow">数据集概览</span><h2 data-i18n="dashboard.overviewTitle">数据集概览</h2><p data-i18n="dashboard.overviewSubtitle">采集产出、任务需求与数据质量。</p></div><span class="dashboard-scope light" data-i18n="dashboard.allData">全部数据</span></header>
+          <div class="dashboard-kpi-grid" id="dashboard-kpis">
+            <article class="dashboard-kpi"><small data-i18n="kpi.target">计划总量</small><b id="dashboard-target">0</b><span data-i18n="kpi.targetNote">计划 slot 数</span></article>
+            <article class="dashboard-kpi"><small data-i18n="kpi.collected">已采集</small><b id="dashboard-collected">0</b><span data-i18n="kpi.collectedNote">已采集片段</span></article>
+            <article class="dashboard-kpi"><small data-i18n="kpi.frames">帧数</small><b id="dashboard-frames">0</b><span data-i18n="kpi.framesNote">轨迹帧</span></article>
+            <article class="dashboard-kpi"><small data-i18n="kpi.duration">平均时长</small><b id="dashboard-duration">0s</b><span data-i18n="kpi.durationNote">每条已采集片段</span></article>
+            <article class="dashboard-kpi accent"><small data-i18n="kpi.efficiency">采集效率</small><b id="dashboard-efficiency">0%</b><span data-i18n="kpi.efficiencyNote">已采集 / 计划总量</span></article>
+            <article class="dashboard-kpi"><small data-i18n="kpi.validRate">通过率</small><b id="dashboard-valid-rate">0%</b><span data-i18n="kpi.validRateNote">通过质检 / 已采集</span></article>
+            <article class="dashboard-kpi passed"><small data-i18n="kpi.passed">质检通过</small><b id="dashboard-passed">0</b><span data-i18n="kpi.passedNote">已通过，不再补采</span></article>
+            <article class="dashboard-kpi pending"><small data-i18n="kpi.toCollect">待补数据</small><b id="dashboard-pending">0</b><span data-i18n="kpi.toCollectNote">待采集或需返修</span></article>
+          </div>
+        </section>
+        <div class="dashboard-lower-grid">
+          <section class="dashboard-panel dashboard-collection-panel"><header class="dashboard-panel-head"><div><span class="eyebrow" data-i18n="dashboard.collectionEyebrow">采集需求</span><h2 data-i18n="dashboard.collectionTitle">按机器人统计</h2></div><span class="dashboard-panel-total" id="dashboard-robot-total">0 / 0</span></header><div class="dashboard-robot-list" id="dashboard-robot-list"></div></section>
+          <section class="dashboard-panel dashboard-health-panel"><header class="dashboard-panel-head"><div><span class="eyebrow" data-i18n="dashboard.healthEyebrow">流程健康度</span><h2 data-i18n="dashboard.healthTitle">质检健康度</h2></div><span class="dashboard-panel-total" id="dashboard-health-rate">0%</span></header><div class="dashboard-health-list" id="dashboard-health-list"></div></section>
         </div>
+        <section class="dashboard-panel dashboard-qc-panel"><header class="dashboard-panel-head"><div><span class="eyebrow" data-i18n="dashboard.qcEyebrow">质量控制</span><h2 data-i18n="dashboard.qcTitle">质检报告</h2><p data-i18n="dashboard.qcSubtitle">只有质检报告可以打开任务数据进行复核。</p></div><span class="dashboard-panel-total" id="dashboard-qc-summary">0</span></header><div class="dashboard-qc-list" id="dashboard-qc-list"></div></section>
       </section>
     </div>
   </main>
 
   <input id="import-file" type="file" accept=".zip,application/zip" hidden>
-  <input id="photo-file" type="file" accept="image/jpeg,image/png,image/webp" multiple hidden>
 
-  <dialog id="object-dialog"><div class="object-dialog-card"><button class="dialog-close" data-close-object aria-label="关闭">&times;</button><div id="object-dialog-body"></div></div></dialog>
+  <dialog id="object-dialog"><div class="object-dialog-card"><button class="dialog-close" data-close-object aria-label="关闭">&times;</button><div id="object-dialog-body"></div><input id="photo-file" type="file" accept="image/jpeg,image/png,image/webp" multiple hidden></div></dialog>
   <dialog id="confirm-dialog">
     <form method="dialog" class="dialog-card">
       <span class="dialog-icon">!</span><h2 id="confirm-title">确认操作</h2><p id="confirm-message"></p>

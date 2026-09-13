@@ -186,13 +186,13 @@ class LeRobotDatasetIO:
                 return int(total)
         return len(list(self.root.glob("data/**/*.parquet")))
 
-    def mark_qc(self, episode: int, verdict: str, note: str = "") -> bool:
+    def mark_qc(self, episode: int, verdict: str, note: str = "", reason: str = "") -> bool:
         """Write a quality-check verdict onto an episode's meta/episodes.jsonl row.
 
-        Merges ``qc_verdict`` ("pass"/"fail") and ``qc_note`` into the matching row in
-        place, leaving the recorded trajectory untouched. An empty ``verdict`` keeps the
-        existing verdict so a note can be saved on its own. Returns False when the dataset
-        has no episodes.jsonl or the episode index is absent.
+        Merges ``qc_verdict`` ("pass"/"fail"), ``qc_note``, and ``qc_reason`` into the
+        matching row in place, leaving the recorded trajectory untouched. An empty
+        ``verdict`` keeps the existing verdict so a note can be saved on its own. Returns
+        False when the dataset has no episodes.jsonl or the episode index is absent.
         """
         path = self.root / "meta" / "episodes.jsonl"
         if not path.exists():
@@ -209,6 +209,7 @@ class LeRobotDatasetIO:
                 if verdict:
                     row["qc_verdict"] = verdict
                 row["qc_note"] = note
+                row["qc_reason"] = reason
                 patched = True
                 break
         if not patched:

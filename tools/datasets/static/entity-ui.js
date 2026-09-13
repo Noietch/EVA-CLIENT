@@ -19,8 +19,38 @@ let emptyList;
 let switchTab;
 let stopPlayback;
 let openSlot;
+let translate;
 
 const $ = (id) => document.getElementById(id);
+const OBJECT_MEASUREMENTS = [
+  ["length_cm", "长（cm）"], ["width_cm", "宽（cm）"],
+  ["height_cm", "高（cm）"], ["mass_g", "质量（g）"],
+];
+const MODELING_METHODS = {
+  A: "image2assets",
+  B: "agent-primitive",
+  C: "agent-cad",
+  D: "agent-blender",
+};
+
+function objectMeasurementsText(object) {
+  const dimensions = [object.length_cm, object.width_cm, object.height_cm];
+  return dimensions.some(Boolean)
+    ? dimensions.map((value) => value || "—").join(" × ") + " cm"
+    : "未填写";
+}
+
+function qcState(slot) {
+  if (slot && slot.qc_state) return slot.qc_state;
+  if (!slot) return "pending";
+  if (slot.state === "repair") return "failed";
+  if (slot.state === "pending") return "pending";
+  return slot.episode && slot.episode.qc_verdict === "pass" ? "passed" : "unreviewed";
+}
+
+function localized(zh, en, fallback = "") {
+  return app.locale === "zh" ? (zh || en || fallback) : (en || zh || fallback);
+}
 
 function configureEntityUi(context) {
   ({
@@ -45,70 +75,106 @@ function configureEntityUi(context) {
     switchTab,
     stopPlayback,
     openSlot,
+    translate,
   } = context);
-}
-
-function renderTaskFilters() {
-  const filters = [
-    [$("task-action-filter"), app.state.tasks.map((task) => task.action)],
-    [$("task-category-filter"), app.state.tasks.map((task) => task.category)],
-  ];
-  for (const [select, values] of filters) {
-    const previous = select.value;
-    const label = select.options[0] ? select.options[0].textContent : "全部";
-    select.replaceChildren(new Option(label, ""));
-    [...new Set(values.filter(Boolean))].sort().forEach((value) => {
-      select.add(new Option(value, value));
-    });
-    select.value = previous;
-  }
 }
 
 function renderTaskList() {
   if (!app.state) return;
-  const query = $("task-search").value.trim().toLowerCase();
-  const action = $("task-action-filter").value;
-  const category = $("task-category-filter").value;
-  const tasks = app.state.tasks.filter((task) => {
-    const text = [
-      task.task_id,
-      task.action,
-      task.category,
-      task.prompt_en,
-      task.prompt_zh,
-      task.batch_id,
-    ].join(" ").toLowerCase();
-    return text.includes(query)
-      && (!action || task.action === action)
-      && (!category || task.category === category);
-  }).sort(compareTaskIds);
   const host = $("task-list");
-  if (!tasks.length) {
-    emptyList(host, query || action || category ? "没有匹配的任务" : "当前批次没有任务");
-    return;
+  const tasks = (app.state.tasks || [])
+    .filter((task) => !app.batch || task.batch_id === app.batch)
+    .sort(compareTaskIds);
+  const entries = tasks.flatMap((task) => (task.slots || []).map((slot) => ({task, slot})));
+  const sceneSelect = $("qc-scene-select");
+  const taskSelect = $("qc-task-select");
+  const sceneIds = [...new Set(entries.map(({slot}) => slot.scene_id).filter(Boolean))].sort();
+  const taskIds = [...new Set(entries.map(({task}) => task.task_id).filter(Boolean))].sort(
+    (left, right) => String(left).localeCompare(String(right), "en", {numeric: true, sensitivity: "base"}),
+  );
+  if (sceneSelect) {
+    const current = app.qcSceneFilter || "";
+    sceneSelect.replaceChildren(new Option(translate("filters.allScenes"), ""), ...sceneIds.map((id) => new Option(id, id)));
+    sceneSelect.value = sceneIds.includes(current) ? current : "";
+    app.qcSceneFilter = sceneSelect.value;
+    sceneSelect.disabled = !entries.length;
   }
-  if ($("task-group-by").value === "task") {
-    host.replaceChildren(...tasks.map((task) => buildTaskAccordion(task)));
-    return;
+  if (taskSelect) {
+    const current = app.qcTaskFilter || "";
+    taskSelect.replaceChildren(new Option(translate("filters.allTasks"), ""), ...taskIds.map((id) => new Option(id, id)));
+    taskSelect.value = taskIds.includes(current) ? current : "";
+    app.qcTaskFilter = taskSelect.value;
+    taskSelect.disabled = !entries.length;
   }
-  const groups = new Map();
-  for (const task of tasks) {
-    for (const sceneId of task.scene_ids) {
-      const key = JSON.stringify([task.batch_id, sceneId]);
-      if (!groups.has(key)) {
-        const group = node("section", "scene-task-group");
-        const slots = node("div", "task-slots");
-        group.append(node("strong", "", sceneId + " · " + task.batch_id), slots);
-        groups.set(key, {group, slots});
-      }
-    }
-    for (const slot of task.slots) {
-      const key = JSON.stringify([task.batch_id, slot.scene_id]);
-      const {slots} = groups.get(key);
-      slots.append(buildSlotTile(task, slot, slots.childElementCount));
-    }
+  const counts = entries.reduce((total, {slot}) => {
+    const state = qcState(slot);
+    total[state] = (total[state] || 0) + 1;
+    return total;
+  }, {passed: 0, failed: 0, unreviewed: 0, pending: 0});
+  const total = entries.length;
+  const passed = counts.passed || 0;
+  const unreviewed = counts.unreviewed || 0;
+  const failed = counts.failed || 0;
+  const pending = counts.pending || 0;
+  // Collection progress counts usable captures; failed captures remain in
+  // the QC repair bucket and are part of the supplement export instead.
+  const collected = passed + unreviewed;
+  const setText = (id, value) => { const element = $(id); if (element) element.textContent = value; };
+  setText("collected-count", collected);
+  setText("slot-total-count", total);
+  setText("pending-count", pending + failed);
+  setText("qc-complete-count", passed);
+  setText("qc-repair-count", failed);
+  setText("qc-unreviewed-count", unreviewed);
+  setText("qc-pending-slot-count", pending);
+  setText("qc-plan-progress", `${collected} / ${total || 0}`);
+  setText("qc-remaining", total ? `${pending + failed} ${translate("qc.remaining")}` : "—");
+  setText("qc-eta", "—");
+  const progress = $("qc-progress-fill");
+  if (progress) progress.style.width = `${total ? Math.min(100, collected / total * 100) : 0}%`;
+  const filtered = entries.filter(({task, slot}) => (
+    (!app.qcSceneFilter || slot.scene_id === app.qcSceneFilter)
+      && (!app.qcTaskFilter || task.task_id === app.qcTaskFilter)
+  ));
+  const pageSize = 50;
+  const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
+  app.qcPage = Math.max(0, Math.min(pageCount - 1, Number(app.qcPage) || 0));
+  const pageStart = app.qcPage * pageSize;
+  const visible = filtered.slice(pageStart, pageStart + pageSize);
+  if (!app.batch) {
+    emptyList(host, translate("qc.chooseBatch"));
+  } else if (!entries.length) {
+    emptyList(host, translate("qc.noSlots"));
+  } else if (!filtered.length) {
+    emptyList(host, translate("qc.noMatches"));
+  } else {
+    host.replaceChildren(...visible.map(({task, slot}, index) => buildSlotTile(task, slot, pageStart + index)));
   }
-  host.replaceChildren(...[...groups.values()].map(({group}) => group));
+  setText("qc-position", filtered.length ? `${app.qcPage + 1} / ${pageCount}` : "— / —");
+  const previous = $("qc-prev-slot");
+  const next = $("qc-next-slot");
+  if (previous) previous.disabled = app.qcPage <= 0;
+  if (next) next.disabled = app.qcPage >= pageCount - 1;
+}
+
+function navigateQcSlot(offset) {
+  if (!app.state || !app.batch) return;
+  const entries = (app.state.tasks || [])
+    .filter((task) => task.batch_id === app.batch)
+    .sort(compareTaskIds)
+    .flatMap((task) => (task.slots || []).map((slot) => ({task, slot})));
+  const filtered = entries.filter(({task, slot}) => (
+    (!app.qcSceneFilter || slot.scene_id === app.qcSceneFilter)
+      && (!app.qcTaskFilter || task.task_id === app.qcTaskFilter)
+  ));
+  const current = filtered.findIndex(({ slot }) => slot.slot_id === app.selectedSlot);
+  const nextIndex = current < 0 ? 0 : current + offset;
+  if (nextIndex >= 0 && nextIndex < filtered.length) {
+    app.qcPage = Math.floor(nextIndex / 50);
+    renderTaskList();
+    const nextEntry = filtered[nextIndex];
+    if (nextEntry) openSlot(nextEntry.task, nextEntry.slot);
+  }
 }
 
 function compareTaskIds(left, right) {
@@ -130,16 +196,16 @@ function buildTaskAccordion(task) {
   const key = recordKey(task, "task_id");
   const total = task.slots.length;
   const counts = task.counts || {};
-  const complete = Number.isFinite(counts.complete)
-    ? counts.complete
-    : task.slots.filter((slot) => slot.state === "complete").length;
-  const repair = Number.isFinite(counts.repair)
-    ? counts.repair
-    : task.slots.filter((slot) => slot.state === "repair").length;
-  const collected = complete + repair;
-  const status = total > 0 && complete === total
+  const passed = Number.isFinite(counts.passed)
+    ? counts.passed
+    : task.slots.filter((slot) => qcState(slot) === "passed").length;
+  const failed = Number.isFinite(counts.failed)
+    ? counts.failed
+    : task.slots.filter((slot) => qcState(slot) === "failed").length;
+  const collected = task.slots.filter((slot) => qcState(slot) !== "pending").length;
+  const status = total > 0 && passed === total
     ? "complete"
-    : repair > 0
+    : failed > 0
       ? "repair"
       : collected > 0
         ? "partial"
@@ -151,14 +217,14 @@ function buildTaskAccordion(task) {
   const copy = node("span", "entity-copy");
   copy.append(
     node("strong", "", task.task_id),
-    node("small", "", task.prompt_zh || task.prompt_en || task.action),
+    node("small", "", localized(task.prompt_zh, task.prompt_en, task.action)),
   );
   const slotTotal = node(
     "span",
     "task-slot-total" + (status === "complete" ? " complete" : ""),
-    complete + "/" + total + "完成",
+    collected + "/" + total,
   );
-  slotTotal.title = "完成 " + complete + " 条，返修 " + repair + " 条，共 " + total + " 条";
+  slotTotal.title = translate("entity.collectedSummary") + " " + collected + " / " + total + " · " + translate("status.passed") + " " + passed + " · " + translate("status.failed") + " " + failed;
   row.append(stateBar, copy, slotTotal, node("span", "task-chevron", "⌄"));
   row.addEventListener("click", () => {
     app.expandedTask = app.expandedTask === key ? "" : key;
@@ -171,7 +237,7 @@ function buildTaskAccordion(task) {
     for (const [index, slot] of task.slots.entries()) {
       slots.append(buildSlotTile(task, slot, index));
     }
-    if (!task.slots.length) emptyList(slots, "该任务尚未配置 episode slot");
+    if (!task.slots.length) emptyList(slots, translate("entity.noEpisodes"));
     wrapper.append(slots);
   }
   return wrapper;
@@ -180,18 +246,20 @@ function buildTaskAccordion(task) {
 function buildSlotTile(task, slot, index) {
   const tile = node(
     "button",
-    "slot-tile " + (slot.episode ? "collected" : "pending")
+    "slot-tile " + qcState(slot)
       + (app.selected.tasks === recordKey(task, "task_id")
         && app.selectedSlot === slot.slot_id ? " active" : ""),
   );
   tile.type = "button";
-  tile.title = slot.slot_id + (slot.episode
-    ? " · 采集完成 · Episode " + slot.episode.episode_index
-    : " · 未采集");
-  tile.append(
-    node("b", "", String(index + 1).padStart(2, "0")),
-    node("small", "", slot.episode ? "完成" : "未采"),
-  );
+  const stateLabels = {
+    pending: translate("status.pending"),
+    unreviewed: translate("status.unreviewed"),
+    passed: translate("status.passed"),
+    failed: translate("status.failed"),
+  };
+  tile.title = slot.slot_id + " · " + stateLabels[qcState(slot)] + (slot.episode ? " · " + translate("qc.episode") + " " + slot.episode.episode_index : "");
+  tile.setAttribute("aria-label", tile.title);
+  tile.append(node("b", "", String(index + 1)));
   tile.addEventListener("click", (event) => {
     event.stopPropagation();
     openSlot(task, slot);
@@ -219,7 +287,7 @@ function renderSceneList() {
   });
   const host = $("scene-list");
   if (!scenes.length) {
-    emptyList(host, query ? "没有匹配的场景" : "当前批次没有场景");
+    emptyList(host, query ? translate("entity.noSceneMatches") : translate("entity.noScenes"));
     return;
   }
   host.replaceChildren(...scenes.map((scene, index) => {
@@ -228,7 +296,7 @@ function renderSceneList() {
       index,
       scene.scene_id,
       scene.placements.map((item) => item.object_id).join(" · "),
-      scene.placements.length + " 组",
+      scene.placements.length + " " + translate("entity.groups"),
       app.selected.scenes === key,
     );
     row.addEventListener("click", () => selectScene(scene));
@@ -236,23 +304,36 @@ function renderSceneList() {
   }));
 }
 
+function objectMatchesFilters(object, query, photoFilter, modelingFilter) {
+  const matchesQuery = [object.object_id, object.object_name, object.object_name_zh]
+    .join(" ").toLowerCase().includes(query);
+  const matchesPhoto = !photoFilter
+    || (photoFilter === "missing" && !object.photos.length)
+    || (photoFilter === "ready" && object.photos.length);
+  const matchesModeling = !modelingFilter
+    || (modelingFilter === "missing" && !object.modeling_method)
+    || object.modeling_method === modelingFilter;
+  return matchesQuery && matchesPhoto && matchesModeling;
+}
+
 function renderObjectList() {
   if (!app.state) return;
   const query = $("object-search").value.trim().toLowerCase();
   const photoFilter = $("object-photo-filter").value;
-  const objects = app.state.objects.filter((object) => {
-    const matchesQuery = [object.object_id, object.object_name, object.object_name_zh]
-      .join(" ").toLowerCase().includes(query);
-    const matchesPhoto = !photoFilter
-      || (photoFilter === "missing" && !object.photos.length)
-      || (photoFilter === "ready" && object.photos.length);
-    return matchesQuery && matchesPhoto;
-  });
+  const modelingFilter = $("object-modeling-filter").value;
+  const objects = app.state.objects.filter(
+    (object) => objectMatchesFilters(object, query, photoFilter, modelingFilter),
+  );
   $("object-filter-count").textContent = objects.length + " / " + app.state.objects.length;
   const host = $("object-list");
   if (!objects.length) {
     if (app.objectThumbObserver) app.objectThumbObserver.disconnect();
-    emptyList(host, query || photoFilter ? "没有匹配的物体" : "还没有物体资产");
+    emptyList(
+      host,
+      query || photoFilter || modelingFilter
+        ? translate("entity.noObjectMatches")
+        : translate("entity.noObjects"),
+    );
     return;
   }
   host.replaceChildren(...objects.map((object) => {
@@ -267,10 +348,9 @@ function renderObjectList() {
     const copy = node("span", "object-card-copy");
     copy.append(
       node("small", "", object.object_id),
-      node("strong", "", object.object_name_zh || object.object_name),
-      node("span", "", object.object_name || "未填写英文名"),
+      node("strong", "", localized(object.object_name_zh, object.object_name, translate("entity.noName"))),
     );
-    row.append(preview, copy, node("span", "badge", object.photos.length + " 图"));
+    row.append(preview, copy, node("span", "badge", object.photos.length + " " + translate("entity.photos")));
     row.addEventListener("click", () => selectObject(object));
     return row;
   }));
@@ -352,10 +432,10 @@ function editorShell(kind, title, label) {
   heading.append(node("span", "eyebrow", label), node("h1", "", title));
   const actions = node("div", "editor-actions");
   if (app.editMode) {
-    if (app.original[kind]) actions.append(button("删除", "delete-" + kind, "button danger"));
-    actions.append(button("保存更改", "save-" + kind, "button primary"));
+    if (app.original[kind]) actions.append(button(translate("entity.delete"), "delete-" + kind, "button danger"));
+    actions.append(button(translate("entity.saveChanges"), "save-" + kind, "button primary"));
   } else {
-    actions.append(node("span", "read-only-label", "只读模式"));
+    actions.append(node("span", "read-only-label", translate("entity.readOnly")));
   }
   head.append(heading, actions);
   const body = node("div", "editor-body");
@@ -381,17 +461,27 @@ function gridGeometry(batch) {
     x: Number(point.x),
     y: Number(point.y),
   }));
+  const xs = [...new Set(normalized.map((point) => point.x))].sort((a, b) => a - b);
+  const ys = [...new Set(normalized.map((point) => point.y))].sort((a, b) => a - b);
   const valid = normalized.length && normalized.every(
     (point) => Number.isFinite(point.x) && Number.isFinite(point.y),
-  );
+  ) && normalized.length === 21 && xs.length === 7 && ys.length === 3;
   if (!valid) {
-    const columns = Math.max(1, Math.ceil(Math.sqrt(normalized.length || 9)));
-    const fallback = normalized.length ? normalized : Array.from({ length: 9 }, (_, i) => ({
-      position_id: "P" + (i + 1),
+    const columns = 7;
+    const rows = 3;
+    const configuredById = new Map(normalized.map((point) => [point.position_id, point]));
+    const fallback = defaultRows.flatMap((row, y) => row.map((id, x) => {
+      const configured = configuredById.get("P" + id) || {};
+      return {
+        ...configured,
+        position_id: "P" + id,
+        x: Number.isFinite(configured.x) ? configured.x : x * 250,
+        y: Number.isFinite(configured.y) ? configured.y : y * 250,
+      };
     }));
     return {
       columns,
-      rows: Math.ceil(fallback.length / columns),
+      rows,
       cells: fallback.map((point, index) => ({
         ...point,
         column: index % columns + 1,
@@ -399,8 +489,6 @@ function gridGeometry(batch) {
       })),
     };
   }
-  const xs = [...new Set(normalized.map((point) => point.x))].sort((a, b) => a - b);
-  const ys = [...new Set(normalized.map((point) => point.y))].sort((a, b) => a - b);
   return {
     columns: xs.length,
     rows: ys.length,
@@ -444,7 +532,7 @@ function renderGridCells(host, batch, scene, readOnly = false) {
           image.loading = "lazy";
           image.decoding = "async";
           image.src = objectPreviewUrl(asset, asset.photos[0], "thumb");
-          image.alt = asset.object_name_zh || asset.object_name;
+          image.alt = localized(asset.object_name_zh, asset.object_name);
           photos.append(image);
         }
         cell.classList.add("has-photo");
@@ -452,7 +540,7 @@ function renderGridCells(host, batch, scene, readOnly = false) {
       }
       const label = matches.map((item) => {
         const asset = objectFor(item.object_id);
-        return asset ? asset.object_name_zh || asset.object_name : item.object_id;
+        return asset ? localized(asset.object_name_zh, asset.object_name, item.object_id) : item.object_id;
       }).join(" / ");
       cell.append(node("strong", "", label));
       cell.title = matches.map((item) => item.object_id).join(", ");
@@ -472,26 +560,26 @@ function renderSceneEditor() {
   const host = $("scene-editor");
   const draft = app.draft.scenes;
   if (!draft) {
-    host.replaceChildren(node("div", "empty-state", "选择或新增场景"));
+    host.replaceChildren(node("div", "empty-state", translate("entity.chooseScene")));
     return;
   }
-  const editor = editorShell("scenes", draft.scene_id || "新场景", "SCENE EDITOR · " + draft.batch_id);
+  const editor = editorShell("scenes", draft.scene_id || translate("entity.newScene"), translate("entity.sceneEditor") + " · " + draft.batch_id);
   const layout = node("div", "scene-layout");
   const canvas = node("section", "surface scene-canvas");
   const idControl = input("text", "scene_id", draft.scene_id, "SC-001");
   idControl.disabled = Boolean(app.original.scenes) || !app.editMode;
   idControl.addEventListener("input", () => {
     draft.scene_id = idControl.value.trim();
-    editor.shell.querySelector("h1").textContent = draft.scene_id || "新场景";
+    editor.shell.querySelector("h1").textContent = draft.scene_id || translate("entity.newScene");
   });
   const grid = node("div", "scene-grid");
   renderGridCells(grid, draft.batch_id, draft, !app.editMode);
-  canvas.append(field("Scene ID", idControl), grid, buildCameraPositionLegend(draft.batch_id));
+  canvas.append(field(translate("entity.sceneId"), idControl), grid, buildCameraPositionLegend(draft.batch_id));
   const placements = node("section", "surface placement-panel");
   const head = node("div", "section-head");
   const heading = node("div");
-  heading.append(node("span", "eyebrow", "PLACEMENT GROUPS"), node("h2", "", "物体与位置"));
-  const add = button("+ 添加", "", "button");
+  heading.append(node("span", "eyebrow", translate("entity.placementGroups")), node("h2", "", translate("entity.objectsPositions")));
+  const add = button("+ " + translate("entity.add"), "", "button");
   add.addEventListener("click", () => {
     if (!app.state.objects.length) return;
     draft.placements.push({
@@ -507,7 +595,7 @@ function renderSceneEditor() {
   if (draft.placements.length) {
     list.replaceChildren(...draft.placements.map(buildPlacementCard));
   } else {
-    emptyList(list, "添加物体后，在左侧九宫格选择位置");
+    emptyList(list, translate("entity.placeHint"));
   }
   placements.append(head, list);
   layout.append(canvas, placements);
@@ -518,16 +606,16 @@ function renderSceneEditor() {
 function buildCameraPositionLegend(batch) {
   const section = node("div", "camera-position-list");
   const cameras = (app.state.batches.find((item) => item.batch_id === batch) || {}).cameras || [];
-  section.append(node("span", "field-label", "相机位置"));
+  section.append(node("span", "field-label", translate("entity.cameraPosition")));
   if (!cameras.length) {
-    section.append(node("span", "camera-position", "未配置"));
+    section.append(node("span", "camera-position", translate("entity.notConfigured")));
     return section;
   }
   for (const camera of cameras) {
     section.append(node(
       "span",
       "camera-position",
-      camera.name + " · " + (camera.attached_to || "外置"),
+      camera.name + " · " + (camera.attached_to || translate("entity.external")),
     ));
   }
   return section;
@@ -544,7 +632,7 @@ function buildPlacementCard(placement, index) {
   const select = node("select");
   for (const object of app.state.objects) {
     select.add(new Option(
-      object.object_id + " · " + (object.object_name_zh || object.object_name),
+      object.object_id + " · " + localized(object.object_name_zh, object.object_name),
       object.object_id,
     ));
   }
@@ -553,7 +641,7 @@ function buildPlacementCard(placement, index) {
   select.addEventListener("click", (event) => event.stopPropagation());
   select.addEventListener("change", () => { placement.object_id = select.value; });
   const remove = button("×", "", "icon-btn");
-  remove.title = "移除 placement";
+  remove.title = translate("entity.removePlacement");
   remove.addEventListener("click", (event) => {
     event.stopPropagation();
     app.draft.scenes.placements.splice(index, 1);
@@ -562,14 +650,14 @@ function buildPlacementCard(placement, index) {
   });
   card.append(select);
   if (app.editMode) card.append(remove);
-  card.append(node("small", "", placement.position_ids.join(", ") || "未选择位置"));
+  card.append(node("small", "", placement.position_ids.join(", ") || translate("entity.choosePosition")));
   return card;
 }
 
 function togglePosition(positionId) {
   const draft = app.draft.scenes;
   if (app.placementIndex < 0 || !draft.placements[app.placementIndex]) {
-    showToast("先添加或选择一个物体组", true);
+    showToast(translate("entity.chooseGroup"), true);
     return;
   }
   const ids = draft.placements[app.placementIndex].position_ids;
@@ -582,23 +670,23 @@ function renderTaskEditor() {
   const host = $("task-editor");
   const draft = app.draft.tasks;
   if (!draft) {
-    host.replaceChildren(node("div", "empty-state", "选择任务，展开查看 episode slot"));
+    host.replaceChildren(node("div", "empty-state", translate("entity.chooseTask")));
     return;
   }
   if (app.robotViewer) {
     app.robotViewer.dispose();
     app.robotViewer = null;
   }
-  const editor = editorShell("tasks", draft.task_id || "新任务", "TASK EDITOR · " + draft.batch_id);
+  const editor = editorShell("tasks", draft.task_id || translate("entity.newTask"), translate("entity.taskEditor") + " · " + draft.batch_id);
   const form = node("form", "form-grid task-form");
   const idControl = input("text", "task_id", draft.task_id, "TASK-001");
   idControl.disabled = Boolean(app.original.tasks) || !app.editMode;
   form.append(
-    field("Task ID", idControl),
-    field("Action", input("text", "action", draft.action)),
-    field("Category", input("text", "category", draft.category)),
-    field("English prompt", textarea("prompt_en", draft.prompt_en), true),
-    field("中文提示词", textarea("prompt_zh", draft.prompt_zh), true),
+    field(translate("entity.taskId"), idControl),
+    field(translate("entity.action"), input("text", "action", draft.action)),
+    field(translate("entity.category"), input("text", "category", draft.category)),
+    field(translate("entity.englishPrompt"), textarea("prompt_en", draft.prompt_en), true),
+    field(translate("entity.chinesePrompt"), textarea("prompt_zh", draft.prompt_zh), true),
   );
   if (!app.editMode) {
     form.querySelectorAll("input, textarea").forEach((control) => { control.disabled = true; });
@@ -607,7 +695,7 @@ function renderTaskEditor() {
     for (const name of ["task_id", "action", "category", "prompt_en", "prompt_zh"]) {
       draft[name] = form.elements[name].value.trim();
     }
-    editor.shell.querySelector("h1").textContent = draft.task_id || "新任务";
+    editor.shell.querySelector("h1").textContent = draft.task_id || translate("entity.newTask");
   });
   editor.body.append(form, buildTaskObjectPicker(), buildTaskScenePicker());
   host.replaceChildren(editor.shell);
@@ -618,13 +706,13 @@ function buildTaskObjectPicker() {
   const surface = node("section", "surface compact-picker");
   const head = node("div", "section-head");
   const heading = node("div");
-  heading.append(node("span", "eyebrow", "OPERATION OBJECTS"), node("h2", "", "操作物体"));
+  heading.append(node("span", "eyebrow", translate("entity.operationObjects")), node("h2", "", translate("entity.operationObjectsTitle")));
   const select = node("select", "add-select");
-  select.add(new Option("添加物体...", ""));
+  select.add(new Option(translate("entity.addObject"), ""));
   const chosen = new Set(app.draft.tasks.operation_object_ids);
   for (const object of app.state.objects.filter((item) => !chosen.has(item.object_id))) {
     select.add(new Option(
-      object.object_id + " · " + (object.object_name_zh || object.object_name),
+      object.object_id + " · " + localized(object.object_name_zh, object.object_name),
       object.object_id,
     ));
   }
@@ -639,7 +727,7 @@ function buildTaskObjectPicker() {
     const asset = objectFor(objectId);
     const row = node("div", "selected-record");
     const inspect = button(
-      asset ? asset.object_name_zh || asset.object_name : objectId,
+      asset ? localized(asset.object_name_zh, asset.object_name, objectId) : objectId,
       "",
       "text-button",
     );
@@ -654,7 +742,7 @@ function buildTaskObjectPicker() {
     if (app.editMode) row.append(remove);
     rows.append(row);
   }
-  if (!rows.children.length) emptyList(rows, "未设置操作物体");
+  if (!rows.children.length) emptyList(rows, translate("entity.noOperationObjects"));
   surface.append(head, rows);
   return surface;
 }
@@ -664,9 +752,9 @@ function buildTaskScenePicker() {
   const surface = node("section", "surface compact-picker");
   const head = node("div", "section-head");
   const heading = node("div");
-  heading.append(node("span", "eyebrow", "SCENE COVERAGE"), node("h2", "", "场景与采集数量"));
+  heading.append(node("span", "eyebrow", translate("entity.sceneCoverage")), node("h2", "", translate("entity.sceneCoverageTitle")));
   const select = node("select", "add-select");
-  select.add(new Option("添加场景...", ""));
+  select.add(new Option(translate("entity.addScene"), ""));
   const chosen = new Set(draft.scene_ids);
   const scenes = app.state.scenes.filter(
     (scene) => scene.batch_id === draft.batch_id && !chosen.has(scene.scene_id),
@@ -699,14 +787,14 @@ function buildTaskScenePicker() {
       draft.scene_epsiodes_count.splice(index, 1);
       renderTaskEditor();
     });
-    row.append(link, count, node("small", "", "episodes"));
+    row.append(link, count, node("small", "", translate("common.episodes")));
     if (app.editMode) row.append(remove);
     rows.append(row);
   });
-  if (!rows.children.length) emptyList(rows, "未配置场景");
+  if (!rows.children.length) emptyList(rows, translate("entity.noConfiguredScenes"));
   const total = node("div", "total-bar");
   total.id = "task-total";
-  total.append(node("span", "", "Total episode slots"), node("b", "", "0"));
+  total.append(node("span", "", translate("entity.totalEpisodeSlots")), node("b", "", "0"));
   surface.append(head, rows, total);
   return surface;
 }
@@ -725,25 +813,40 @@ function renderObjectEditor() {
   const host = $("object-dialog-body");
   const draft = app.draft.objects;
   if (!draft) {
-    host.replaceChildren(node("div", "empty-state", "选择或新增物体"));
+    host.replaceChildren(node("div", "empty-state", translate("entity.chooseObject")));
     return;
   }
-  const editor = editorShell("objects", draft.object_id || "新物体", "SHARED OBJECT ASSET");
+  const editor = editorShell("objects", draft.object_id || translate("entity.newObject"), translate("entity.objectAsset"));
   const form = node("form", "form-grid inset surface");
   const idControl = input("text", "object_id", draft.object_id, "AST-0001");
   idControl.disabled = Boolean(app.original.objects) || !app.editMode;
   form.append(
-    field("Object ID", idControl),
-    field("Color", input("text", "color", draft.color, "white / #e8590c")),
-    field("English name", input("text", "object_name", draft.object_name), true),
-    field("中文名称", input("text", "object_name_zh", draft.object_name_zh), true),
-    field("扫描状态", input("text", "scan_status", draft.scan_status), true),
-    field("Photo directory", input("text", "photo_dir", draft.photo_dir), true),
+    field(translate("entity.objectId"), idControl),
+    field(translate("entity.color"), input("text", "color", draft.color, "white / #e8590c")),
+    field(translate("common.englishName"), input("text", "object_name", draft.object_name), true),
+    field(translate("entity.chineseName"), input("text", "object_name_zh", draft.object_name_zh), true),
+    field(translate("entity.scanStatus"), input("text", "scan_status", draft.scan_status), true),
+    field(translate("entity.photoDirectory"), input("text", "photo_dir", draft.photo_dir), true),
   );
-  if (!app.editMode) {
-    form.querySelectorAll("input").forEach((control) => { control.disabled = true; });
+  form.append(node("p", "full", "尺寸按自然放置时的外接长、宽、高填写；圆盘长宽均填直径。未知可留空。"));
+  for (const [name, label] of OBJECT_MEASUREMENTS) {
+    const control = input("number", name, draft[name] || "", "未填写");
+    control.min = "0";
+    control.step = "any";
+    form.append(field(label, control));
   }
-  form.addEventListener("input", () => {
+  const methodControl = node("select");
+  methodControl.name = "modeling_method";
+  methodControl.add(new Option("未填写", ""));
+  for (const [code, label] of Object.entries(MODELING_METHODS)) {
+    methodControl.add(new Option(code + " · " + label, code));
+  }
+  methodControl.value = draft.modeling_method || "";
+  form.append(field("建模方法", methodControl, true));
+  if (!app.editMode) {
+    form.querySelectorAll("input, select").forEach((control) => { control.disabled = true; });
+  }
+  const updateDraft = () => {
     for (const name of [
       "object_id",
       "object_name",
@@ -751,11 +854,16 @@ function renderObjectEditor() {
       "scan_status",
       "color",
       "photo_dir",
+      ...OBJECT_MEASUREMENTS.map(([name]) => name),
+      "modeling_method",
     ]) {
       draft[name] = form.elements[name].value.trim();
     }
-    editor.shell.querySelector("h1").textContent = draft.object_id || "新物体";
-  });
+    editor.shell.querySelector("h1").textContent = draft.object_id || translate("entity.newObject");
+  };
+  form.addEventListener("input", updateDraft);
+  form.addEventListener("change", updateDraft);
+  updateDraft();
   editor.body.append(form, buildPhotoGallery(draft, true));
   host.replaceChildren(editor.shell);
 }
@@ -764,9 +872,9 @@ function buildPhotoGallery(object, editable = false) {
   const section = node("section", "surface photo-surface");
   const head = node("div", "section-head");
   const heading = node("div");
-  heading.append(node("span", "eyebrow", "OBJECT PHOTOS"), node("h2", "", "实物照片"));
+  heading.append(node("span", "eyebrow", translate("entity.objectPhotos")), node("h2", "", translate("entity.physicalPhotos")));
   if (editable && app.editMode) {
-    const upload = button("上传照片", "", "button");
+    const upload = button(translate("entity.uploadPhotos"), "", "button");
     upload.disabled = !app.original.objects;
     upload.addEventListener("click", () => $("photo-file").click());
     head.append(heading, upload);
@@ -782,13 +890,13 @@ function buildPhotoGallery(object, editable = false) {
       image.loading = index === 0 ? "eager" : "lazy";
       image.decoding = "async";
       image.src = objectPreviewUrl(object, filename, previewVariant);
-      image.alt = object.object_name_zh || object.object_name;
+      image.alt = localized(object.object_name_zh, object.object_name);
       figure.append(image, node("figcaption", "", filename));
       gallery.append(figure);
     }
   } else {
     const slot = node("div", "photo-slot");
-    slot.append(node("b", "", "+"), node("span", "", "PHOTO SLOT"));
+    slot.append(node("b", "", "+"), node("span", "", translate("common.photoSlot")));
     gallery.append(slot);
   }
   section.append(head, gallery);
@@ -798,80 +906,248 @@ function buildPhotoGallery(object, editable = false) {
 function openObjectDialog(objectId) {
   const object = objectFor(objectId);
   if (!object) {
-    showToast("未找到物体 " + objectId, true);
+    showToast(translate("entity.noObject") + " " + objectId, true);
     return;
   }
   const body = $("object-dialog-body");
   const header = node("header", "object-modal-head");
   header.append(
     node("span", "eyebrow", object.object_id),
-    node("h2", "", object.object_name_zh || object.object_name),
-    node("p", "", object.object_name || "未填写英文名称"),
+    node("h2", "", localized(object.object_name_zh, object.object_name, translate("entity.noName"))),
   );
   const meta = node("div", "object-modal-meta");
   meta.append(
-    node("span", "", "扫描状态 · " + (object.scan_status || "未填写")),
-    node("span", "", "颜色 · " + (object.color || "未标注")),
-    node("span", "", "照片目录 · " + (object.photo_dir || "未绑定")),
+    node("span", "", translate("entity.scanStatus") + " · " + (object.scan_status || translate("entity.valueNotSet"))),
+    node("span", "", translate("entity.color") + " · " + (object.color || translate("entity.valueUnlabeled"))),
+    node("span", "", translate("entity.photoDirectory") + " · " + (object.photo_dir || translate("entity.valueUnbound"))),
+    node("span", "", translate("entity.measurements") + " · " + objectMeasurementsText(object)),
+    node("span", "", translate("entity.mass") + " · " + (object.mass_g ? object.mass_g + " g" : translate("entity.valueNotSet"))),
+    node("span", "", translate("entity.modelingMethod") + " · " + (object.modeling_method
+      ? object.modeling_method + " · " + (MODELING_METHODS[object.modeling_method] || translate("entity.unknownMethod"))
+      : translate("entity.valueNotSet"))),
   );
   body.replaceChildren(header, meta, buildPhotoGallery(object));
   $("object-dialog").showModal();
 }
 
+function formatDashboardNumber(value) {
+  return new Intl.NumberFormat("en-US").format(Math.max(0, Math.round(Number(value) || 0)));
+}
+
+function formatDashboardPercent(value) {
+  const percent = Math.max(0, Math.min(1, Number(value) || 0)) * 100;
+  return percent > 0 && percent < 1 ? percent.toFixed(1) + "%" : Math.round(percent) + "%";
+}
+
+function formatDashboardDuration(seconds) {
+  const value = Number(seconds) || 0;
+  if (value >= 3600) return (value / 3600).toFixed(1) + "h";
+  if (value >= 60) return Math.round(value / 60) + "m";
+  return Math.round(value) + "s";
+}
+
+function dashboardBatchTarget(batch) {
+  return Number(
+    batch.benchmark_target_episodes ?? batch.target_episodes ?? batch.episodes ?? 0,
+  );
+}
+
+function dashboardBatchCount(batch) {
+  return batch.benchmark_batch ? 1 : 0;
+}
+
+function setDashboardText(id, value) {
+  const element = $(id);
+  if (element) element.textContent = value;
+}
+
+function dashboardSummary(plan) {
+  const counts = plan && plan.collection
+    ? plan.collection.qc_counts || plan.collection.counts || {}
+    : {};
+  if (plan) {
+    const tasks = app.state.tasks.filter((task) => task.batch_id === plan.batch_id);
+    const episodes = tasks.flatMap((task) => task.slots.map((slot) => slot.episode).filter(Boolean));
+    const frames = episodes.reduce((sum, episode) => sum + Number(episode.length || 0), 0);
+    return {
+      target: Number(counts.total || 0),
+      collected: Number(counts.unreviewed || 0) + Number(counts.passed || 0) + Number(counts.failed || 0),
+      pending: Number(counts.pending || 0),
+      unreviewed: Number(counts.unreviewed || 0),
+      passed: Number(counts.passed || 0),
+      failed: Number(counts.failed || 0),
+      frames,
+      duration: frames / 30,
+    };
+  }
+  const batches = (app.state.all_batches || app.state.batches || []).filter(
+    (batch) => dashboardBatchCount(batch) > 0,
+  );
+  return batches.reduce(
+    (total, batch) => ({
+      target: total.target + dashboardBatchTarget(batch),
+      collected: total.collected + Number(batch.collected || 0),
+      pending: total.pending + Number(batch.pending || 0),
+      unreviewed: total.unreviewed + Number(batch.unreviewed || 0),
+      passed: total.passed + Number(batch.passed || 0),
+      failed: total.failed + Number(batch.failed || 0),
+      frames: total.frames + Number(batch.frames || 0),
+      duration: total.duration + Number(batch.duration_seconds || 0),
+    }),
+    { target: 0, collected: 0, pending: 0, unreviewed: 0, passed: 0, failed: 0, frames: 0, duration: 0 },
+  );
+}
+
 function renderInfo() {
   if (!app.state) return;
-  const form = $("info-form");
-  const plan = app.batch ? planFor(app.batch) : null;
-  if (!plan) {
-    const overview = node("div", "batch-overview full");
-    overview.append(
-      node("strong", "", "全部批次"),
-      node("p", "", "在 Tasks 左栏选择一个计划批次后，可查看元数据并导出计划。"),
-    );
-    form.replaceChildren(overview);
-    return;
+  // Dashboard is always a global overview, independent of the QC selection.
+  const summary = dashboardSummary(null);
+  const batches = app.state.all_batches || app.state.batches || [];
+  const robotBatches = new Map();
+  for (const batch of batches) {
+    const robot = String(batch.robot_type || translate("dashboard.unknownRobot"));
+    const group = robotBatches.get(robot) || [];
+    group.push(batch);
+    robotBatches.set(robot, group);
   }
-  const datasetName = input("text", "dataset_name", plan.info.dataset_name || "");
-  const robotType = input("text", "robot_type", plan.info.robot_type || "");
-  const collectionDir = input("text", "collection_dir", plan.info.collection_dir || "");
-  datasetName.disabled = !app.editMode;
-  robotType.disabled = !app.editMode;
-  collectionDir.disabled = !app.editMode;
-  const planDir = input("text", "", plan.dataset_dir);
-  planDir.disabled = true;
-  const collected = input("text", "", plan.collection.dataset_dir);
-  collected.disabled = true;
-  const cameras = buildCameraPositionLegend(app.batch);
-  const save = button("保存元数据", "", "button primary");
-  save.addEventListener("click", () => runWrite(save, async () => {
-    await writeJson("/api/batches/" + encodeURIComponent(app.batch) + "/info", "PUT", {
-      dataset_name: datasetName.value.trim(),
-      robot_type: robotType.value.trim(),
-      collection_dir: collectionDir.value.trim(),
-    });
-    await loadState();
-  }, "批次元数据已保存"));
-  form.replaceChildren(
-    field("Dataset name", datasetName),
-    field("Robot type", robotType),
-    field("Plan directory", planDir, true),
-    field("Collection directory override", collectionDir, true, "留空时按 dataset_name 自动发现"),
-    field("Resolved collection directory", collected, true),
-    cameras,
+  const robots = [...robotBatches.entries()]
+    .filter(([, grouped]) => grouped.some((batch) => dashboardBatchCount(batch) > 0))
+    .map(([robot]) => robot)
+    .sort((left, right) => left.localeCompare(right));
+  const target = summary.target;
+  const collected = summary.collected;
+  const qcTotal = collected || 0;
+  const dashboardPassed = summary.passed;
+  setDashboardText("dashboard-target", formatDashboardNumber(target));
+  setDashboardText("dashboard-collected", formatDashboardNumber(collected));
+  setDashboardText("dashboard-frames", formatDashboardNumber(summary.frames));
+  setDashboardText("dashboard-duration", formatDashboardDuration(
+    collected ? summary.duration / collected : 0,
+  ));
+  setDashboardText("dashboard-efficiency", formatDashboardPercent(target ? collected / target : 0));
+  setDashboardText("dashboard-valid-rate", formatDashboardPercent(qcTotal ? dashboardPassed / qcTotal : 0));
+  setDashboardText("dashboard-passed", formatDashboardNumber(dashboardPassed));
+  setDashboardText("dashboard-pending", formatDashboardNumber(summary.pending + summary.failed));
+  setDashboardText(
+    "dashboard-range-summary",
+    formatDashboardNumber(collected) + " " + translate("dashboard.episodes") + " / " + formatDashboardNumber(summary.frames)
+      + " " + translate("dashboard.frames") + " · " + batches.reduce((count, batch) => count + dashboardBatchCount(batch), 0) + " " + translate("dashboard.plans") + " · " + robots.length + " " + translate("dashboard.robots"),
   );
-  const actions = node("div", "field full");
-  if (app.editMode) {
-    actions.append(save);
-    form.append(actions);
+  setDashboardText(
+    "dashboard-robot-total",
+    formatDashboardNumber(collected) + " / " + formatDashboardNumber(target),
+  );
+  setDashboardText(
+    "dashboard-health-rate",
+    formatDashboardPercent(qcTotal ? summary.passed / qcTotal : 0),
+  );
+  setDashboardText(
+    "dashboard-qc-summary",
+    formatDashboardNumber(summary.pending + summary.failed) + " " + translate("dashboard.pending"),
+  );
+
+  const robotHost = $("dashboard-robot-list");
+  if (robotHost) {
+    robotHost.replaceChildren(...robots.map((robot) => {
+      const groupedBatches = (robotBatches.get(robot) || []).filter(
+        (batch) => dashboardBatchCount(batch) > 0,
+      );
+      const robotSummary = groupedBatches.reduce(
+        (total, batch) => ({
+          target: total.target + dashboardBatchTarget(batch),
+          collected: total.collected + Number(batch.collected || 0),
+          pending: total.pending + Number(batch.pending || 0) + Number(batch.failed || 0),
+        }),
+        { target: 0, collected: 0, pending: 0 },
+      );
+      const row = node("div", "dashboard-robot-row");
+      const copy = node("div", "dashboard-robot-copy");
+      copy.append(
+        node("strong", "", robot),
+        node("span", "", groupedBatches.length + " " + translate("dashboard.plans")),
+      );
+      const track = node("div", "dashboard-progress");
+      const fill = node("span", "");
+      fill.style.width = (robotSummary.target
+        ? Math.min(100, robotSummary.collected / robotSummary.target * 100)
+        : 0) + "%";
+      track.append(fill);
+      const value = node("div", "dashboard-robot-value");
+      value.append(
+        node("b", "", formatDashboardNumber(robotSummary.collected) + " / " + formatDashboardNumber(robotSummary.target)),
+        node("small", "", translate("dashboard.remaining") + " " + formatDashboardNumber(robotSummary.pending)),
+      );
+      row.append(copy, track, value);
+      return row;
+    }));
+    if (!robotHost.childElementCount) emptyList(robotHost, translate("dashboard.noRobotPlans"));
   }
+
+  const healthHost = $("dashboard-health-list");
+  if (healthHost) {
+    const health = [
+      ["passed", translate("status.passed"), summary.passed],
+      ["unreviewed", translate("status.unreviewed"), summary.unreviewed],
+      ["failed", translate("status.failed"), summary.failed],
+      ["pending", translate("status.pending"), summary.pending],
+    ];
+    healthHost.replaceChildren(...health.map(([state, label, value]) => {
+      const row = node("div", "dashboard-health-row " + state);
+      const bar = node("div", "dashboard-health-bar");
+      const fill = node("span", "");
+      fill.style.width = (target ? Math.min(100, value / target * 100) : 0) + "%";
+      bar.append(fill);
+      row.append(node("span", "", label), bar, node("b", "", formatDashboardNumber(value)));
+      return row;
+    }));
+  }
+
+  const reportHost = $("dashboard-qc-list");
+  if (!reportHost) return;
+  const reports = [...batches].filter(
+    (batch) => Number(batch.failed || 0) > 0,
+  ).sort((left, right) => (
+    Number(right.failed || 0) - Number(left.failed || 0)
+  ));
+  reportHost.replaceChildren(...reports.map((batch) => {
+    const failed = Number(batch.failed || 0);
+    const row = node("div", "dashboard-qc-row failed");
+    const copy = node("div", "dashboard-qc-copy");
+    copy.append(
+      node("strong", "", batch.batch_id),
+      node(
+        "span",
+        "",
+        (batch.robot_type || translate("dashboard.unknownRobot")) + " · " + formatDashboardNumber(batch.collected)
+          + " / " + formatDashboardNumber(dashboardBatchTarget(batch))
+          + " · " + translate("status.failed") + " " + formatDashboardNumber(failed),
+      ),
+    );
+    const openQc = button(translate("dashboard.openQc"), "", "button primary");
+    openQc.addEventListener("click", async () => {
+      app.batch = batch.batch_id;
+      app.qcSceneFilter = "";
+      app.qcTaskFilter = "";
+      app.qcPage = 0;
+      app.selectedSlot = "";
+      app.selected.tasks = "";
+      app.review = null;
+      await loadState();
+      switchTab("tasks");
+    });
+    row.append(copy, openQc);
+    return row;
+  }));
+  if (!reportHost.childElementCount) emptyList(reportHost, translate("dashboard.noReports"));
 }
 
 function renderIssues() {
   if (!app.state) return;
   const host = $("issues-list");
+  if (!host) return;
   if (!app.state.issues.length) {
     const ok = node("div", "issues-ok");
-    ok.append(node("b", "", "✓"), node("span", "", "当前范围未发现计划问题"));
+    ok.append(node("b", "", "✓"), node("span", "", translate("entity.noPlanIssues")));
     host.replaceChildren(ok);
     return;
   }
@@ -896,11 +1172,13 @@ function renderCurrentEditor() {
 function jumpScene(batch, sceneId) {
   const scene = sceneFor(batch, sceneId);
   if (!scene) {
-    showToast("未找到场景 " + sceneId, true);
+    showToast(translate("entity.noScene") + " " + sceneId, true);
     return;
   }
-  selectScene(scene);
-  switchTab("scenes");
+  app.batch = batch;
+  app.qcSceneFilter = sceneId;
+  app.qcTaskFilter = "";
+  switchTab("tasks");
 }
 
 function nextId(prefix, records, key, width = 3) {
@@ -913,7 +1191,7 @@ function nextId(prefix, records, key, width = 3) {
 
 function requireBatch() {
   if (app.batch) return app.batch;
-  showToast("请先在 Tasks 左栏选择一个计划批次", true);
+  showToast(translate("entity.chooseBatch"), true);
   switchTab("tasks");
   return "";
 }
@@ -961,6 +1239,11 @@ function newEntity(kind) {
       scan_status: "",
       color: "",
       photo_dir: "",
+      length_cm: "",
+      width_cm: "",
+      height_cm: "",
+      mass_g: "",
+      modeling_method: "",
       photos: [],
     };
     app.selected.objects = "";
@@ -973,18 +1256,29 @@ function newEntity(kind) {
 function validateDraft(kind) {
   const draft = app.draft[kind];
   if (kind === "scenes") {
-    if (!draft.scene_id) throw new Error("Scene ID 不能为空");
+    if (!draft.scene_id) throw new Error(translate("entity.sceneIdRequired"));
     for (const placement of draft.placements) {
       if (!placement.object_id || !placement.position_ids.length) {
-        throw new Error("每个物体组都需要物体和至少一个位置");
+        throw new Error(translate("entity.placementRequired"));
       }
     }
   } else if (kind === "tasks") {
-    if (!draft.task_id || !draft.prompt_en) throw new Error("Task ID 和 English prompt 不能为空");
-    if (!draft.scene_ids.length) throw new Error("任务至少需要一个场景");
+    if (!draft.task_id || !draft.prompt_en) throw new Error(translate("entity.promptRequired"));
+    if (!draft.scene_ids.length) throw new Error(translate("entity.sceneRequired"));
     updateTaskTotal();
   } else if (!draft.object_id || (!draft.object_name && !draft.object_name_zh)) {
-    throw new Error("Object ID 和至少一种名称不能为空");
+    throw new Error(translate("entity.objectNameRequired"));
+  }
+  if (kind === "objects") {
+    for (const [name, label] of OBJECT_MEASUREMENTS) {
+      const value = String(draft[name] ?? "").trim();
+      if (value && (!Number.isFinite(Number(value)) || Number(value) <= 0)) {
+        throw new Error(label + "必须是大于 0 的有限数值，或留空");
+      }
+    }
+    if (draft.modeling_method && !Object.hasOwn(MODELING_METHODS, draft.modeling_method)) {
+      throw new Error("建模方法必须为 A、B、C、D，或留空");
+    }
   }
   return draft;
 }
@@ -993,7 +1287,9 @@ function validateDraft(kind) {
 export {
   configureEntityUi,
   jumpScene,
+  navigateQcSlot,
   newEntity,
+  objectMatchesFilters,
   openObjectDialog,
   renderCurrentEditor,
   renderGridCells,
@@ -1003,7 +1299,6 @@ export {
   renderObjectList,
   renderSceneList,
   renderTaskEditor,
-  renderTaskFilters,
   renderTaskList,
   requireBatch,
   validateDraft,

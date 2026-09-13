@@ -34,6 +34,13 @@ def parse_args() -> tuple[ConfigDict, int, str | None, bool]:
         action="store_true",
         help="Low-power mode: no web server; control over the ZMQ channel, status via logs",
     )
+    parser.add_argument(
+        "--language",
+        "--locale",
+        choices=("zh", "en"),
+        default="en",
+        help="Console language: zh or en (default: en)",
+    )
     args = parser.parse_args()
 
     import robots  # noqa: F401
@@ -44,6 +51,7 @@ def parse_args() -> tuple[ConfigDict, int, str | None, bool]:
     )
     if not args.config:
         config.console.initial_tab = "manual"
+    config.console.language = args.language
 
     return config, args.web_port, args.config, args.headless
 
@@ -63,7 +71,10 @@ def main() -> None:
         force=True,
     )
     config, web_port, config_path, headless = parse_args()
-    if run(config, web_port=web_port, config_path=config_path, headless=headless):
+    language = str((config.get("console") or {}).get("language", "en"))
+    if run(
+        config, web_port=web_port, config_path=config_path, headless=headless, language=language
+    ):
         os.execv(sys.executable, [sys.executable, *sys.argv])
 
 

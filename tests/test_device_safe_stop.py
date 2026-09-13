@@ -13,7 +13,8 @@ pytestmark = pytest.mark.unit
 
 def make_config():
     return ConfigDict(
-        robot=dict(initial_qpos=[0.5, 1.0], safe_qpos=[0.0, 1.0]), inference_cfg=dict(publish_rate=30)
+        robot=dict(initial_qpos=[0.5, 1.0], safe_qpos=[0.0, 1.0]),
+        inference_cfg=dict(publish_rate=30),
     )
 
 

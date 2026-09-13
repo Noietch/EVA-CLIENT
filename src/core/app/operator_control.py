@@ -229,19 +229,24 @@ def handle_teleop_operator_event(
     }:
         message = "Collection VR controls are unavailable in the RL workspace"
     elif event.intent in {
-        "review_left", "review_right", "review_up", "review_down", "review_select"
-    } or (
-        event.intent == "intervention_toggle" and not runtime.rl_active
-    ):
+        "review_left",
+        "review_right",
+        "review_up",
+        "review_down",
+        "review_select",
+    } or (event.intent == "intervention_toggle" and not runtime.rl_active):
         if runtime.rl_active:
             message = "Collection review is unavailable in the RL workspace"
         else:
             action = "toggle_qc" if event.intent == "intervention_toggle" else event.intent[7:]
-            runtime.collection_review_events = (*runtime.collection_review_events, {
-                "id": f"{event.session_id}:{event.event_id}",
-                "action": action,
-                "created_at": time.monotonic(),
-            })[-64:]
+            runtime.collection_review_events = (
+                *runtime.collection_review_events,
+                {
+                    "id": f"{event.session_id}:{event.event_id}",
+                    "action": action,
+                    "created_at": time.monotonic(),
+                },
+            )[-64:]
             accepted = True
             message = "Collection review input received"
     elif event.intent == "arm_toggle":

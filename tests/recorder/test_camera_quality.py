@@ -23,8 +23,12 @@ def test_oversampling_tolerates_one_missing_sample_at_30fps_output(capture_fps, 
         vectors={"state_qpos": [CollectionRawSample(t, np.full(4, t)) for t in (0, 1)]},
     )
     aligned, report = align_collection_samples(
-        batch, robot=robot(), camera_keys=("front",), vector_fields=("state_qpos",),
-        fps=30, image_skew_sec=0.02,
+        batch,
+        robot=robot(),
+        camera_keys=("front",),
+        vector_fields=("state_qpos",),
+        fps=30,
+        image_skew_sec=0.02,
     )
     assert len(aligned) == 31
     np.testing.assert_allclose(np.diff([frame.timestamp for frame in aligned]), 1 / 30)

@@ -103,9 +103,7 @@ def _camera_startup_keys(config, values) -> set[str]:
         if not mappings:
             continue
         configured_keys.update(
-            str(mapping).split("=", 1)[0].strip()
-            for mapping in mappings
-            if "=" in str(mapping)
+            str(mapping).split("=", 1)[0].strip() for mapping in mappings if "=" in str(mapping)
         )
     if configured_keys and configured_keys.issubset(schema_keys):
         return configured_keys
@@ -179,8 +177,7 @@ def prepare_device(config, runtime, session, service, component, pid, *, timeout
                 observed_camera_keys.update(images)
                 observed_camera_at.update({key: observed_at for key in images})
                 recent = all(
-                    observed_at - observed_camera_at.get(key, 0.0)
-                    <= _CAMERA_STARTUP_FRAME_WINDOW_S
+                    observed_at - observed_camera_at.get(key, 0.0) <= _CAMERA_STARTUP_FRAME_WINDOW_S
                     for key in expected_camera_keys
                 )
                 if expected_camera_keys.issubset(observed_camera_keys) and recent:
@@ -202,9 +199,7 @@ def prepare_device(config, runtime, session, service, component, pid, *, timeout
                     observed_camera_keys.update(images)
                 missing = sorted(expected_camera_keys - observed_camera_keys)
                 detail = f"; missing camera keys: {', '.join(missing)}" if missing else ""
-                raise ValueError(
-                    f"{component} startup timed out waiting for live feedback{detail}"
-                )
+                raise ValueError(f"{component} startup timed out waiting for live feedback{detail}")
             raise ValueError(f"{component} startup timed out waiting for live feedback")
         service.request("ready", {"component": component, "pid": pid})
     finally:

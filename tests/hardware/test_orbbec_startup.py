@@ -12,14 +12,21 @@ def test_camera_publisher_follows_capture_rate(monkeypatch, fps):
     from examples.hardware.yam import node
 
     parser = node.build_arg_parser()
-    args = parser.parse_args([
-        "--camera-only", "--camera", "cam_high=serial", "--camera-fps", str(fps),
-    ])
+    args = parser.parse_args(
+        [
+            "--camera-only",
+            "--camera",
+            "cam_high=serial",
+            "--camera-fps",
+            str(fps),
+        ]
+    )
     monkeypatch.setattr(node, "build_arg_parser", lambda: SimpleNamespace(parse_args=lambda: args))
     monkeypatch.setattr(node, "RealSenseCameraCache", lambda _: object())
     rates = []
     monkeypatch.setattr(
-        node, "CameraPublisher",
+        node,
+        "CameraPublisher",
         lambda caches, endpoint, rate: SimpleNamespace(run=lambda: rates.append(rate)),
     )
     node.main()

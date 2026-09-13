@@ -53,9 +53,7 @@ def test_forward_selection_treats_red_and_pending_equally(next_quality):
         {"episode_index": 4, "slot_id": slots[4].slot_id, "quality": "red"},
     ]
     if next_quality:
-        episodes.append(
-            {"episode_index": 3, "slot_id": slots[3].slot_id, "quality": next_quality}
-        )
+        episodes.append({"episode_index": 3, "slot_id": slots[3].slot_id, "quality": next_quality})
     for episode in episodes:
         episode["status"] = "saved"
 
@@ -329,9 +327,7 @@ def test_collection_slots_prioritize_scene_then_layout_ordered_task_object() -> 
 
 
 def test_collection_slots_fall_back_to_legacy_operation_object_names() -> None:
-    config = ConfigDict(
-        collection=ConfigDict(tasks={"set": [("right task", 1), ("left task", 1)]})
-    )
+    config = ConfigDict(collection=ConfigDict(tasks={"set": [("right task", 1), ("left task", 1)]}))
     scene_plan = {
         "positions": [
             {"position_id": "P1", "x": 0, "y": 0},
@@ -372,9 +368,7 @@ def test_collection_slots_fall_back_to_legacy_operation_object_names() -> None:
 def test_collection_slots_put_left_hand_before_right_hand_at_same_position() -> None:
     right_prompt = "use the right arm to move the object"
     left_prompt = "use the left arm to move the object"
-    config = ConfigDict(
-        collection=ConfigDict(tasks={"set": [(right_prompt, 1), (left_prompt, 1)]})
-    )
+    config = ConfigDict(collection=ConfigDict(tasks={"set": [(right_prompt, 1), (left_prompt, 1)]}))
     scene_plan = {
         "positions": [{"position_id": "P1", "x": 0, "y": 0}],
         "scenes": [
@@ -409,9 +403,7 @@ def test_collection_slots_put_left_hand_before_right_hand_at_same_position() -> 
 def test_collection_slots_prioritize_hand_before_object_position() -> None:
     right_prompt = "use the right arm to move the left object"
     left_prompt = "use the left arm to move the right object"
-    config = ConfigDict(
-        collection=ConfigDict(tasks={"set": [(right_prompt, 1), (left_prompt, 1)]})
-    )
+    config = ConfigDict(collection=ConfigDict(tasks={"set": [(right_prompt, 1), (left_prompt, 1)]}))
     scene_plan = {
         "positions": [
             {"position_id": "P1", "x": 0, "y": 0},

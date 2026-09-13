@@ -756,9 +756,7 @@ class VrTeleopClient:
             worker_healthy = not self._worker_ever_started or bool(
                 worker is not None and worker.is_alive() and not self._stop.is_set()
             )
-            frame_fresh = bool(
-                frame is not None and frame.age(current) <= self._input_timeout_s
-            )
+            frame_fresh = bool(frame is not None and frame.age(current) <= self._input_timeout_s)
             connected = bool(
                 worker_healthy
                 and browser_connected

@@ -1016,12 +1016,17 @@ def _handle_web_command(
         try:
             session.last_error = ""
             if verb == "device_start":
-                if (runtime.collection_teleop_armed or session.manual_publish_active
-                        or session.status is SessionStatus.RUNNING):
+                if (
+                    runtime.collection_teleop_armed
+                    or session.manual_publish_active
+                    or session.status is SessionStatus.RUNNING
+                ):
                     raise ValueError("Stop control before starting devices")
                 operation("starting")
                 if not settings.workspace.saved:
-                    settings.service.request("save", {"selected": settings.workspace.initial_selection(config)})
+                    settings.service.request(
+                        "save", {"selected": settings.workspace.initial_selection(config)}
+                    )
                     settings.workspace = DeviceWorkspace(settings.workspace.path)
                 before = settings.service.request("status")
                 result = settings.service.request("start", {"component": component})
@@ -1033,7 +1038,9 @@ def _handle_web_command(
                         owned.append(name)
                 for name in names:
                     if name in result["pids"] and not result.get("ready", {}).get(name):
-                        prepare_device(config, runtime, session, settings.service, name, result["pids"][name])
+                        prepare_device(
+                            config, runtime, session, settings.service, name, result["pids"][name]
+                        )
                 operation("ready")
             else:
                 operation("stopping")
@@ -1352,6 +1359,7 @@ def run(
     web_port: int,
     config_path: str | None = None,
     headless: bool = False,
+    language: str = "en",
 ) -> bool:
     """Main entry. Runs the unified console web server.
 
@@ -1489,7 +1497,9 @@ def run(
         select_mode(SessionMode.REAL, config, session, runtime)
         maybe_start_inference_cli(config, runtime, session)
     else:
-        start_console_server(config, runtime, session, port=web_port, output_dir=output_dir)
+        start_console_server(
+            config, runtime, session, port=web_port, output_dir=output_dir, language=language
+        )
         logger.info("Console web server started on port %d", web_port)
         # Optional ZMQ control channel — must start AFTER the console server so it can
         # share runtime.console_ctx. No-op unless control_channel.enabled.

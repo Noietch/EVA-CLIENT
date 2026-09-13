@@ -616,6 +616,7 @@ class ConsoleContext:
     scene_batch_loading: threading.Event = dataclasses.field(default_factory=threading.Event)
     scene_pbar: tqdm | None = None  # collection-replay playback progress bar
     active_tab: str = "debug"
+    language: str = "en"
     output_dir: str = ""  # results root; debug results land in <output_dir>/console/
     preview: Any = None  # EpisodePreview for RESULT-tab playback (lazily set)
     quality_upload_lock: threading.RLock = dataclasses.field(default_factory=threading.RLock)
@@ -961,7 +962,9 @@ def _resolve_dataset_dir(dataset_dir: str) -> str:
 def _scene_plan_root(config: ConfigDict | None = None, dataset: str | None = None) -> Path:
     task_set_dirs = (config.get("collection") or {}).get("task_set_dir") if config else None
     if isinstance(task_set_dirs, (list, tuple)) and task_set_dirs:
-        roots = [_resolve_runtime_path(str(value)).expanduser().resolve() for value in task_set_dirs]
+        roots = [
+            _resolve_runtime_path(str(value)).expanduser().resolve() for value in task_set_dirs
+        ]
         root = next((path for path in roots if path.name == dataset), None) if dataset else roots[0]
         if root is None:
             raise ValueError("unknown collection task-set directory")
@@ -1120,7 +1123,10 @@ def _scene_plan_objects(root: Path) -> dict[str, dict[str, Any]]:
             "name_zh": str(row.get("object_name_zh") or row.get("名称") or ""),
             "name_en": str(row.get("object_name") or row.get("英文名") or ""),
             "color": str(row.get("color", "") or ""),
-            "photo_url": f"/api/scene_plan/object-photo/{quote(object_id)}/{quote(photo.name)}?set={quote(root.name)}"
+            "photo_url": (
+                f"/api/scene_plan/object-photo/{quote(object_id)}/"
+                f"{quote(photo.name)}?set={quote(root.name)}"
+            )
             if photo
             else "",
         }
@@ -1253,7 +1259,9 @@ def _build_scene_plan(root: Path) -> dict[str, Any]:
     }
 
 
-def _load_scene_plan(config: ConfigDict | None = None, dataset: str | None = None) -> dict[str, Any]:
+def _load_scene_plan(
+    config: ConfigDict | None = None, dataset: str | None = None
+) -> dict[str, Any]:
     """Load and signature-cache the optional normalized collection scene plan."""
     root = _scene_plan_root(config, dataset)
     collection = (config.get("collection") or {}) if config is not None else {}
@@ -1489,9 +1497,7 @@ def _collection_slots_snapshot(ctx: ConsoleContext, dataset: str) -> dict[str, A
     }
 
 
-def _apply_collection_slot_session(
-    session: SessionState, slot: dict[str, Any] | None
-) -> None:
+def _apply_collection_slot_session(session: SessionState, slot: dict[str, Any] | None) -> None:
     if slot is None:
         session.collection_scene_id = None
         session.collection_scene_round = None
@@ -1518,7 +1524,9 @@ def _sync_collection_slot_session(ctx: ConsoleContext) -> dict[str, Any] | None:
     dataset_dir = str(snapshot["dataset_dir"] or "")
     if active is not None and dataset_dir:
         select_collection_slot(
-            Path(dataset_dir), active["slot_id"], snapshot["slot_state"],
+            Path(dataset_dir),
+            active["slot_id"],
+            snapshot["slot_state"],
             episode_index=(active.get("episode") or {}).get("episode_index"),
             # Retain an automatic retake just like an explicitly selected retake.
             manual=bool(active.get("repair")),
@@ -2055,11 +2063,13 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _send_static(self, path: Path) -> None:
+    def _send_static(self, path: Path, replacements: dict[bytes, bytes] | None = None) -> None:
         if not path.exists():
             self._send_empty(404)
             return
         body = path.read_bytes()
+        for old, new in (replacements or {}).items():
+            body = body.replace(old, new)
         ctype = {
             ".html": "text/html; charset=utf-8",
             ".js": "application/javascript; charset=utf-8",
@@ -2350,7 +2360,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                     ],
                 }
                 body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
-                self.wfile.write(f"data: {body}\n\n".encode("utf-8"))
+                self.wfile.write(f"data: {body}\n\n".encode())
                 self.wfile.flush()
 
                 next_tick += period
@@ -2371,7 +2381,10 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         # Prefix routes (streams + static assets) come first; they own a path subtree.
         if path in {"/", "/index.html"}:
-            self._send_static(STATIC_DIR / "index.html")
+            self._send_static(
+                STATIC_DIR / "index.html",
+                {b"__EVA_LANGUAGE__": self.ctx.language.encode("ascii")},
+            )
             return
         if path == "/task_preview.html":
             self._send_static(STATIC_DIR / "task_preview.html")
@@ -2557,10 +2570,14 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             collection_set = self._query_str("set").strip() or None
             if scope == "collect" and collection_set and task_filter:
                 plan = _load_scene_plan(config, collection_set)
-                linked = next((
-                    task for task in plan["tasks"]
-                    if task.get("runtime_prompt", task["prompt_en"]) == task_filter
-                ), None)
+                linked = next(
+                    (
+                        task
+                        for task in plan["tasks"]
+                        if task.get("runtime_prompt", task["prompt_en"]) == task_filter
+                    ),
+                    None,
+                )
                 task_id_filter = linked["task_id"] if linked else None
             if logger_obj is not None:
                 status = _status_snapshot_for_poll(
@@ -3441,7 +3458,9 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             self._send_json(409, {"ok": False, "error": "collection recording is unavailable"})
             return
         select_collection_slot(
-            Path(dataset_dir), slot_id, snapshot["slot_state"],
+            Path(dataset_dir),
+            slot_id,
+            snapshot["slot_state"],
             episode_index=(selected.get("episode") or {}).get("episode_index"),
             manual=bool(body.get("manual", True)),
         )
@@ -3832,7 +3851,9 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         if logger_obj is None:
             self._send_json(409, {"ok": False, "error": "collection recording is unavailable"})
             return None
-        collection_dataset = str(body.get("dataset") or self.ctx.session.selected_collect_set or "").strip()
+        collection_dataset = str(
+            body.get("dataset") or self.ctx.session.selected_collect_set or ""
+        ).strip()
         config = self.ctx.runtime.active_config or self.ctx.config
         entries = config.collection.tasks.get(collection_dataset)
         if not entries:
@@ -4285,6 +4306,7 @@ def build_console_context(
     session: SessionState,
     output_dir: str = "",
     *,
+    language: str = "en",
     with_scene: bool = True,
     with_obs_reader: bool = True,
     with_preview: bool = True,
@@ -4316,6 +4338,7 @@ def build_console_context(
         obs_reader=runtime.transport.create_observation_reader() if with_obs_reader else None,
         scene=scene,
         active_tab=_resolve_initial_tab(config),
+        language=language if language in {"zh", "en"} else "en",
         output_dir=output_dir,
     )
     # RESULT-tab playback reads recorded episodes under <output_dir>/episodes.
@@ -4347,9 +4370,10 @@ def start_console_server(
     port: int,
     host: str = "0.0.0.0",
     output_dir: str = "",
+    language: str = "en",
 ) -> threading.Thread:
     """Launch a daemon HTTP server thread bound to ``host:port``."""
-    ctx = build_console_context(config, runtime, session, output_dir)
+    ctx = build_console_context(config, runtime, session, output_dir, language=language)
     ConsoleRequestHandler.ctx = ctx
     server = ThreadingHTTPServer((host, port), ConsoleRequestHandler)
 

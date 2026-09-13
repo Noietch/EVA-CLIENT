@@ -1,4 +1,5 @@
 """Exercise spatial navigation and exactly-once QC on the production UI handlers."""
+
 import subprocess
 from pathlib import Path
 
@@ -8,13 +9,22 @@ pytestmark = pytest.mark.static
 
 
 def test_review_cursor_and_qc_events():
-    source = (Path(__file__).resolve().parents[1] /
-              "src/core/app/console/static/js/collect.js").read_text()
-    outcome = source[source.index("function collectOutcome(item)"):
-                     source.index("function collectTone(item)")]
-    handlers = outcome + source[source.index("let collectionReviewSeen = null;"):
-                      source.index("function renderCollectionSlotFilters()")]
-    script = r'''
+    source = (
+        Path(__file__).resolve().parents[1] / "src/core/app/console/static/js/collect.js"
+    ).read_text()
+    outcome = source[
+        source.index("function collectOutcome(item)") : source.index("function collectTone(item)")
+    ]
+    handlers = (
+        outcome
+        + source[
+            source.index("let collectionReviewSeen = null;") : source.index(
+                "function renderCollectionSlotFilters()"
+            )
+        ]
+    )
+    script = (
+        r"""
 const assert = require("node:assert/strict");
 const S = {ACTIVE_TAB: "collect", STATUS: {collect: {}},
   collectionSlots: {selectedSlotId: "", slots: [], dataset: "test", page: 1, pageCount: 3}};
@@ -58,7 +68,9 @@ const submitEpisodeQc = async (kind, verdict) => {
   assert.equal(kind, "collect");
   target.qc_verdict = verdict; marks++;
 };
-'''+handlers+r'''
+"""
+        + handlers
+        + r"""
 (async () => {
   const send = (events) => handleCollectionReviewInput({connected: true, review_events: events});
   send([]);
@@ -159,6 +171,7 @@ const submitEpisodeQc = async (kind, verdict) => {
   assert.equal(activations, 1);
 
 })().catch((error) => {console.error(error); process.exitCode = 1;});
-'''
+"""
+    )
     result = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr

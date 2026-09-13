@@ -128,6 +128,7 @@ def is_rejected_episode(row: dict[str, Any]) -> bool:
 
 def _latest_slot_episodes(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Keep exactly the latest attempt for each capture slot, regardless of QC."""
+
     def legacy_keys(row: dict[str, Any]) -> list[tuple[str, str]]:
         scene_id = str(row.get("scene_id") or "").strip()
         try:

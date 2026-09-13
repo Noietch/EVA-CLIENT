@@ -3,7 +3,8 @@
 #
 # Usage: tools/datasets/start.sh [additional tools.datasets.app arguments]
 # Inputs: EVA_DATA_ROOT (default: datasets/data_collection), EVA_DATASET_HOST,
-# EVA_DATASET_PORT, EVA_DATASET_READ_ONLY (0 or 1), and EVA_DATASET_PYTHON
+# EVA_DATASET_PORT, EVA_DATASET_READ_ONLY (0 or 1), EVA_DATASET_LOCALE (en or zh),
+# and EVA_DATASET_PYTHON
 # (default: the repository .venv).
 # Output: a Flask service listening on the configured host and port.
 # Side effects: the application may create missing catalog directories and
@@ -17,8 +18,9 @@ repository_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 data_root="${EVA_DATA_ROOT:-${repository_root}/datasets/data_collection}"
 python_bin="${EVA_DATASET_PYTHON:-${repository_root}/.venv/bin/python}"
 host="${EVA_DATASET_HOST:-0.0.0.0}"
-port="${EVA_DATASET_PORT:-8418}"
+port="${EVA_DATASET_PORT:-8416}"
 read_only="${EVA_DATASET_READ_ONLY:-0}"
+locale="${EVA_DATASET_LOCALE:-en}"
 
 if [[ ! -x "${python_bin}" ]]; then
   echo "Dataset Python is not executable: ${python_bin}" >&2
@@ -32,6 +34,7 @@ command=(
   --collection-root "${data_root}"
   --host "${host}"
   --port "${port}"
+  --locale "${locale}"
 )
 
 case "${read_only}" in

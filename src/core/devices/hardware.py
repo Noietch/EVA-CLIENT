@@ -108,7 +108,8 @@ class HardwareCatalog:
         defaults = copy.deepcopy(spec["config"])
         settings = spec["settings"] if settings is None else settings
         for setting, field in (
-            ("obs_endpoint", "sub_endpoint"), ("action_endpoint", "pub_endpoint")
+            ("obs_endpoint", "sub_endpoint"),
+            ("action_endpoint", "pub_endpoint"),
         ):
             if setting in settings:
                 defaults["transport"][field] = settings[setting]

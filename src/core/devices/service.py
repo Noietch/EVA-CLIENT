@@ -55,11 +55,7 @@ class DeviceProcesses:
 
     def _stop_stale_teleop(self, command: list[str]) -> list[int]:
         """Stop an identical VR launcher orphaned by an earlier device service."""
-        owned = {
-            process.pid
-            for process in self.processes.values()
-            if process.poll() is None
-        }
+        owned = {process.pid for process in self.processes.values() if process.poll() is None}
         stale = [
             process
             for process in psutil.process_iter()
@@ -171,9 +167,11 @@ class DeviceProcesses:
                     pass
             try:
                 process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
+            except subprocess.TimeoutExpired as error:
                 if name == "robot":
-                    raise ValueError("Robot did not finish shutdown; forced termination withheld")
+                    raise ValueError(
+                        "Robot did not finish shutdown; forced termination withheld"
+                    ) from error
                 try:
                     os.killpg(process.pid, signal.SIGKILL)
                 except ProcessLookupError:
@@ -223,8 +221,10 @@ class DeviceProcesses:
     def open_pico(self) -> None:
         process = self.processes.get("teleop")
         if (
-            process is None or process.poll() is not None
-            or self.ready_pids.get("teleop") != process.pid or not self.browser_url
+            process is None
+            or process.poll() is not None
+            or self.ready_pids.get("teleop") != process.pid
+            or not self.browser_url
         ):
             raise ValueError("Start VR successfully before opening Pico")
         url = urlsplit(self.browser_url)
@@ -232,10 +232,15 @@ class DeviceProcesses:
         result = subprocess.run(
             ["bash", str(REPOSITORY_ROOT / "examples/input_sources/vr_webxr/open_pico.sh")],
             env=dict(os.environ, VR_TOKEN=token, VR_PORT=str(url.port), VR_SCHEME=url.scheme),
-            capture_output=True, text=True, timeout=15, check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
         )
         if result.returncode:
-            message = (result.stderr or result.stdout or "Open Pico failed").replace(token, "[redacted]")
+            message = (result.stderr or result.stdout or "Open Pico failed").replace(
+                token, "[redacted]"
+            )
             raise ValueError(message[-1000:])
 
     def status(self, component: str | None = None) -> dict:
@@ -443,7 +448,14 @@ class DeviceRequestHandler(socketserver.StreamRequestHandler):
             elif action != "status":
                 raise ValueError(f"Unknown device operation: {action}")
             result = self.manager.status(component)
-        except (ValueError, KeyError, TypeError, OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+        except (
+            ValueError,
+            KeyError,
+            TypeError,
+            OSError,
+            RuntimeError,
+            subprocess.TimeoutExpired,
+        ) as error:
             result = {"ok": False, "error": str(error)}
         self.wfile.write(json.dumps(result).encode() + b"\n")
 
