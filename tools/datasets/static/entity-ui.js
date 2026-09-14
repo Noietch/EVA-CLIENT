@@ -14,7 +14,6 @@ let showToast;
 let runWrite;
 let writeJson;
 let loadState;
-let requireEditMode;
 let emptyList;
 let switchTab;
 let stopPlayback;
@@ -70,7 +69,6 @@ function configureEntityUi(context) {
     runWrite,
     writeJson,
     loadState,
-    requireEditMode,
     emptyList,
     switchTab,
     stopPlayback,
@@ -431,12 +429,8 @@ function editorShell(kind, title, label) {
   const heading = node("div");
   heading.append(node("span", "eyebrow", label), node("h1", "", title));
   const actions = node("div", "editor-actions");
-  if (app.editMode) {
-    if (app.original[kind]) actions.append(button(translate("entity.delete"), "delete-" + kind, "button danger"));
-    actions.append(button(translate("entity.saveChanges"), "save-" + kind, "button primary"));
-  } else {
-    actions.append(node("span", "read-only-label", translate("entity.readOnly")));
-  }
+  if (app.original[kind]) actions.append(button(translate("entity.delete"), "delete-" + kind, "button danger"));
+  actions.append(button(translate("entity.saveChanges"), "save-" + kind, "button primary"));
   head.append(heading, actions);
   const body = node("div", "editor-body");
   shell.append(head, body);
@@ -567,13 +561,13 @@ function renderSceneEditor() {
   const layout = node("div", "scene-layout");
   const canvas = node("section", "surface scene-canvas");
   const idControl = input("text", "scene_id", draft.scene_id, "SC-001");
-  idControl.disabled = Boolean(app.original.scenes) || !app.editMode;
+  idControl.disabled = Boolean(app.original.scenes);
   idControl.addEventListener("input", () => {
     draft.scene_id = idControl.value.trim();
     editor.shell.querySelector("h1").textContent = draft.scene_id || translate("entity.newScene");
   });
   const grid = node("div", "scene-grid");
-  renderGridCells(grid, draft.batch_id, draft, !app.editMode);
+  renderGridCells(grid, draft.batch_id, draft, false);
   canvas.append(field(translate("entity.sceneId"), idControl), grid, buildCameraPositionLegend(draft.batch_id));
   const placements = node("section", "surface placement-panel");
   const head = node("div", "section-head");
@@ -590,7 +584,7 @@ function renderSceneEditor() {
     renderSceneEditor();
   });
   head.append(heading);
-  if (app.editMode) head.append(add);
+  head.append(add);
   const list = node("div", "placement-list");
   if (draft.placements.length) {
     list.replaceChildren(...draft.placements.map(buildPlacementCard));
@@ -623,12 +617,10 @@ function buildCameraPositionLegend(batch) {
 
 function buildPlacementCard(placement, index) {
   const card = node("div", "placement-card" + (app.placementIndex === index ? " active" : ""));
-  if (app.editMode) {
-    card.addEventListener("click", () => {
-      app.placementIndex = index;
-      renderSceneEditor();
-    });
-  }
+  card.addEventListener("click", () => {
+    app.placementIndex = index;
+    renderSceneEditor();
+  });
   const select = node("select");
   for (const object of app.state.objects) {
     select.add(new Option(
@@ -637,7 +629,6 @@ function buildPlacementCard(placement, index) {
     ));
   }
   select.value = placement.object_id;
-  select.disabled = !app.editMode;
   select.addEventListener("click", (event) => event.stopPropagation());
   select.addEventListener("change", () => { placement.object_id = select.value; });
   const remove = button("×", "", "icon-btn");
@@ -649,7 +640,7 @@ function buildPlacementCard(placement, index) {
     renderSceneEditor();
   });
   card.append(select);
-  if (app.editMode) card.append(remove);
+  card.append(remove);
   card.append(node("small", "", placement.position_ids.join(", ") || translate("entity.choosePosition")));
   return card;
 }
@@ -680,7 +671,7 @@ function renderTaskEditor() {
   const editor = editorShell("tasks", draft.task_id || translate("entity.newTask"), translate("entity.taskEditor") + " · " + draft.batch_id);
   const form = node("form", "form-grid task-form");
   const idControl = input("text", "task_id", draft.task_id, "TASK-001");
-  idControl.disabled = Boolean(app.original.tasks) || !app.editMode;
+  idControl.disabled = Boolean(app.original.tasks);
   form.append(
     field(translate("entity.taskId"), idControl),
     field(translate("entity.action"), input("text", "action", draft.action)),
@@ -688,9 +679,6 @@ function renderTaskEditor() {
     field(translate("entity.englishPrompt"), textarea("prompt_en", draft.prompt_en), true),
     field(translate("entity.chinesePrompt"), textarea("prompt_zh", draft.prompt_zh), true),
   );
-  if (!app.editMode) {
-    form.querySelectorAll("input, textarea").forEach((control) => { control.disabled = true; });
-  }
   form.addEventListener("input", () => {
     for (const name of ["task_id", "action", "category", "prompt_en", "prompt_zh"]) {
       draft[name] = form.elements[name].value.trim();
@@ -721,7 +709,7 @@ function buildTaskObjectPicker() {
     renderTaskEditor();
   });
   head.append(heading);
-  if (app.editMode) head.append(select);
+  head.append(select);
   const rows = node("div", "selected-records");
   for (const objectId of app.draft.tasks.operation_object_ids) {
     const asset = objectFor(objectId);
@@ -739,7 +727,7 @@ function buildTaskObjectPicker() {
       renderTaskEditor();
     });
     row.append(node("code", "", objectId), inspect);
-    if (app.editMode) row.append(remove);
+    row.append(remove);
     rows.append(row);
   }
   if (!rows.children.length) emptyList(rows, translate("entity.noOperationObjects"));
@@ -768,7 +756,7 @@ function buildTaskScenePicker() {
     renderTaskEditor();
   });
   head.append(heading);
-  if (app.editMode) head.append(select);
+  head.append(select);
   const rows = node("div", "selected-records");
   draft.scene_ids.forEach((sceneId, index) => {
     const row = node("div", "selected-record scene-record");
@@ -776,7 +764,6 @@ function buildTaskScenePicker() {
     link.addEventListener("click", () => jumpScene(draft.batch_id, sceneId));
     const count = input("number", "", draft.scene_epsiodes_count[index] || 1);
     count.min = "1";
-    count.disabled = !app.editMode;
     count.addEventListener("input", () => {
       draft.scene_epsiodes_count[index] = Math.max(1, Number(count.value) || 1);
       updateTaskTotal();
@@ -788,7 +775,7 @@ function buildTaskScenePicker() {
       renderTaskEditor();
     });
     row.append(link, count, node("small", "", translate("common.episodes")));
-    if (app.editMode) row.append(remove);
+    row.append(remove);
     rows.append(row);
   });
   if (!rows.children.length) emptyList(rows, translate("entity.noConfiguredScenes"));
@@ -819,7 +806,7 @@ function renderObjectEditor() {
   const editor = editorShell("objects", draft.object_id || translate("entity.newObject"), translate("entity.objectAsset"));
   const form = node("form", "form-grid inset surface");
   const idControl = input("text", "object_id", draft.object_id, "AST-0001");
-  idControl.disabled = Boolean(app.original.objects) || !app.editMode;
+  idControl.disabled = Boolean(app.original.objects);
   form.append(
     field(translate("entity.objectId"), idControl),
     field(translate("entity.color"), input("text", "color", draft.color, "white / #e8590c")),
@@ -843,9 +830,6 @@ function renderObjectEditor() {
   }
   methodControl.value = draft.modeling_method || "";
   form.append(field("建模方法", methodControl, true));
-  if (!app.editMode) {
-    form.querySelectorAll("input, select").forEach((control) => { control.disabled = true; });
-  }
   const updateDraft = () => {
     for (const name of [
       "object_id",
@@ -873,7 +857,7 @@ function buildPhotoGallery(object, editable = false) {
   const head = node("div", "section-head");
   const heading = node("div");
   heading.append(node("span", "eyebrow", translate("entity.objectPhotos")), node("h2", "", translate("entity.physicalPhotos")));
-  if (editable && app.editMode) {
+  if (editable) {
     const upload = button(translate("entity.uploadPhotos"), "", "button");
     upload.disabled = !app.original.objects;
     upload.addEventListener("click", () => $("photo-file").click());
@@ -1197,7 +1181,6 @@ function requireBatch() {
 }
 
 function newEntity(kind) {
-  if (!requireEditMode()) return;
   if (kind !== "objects" && !requireBatch()) return;
   app.selectedSlot = "";
   app.original[kind] = "";

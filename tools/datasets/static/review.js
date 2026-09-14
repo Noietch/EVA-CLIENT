@@ -26,7 +26,6 @@ let renderTaskList;
 let renderTaskEditor;
 let sceneFor;
 let renderGridCells;
-let requireEditMode;
 let navigateQcSlot;
 let translate;
 
@@ -48,7 +47,6 @@ function configureReview(context) {
     renderTaskEditor,
     sceneFor,
     renderGridCells,
-    requireEditMode,
     navigateQcSlot,
     translate,
   } = context);
@@ -310,7 +308,6 @@ function buildQcControls(task, slot) {
 }
 
 async function saveQc(task, slot, verdict, control) {
-  if (!requireEditMode()) return;
   const reasonValue = $("qc-reason").value;
   const noteValue = $("qc-note").value.trim();
   if (verdict === "fail" && !reasonValue) {
@@ -329,11 +326,7 @@ async function saveQc(task, slot, verdict, control) {
       { verdict, note: noteValue, reason: verdict === "fail" || !verdict ? reasonValue : "" },
     );
     await loadState(true, true);
-    const freshTask = app.state.tasks.find(
-      (item) => item.batch_id === task.batch_id && item.task_id === task.task_id,
-    );
-    const freshSlot = freshTask.slots.find((item) => item.slot_id === slot.slot_id);
-    await openSlot(freshTask, freshSlot);
+    navigateQcSlot(1);
   }, verdict === "pass"
     ? translate("qc.savePassed")
     : verdict === "fail" ? translate("qc.saveFailed") : translate("qc.saved"));

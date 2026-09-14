@@ -141,22 +141,19 @@
 
 .qc-controls input { height: 36px; }
 .qc-controls select { min-width: 0; height: 36px; }
-.qc-controls.read-only { grid-template-columns: auto minmax(0, 1fr); }
 .qc-summary { color: var(--ink); font: 700 9px/1 var(--mono); }
 .qc-note-readonly { min-width: 0; overflow: hidden; color: var(--ink-dim); text-overflow: ellipsis; white-space: nowrap; }
 .qc-pass { border-color: rgba(47, 158, 68, .5); color: var(--ok); }
 .qc-pass.selected { background: var(--ok); color: var(--paper); }
 .button.danger.selected { background: var(--danger); color: var(--paper); }
 .qc-export-inline { white-space: nowrap; }
-.qc-side-panel .qc-controls,
-.qc-side-panel .qc-controls.read-only { grid-template-columns: 1fr; align-items: stretch; }
+.qc-side-panel .qc-controls { grid-template-columns: 1fr; align-items: stretch; }
 .qc-side-panel .qc-controls .eyebrow,
 .qc-side-panel .qc-controls input,
 .qc-side-panel .qc-controls select,
 .qc-side-panel .qc-controls button,
 .qc-side-panel .qc-controls a { grid-column: 1; width: 100%; }
 .qc-side-panel .qc-controls .button { display: flex; justify-content: center; }
-.qc-side-panel .qc-controls.read-only .qc-export-inline { margin-top: 4px; }
 
 @media (max-width: 1050px) {
   .qc-stage { grid-template-columns: 1fr; }

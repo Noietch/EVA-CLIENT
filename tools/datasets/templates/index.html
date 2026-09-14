@@ -19,12 +19,7 @@
       <span id="dataset-path" data-i18n="path.loading">正在读取计划批次...</span>
     </div>
     <div class="topbar-actions">
-      <label class="edit-mode-toggle" title="开启后才能修改计划、物体和 QC" data-i18n-title="edit.toggleTitle">
-        <input id="edit-mode" type="checkbox">
-        <span class="toggle-track"></span>
-        <span id="edit-mode-label" data-i18n="edit.readonly">只读</span>
-      </label>
-      <button class="icon-btn" id="import-trigger" data-edit-only title="导入计划压缩包" data-i18n-title="actions.importPlan" aria-label="导入计划压缩包" data-i18n-aria-label="actions.importPlan" hidden>&#8593;</button>
+      <button class="icon-btn" id="import-trigger" title="导入计划压缩包" data-i18n-title="actions.importPlan" aria-label="导入计划压缩包" data-i18n-aria-label="actions.importPlan">&#8593;</button>
       <a class="icon-btn disabled" id="export-trigger" title="导出计划压缩包" data-i18n-title="actions.exportPlan" aria-label="导出计划压缩包" data-i18n-aria-label="actions.exportPlan">&#8595;</a>
       <button class="button primary" id="validate-button" data-i18n="actions.validate">检查计划</button>
     </div>
@@ -52,7 +47,7 @@
         <aside class="list-panel task-sidebar">
           <div class="list-head">
             <div><span class="eyebrow" data-i18n="qc.eyebrow">质量检查</span><h1 data-i18n="qc.title">质检审核</h1></div>
-            <button class="icon-btn dark" data-action="new-task" data-edit-only title="新增任务" aria-label="新增任务" hidden>+</button>
+            <button class="icon-btn dark" data-action="new-task" title="新增任务" aria-label="新增任务">+</button>
           </div>
           <section class="collection-control-panel" aria-label="Dataset selection" data-i18n-aria-label="filters.batch">
             <div class="collection-panel-head"><span class="step-badge">1</span><span data-i18n="filters.batch">计划批次</span></div>
@@ -117,7 +112,7 @@
               <option value="D">D · agent-blender</option>
             </select>
             <span id="object-filter-count">0 / 0</span>
-            <button class="icon-btn dark" data-action="new-object" data-edit-only title="新增物体" aria-label="新增物体" hidden>+</button>
+            <button class="icon-btn dark" data-action="new-object" title="新增物体" aria-label="新增物体">+</button>
           </div>
         </header>
         <div class="object-grid" id="object-list"></div>

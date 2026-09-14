@@ -28,9 +28,6 @@ const $ = (id) => document.getElementById(id);
 const LOCALE_TABLE = {
   "brand.dataset": ["采集数据", "Collection Dataset"],
   "path.loading": ["正在读取计划批次...", "Loading task plans..."],
-  "edit.toggleTitle": ["开启后才能修改计划、物体和质检", "Enable to edit plans, objects, and QC"],
-  "edit.readonly": ["只读", "Read only"],
-  "edit.enabled": ["编辑中", "Editing"],
   "actions.validate": ["检查计划", "Validate plans"],
   "actions.retry": ["重试", "Retry"],
   "actions.exportQc": ["导出补采清单", "Export reshoot list"],
@@ -143,10 +140,6 @@ const LOCALE_TABLE = {
   "dashboard.openQc": ["查看质检", "Open QC"],
   "dashboard.noReports": ["暂无质检报告", "No QC reports"],
   "dashboard.pendingSummary": ["待处理 0", "0 pending"],
-  "ui.enableEditFirst": ["请先开启编辑模式", "Enable edit mode first"],
-  "ui.enableEdit": ["开启编辑模式", "Enable edit mode"],
-  "ui.editWarning": ["开启后可修改计划、物体照片和质检结果。请确认当前操作不会污染正式数据。", "Editing can change plans, object photos, and QC results. Confirm that this will not affect production data."],
-  "ui.enable": ["开启编辑", "Enable"],
   "ui.requestFailed": ["请求失败", "Request failed"],
   "ui.chooseBatchExport": ["选择批次后可导出", "Choose a batch to export"],
   "ui.saved": ["已保存", "saved"],
@@ -177,7 +170,6 @@ const LOCALE_TABLE = {
   "entity.photos": ["图", "photos"],
   "entity.delete": ["删除", "Delete"],
   "entity.saveChanges": ["保存更改", "Save changes"],
-  "entity.readOnly": ["只读模式", "Read-only mode"],
   "entity.chooseScene": ["选择或新增场景", "Select or add a scene"],
   "entity.newScene": ["新场景", "New scene"],
   "entity.sceneEditor": ["场景编辑器", "Scene editor"],
@@ -280,7 +272,6 @@ const app = {
   robotViewer: null,
   writeBusy: false,
   toastTimer: 0,
-  editMode: false,
   objectThumbObserver: null,
   stateCache: new Map(),
   reviewCache: new Map(),
@@ -404,71 +395,11 @@ function setQcLoading(loading, token = app.qcLoadingToken) {
   }
 }
 
-function requireEditMode() {
-  if (app.editMode) return true;
-  showToast(t("ui.enableEditFirst"), true);
-  return false;
-}
-
-function restoreSelectedDrafts() {
-  const specs = [
-    ["scenes", "scene_id"],
-    ["tasks", "task_id"],
-    ["objects", "object_id"],
-  ];
-  for (const [kind, idField] of specs) {
-    const record = app.state[kind].find(
-      (item) => recordKey(item, idField) === app.selected[kind],
-    );
-    app.draft[kind] = record ? clone(record) : null;
-    app.original[kind] = record ? record[idField] : "";
-  }
-}
-
-function syncEditMode() {
-  document.body.classList.toggle("read-only", !app.editMode);
-  $("edit-mode").checked = app.editMode;
-  $("edit-mode-label").textContent = app.editMode ? t("edit.enabled") : t("edit.readonly");
-  document.querySelectorAll("[data-edit-only]").forEach((control) => {
-    control.hidden = !app.editMode;
-  });
-  if (!app.state) return;
-  renderInfo();
-  if (app.tab === "tasks" && app.selectedSlot && app.review) {
-    const task = app.state.tasks.find(
-      (item) => recordKey(item, "task_id") === app.selected.tasks,
-    );
-    const slot = task && task.slots.find((item) => item.slot_id === app.selectedSlot);
-    if (task && slot) renderReview(task, slot, app.review);
-  } else {
-    renderCurrentEditor();
-  }
-}
-
-async function changeEditMode(control) {
-  const enabled = control.checked;
-  if (enabled) {
-    const confirmed = await confirmAction(
-      t("ui.enableEdit"),
-      t("ui.editWarning"),
-      t("ui.enable"),
-    );
-    if (!confirmed) {
-      control.checked = false;
-      return;
-    }
-  } else {
-    restoreSelectedDrafts();
-  }
-  app.editMode = enabled;
-  syncEditMode();
-}
-
 async function api(path, options = {}) {
   const headers = new Headers(options.headers || {});
   if (options.method && !["GET", "HEAD"].includes(options.method)) {
     headers.set("X-EVA-Dataset-Editor", "1");
-    if (app.editMode) headers.set("X-EVA-Edit-Mode", "1");
+    headers.set("X-EVA-Edit-Mode", "1");
   }
   const response = await fetch(path, { ...options, headers });
   const type = response.headers.get("content-type") || "";
@@ -683,7 +614,6 @@ function emptyList(host, message) {
 }
 
 function saveEntity(kind, control) {
-  if (!requireEditMode()) return;
   const draft = validateDraft(kind);
   const idField = kind === "scenes" ? "scene_id" : kind === "tasks" ? "task_id" : "object_id";
   const id = draft[idField];
@@ -724,7 +654,6 @@ function confirmAction(title, message, label = "确认") {
 }
 
 async function deleteEntity(kind, control) {
-  if (!requireEditMode()) return;
   const id = app.original[kind];
   if (!id || !await confirmAction(t("ui.confirmDelete"), t("ui.importPrefix") + id + t("ui.deleteQuestion"), t("ui.delete"))) {
     return;
@@ -762,7 +691,7 @@ async function validatePlan(control) {
 }
 
 async function importPlan(file, control) {
-  if (!requireEditMode() || !file || !requireBatch()) return;
+  if (!file || !requireBatch()) return;
   const confirmed = await confirmAction(
     t("ui.importPlan"),
     t("ui.importPrefix") + file.name + t("ui.importMiddle") + app.batch + ".",
@@ -783,7 +712,7 @@ async function importPlan(file, control) {
 }
 
 async function uploadPhotos(files) {
-  if (!requireEditMode() || !files.length || !app.original.objects) return;
+  if (!files.length || !app.original.objects) return;
   const form = new FormData();
   [...files].forEach((file) => form.append("photos", file));
   await runWrite(null, async () => {
@@ -824,7 +753,7 @@ function handleAction(event) {
     else if (action.startsWith("delete-")) deleteEntity(action.slice(7), control);
     else if (action === "validate") validatePlan(control);
     else if (action === "import") {
-      if (requireEditMode() && requireBatch()) $("import-file").click();
+      if (requireBatch()) $("import-file").click();
     }
   } catch (error) {
     showToast(error.message || String(error), true);
@@ -833,7 +762,6 @@ function handleAction(event) {
 
 function bindEvents() {
   document.addEventListener("click", handleAction);
-  $("edit-mode").addEventListener("change", (event) => changeEditMode(event.currentTarget));
   document.querySelectorAll(".tab").forEach((tab) => {
     tab.addEventListener("click", () => switchTab(tab.dataset.tab));
   });
@@ -864,7 +792,7 @@ function bindEvents() {
   $("retry-button").addEventListener("click", () => loadState());
   $("validate-button").addEventListener("click", (event) => validatePlan(event.currentTarget));
   $("import-trigger").addEventListener("click", () => {
-    if (requireEditMode() && requireBatch()) $("import-file").click();
+    if (requireBatch()) $("import-file").click();
   });
   $("import-file").addEventListener("change", (event) => {
     importPlan(event.target.files[0], $("import-trigger"));
@@ -904,7 +832,6 @@ configureEntityUi({
   runWrite,
   writeJson,
   loadState,
-  requireEditMode,
   emptyList,
   switchTab,
   stopPlayback,
@@ -928,13 +855,11 @@ configureReview({
   renderTaskEditor,
   sceneFor,
   renderGridCells,
-  requireEditMode,
   navigateQcSlot,
   translate: t,
 });
 
 applyLocale();
-syncEditMode();
 bindEvents();
 switchTab(app.tab);
 loadState();
