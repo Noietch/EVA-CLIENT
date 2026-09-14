@@ -82,6 +82,9 @@ const LOCALE_TABLE = {
   "filters.allRobots": ["全部机器人", "All robots"],
   "filters.batch": ["计划批次", "Plan batch"],
   "filters.chooseBatch": ["选择批次", "Choose a batch"],
+  "filters.batchNavigation": ["批次导航", "Batch navigation"],
+  "filters.previousBatch": ["上一批次", "Previous batch"],
+  "filters.nextBatch": ["下一批次", "Next batch"],
   "filters.scene": ["场景", "Scene"],
   "filters.allScenes": ["全部场景", "All scenes"],
   "filters.task": ["任务", "Task"],
@@ -502,10 +505,16 @@ function retainSelections() {
 function renderBatchSelect() {
   const select = $("batch-select");
   select.replaceChildren(new Option(t("filters.chooseBatch"), ""));
-  for (const batch of app.state.batches) {
+  const batches = app.state.batches;
+  for (const batch of batches) {
     select.add(new Option(batch.batch_id + " · " + batch.robot_type, batch.batch_id));
   }
   select.value = app.batch;
+  const currentIndex = batches.findIndex((batch) => batch.batch_id === app.batch);
+  const previous = $("batch-prev");
+  const next = $("batch-next");
+  if (previous) previous.disabled = !batches.length || currentIndex === 0;
+  if (next) next.disabled = !batches.length || currentIndex === batches.length - 1;
   const url = app.batch
     ? "/api/batches/" + encodeURIComponent(app.batch) + "/export"
     : "";
@@ -751,6 +760,20 @@ function bindEvents() {
     clearEditors();
     await loadState();
   });
+  const navigateBatch = async (offset) => {
+    const batches = app.state ? app.state.batches : [];
+    if (!batches.length) return;
+    const currentIndex = batches.findIndex((batch) => batch.batch_id === app.batch);
+    const nextIndex = currentIndex < 0
+      ? (offset > 0 ? 0 : batches.length - 1)
+      : currentIndex + offset;
+    if (nextIndex < 0 || nextIndex >= batches.length) return;
+    app.batch = batches[nextIndex].batch_id;
+    clearEditors();
+    await loadState();
+  };
+  $("batch-prev").addEventListener("click", () => navigateBatch(-1));
+  $("batch-next").addEventListener("click", () => navigateBatch(1));
   $("robot-select").addEventListener("change", async (event) => {
     app.robot = event.target.value;
     app.batch = "";
