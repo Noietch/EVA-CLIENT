@@ -28,7 +28,7 @@ const $ = (id) => document.getElementById(id);
 const LOCALE_TABLE = {
   "brand.dataset": ["采集数据", "Collection Dataset"],
   "path.loading": ["正在读取计划批次...", "Loading task plans..."],
-  "actions.validate": ["检查计划", "Validate plans"],
+  "actions.refreshDatabase": ["刷新数据库", "Refresh database"],
   "actions.retry": ["重试", "Retry"],
   "actions.exportQc": ["导出补采清单", "Export reshoot list"],
   "actions.importPlan": ["导入计划压缩包", "Import plan ZIP"],
@@ -147,8 +147,6 @@ const LOCALE_TABLE = {
   "ui.delete": ["删除", "Delete"],
   "ui.deleteQuestion": ["？被引用的记录无法删除。", "? Referenced records cannot be deleted."],
   "ui.deleted": ["已删除", "deleted"],
-  "ui.reloadChecked": ["全部批次已重新读取并检查", "All batches reloaded and checked"],
-  "ui.validationDone": ["计划检查完成", "Plan validation complete"],
   "ui.importPlan": ["导入计划", "Import plan"],
   "ui.importPrefix": ["导入 ", "Import "],
   "ui.importMiddle": [" 将替换批次 ", " will replace the four plan files in batch "],
@@ -674,20 +672,6 @@ async function deleteEntity(kind, control) {
   }, id + " " + t("ui.deleted"));
 }
 
-async function validatePlan(control) {
-  if (!app.batch) {
-    await loadState();
-    showToast(t("ui.reloadChecked"));
-    return;
-  }
-  await runWrite(control, async () => {
-    const payload = await api("/api/batches/" + encodeURIComponent(app.batch) + "/validate");
-    app.state.issues = payload.issues;
-    renderIssues();
-    updateSummary();
-  }, t("ui.validationDone"));
-}
-
 async function importPlan(file, control) {
   if (!file || !requireBatch()) return;
   const confirmed = await confirmAction(
@@ -749,7 +733,6 @@ function handleAction(event) {
     else if (action === "new-object") newEntity("objects");
     else if (action.startsWith("save-")) saveEntity(action.slice(5), control);
     else if (action.startsWith("delete-")) deleteEntity(action.slice(7), control);
-    else if (action === "validate") validatePlan(control);
     else if (action === "import") {
       if (requireBatch()) $("import-file").click();
     }
@@ -788,7 +771,7 @@ function bindEvents() {
   $("object-photo-filter").addEventListener("change", renderObjectList);
   $("object-modeling-filter").addEventListener("change", renderObjectList);
   $("retry-button").addEventListener("click", () => loadState());
-  $("validate-button").addEventListener("click", (event) => validatePlan(event.currentTarget));
+  $("refresh-button").addEventListener("click", () => loadState(false, true));
   $("import-trigger").addEventListener("click", () => {
     if (requireBatch()) $("import-file").click();
   });

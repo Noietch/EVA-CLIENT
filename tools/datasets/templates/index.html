@@ -21,7 +21,7 @@
     <div class="topbar-actions">
       <button class="icon-btn" id="import-trigger" title="导入计划压缩包" data-i18n-title="actions.importPlan" aria-label="导入计划压缩包" data-i18n-aria-label="actions.importPlan">&#8593;</button>
       <a class="icon-btn disabled" id="export-trigger" title="导出计划压缩包" data-i18n-title="actions.exportPlan" aria-label="导出计划压缩包" data-i18n-aria-label="actions.exportPlan">&#8595;</a>
-      <button class="button primary" id="validate-button" data-i18n="actions.validate">检查计划</button>
+      <button class="button primary" id="refresh-button" data-i18n="actions.refreshDatabase">刷新数据库</button>
     </div>
   </header>
 
@@ -47,11 +47,10 @@
         <aside class="list-panel task-sidebar">
           <div class="list-head">
             <div><span class="eyebrow" data-i18n="qc.eyebrow">质量检查</span><h1 data-i18n="qc.title">质检审核</h1></div>
-            <button class="icon-btn dark" data-action="new-task" title="新增任务" aria-label="新增任务">+</button>
           </div>
           <section class="collection-control-panel" aria-label="Dataset selection" data-i18n-aria-label="filters.batch">
-            <div class="collection-panel-head"><span class="step-badge">1</span><span data-i18n="filters.batch">计划批次</span></div>
             <div class="collection-panel-card">
+              <div class="collection-panel-head"><span class="step-badge">1</span><span data-i18n="filters.batch">计划批次</span></div>
               <label class="batch-field"><span data-i18n="filters.robot">机器人</span><select id="robot-select"><option value="" data-i18n="filters.allRobots">全部机器人</option></select></label>
               <label class="batch-field"><span data-i18n="filters.batch">计划批次</span><select id="batch-select"><option value="" data-i18n="filters.chooseBatch">选择批次</option></select></label>
             </div>
@@ -81,8 +80,8 @@
             <div class="collection-qc-nav"><button class="icon-btn" id="qc-prev-slot" type="button" aria-label="上一个槽位" data-i18n-aria-label="qc.previousSlot">←</button><strong id="qc-position">— / —</strong><button class="icon-btn" id="qc-next-slot" type="button" aria-label="下一个槽位" data-i18n-aria-label="qc.nextSlot">→</button></div>
           </section>
           <section class="collection-qc-operation" aria-label="Quality check operation" data-i18n-aria-label="qc.operation">
-            <div class="collection-panel-head"><span class="step-badge">3</span><span data-i18n="qc.operation">质检操作</span></div>
             <div class="collection-panel-card">
+              <div class="collection-panel-head"><span class="step-badge">3</span><span data-i18n="qc.operation">质检操作</span></div>
               <div id="qc-left-controls" class="collection-qc-controls"></div>
               <a class="button qc-export-left disabled" id="qc-export" href="#" aria-disabled="true" data-i18n="actions.exportQc">导出补采清单</a>
             </div>
