@@ -99,25 +99,27 @@ async function openSlot(task, slot) {
 function renderReviewLoading(task, slot) {
   const host = $("task-editor");
   const shell = node("div", "editor-shell");
-  const head = reviewHeader(task, slot);
+  const head = reviewHeader(task);
   const loading = node("div", "loading-state");
   loading.append(node("span", "spinner"), node("strong", "", translate("qc.loadingSlot")));
   shell.append(head, loading);
   host.replaceChildren(shell);
 }
 
-function reviewHeader(task, slot) {
+function reviewHeader(task) {
   const head = node("header", "editor-head review-head");
   const heading = node("div");
+  const promptZh = String(task.prompt_zh || "").trim();
+  const promptEn = String(task.prompt_en || "").trim();
+  const primary = app.locale === "zh" ? promptZh || promptEn : promptEn || promptZh;
+  const secondary = app.locale === "zh" ? promptEn : promptZh;
   heading.append(
-    node(
-      "span",
-      "eyebrow",
-      task.batch_id + " · " + translate("review.taskId") + " " + task.task_id
-        + " · " + translate("review.sceneId") + " " + slot.scene_id
-        + " · " + translate("review.slotId") + " " + slot.slot_id,
-    ),
+    node("span", "eyebrow", translate("review.taskDescription")),
+    node("h1", "review-task-description", primary || task.task_id),
   );
+  if (secondary && secondary !== primary) {
+    heading.append(node("p", "review-task-description-secondary", secondary));
+  }
   head.append(heading);
   return head;
 }
@@ -129,7 +131,7 @@ function renderReview(task, slot, payload) {
   const body = node("div", "review-body");
   const stage = buildQcStage(task, slot, payload);
   body.append(stage);
-  shell.append(reviewHeader(task, slot), body);
+  shell.append(reviewHeader(task), body);
   host.replaceChildren(shell);
   app.robotViewer = new RobotViewer($("review-gl"), $("robot-empty"));
   const episodeIndex = slot.episode ? Number(slot.episode.episode_index) : null;
