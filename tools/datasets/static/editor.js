@@ -953,18 +953,12 @@ function bindEvents() {
   $("hf-publish-task-set").addEventListener("click", () => {
     if (app.batch) runHfSyncAction(`/api/batches/${encodeURIComponent(app.batch)}/hf/publish`, "actions.publishTaskSet");
   });
-  $("hf-sync-task-set").addEventListener("click", () => {
-    if (app.batch) runHfSyncAction(`/api/batches/${encodeURIComponent(app.batch)}/hf/sync`, "sync.taskSet");
-  });
   $("hf-sync-assets").addEventListener("click", () => runHfSyncAction("/api/hf/assets/publish", "sync.assets"));
   $("hf-download-dataset").addEventListener("click", () => {
     if (app.batch) runHfSyncAction(`/api/batches/${encodeURIComponent(app.batch)}/hf/download`, "sync.dataset");
   });
   $("hf-upload-qc").addEventListener("click", () => {
     if (app.batch) runHfSyncAction(`/api/batches/${encodeURIComponent(app.batch)}/hf/qc/upload`, "sync.uploadQc");
-  });
-  $("hf-download-qc").addEventListener("click", () => {
-    if (app.batch) runHfSyncAction(`/api/batches/${encodeURIComponent(app.batch)}/hf/qc/download`, "sync.downloadQc");
   });
   $("import-trigger").addEventListener("click", () => {
     if (requireBatch()) $("import-file").click();
