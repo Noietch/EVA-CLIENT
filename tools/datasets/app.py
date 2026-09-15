@@ -204,10 +204,14 @@ class DatasetService:
         return jsonify(fetch_dataset(PROJECT_ROOT, destination.name, destination.parent))
 
     def publish_hf_qc(self, batch: str) -> Any:
-        return jsonify(publish_qc(PROJECT_ROOT, self.catalog.collection_root / batch, batch))
+        info = yaml.safe_load((self.catalog._batch_root(batch) / "info.yaml").read_text())
+        dataset_dir = self.catalog._source_dataset_dir(batch, info)
+        return jsonify(publish_qc(PROJECT_ROOT, dataset_dir, dataset_dir.name))
 
     def download_hf_qc(self, batch: str) -> Any:
-        return jsonify(fetch_qc(PROJECT_ROOT, batch, self.catalog.collection_root / batch))
+        info = yaml.safe_load((self.catalog._batch_root(batch) / "info.yaml").read_text())
+        dataset_dir = self.catalog._source_dataset_dir(batch, info)
+        return jsonify(fetch_qc(PROJECT_ROOT, dataset_dir.name, dataset_dir))
 
     def export_qc(self, batch: str) -> Any:
         rows = self.catalog.qc_rows(batch)
