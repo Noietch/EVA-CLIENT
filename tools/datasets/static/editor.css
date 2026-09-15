@@ -373,7 +373,7 @@ input[type="color"] { padding: 4px; cursor: pointer; }
 .button { min-height: 38px; padding: 8px 12px; font: 650 10px/1 var(--mono); text-transform: uppercase; }
 .button:hover:not(:disabled), .icon-btn:hover:not(:disabled), .transfer-button:hover { transform: translateY(-1px); box-shadow: var(--shadow-pop); }
 .button:active:not(:disabled), .icon-btn:active:not(:disabled) { transform: translateY(0); }
-.button:disabled, .icon-btn:disabled { opacity: .45; cursor: wait; box-shadow: none; }
+.button:disabled, .icon-btn:disabled { opacity: .45; cursor: not-allowed; box-shadow: none; }
 .button.primary { border-color: var(--ink); }
 .button.danger { border-color: rgba(224, 49, 49, .4); color: var(--danger); }
 
