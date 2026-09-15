@@ -63,12 +63,10 @@
           <section class="dataset-sync-card" aria-label="Dataset synchronization">
                 <div class="collection-panel-head"><span class="step-badge">1</span><span data-i18n="sync.title">数据传输</span></div>
                 <div class="dataset-sync-actions">
-                  <button class="button" id="hf-publish-task-set" disabled data-i18n="actions.publishTaskSet">发布任务集到 HF</button>
-                  <button class="button" id="hf-sync-assets" data-i18n="sync.assets">上传资源</button>
-                  <button class="button" id="hf-upload-qc" disabled data-i18n="sync.uploadQc">上传质检结果</button>
-                  <button class="button primary" id="hf-download-dataset" disabled data-i18n="sync.dataset">下载数据集</button>
-                  <button class="button" id="hf-sync-task-set" disabled data-i18n="sync.taskSet">下载任务集</button>
-                  <button class="button" id="hf-download-qc" disabled data-i18n="sync.downloadQc">下载质检结果</button>
+                  <button class="button primary" id="hf-download-dataset">上传 data</button>
+                  <button class="button" id="hf-sync-assets">下载资源</button>
+                  <button class="button" id="hf-publish-task-set" disabled>下载任务集</button>
+                  <button class="button" id="hf-upload-qc" disabled>下载 QC 结果</button>
                 </div>
                 <div class="collect-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="hf-sync-progress"><i id="hf-sync-progress-fill"></i></div>
                 <div class="kv"><span class="k" data-i18n="sync.status">状态</span><span class="v" id="hf-sync-status" data-i18n="sync.idle">就绪</span></div>

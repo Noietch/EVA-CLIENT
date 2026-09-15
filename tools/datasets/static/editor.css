@@ -1148,7 +1148,7 @@ dialog::backdrop { background: rgba(31, 30, 28, .38); backdrop-filter: blur(2px)
 .dashboard-panel-total { flex: 0 0 auto; color: var(--ink-dim); font: 700 12px/1 var(--mono); white-space: nowrap; }
 /* Collection queue tiles: square cells with 50-slot paging. */
 .collection-slot-grid .slot-tile { aspect-ratio: 1; }
-.dataset-sync-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+.dataset-sync-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
 .dataset-sync-actions .button { min-width: 0; white-space: normal; }
 .dataset-sync-card { flex: 0 0 auto; margin-top: 13px; }
 .dataset-sync-card .dataset-sync-actions { margin-top: 10px; }
