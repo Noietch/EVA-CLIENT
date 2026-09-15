@@ -645,6 +645,16 @@ function collectSetValue() {
     return collectSet || "";
   }
 
+function selectCollectSet(setName) {
+    const set = collectTaskSets().find((item) => item.name === setName);
+    if (!set) return false;
+    collectSet = set.name;
+    collectTask = set.tasks[0].prompt;
+    collectTaskIndex = 0;
+    syncCollectTaskNavigation();
+    return true;
+  }
+
 function collectTaskIndexValue() {
     return Number.isInteger(collectTaskIndex) ? collectTaskIndex : null;
   }
@@ -1472,7 +1482,7 @@ function renderManualTarget(qpos) {
 export {
   applyRunControlStatus, applyStatus, mark, pauseSetup, replayIsLocalMode, resumeSetup,
   retrySetup, setPanel, startRunFromDebug, syncChip, uiMode, updateGuide,
-  applyTune, applyManualTune, collectSetValue, collectTaskIndexValue,
+  applyTune, applyManualTune, collectSetValue, selectCollectSet, collectTaskIndexValue,
   collectTaskValue, renderConfig, applyCollectTaskSelection,
   renderEvalGripper,
   renderRlGripper,

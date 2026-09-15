@@ -175,6 +175,51 @@ def test_history_filters_by_identity_before_pagination(tmp_path):
     assert path.read_text() == original
 
 
+def test_history_uses_qc_for_reviewed_episode_and_capture_quality_for_retake(tmp_path):
+    meta = tmp_path / "meta"
+    meta.mkdir()
+    (meta / "episodes.jsonl").write_text(
+        json.dumps(dict(episode_index=0, tasks=["pick"], slot_id="SLOT-1",
+                        quality="red", length=3)) + "\n"
+        + json.dumps(dict(episode_index=1, tasks=["pick"], slot_id="SLOT-1",
+                          quality="green", length=3)) + "\n"
+    )
+    qc = tmp_path / "canonical-qc.jsonl"
+    qc.write_text(json.dumps(dict(episode_index=0, slot_id="SLOT-1",
+                                  qc_verdict="pass")) + "\n")
+    rows = load_episode_history(tmp_path, qc_path=qc)["episodes"]
+    assert rows[0]["qc_verdict"] == "pass"
+    assert "qc_verdict" not in rows[1]
+    qc.write_text(json.dumps(dict(episode_index=0, slot_id="SLOT-1",
+                                  qc_verdict="fail")) + "\n")
+    revised = load_episode_history(tmp_path, qc_path=qc)["episodes"]
+    assert revised[0]["qc_verdict"] == "fail"
+    assert revised[1]["quality"] == "green"
+
+
+def test_qc_matches_reindexed_canonical_capture_without_marking_new_retake(tmp_path):
+    runtime = tmp_path / "runtime/meta"
+    canonical = tmp_path / "canonical/meta"
+    runtime.mkdir(parents=True)
+    canonical.mkdir(parents=True)
+    original = dict(episode_index=12, tasks=["pick"], slot_id="SLOT-1",
+                    session_id="SESSION-1", started_at="START-1", ended_at="END-1",
+                    quality="red", length=3)
+    retake = dict(episode_index=13, tasks=["pick"], slot_id="SLOT-1",
+                  session_id="SESSION-2", started_at="START-2", ended_at="END-2",
+                  quality="green", length=3)
+    (runtime / "episodes.jsonl").write_text(
+        json.dumps(original) + "\n" + json.dumps(retake) + "\n")
+    (canonical / "episodes.jsonl").write_text(
+        json.dumps({**original, "episode_index": 0}) + "\n")
+    qc = canonical / "qc.jsonl"
+    qc.write_text(json.dumps(dict(episode_index=0, slot_id="SLOT-1",
+                                  qc_verdict="fail")) + "\n")
+    rows = load_episode_history(runtime.parent, qc_path=qc)["episodes"]
+    assert rows[0]["qc_verdict"] == "fail"
+    assert "qc_verdict" not in rows[1]
+
+
 def test_frontend_retains_scene_and_history_after_description_edit():
     node = shutil.which("node")
     if node is None:

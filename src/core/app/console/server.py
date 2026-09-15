@@ -1450,6 +1450,26 @@ def _cached_collection_slots(
     return list(slots)
 
 
+def _collection_transfer_path(config: ConfigDict, dataset: str) -> tuple[Path, str]:
+    plan_root = _scene_plan_root(config, dataset)
+    info = _read_scene_plan_yaml(plan_root, "info.yaml")
+    remote_path = str(info.get("collection_dir") or "").strip()
+    relative_path = Path(remote_path)
+    if (not remote_path.startswith("datasets/") or relative_path.is_absolute()
+            or ".." in relative_path.parts or relative_path.name != dataset):
+        raise ValueError("invalid collection_dir for selected set")
+    return plan_root.parent.parent / relative_path, remote_path
+
+
+def _collection_qc_path(config: ConfigDict, dataset: str) -> Path | None:
+    try:
+        dataset_dir, _ = _collection_transfer_path(config, dataset)
+    except (OSError, ValueError):
+        return None
+    path = dataset_dir / "meta/qc.jsonl"
+    return path if path.is_file() else None
+
+
 def _collection_slots_snapshot(ctx: ConsoleContext, dataset: str) -> dict[str, Any]:
     """Resolve one dataset's fixed plan against saved and in-flight episodes."""
     config = ctx.runtime.active_config or ctx.config
@@ -1467,7 +1487,9 @@ def _collection_slots_snapshot(ctx: ConsoleContext, dataset: str) -> dict[str, A
         dataset_dir = Path(raw_dataset_dir).resolve() if raw_dataset_dir else None
         queue = list(status.get("queue") or [])
         if dataset_dir is not None:
-            episodes = list(load_episode_history(dataset_dir).get("episodes") or [])
+            episodes = list(load_episode_history(
+                dataset_dir, qc_path=_collection_qc_path(config, dataset)
+            ).get("episodes") or [])
     slot_state = load_slot_state(dataset_dir)
     rows, active, counts = collection_slot_status(slots, episodes, queue, slot_state)
     scenes: list[dict[str, str]] = []
@@ -2632,6 +2654,8 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
 
         history = load_episode_history(
             Path(dataset_dir),
+            qc_path=(_collection_qc_path(config, collection_set)
+                     if scope == "collect" and collection_set else None),
             task=task_filter,
             task_id=task_id_filter,
             since=since,
@@ -3197,8 +3221,11 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                 self._send_empty(404)
                 return
             handler(self, body)
-        except Exception:
+        except Exception as error:
             logger.exception("[HTTP_POST_ERROR] trace=%s path=%s", trace_id, path)
+            if path.startswith("/api/hf/") and self._response_status is None:
+                self._send_json(500, {"ok": False, "error": str(error)})
+                return
             raise
         finally:
             if path != "/api/client_trace":
@@ -3388,23 +3415,39 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
     def _post_hf_task_set_sync(self, body: dict) -> None:
         config = self.ctx.runtime.active_config or self.ctx.config
         task_set = str(body.get("task_set", "")).strip()
-        destination = _scene_plan_root(config).parent
+        if task_set not in config.collection.tasks:
+            self._send_json(409, {"ok": False, "error": "unknown collection set"})
+            return
+        destination = _scene_plan_root(config, task_set).parent
         result = fetch_task_set(Path(__file__).resolve().parents[4], task_set, destination, config.collection.storage)
         self._send_json(200, {"ok": True, **result})
 
-    def _post_hf_assets_sync(self, body: dict) -> None:
+    def _post_hf_assets_download(self, body: dict) -> None:
         config = self.ctx.runtime.active_config or self.ctx.config
-        destination = _scene_plan_root(config).parent
-        result = fetch_assets(Path(__file__).resolve().parents[4], destination, config.collection.storage)
+        dataset = str(body.get("dataset", "")).strip()
+        if dataset not in config.collection.tasks:
+            self._send_json(409, {"ok": False, "error": "unknown collection set"})
+            return
+        project_root = Path(__file__).resolve().parents[4]
+        plan_root = _scene_plan_root(config, dataset)
+        destination = (plan_root.parent.parent / "assets" if plan_root.parent.name == "task_sets"
+                       else project_root / "datasets/data_collection/assets")
+        result = fetch_assets(project_root, plan_root, destination, config.collection.storage)
         self._send_json(200, {"ok": True, **result})
 
     def _post_hf_dataset_upload(self, body: dict) -> None:
+        dataset_name = str(body.get("dataset", "")).strip()
         dataset_dir = self._active_collection_dataset(body)
         if dataset_dir is None:
             return
-        dataset_name = dataset_dir.name
         config = self.ctx.runtime.active_config or self.ctx.config
-        result = publish_dataset(Path(__file__).resolve().parents[4], dataset_dir, dataset_name, config.collection.storage)
+        plan_root = _scene_plan_root(config, dataset_name)
+        info = _read_scene_plan_yaml(plan_root, "info.yaml")
+        result = publish_dataset(
+            Path(__file__).resolve().parents[4], dataset_dir, dataset_name,
+            config.collection.storage,
+            new_remote_path=str(info.get("collection_dir") or "").strip() or None,
+        )
         self._send_json(200, {"ok": True, **result})
 
     def _post_hf_dataset_download(self, body: dict) -> None:
@@ -3417,12 +3460,29 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
 
     def _post_hf_qc_sync(self, body: dict) -> None:
         config = self.ctx.runtime.active_config or self.ctx.config
-        dataset_dir = Path(str(body.get("dataset_dir", "")).strip()).expanduser().resolve()
-        dataset_name = str(body.get("dataset_name", "")).strip() or dataset_dir.name
+        dataset_name = str(body.get("dataset", "")).strip()
+        if not dataset_name or dataset_name not in config.collection.tasks or Path(dataset_name).name != dataset_name:
+            self._send_json(409, {"ok": False, "error": "unknown collection dataset"})
+            return
+        try:
+            dataset_dir, remote_path = _collection_transfer_path(config, dataset_name)
+        except ValueError as error:
+            self._send_json(409, {"ok": False, "error": str(error)})
+            return
         if body.get("direction") == "upload":
-            result = publish_qc(Path(__file__).resolve().parents[4], dataset_dir, dataset_name, config.collection.storage)
+            result = publish_qc(
+                Path(__file__).resolve().parents[4], dataset_dir, dataset_name,
+                config.collection.storage, expected_path=remote_path,
+            )
+        elif body.get("direction") == "download":
+            result = fetch_qc(
+                Path(__file__).resolve().parents[4], dataset_name, dataset_dir,
+                config.collection.storage,
+                expected_path=remote_path,
+            )
         else:
-            result = fetch_qc(Path(__file__).resolve().parents[4], dataset_name, dataset_dir, config.collection.storage)
+            self._send_json(400, {"ok": False, "error": "invalid QC direction"})
+            return
         self._send_json(200, {"ok": True, **result})
 
     def _post_select_collect_task(self, body: dict) -> None:
@@ -4330,7 +4390,7 @@ _POST_ROUTES = {
     "/api/review_episode": ConsoleRequestHandler._post_review_episode,
     "/api/select_task": ConsoleRequestHandler._post_select_task,
     "/api/hf/task_set/sync": ConsoleRequestHandler._post_hf_task_set_sync,
-    "/api/hf/assets/sync": ConsoleRequestHandler._post_hf_assets_sync,
+    "/api/hf/assets/download": ConsoleRequestHandler._post_hf_assets_download,
     "/api/hf/dataset/upload": ConsoleRequestHandler._post_hf_dataset_upload,
     "/api/hf/dataset/download": ConsoleRequestHandler._post_hf_dataset_download,
     "/api/hf/qc/sync": ConsoleRequestHandler._post_hf_qc_sync,

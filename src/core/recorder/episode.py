@@ -2404,23 +2404,23 @@ class EpisodeLogger:
             # A mounted task set is authoritative. Its task definitions may be
             # loaded by the dataset service and need not mirror collection.tasks.
             if str(collection.get("task_set_dir", "") or "").strip():
-                return self._log_dir / sanitize_path_component(collection_dataset)
+                return self._log_dir / sanitize_path_component(collection_dataset) / "raw"
             entries = configured_tasks.get(collection_dataset)
             if entries is None or prompt not in {str(entry[0]) for entry in entries}:
                 raise ValueError(
                     f"collection task {prompt!r} is not configured in dataset "
                     f"{collection_dataset!r}"
                 )
-            return self._log_dir / sanitize_path_component(collection_dataset)
+            return self._log_dir / sanitize_path_component(collection_dataset) / "raw"
         for dataset_name, entries in configured_tasks.items():
             if prompt in {str(entry[0]) for entry in entries}:
-                return self._log_dir / sanitize_path_component(str(dataset_name))
-        return self._log_dir / sanitize_path_component(prompt or "unset")
+                return self._log_dir / sanitize_path_component(str(dataset_name)) / "raw"
+        return self._log_dir / sanitize_path_component(prompt or "unset") / "raw"
 
     def _collection_task_target(self, task: str, dataset_dir: Path | None = None) -> int | None:
         configured_tasks = (self._collection or {}).get("tasks") or {}
         for dataset_name, entries in configured_tasks.items():
-            configured_dir = self._log_dir / sanitize_path_component(str(dataset_name))
+            configured_dir = self._log_dir / sanitize_path_component(str(dataset_name)) / "raw"
             if dataset_dir is not None and configured_dir != dataset_dir:
                 continue
             for prompt, target in entries:

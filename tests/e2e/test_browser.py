@@ -30,6 +30,31 @@ def browser():
         browser.close()
 
 
+def test_collection_set_selection_stays_on_set_without_active_slot(browser):
+    config = console_config(collection={"enabled": True})
+    config.collection.schema.columns = {"qpos": "observation.qpos", "action_qpos": "action"}
+    with serve_console(config) as console:
+        page = browser.new_page()
+        page.route("**/api/camera/**", lambda route: route.abort())
+        def complete_set(route):
+            route.fulfill(json={
+                "ok": True, "dataset": "pouring_set", "dataset_dir": "",
+                "active": None, "counts": {"complete": 1, "pending": 0, "total": 1},
+                "slots": [], "scenes": [], "tasks": [], "page": 1,
+                "page_count": 1, "filtered_total": 0, "viewer_active": False,
+            })
+        page.route("**/api/collection_slots?dataset=pouring_set*", complete_set)
+        try:
+            page.goto(f"http://127.0.0.1:{console.port}", wait_until="domcontentloaded")
+            page.locator("#collect-set-list option[value='pouring_set']").wait_for(state="attached")
+            page.locator("button[data-tab=collect]").click()
+            page.locator("#collect-set-list").select_option("pouring_set")
+            page.wait_for_timeout(650)
+            assert page.locator("#collect-set-list").input_value() == "pouring_set"
+        finally:
+            page.close()
+
+
 def test_collection_slot_click_selects_and_double_click_previews(browser, tmp_path):
     source = (
         Path(__file__).resolve().parents[2] / "src/core/app/console/static/js/collect.js"

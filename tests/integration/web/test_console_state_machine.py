@@ -264,7 +264,7 @@ def test_completed_slot_retake_survives_polling_and_releases_after_save(tmp_path
         {"slot_id": "INLINE-0:0", "episode_index": 0, "status": "saved", "quality": "green"}
     ]
     monkeypatch.setattr(
-        console_server, "load_episode_history", lambda *_args: {"episodes": episodes}
+        console_server, "load_episode_history", lambda *_args, **_kwargs: {"episodes": episodes}
     )
     queue = []
 

@@ -282,10 +282,10 @@ def save_slot_state(dataset_dir: Path, state: CollectionSlotState) -> None:
 def _episode_outcome(episode: dict[str, Any]) -> str:
     if str(episode.get("status") or "") != "saved":
         return "pending"
-    if (
-        str(episode.get("quality") or "green").lower() == "red"
-        or str(episode.get("qc_verdict") or "").lower() == "fail"
-    ):
+    verdict = str(episode.get("qc_verdict") or "").lower()
+    if verdict == "pass":
+        return "usable"
+    if verdict == "fail" or str(episode.get("quality") or "green").lower() == "red":
         return "rejected"
     return "usable"
 

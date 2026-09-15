@@ -3,7 +3,7 @@
 import { $, LIVE, S, apiGet, apiPost, clientTrace } from "./core.js";
 import { updateScrub } from "./charts.js";
 import {
-  applyCollectTaskSelection, collectTaskIndexValue, collectSetValue, collectTaskValue,
+  applyCollectTaskSelection, collectTaskIndexValue, collectSetValue, selectCollectSet, collectTaskValue,
   setPanel, applyStatus, uiMode,
 } from "./run.js";
 import {
@@ -253,6 +253,7 @@ async function pollCollectionSlots(force = false) {
 async function selectCollectionDataset(dataset) {
   const value = String(dataset || "").trim();
   if (!value || (S.STATUS.collect && S.STATUS.collect.collecting)) return false;
+  if (!selectCollectSet(value)) return false;
   const state = S.collectionSlots;
   state.dataset = value;
   state.loaded = false;
@@ -1095,6 +1096,13 @@ function collectOutcome(item) {
     return "pending";
   }
 
+function collectResultLabel(item) {
+    if (!item) return "UNKNOWN";
+    return item.qc_verdict
+      ? `QC ${String(item.qc_verdict).toUpperCase()}`
+      : String(item.quality || "unknown").toUpperCase();
+  }
+
 function collectTone(item) {
     if (item.status === "queued") return "cq-queued";
     if (item.status === "saving") return "cq-busy";
@@ -1420,8 +1428,7 @@ function renderCollectTiles(items) {
       const episode = savedEpisodeId(slot.episode);
       tile.title = `SLOT ${Number(slot.ordinal) + 1} · ${tile.title}`;
       if (episode != null) {
-        tile.title += ` · EPISODE ${episode} · ${String(slot.episode.quality || "unknown").toUpperCase()}`;
-        if (slot.episode.qc_verdict) tile.title += ` · QC ${slot.episode.qc_verdict.toUpperCase()}`;
+        tile.title += ` · EPISODE ${episode} · ${collectResultLabel(slot.episode)}`;
       }
       if (slot.state === "saving") tile.title += " · CONVERTING";
       tile.textContent = String(Number(slot.ordinal) + 1);
@@ -1645,28 +1652,38 @@ function renderCollectionTransfer(enabled, usableCount, rejectedCount) {
   }
 }
 
-async function syncTaskSetFromHf() {
+async function downloadCollectionTaskSetFromHf() {
   const taskSet = collectSetValue();
-  if (!taskSet) return;
-  const button = $("b-collect-task-set-sync");
+  const button = $("b-collect-task-set-download");
   const status = $("collect-dataset-sync-status");
+  if (!taskSet) { status.textContent = "请选择任务集 / Select a task set"; return; }
   button.disabled = true;
+  status.textContent = `正在下载任务 / Downloading tasks: ${taskSet}`;
   try {
-    await apiPost("/api/hf/task_set/sync", {task_set: taskSet});
-    if (status) status.textContent = `task set synced: ${taskSet}`;
+    const result = await apiPost("/api/hf/task_set/sync", {task_set: taskSet}, {timeoutMs: 0, concurrent: true});
+    if (!result.ok) throw new Error(result.error || "Task download failed");
+    status.textContent = `tasks downloaded: ${result.task_set || taskSet}`;
     await pollCollectionSlots(true);
+  } catch (error) {
+    status.textContent = error.message;
   } finally {
     button.disabled = false;
   }
 }
 
-async function downloadAssetsFromHf() {
-  const button = $("b-collect-assets-sync");
+async function downloadCollectionAssetsFromHf() {
+  const dataset = collectSetValue();
+  const button = $("b-collect-assets-download");
   const status = $("collect-dataset-sync-status");
+  if (!dataset) { status.textContent = "请选择任务集 / Select a set"; return; }
   button.disabled = true;
+  status.textContent = `正在下载资产 / Downloading assets: ${dataset}`;
   try {
-    const result = await apiPost("/api/hf/assets/sync", {});
-    if (status) status.textContent = `assets downloaded: ${result.revision || "done"}`;
+    const result = await apiPost("/api/hf/assets/download", {dataset}, {timeoutMs: 0, concurrent: true});
+    if (!result.ok) throw new Error(result.error || "Asset download failed");
+    status.textContent = `assets downloaded for ${dataset}: ${result.files || 0} files`;
+  } catch (error) {
+    status.textContent = error.message;
   } finally {
     button.disabled = false;
   }
@@ -1678,11 +1695,11 @@ async function uploadCollectionDatasetToHf() {
   const status = $("collect-dataset-sync-status");
   if (!dataset) { status.textContent = "请选择数据集 / Select a dataset"; return; }
   button.disabled = true;
-  status.textContent = "正在上传 / Uploading";
+  status.textContent = `正在上传 / Uploading: ${dataset}`;
   try {
     const result = await apiPost("/api/hf/dataset/upload", {dataset}, {timeoutMs: 0, concurrent: true});
     if (!result.ok) throw new Error(result.error || "Upload failed");
-    if (status) status.textContent = `dataset uploaded: ${result.revision || "done"}`;
+    if (status) status.textContent = `${dataset} uploaded: ${result.revision || "done"}`;
   } catch (error) {
     status.textContent = error.message;
   } finally {
@@ -1710,18 +1727,37 @@ async function downloadCollectionDatasetFromHf() {
 
 async function syncCollectionQc(direction) {
   const dataset = collectSetValue();
-  const datasetDir = S.STATUS && S.STATUS.dataset_dir;
-  if (!dataset || !datasetDir) return;
+  const button = $(direction === "upload" ? "b-collect-qc-upload" : "b-collect-qc-download");
   const status = $("collect-dataset-sync-status");
-  await apiPost("/api/hf/qc/sync", {direction, dataset_dir: datasetDir, dataset_name: dataset});
-  if (status) status.textContent = `QC ${direction} complete`;
+  if (!dataset) { status.textContent = "请选择数据集 / Select a dataset"; return; }
+  button.disabled = true;
+  status.textContent = `${direction === "upload" ? "正在上传 / Uploading" : "正在下载 / Downloading"} QC: ${dataset}`;
+  try {
+    const result = await apiPost("/api/hf/qc/sync", {direction, dataset}, {timeoutMs: 0, concurrent: true});
+    if (!result.ok) throw new Error(result.error || `QC ${direction} failed`);
+    status.textContent = direction === "upload"
+      ? `${dataset} QC uploaded: ${result.path || dataset}`
+      : result.source === "none"
+      ? `${dataset}: QC is not published; capture GREEN/RED is shown`
+      : result.source === "episodes.jsonl"
+      ? `${dataset} quality metadata downloaded: ${result.episodes || 0} episodes (no remote QC verdicts)`
+      : `${dataset} QC downloaded: ${result.path || dataset}`;
+    if (direction === "download") {
+      invalidateEpisodeHistory("collect");
+      await pollEpisodeHistory(true);
+    }
+  } catch (error) {
+    status.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
 }
 
 function renderCollectionReplayStatus(selectedEpisodeSaved) {
   const replayStatus = $("collect-replay-status");
   const history = historyFor("collect", S.STATUS.collect || {});
   const item = history.episodes.find((entry) => savedEpisodeId(entry) === S.collectReplayEpisode);
-  const label = `episode ${S.collectReplayEpisode} · ${String((item && item.quality) || "unknown").toUpperCase()}`;
+  const label = `episode ${S.collectReplayEpisode} · ${collectResultLabel(item)}`;
   if (S.reviewKind === "collect" && LIVE.replayOwner === "collect") {
     replayStatus.textContent = LIVE.replayError
       ? `${label} · error · ${LIVE.replayError}`
@@ -1829,7 +1865,7 @@ function renderCollect() {
     const selectedEpisodeSaved = savedEpisodeId(selectedEpisode) != null;
     const qcPending = S.collectTaskSelectionPending || collectionSlotClickTimer !== null;
     $("collect-qc-target").textContent = selectedEpisodeSaved
-      ? `EPISODE ${selectedEpisode.episode_index} · ${String(selectedEpisode.qc_verdict || selectedEpisode.quality || "unknown").toUpperCase()}` : "--";
+      ? `EPISODE ${selectedEpisode.episode_index} · ${collectResultLabel(selectedEpisode)}` : "--";
     $("b-collect-qc-pass").disabled = !enabled || !selectedEpisodeSaved || qcPending;
     $("b-goto-qc").disabled = !enabled || !selectedEpisodeSaved || qcPending;
     $("b-collect-note-save").disabled = !selectedEpisodeSaved || qcPending;
@@ -2154,7 +2190,7 @@ async function reviewCollectEpisode(item) {
     LIVE.replayError = "";
     updateScrub();
     const title = reviewTitleFor("collect");
-    const qualityLabel = String(item.quality || "unknown").toUpperCase();
+    const qualityLabel = collectResultLabel(item);
     if (title) title.textContent = `episode ${episode} · ${qualityLabel} · loading`;
     const err = reviewErrorFor("collect");
     if (err) err.textContent = "";
@@ -2343,7 +2379,8 @@ export {
   installCollectKeyboardControls, renderCollectControls, uploadCollectionQuality,
   handleCollectionReviewInput, resetCollectionReviewInput,
   changeCollectionExportFormat, invalidateEpisodeHistory, pollEpisodeHistory,
-  syncTaskSetFromHf, downloadAssetsFromHf, uploadCollectionDatasetToHf, downloadCollectionDatasetFromHf, syncCollectionQc,
+  downloadCollectionTaskSetFromHf, downloadCollectionAssetsFromHf,
+  uploadCollectionDatasetToHf, downloadCollectionDatasetFromHf, syncCollectionQc,
   pollCollectionSlots, selectCollectionDataset,
   changeCollectionSlotFilter, changeCollectionSlotPage, toggleCollectionSlotAll,
 };
