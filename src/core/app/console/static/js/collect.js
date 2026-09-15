@@ -1369,24 +1369,28 @@ function renderCollectionSlotFilters() {
     const state = S.collectionSlots;
     const scene = $("collect-slot-scene-filter");
     const task = $("collect-slot-task-filter");
-    const sceneKey = JSON.stringify(state.scenes || []);
-    const taskKey = JSON.stringify(state.tasks || []);
+    const sceneIds = [...new Set((state.scenes || []).map((entry) => entry.id).filter(Boolean))].sort();
+    const taskIds = [...new Set((state.tasks || []).map((entry) => entry.id).filter(Boolean))].sort(
+      (left, right) => String(left).localeCompare(String(right), "en", { numeric: true, sensitivity: "base" })
+    );
+    const sceneKey = JSON.stringify(sceneIds);
+    const taskKey = JSON.stringify(taskIds);
     if (scene.dataset.options !== sceneKey) {
       scene.innerHTML = '<option value="">ALL SCENES</option>';
-      (state.scenes || []).forEach((entry) => {
+      sceneIds.forEach((id) => {
         const option = document.createElement("option");
-        option.value = entry.id;
-        option.textContent = entry.label;
+        option.value = id;
+        option.textContent = id;
         scene.appendChild(option);
       });
       scene.dataset.options = sceneKey;
     }
     if (task.dataset.options !== taskKey) {
       task.innerHTML = '<option value="">ALL TASKS</option>';
-      (state.tasks || []).forEach((entry) => {
+      taskIds.forEach((id) => {
         const option = document.createElement("option");
-        option.value = entry.id;
-        option.textContent = entry.label;
+        option.value = id;
+        option.textContent = id;
         task.appendChild(option);
       });
       task.dataset.options = taskKey;

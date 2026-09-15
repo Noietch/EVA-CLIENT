@@ -3820,11 +3820,21 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         task = str(body.get("task", ""))
         collection_dataset = str(body.get("dataset", "")).strip() or None
         config = self.ctx.runtime.active_config or self.ctx.config
-        valid_target = any(
-            (collection_dataset is None or dataset_name == collection_dataset)
-            and any(str(entry[0]) == task for entry in entries)
-            for dataset_name, entries in config.collection.tasks.items()
-        )
+        if collection_dataset is not None:
+            # Saved episodes retain their original wording after task edits.
+            # Resolve the named dataset with a current configured prompt; the
+            # recorder validates the saved episode ID and pending writes there.
+            entries = config.collection.tasks.get(collection_dataset)
+            valid_target = bool(entries)
+            if valid_target:
+                task = str(entries[0][0])
+        else:
+            # Legacy requests without a dataset still need an exact prompt to
+            # select the correct dataset.
+            valid_target = any(
+                any(str(entry[0]) == task for entry in entries)
+                for entries in config.collection.tasks.values()
+            )
         if not valid_target:
             self._send_json(
                 409,
@@ -3900,7 +3910,9 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             source_episode_indices = {
                 int(row["episode"]["episode_index"])
                 for row in snapshot["rows"]
-                if row["state"] in {"complete", "rejected", "deferred"}
+                # Selecting a saved slot for retake changes its display state
+                # to active without invalidating its recorded episode.
+                if row["state"] in {"complete", "rejected", "deferred", "active"}
                 and row.get("episode") is not None
             }
         accepted_dir, rejected_dir = _quality_export_paths(dataset_dir, dataset_format)

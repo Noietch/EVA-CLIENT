@@ -435,8 +435,9 @@ def _register_completed_quality_export(
 
 @pytest.mark.parametrize("cursor_changed", [False, True])
 @pytest.mark.parametrize("has_slot_plan", [False, True])
+@pytest.mark.parametrize("saved_slot_state", ["complete", "active"])
 def test_collect_quality_export_uses_selected_dataset(
-    tmp_path, monkeypatch, cursor_changed, has_slot_plan
+    tmp_path, monkeypatch, cursor_changed, has_slot_plan, saved_slot_state
 ):
     source = tmp_path / "pick_up_cup"
     source.mkdir()
@@ -477,9 +478,10 @@ def test_collect_quality_export_uses_selected_dataset(
         "_collection_slots_snapshot",
         lambda ctx, dataset: {
             "rows": [
-                {"state": "complete", "episode": {"episode_index": 0}},
+                {"state": saved_slot_state, "episode": {"episode_index": 0}},
                 {"state": "rejected", "episode": {"episode_index": 2}},
                 {"state": "pending", "episode": None},
+                {"state": "active", "episode": None},
                 {"state": "saving", "episode": {"episode_index": 3}},
             ]
             if has_slot_plan
