@@ -1645,6 +1645,78 @@ function renderCollectionTransfer(enabled, usableCount, rejectedCount) {
   }
 }
 
+async function syncTaskSetFromHf() {
+  const taskSet = collectSetValue();
+  if (!taskSet) return;
+  const button = $("b-collect-task-set-sync");
+  const status = $("collect-dataset-sync-status");
+  button.disabled = true;
+  try {
+    await apiPost("/api/hf/task_set/sync", {task_set: taskSet});
+    if (status) status.textContent = `task set synced: ${taskSet}`;
+    await pollCollectionSlots(true);
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function syncAssetsToHf() {
+  const button = $("b-collect-assets-sync");
+  const status = $("collect-dataset-sync-status");
+  button.disabled = true;
+  try {
+    const result = await apiPost("/api/hf/assets/publish", {});
+    if (status) status.textContent = `assets synced: ${result.files || 0} files`;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function uploadCollectionDatasetToHf() {
+  const dataset = collectSetValue();
+  const button = $("b-collect-dataset-upload");
+  const status = $("collect-dataset-sync-status");
+  if (!dataset) { status.textContent = "请选择数据集 / Select a dataset"; return; }
+  button.disabled = true;
+  status.textContent = "正在上传 / Uploading";
+  try {
+    const result = await apiPost("/api/hf/dataset/upload", {dataset}, {timeoutMs: 0, concurrent: true});
+    if (!result.ok) throw new Error(result.error || "Upload failed");
+    if (status) status.textContent = `dataset uploaded: ${result.revision || "done"}`;
+  } catch (error) {
+    status.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function downloadCollectionDatasetFromHf() {
+  const dataset = collectSetValue();
+  const button = $("b-collect-dataset-download");
+  const status = $("collect-dataset-sync-status");
+  if (!dataset) { status.textContent = "请选择数据集 / Select a dataset"; return; }
+  button.disabled = true;
+  status.textContent = "正在下载 / Downloading";
+  try {
+    const result = await apiPost("/api/hf/dataset/download", {dataset}, {timeoutMs: 0, concurrent: true});
+    if (!result.ok) throw new Error(result.error || "Download failed");
+    status.textContent = "dataset downloaded";
+  } catch (error) {
+    status.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function syncCollectionQc(direction) {
+  const dataset = collectSetValue();
+  const datasetDir = S.STATUS && S.STATUS.dataset_dir;
+  if (!dataset || !datasetDir) return;
+  const status = $("collect-dataset-sync-status");
+  await apiPost("/api/hf/qc/sync", {direction, dataset_dir: datasetDir, dataset_name: dataset});
+  if (status) status.textContent = `QC ${direction} complete`;
+}
+
 function renderCollectionReplayStatus(selectedEpisodeSaved) {
   const replayStatus = $("collect-replay-status");
   const history = historyFor("collect", S.STATUS.collect || {});
@@ -2271,6 +2343,7 @@ export {
   installCollectKeyboardControls, renderCollectControls, uploadCollectionQuality,
   handleCollectionReviewInput, resetCollectionReviewInput,
   changeCollectionExportFormat, invalidateEpisodeHistory, pollEpisodeHistory,
+  syncTaskSetFromHf, syncAssetsToHf, uploadCollectionDatasetToHf, downloadCollectionDatasetFromHf, syncCollectionQc,
   pollCollectionSlots, selectCollectionDataset,
   changeCollectionSlotFilter, changeCollectionSlotPage, toggleCollectionSlotAll,
 };

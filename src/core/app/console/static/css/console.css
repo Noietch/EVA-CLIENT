@@ -642,7 +642,7 @@
       grid-template-rows: auto auto;
     }
     #view-debug.collect-mode .stage-top .col-canvas {
-      flex: 0 0 120px; height: 120px;
+      flex: 1 1 auto; height: auto; min-height: 0;
     }
   }
 
@@ -1941,3 +1941,5 @@
   }
   body select:not([multiple]):disabled { opacity: .45; cursor: not-allowed; box-shadow: none; }
   select option, select optgroup { color: var(--ink); background: var(--paper); }
+.dataset-sync-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+.dataset-sync-actions .btn { min-width: 0; white-space: normal; }

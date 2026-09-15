@@ -209,6 +209,12 @@ def split_dataset_by_quality(
         output.parent.mkdir(parents=True, exist_ok=True)
 
     rows = _read_jsonl(source_dir / "meta" / "episodes.jsonl")
+    qc_path = source_dir / "meta" / "qc.jsonl"
+    if qc_path.is_file():
+        qc_rows = _read_jsonl(qc_path)
+        qc_by_episode = {int(row["episode_index"]): row for row in qc_rows}
+        for row in rows:
+            row.update({key: value for key, value in qc_by_episode.get(int(row["episode_index"]), {}).items() if key != "episode_index"})
     if not rows:
         raise ValueError("dataset has no episode metadata")
     indices = [int(row["episode_index"]) for row in rows]

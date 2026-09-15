@@ -805,17 +805,22 @@ function renderObjectEditor() {
   }
   const editor = editorShell("objects", draft.object_id || translate("entity.newObject"), translate("entity.objectAsset"));
   const form = node("form", "form-grid inset surface");
-  const idControl = input("text", "object_id", draft.object_id, "AST-0001");
-  idControl.disabled = Boolean(app.original.objects);
+  const colorControl = input("text", "color", draft.color, "例如：红色、蓝色、白色");
+  colorControl.setAttribute("list", "object-color-options");
+  if (!$("object-color-options")) {
+    const colors = node("datalist");
+    colors.id = "object-color-options";
+    for (const color of ["红色", "橙色", "黄色", "绿色", "蓝色", "紫色", "粉色", "棕色", "黑色", "白色", "灰色", "透明", "多色", "其他"]) {
+      colors.append(node("option", "", color));
+    }
+    document.body.append(colors);
+  }
   form.append(
-    field(translate("entity.objectId"), idControl),
-    field(translate("entity.color"), input("text", "color", draft.color, "white / #e8590c")),
+    field(translate("entity.color"), colorControl),
     field(translate("common.englishName"), input("text", "object_name", draft.object_name), true),
     field(translate("entity.chineseName"), input("text", "object_name_zh", draft.object_name_zh), true),
-    field(translate("entity.scanStatus"), input("text", "scan_status", draft.scan_status), true),
-    field(translate("entity.photoDirectory"), input("text", "photo_dir", draft.photo_dir), true),
   );
-  form.append(node("p", "full", "尺寸按自然放置时的外接长、宽、高填写；圆盘长宽均填直径。未知可留空。"));
+  form.append(node("p", "full", "编号和照片目录自动生成。尺寸按自然放置时的外接长、宽、高填写；圆盘长宽均填直径。未知可留空。"));
   for (const [name, label] of OBJECT_MEASUREMENTS) {
     const control = input("number", name, draft[name] || "", "未填写");
     control.min = "0";
@@ -832,12 +837,9 @@ function renderObjectEditor() {
   form.append(field("建模方法", methodControl, true));
   const updateDraft = () => {
     for (const name of [
-      "object_id",
       "object_name",
       "object_name_zh",
-      "scan_status",
       "color",
-      "photo_dir",
       ...OBJECT_MEASUREMENTS.map(([name]) => name),
       "modeling_method",
     ]) {
@@ -859,8 +861,7 @@ function buildPhotoGallery(object, editable = false) {
   heading.append(node("span", "eyebrow", translate("entity.objectPhotos")), node("h2", "", translate("entity.physicalPhotos")));
   if (editable) {
     const upload = button(translate("entity.uploadPhotos"), "", "button");
-    upload.disabled = !app.original.objects;
-    upload.addEventListener("click", () => $("photo-file").click());
+    upload.addEventListener("click", () => document.dispatchEvent(new CustomEvent("object-photo-upload")));
     head.append(heading, upload);
   } else {
     head.append(heading);
@@ -879,8 +880,14 @@ function buildPhotoGallery(object, editable = false) {
       gallery.append(figure);
     }
   } else {
-    const slot = node("div", "photo-slot");
+    const slot = node("button", "photo-slot");
+    slot.type = "button";
     slot.append(node("b", "", "+"), node("span", "", translate("common.photoSlot")));
+    if (editable) {
+      slot.addEventListener("click", () => document.dispatchEvent(new CustomEvent("object-photo-upload")));
+    } else {
+      slot.disabled = true;
+    }
     gallery.append(slot);
   }
   section.append(head, gallery);
@@ -901,9 +908,7 @@ function openObjectDialog(objectId) {
   );
   const meta = node("div", "object-modal-meta");
   meta.append(
-    node("span", "", translate("entity.scanStatus") + " · " + (object.scan_status || translate("entity.valueNotSet"))),
     node("span", "", translate("entity.color") + " · " + (object.color || translate("entity.valueUnlabeled"))),
-    node("span", "", translate("entity.photoDirectory") + " · " + (object.photo_dir || translate("entity.valueUnbound"))),
     node("span", "", translate("entity.measurements") + " · " + objectMeasurementsText(object)),
     node("span", "", translate("entity.mass") + " · " + (object.mass_g ? object.mass_g + " g" : translate("entity.valueNotSet"))),
     node("span", "", translate("entity.modelingMethod") + " · " + (object.modeling_method
@@ -937,7 +942,7 @@ function dashboardBatchTarget(batch) {
 }
 
 function dashboardBatchCount(batch) {
-  return batch.benchmark_batch ? 1 : 0;
+  return batch.batch_kind === "unmatched" || !batch.benchmark_batch ? 0 : 1;
 }
 
 function setDashboardText(id, value) {
@@ -1013,11 +1018,6 @@ function renderInfo() {
   setDashboardText("dashboard-passed", formatDashboardNumber(dashboardPassed));
   setDashboardText("dashboard-pending", formatDashboardNumber(summary.pending + summary.failed));
   setDashboardText(
-    "dashboard-range-summary",
-    formatDashboardNumber(collected) + " " + translate("dashboard.episodes") + " / " + formatDashboardNumber(summary.frames)
-      + " " + translate("dashboard.frames") + " · " + batches.reduce((count, batch) => count + dashboardBatchCount(batch), 0) + " " + translate("dashboard.plans") + " · " + robots.length + " " + translate("dashboard.robots"),
-  );
-  setDashboardText(
     "dashboard-robot-total",
     formatDashboardNumber(collected) + " / " + formatDashboardNumber(target),
   );
@@ -1089,7 +1089,7 @@ function renderInfo() {
   const reportHost = $("dashboard-qc-list");
   if (!reportHost) return;
   const reports = [...batches].filter(
-    (batch) => Number(batch.failed || 0) > 0,
+    (batch) => dashboardBatchCount(batch) > 0 && Number(batch.failed || 0) > 0,
   ).sort((left, right) => (
     Number(right.failed || 0) - Number(left.failed || 0)
   ));
@@ -1219,9 +1219,7 @@ function newEntity(kind) {
       object_id: nextId("AST-", app.state.objects, "object_id", 4),
       object_name: "",
       object_name_zh: "",
-      scan_status: "",
       color: "",
-      photo_dir: "",
       length_cm: "",
       width_cm: "",
       height_cm: "",

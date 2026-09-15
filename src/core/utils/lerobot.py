@@ -187,7 +187,7 @@ class LeRobotDatasetIO:
         return len(list(self.root.glob("data/**/*.parquet")))
 
     def mark_qc(self, episode: int, verdict: str, note: str = "", reason: str = "") -> bool:
-        """Write a quality-check verdict onto an episode's meta/episodes.jsonl row.
+        """Write a quality-check verdict onto the episode's meta/qc.jsonl row.
 
         Merges ``qc_verdict`` ("pass"/"fail"), ``qc_note``, and ``qc_reason`` into the
         matching row in place, leaving the recorded trajectory untouched. An empty
@@ -195,6 +195,7 @@ class LeRobotDatasetIO:
         False when the dataset has no episodes.jsonl or the episode index is absent.
         """
         path = self.root / "meta" / "episodes.jsonl"
+        qc_path = self.root / "meta" / "qc.jsonl"
         if not path.exists():
             return False
         rows = []
@@ -206,17 +207,23 @@ class LeRobotDatasetIO:
         patched = False
         for row in rows:
             if int(row.get("episode_index", -1)) == episode:
-                if verdict:
-                    row["qc_verdict"] = verdict
-                row["qc_note"] = note
-                row["qc_reason"] = reason
                 patched = True
                 break
         if not patched:
             return False
-        with path.open("w") as f:
-            for row in rows:
-                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        qc_rows = []
+        if qc_path.exists():
+            qc_rows = [json.loads(line) for line in qc_path.read_text().splitlines() if line.strip()]
+        qc_row = next((row for row in qc_rows if int(row.get("episode_index", -1)) == episode), None)
+        if qc_row is None:
+            qc_row = {"episode_index": episode}
+            qc_rows.append(qc_row)
+        if verdict:
+            qc_row["qc_verdict"] = verdict
+        qc_row["qc_note"] = note
+        qc_row["qc_reason"] = reason
+        qc_path.parent.mkdir(parents=True, exist_ok=True)
+        qc_path.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in qc_rows))
         return True
 
     def read_annotation(self, episode: int) -> str:

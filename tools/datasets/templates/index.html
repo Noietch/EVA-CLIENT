@@ -21,6 +21,7 @@
     <div class="topbar-actions">
       <button class="icon-btn" id="import-trigger" title="导入计划压缩包" data-i18n-title="actions.importPlan" aria-label="导入计划压缩包" data-i18n-aria-label="actions.importPlan">&#8593;</button>
       <a class="icon-btn disabled" id="export-trigger" title="导出计划压缩包" data-i18n-title="actions.exportPlan" aria-label="导出计划压缩包" data-i18n-aria-label="actions.exportPlan">&#8595;</a>
+      <button class="button" id="publish-task-set" disabled data-i18n="actions.publishTaskSet">发布任务集到 HF</button>
       <button class="button primary" id="refresh-button" data-i18n="actions.refreshDatabase">刷新数据库</button>
     </div>
   </header>
@@ -58,6 +59,19 @@
                 <button class="button" id="batch-next" type="button" data-i18n="filters.nextBatch">下一批次</button>
               </div>
             </div>
+          </section>
+          <section class="dataset-sync-card" aria-label="Dataset synchronization">
+                <div class="collection-panel-head"><span class="step-badge">1</span><span data-i18n="sync.title">数据传输</span></div>
+                <div class="dataset-sync-actions">
+                  <button class="button" id="hf-publish-task-set" disabled data-i18n="actions.publishTaskSet">发布任务集到 HF</button>
+                  <button class="button" id="hf-sync-assets" data-i18n="sync.assets">上传资源</button>
+                  <button class="button" id="hf-upload-qc" disabled data-i18n="sync.uploadQc">上传质检结果</button>
+                  <button class="button primary" id="hf-download-dataset" disabled data-i18n="sync.dataset">下载数据集</button>
+                  <button class="button" id="hf-sync-task-set" disabled data-i18n="sync.taskSet">下载任务集</button>
+                  <button class="button" id="hf-download-qc" disabled data-i18n="sync.downloadQc">下载质检结果</button>
+                </div>
+                <div class="collect-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="hf-sync-progress"><i id="hf-sync-progress-fill"></i></div>
+                <div class="kv"><span class="k" data-i18n="sync.status">状态</span><span class="v" id="hf-sync-status" data-i18n="sync.idle">就绪</span></div>
           </section>
           <section class="collection-qc-panel" id="collection-qc-panel" aria-label="Quality check slot overview" data-i18n-aria-label="qc.slotOverview">
             <div class="qc-loading-indicator" id="qc-loading-indicator" aria-live="polite" hidden>
@@ -115,7 +129,7 @@
               <option value="D">D · agent-blender</option>
             </select>
             <span id="object-filter-count">0 / 0</span>
-            <button class="icon-btn dark" data-action="new-object" title="新增物体" aria-label="新增物体">+</button>
+            <button class="button" id="object-import-trigger" title="CSV 列含 object_name_zh、color、photos（文件名用分号分隔），可同时选择图片" data-i18n-title="actions.importObjects">批量导入 CSV+照片</button><button class="icon-btn dark" data-action="new-object" title="新增物体" aria-label="新增物体">+</button>
           </div>
         </header>
         <div class="object-grid" id="object-list"></div>
@@ -124,11 +138,8 @@
       <section class="view dataset-view" id="view-dataset" data-view="dataset">
         <header class="page-head dashboard-page-head">
           <div><span class="eyebrow" data-i18n="dashboard.eyebrow">原始数据运营</span><h1 data-i18n="dashboard.title">运营看板</h1><p data-i18n="dashboard.subtitle">原始数据产出、采集需求与质检健康度。</p></div>
-          <span class="dashboard-scope" data-i18n="dashboard.allData">全部数据</span>
         </header>
-        <div class="dashboard-filterbar"><span class="dashboard-filter-label" data-i18n="dashboard.range">采集范围</span><span class="dashboard-filter-value" data-i18n="dashboard.allPlans">全部计划</span><span class="dashboard-filter-summary" id="dashboard-range-summary" data-i18n="dashboard.calculating">正在统计...</span></div>
         <section class="dashboard-section dashboard-overview-section">
-          <header class="dashboard-section-head"><span class="dashboard-section-number">01</span><div><span class="eyebrow" data-i18n="dashboard.overviewEyebrow">数据集概览</span><h2 data-i18n="dashboard.overviewTitle">数据集概览</h2><p data-i18n="dashboard.overviewSubtitle">采集产出、任务需求与数据质量。</p></div><span class="dashboard-scope light" data-i18n="dashboard.allData">全部数据</span></header>
           <div class="dashboard-kpi-grid" id="dashboard-kpis">
             <article class="dashboard-kpi"><small data-i18n="kpi.target">计划总量</small><b id="dashboard-target">0</b><span data-i18n="kpi.targetNote">计划 slot 数</span></article>
             <article class="dashboard-kpi"><small data-i18n="kpi.collected">已采集</small><b id="dashboard-collected">0</b><span data-i18n="kpi.collectedNote">已采集片段</span></article>
@@ -150,8 +161,17 @@
   </main>
 
   <input id="import-file" type="file" accept=".zip,application/zip" hidden>
+  <input id="photo-file" type="file" accept="image/jpeg,image/png,image/webp" multiple hidden>
+  <input id="object-import-file" type="file" accept=".csv,text/csv,image/jpeg,image/png,image/webp" multiple hidden>
 
-  <dialog id="object-dialog"><div class="object-dialog-card"><button class="dialog-close" data-close-object aria-label="关闭">&times;</button><div id="object-dialog-body"></div><input id="photo-file" type="file" accept="image/jpeg,image/png,image/webp" multiple hidden></div></dialog>
+  <dialog id="object-dialog"><div class="object-dialog-card"><button class="dialog-close" data-close-object aria-label="关闭">&times;</button><div id="object-dialog-body"></div></div></dialog>
+  <dialog id="robot-compare-dialog" aria-labelledby="robot-compare-title">
+    <div class="robot-compare-card">
+      <button class="dialog-close" data-close-robot-compare aria-label="关闭">&times;</button>
+      <header class="robot-compare-head"><div class="robot-compare-title-row"><div><span class="eyebrow" data-i18n="review.compareTitle">机器人视频对比</span><h2 id="robot-compare-title"></h2></div><button class="button primary" id="robot-compare-play-all" type="button" data-i18n="review.comparePlayAll">全部播放</button></div><p data-i18n="review.compareHint">按任务、场景和轮次对齐播放时间</p></header>
+      <div id="robot-compare-body"></div>
+    </div>
+  </dialog>
   <dialog id="confirm-dialog">
     <form method="dialog" class="dialog-card">
       <span class="dialog-icon">!</span><h2 id="confirm-title">确认操作</h2><p id="confirm-message"></p>

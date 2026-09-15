@@ -122,7 +122,7 @@ def _episode_dataset(collection: Path) -> Path:
     table = pa.table(
         {
             "observation.state": pa.array([[0.0, 0.1], [0.2, 0.3], [0.4, 0.5]], vector),
-            "action": pa.array([[1.0, 1.1], [1.2, 1.3], [1.4, 1.5]], vector),
+            "action": pa.array([[1.0, 1.1], [1.0, 1.1], [1.4, 1.5]], vector),
             "timestamp": pa.array([0.0, 0.1, 0.2]),
         }
     )
@@ -315,11 +315,83 @@ def test_episode_matches_slot_and_review_returns_series(tmp_path):
     assert response.status_code == 200
     assert review["series"]["state_names"] == ["joint_a", "joint_b"]
     assert review["series"]["action"][2] == pytest.approx([1.4, 1.5])
+    assert review["series"]["frame_labels"] == ["static", "static", "non-static"]
     assert review["fps"] == 10
     transforms = client.get("/api/batches/" + BATCH + "/episodes/7/transforms?start=0&count=2")
     assert transforms.status_code == 200
     assert transforms.data.startswith(b"EVAXFRM1")
     assert transforms.headers["X-EVA-Transform-Total"] == "3"
+
+
+def test_dashboard_summary_excludes_episode_without_matching_slot(tmp_path):
+    client, _, _, collection = _workspace(tmp_path)
+    root = _episode_dataset(collection)
+    episodes_path = root / "meta/episodes.jsonl"
+    orphan = {
+        "episode_index": 8,
+        "length": 5,
+        "task_id": "TASK-1",
+        "scene_id": "SC-OTHER",
+        "scene_round": 0,
+        "slot_id": "TASK-1:SC-OTHER:0",
+        "quality": "green",
+    }
+    with episodes_path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(orphan) + "\n")
+
+    state = client.get("/api/state?batch=" + BATCH).get_json()
+    summary = next(item for item in state["all_batches"] if item["batch_id"] == BATCH)
+    assert summary["collected"] == 1
+    assert summary["pending"] == 1
+    assert summary["frames"] == 3
+
+
+def test_middle_static_frames_auto_fail_and_expose_trim_boundaries(tmp_path):
+    client, _, _, collection = _workspace(tmp_path)
+    root = _episode_dataset(collection)
+    vector = pa.list_(pa.float32(), 1)
+    pq.write_table(
+        pa.table(
+            {
+                "observation.state": pa.array([[0], [1], [1], [2]], vector),
+                "action": pa.array([[0], [1], [1], [2]], vector),
+                "timestamp": pa.array([0.0, 0.1, 0.2, 0.3]),
+            }
+        ),
+        root / "data/chunk-000/episode_000007.parquet",
+    )
+    row_path = root / "meta/episodes.jsonl"
+    row = json.loads(row_path.read_text())
+    row["length"] = 4
+    row_path.write_text(json.dumps(row) + "\n")
+
+    state = client.get("/api/state?batch=" + BATCH).get_json()
+    slot = state["tasks"][0]["slots"][0]
+    assert slot["qc_state"] == "failed"
+    assert slot["episode"]["qc_reason"] == "static_frames_excessive"
+    review = client.get("/api/review?batch=" + BATCH + "&slot_id=TASK-1:SC-1:0").get_json()
+    analysis = review["series"]["frame_label_analysis"]
+    assert analysis["trim_start_frame"] == 1
+    assert analysis["trim_end_frame"] == 4
+    assert analysis["middle_static_frames"] == 1
+
+
+def test_trim_episode_updates_parquet_and_episode_metadata(tmp_path):
+    client, _, _, collection = _workspace(tmp_path)
+    root = _episode_dataset(collection)
+    response = client.post(
+        "/api/batches/" + BATCH + "/episodes/7/trim",
+        json={"start_frame": 1, "end_frame": 3},
+    )
+    assert response.status_code == 200
+    assert response.get_json()["length"] == 2
+    table = pq.read_table(root / "data/chunk-000/episode_000007.parquet")
+    assert table.num_rows == 2
+    assert table["timestamp"].to_pylist() == [0.0, 0.1]
+    row = json.loads((root / "meta/episodes.jsonl").read_text())
+    assert row["length"] == 2
+    assert row["trim_start_frame"] == 1
+    assert row["trim_end_frame"] == 3
 
 
 @pytest.mark.parametrize("quality,verdict", [("red", ""), ("RED", "pass"), ("green", "fail")])
@@ -347,9 +419,9 @@ def test_qc_updates_episode_and_slot_state(tmp_path):
     assert response.status_code == 200
     slot = response.get_json()["tasks"][0]["slots"][0]
     assert slot["state"] == "repair"
-    episode = json.loads((root / "meta/episodes.jsonl").read_text().strip())
-    assert episode["qc_verdict"] == "fail"
-    assert episode["qc_note"] == "grasp missed"
+    qc = json.loads((root / "meta/qc.jsonl").read_text().strip())
+    assert qc["qc_verdict"] == "fail"
+    assert qc["qc_note"] == "grasp missed"
 
 
 def test_object_photo_upload_and_placeholder(tmp_path):

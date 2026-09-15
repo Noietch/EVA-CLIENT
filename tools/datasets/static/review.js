@@ -27,7 +27,9 @@ let renderTaskEditor;
 let sceneFor;
 let renderGridCells;
 let navigateQcSlot;
+let showToast;
 let translate;
+const STATIC_REASON = "static_frames_excessive";
 
 function configureReview(context) {
   ({
@@ -48,6 +50,7 @@ function configureReview(context) {
     sceneFor,
     renderGridCells,
     navigateQcSlot,
+    showToast,
     translate,
   } = context);
 }
@@ -120,8 +123,142 @@ function reviewHeader(task) {
   if (secondary && secondary !== primary) {
     heading.append(node("p", "review-task-description-secondary", secondary));
   }
-  head.append(heading);
+  const compare = button(translate("review.compareRobots"), "", "button robot-compare-trigger");
+  compare.addEventListener("click", () => openRobotCompare(task, app.selectedSlot));
+  head.append(heading, compare);
   return head;
+}
+
+async function openRobotCompare(task, slotId) {
+  stopPlayback();
+  const dialog = $("robot-compare-dialog");
+  const title = $("robot-compare-title");
+  const body = $("robot-compare-body");
+  if (!dialog || !title || !body) return;
+  title.textContent = String(task.prompt_zh || task.prompt_en || task.task_id || translate("review.compareTitle"));
+  body.replaceChildren(node("div", "compare-loading", translate("review.compareLoading")));
+  const playAll = $("robot-compare-play-all");
+  if (playAll) {
+    playAll.textContent = translate("review.comparePlayAll");
+    playAll.disabled = true;
+    playAll.onclick = toggleComparePlayback;
+  }
+  dialog.showModal();
+  try {
+    const sourceSlot = (task.slots || []).find((item) => item.slot_id === slotId) || (task.slots || [])[0];
+    const query = new URLSearchParams({
+      task_id: task.task_id,
+      scene_id: sourceSlot ? sourceSlot.scene_id : "",
+      round_index: sourceSlot ? sourceSlot.round_index : 0,
+      current_batch: app.batch || task.batch_id || "",
+    });
+    const result = await api("/api/compare?" + query);
+    const groups = result.groups || [];
+    const hasVideo = groups.filter((group) => group.payload && group.payload.videos && group.payload.videos.length).length;
+    if (!groups.length || !hasVideo) {
+      body.replaceChildren(node("div", "compare-empty", translate("review.compareEmpty")));
+      return;
+    }
+    body.replaceChildren(...groups.map(buildCompareGroup));
+    installCompareSync(body);
+    if ($("robot-compare-play-all")) $("robot-compare-play-all").disabled = !body.querySelector("video");
+  } catch (error) {
+    body.replaceChildren(node("div", "compare-empty", error.message || translate("review.compareEmpty")));
+  }
+  dialog.onclose = () => {
+    body.querySelectorAll("video").forEach((video) => video.pause());
+    const playAll = $("robot-compare-play-all");
+    if (playAll) playAll.textContent = translate("review.comparePlayAll");
+  };
+}
+
+function toggleComparePlayback() {
+  const dialog = $("robot-compare-dialog");
+  if (!dialog) return;
+  const videos = [...dialog.querySelectorAll("video")];
+  if (!videos.length) return;
+  const playing = videos.some((video) => !video.paused && !video.ended);
+  if (playing) {
+    videos.forEach((video) => video.pause());
+    return;
+  }
+  const source = videos.find((video) => !video.ended) || videos[0];
+  const elapsed = Number(source.currentTime) || 0;
+  videos.forEach((video) => {
+    if (video.ended || Math.abs(video.currentTime - elapsed) > 0.08) {
+      video.currentTime = Math.min(elapsed, Number.isFinite(video.duration) ? video.duration : elapsed);
+    }
+    if (!video.ended) video.play().catch(() => {});
+  });
+}
+
+function updateComparePlayButton() {
+  const control = $("robot-compare-play-all");
+  const dialog = $("robot-compare-dialog");
+  if (!control || !dialog) return;
+  const playing = [...dialog.querySelectorAll("video")].some((video) => !video.paused && !video.ended);
+  control.textContent = translate(playing ? "review.comparePauseAll" : "review.comparePlayAll");
+}
+
+function buildCompareGroup(group) {
+  const card = node("section", "robot-compare-group");
+  const head = node("header", "robot-compare-group-head");
+  head.append(node("strong", "", group.robot_type), node("small", "", group.batch_id));
+  const views = node("div", "robot-compare-views");
+  const videos = group.payload && group.payload.videos || [];
+  if (!videos.length || !group.slot.episode) {
+    views.append(node("div", "compare-empty compare-group-empty", translate("review.compareEmpty")));
+  } else {
+    for (const video of videos.slice(0, 3)) {
+      const cell = node("div", "robot-compare-view");
+      cell.append(node("span", "cam-label", video.label));
+      const media = node("video", "compare-video");
+      media.preload = "metadata";
+      media.controls = true;
+      media.muted = true;
+      media.playsInline = true;
+      const videoBatch = group.payload.video_batch || group.batch_id;
+      const videoEpisode = group.payload.video_episode_index ?? group.slot.episode.episode_index;
+      media.src = "/api/batches/" + encodeURIComponent(videoBatch)
+        + "/episodes/" + videoEpisode
+        + "/video/" + encodePath(video.key);
+      cell.append(media);
+      views.append(cell);
+    }
+  }
+  card.append(head, views);
+  return card;
+}
+
+function installCompareSync(container) {
+  const videos = [...container.querySelectorAll(".compare-video")];
+  let syncing = false;
+  const syncPeers = (source, action) => {
+    if (syncing) return;
+    syncing = true;
+    for (const peer of videos) {
+      if (peer === source) continue;
+      if (action === "time") {
+        if (!peer.ended && Math.abs(peer.currentTime - source.currentTime) > 0.08) {
+          peer.currentTime = Math.min(source.currentTime, Number.isFinite(peer.duration) ? peer.duration : source.currentTime);
+        }
+      } else if (action === "play") {
+        if (!peer.ended) {
+          peer.currentTime = Math.min(source.currentTime, Number.isFinite(peer.duration) ? peer.duration : source.currentTime);
+          peer.play().catch(() => {});
+        }
+      } else if (action === "pause") {
+        peer.pause();
+      }
+    }
+    syncing = false;
+  };
+  videos.forEach((video) => {
+    video.addEventListener("play", () => { syncPeers(video, "play"); updateComparePlayButton(); });
+    video.addEventListener("pause", () => { if (!video.ended) syncPeers(video, "pause"); updateComparePlayButton(); });
+    video.addEventListener("seeking", () => syncPeers(video, "time"));
+    video.addEventListener("timeupdate", () => syncPeers(video, "time"));
+  });
 }
 
 function renderReview(task, slot, payload) {
@@ -139,6 +276,7 @@ function renderReview(task, slot, payload) {
   requestAnimationFrame(() => {
     renderChartControls();
     drawReviewCharts(0);
+    autoStartPlayback();
   });
 }
 
@@ -160,7 +298,7 @@ function buildQcStage(task, slot, payload) {
   robot.append(empty);
   visual.append(robot);
   top.append(visual, buildCameraStrip(task.batch_id, slot, payload));
-  main.append(top, buildChartRow(), buildScrubber(payload));
+  main.append(top, buildChartRow(), buildFrameLabelCard(task, slot, payload), buildScrubber(payload));
   stage.append(main);
   return stage;
 }
@@ -182,15 +320,19 @@ function buildCameraStrip(batch, slot, payload) {
     strip.append(node("div", "cam-empty", slot.episode ? translate("qc.noVideo") : translate("qc.emptySlot")));
     return strip;
   }
+  const videoBatch = payload.video_batch || batch;
+  const videoEpisode = payload.video_episode_index ?? slot.episode.episode_index;
   for (const video of payload.videos) {
     const cell = node("div", "cam-cell");
     cell.append(node("span", "cam-label", video.label));
     const media = node("video", "cam");
-    media.preload = "auto";
+    media.preload = "metadata";
+    media.autoplay = true;
+    media.loop = true;
     media.muted = true;
     media.playsInline = true;
-    media.src = "/api/batches/" + encodeURIComponent(batch)
-      + "/episodes/" + slot.episode.episode_index
+    media.src = "/api/batches/" + encodeURIComponent(videoBatch)
+      + "/episodes/" + videoEpisode
       + "/video/" + encodePath(video.key);
     cell.append(media);
     strip.append(cell);
@@ -218,6 +360,198 @@ function buildChart(kind, label) {
   body.append(canvas);
   panel.append(head, body);
   return panel;
+}
+
+function buildFrameLabelCard(task, slot, payload) {
+  const card = node("section", "frame-label-card");
+  const head = node("div", "frame-label-head");
+  head.append(
+    node("span", "chart-title", translate("qc.frameLabels")),
+    node("span", "frame-label-head-tag", translate("qc.trimTag")),
+  );
+  const series = payload.series;
+  const labels = series && (series.frame_labels || series.labels) || [];
+  const total = series ? series.state.length : 0;
+  const analysis = frameLabelAnalysis(series, labels);
+  const track = node("div", "frame-label-track");
+  track.id = "review-frame-labels";
+  let controls = null;
+  if (labels.length === total && total) {
+    for (const segmentInfo of analysis.segments) {
+      const {label, start, end} = segmentInfo;
+      const segment = node("span", "frame-label-segment " + label);
+      segment.style.flex = `${end - start} 0 0%`;
+      segment.title = `${frameLabelText(label)} · ${start + 1}-${end}`;
+      track.append(segment);
+    }
+    for (const segment of analysis.static_segments || []) {
+      for (const boundary of [segment.start, segment.end]) {
+        if (boundary <= 0 || boundary >= total) continue;
+        const marker = node("span", "frame-label-boundary");
+        marker.style.setProperty("--boundary-pct", `${boundary / total * 100}%`);
+        marker.title = `${translate("qc.frameBoundary")} ${boundary}`;
+        track.append(marker);
+      }
+    }
+    controls = buildFrameControls(track, task, slot, analysis, total);
+    track.append(controls.startMarker, controls.endMarker);
+  } else {
+    track.classList.add("empty");
+    track.append(node("span", "frame-label-empty", translate("qc.noFrameLabels")));
+  }
+  card.append(head, track);
+  if (total) {
+    const range = node("div", "frame-label-range");
+    range.id = "review-frame-range";
+    range.textContent = `${translate("qc.trimRange")} ${Math.max(1, Number(analysis.trim_start_frame) + 1)}-${Math.min(total, Number(analysis.trim_end_frame) || total)} / ${total}`;
+    card.append(range);
+  }
+  if (analysis.middle_static_frames) {
+    const warning = node("div", "frame-label-warning");
+    warning.append(node("b", "", translate("qc.staticFramesExcessive")), node("span", "", translate("qc.staticFramesHint")));
+    card.append(warning);
+  }
+  if (controls) card.append(controls.controls);
+  if (controls) {
+    const actions = node("div", "frame-label-actions");
+    actions.append(controls.save);
+    card.append(actions);
+  }
+  const legend = node("div", "frame-label-legend");
+  for (const label of ["static", "non-static"]) {
+    const item = node("span", "frame-label-key " + label);
+    item.append(node("i"), node("span", "", frameLabelText(label)));
+    legend.append(item);
+  }
+  card.append(legend);
+  return card;
+}
+
+function frameLabelAnalysis(series, labels) {
+  if (series && series.frame_label_analysis) return series.frame_label_analysis;
+  const segments = [];
+  let start = 0;
+  while (start < labels.length) {
+    const label = labels[start] || "unlabeled";
+    let end = start + 1;
+    while (end < labels.length && (labels[end] || "unlabeled") === label) end += 1;
+    segments.push({label, start, end, start_frame: start, end_frame: end - 1, length: end - start});
+    start = end;
+  }
+  const staticSegments = segments.filter((segment) => segment.label === "static");
+  const leading = staticSegments[0] && staticSegments[0].start === 0 ? staticSegments[0] : null;
+  const trailing = staticSegments.at(-1) && staticSegments.at(-1).end === labels.length
+    ? staticSegments.at(-1) : null;
+  const edge = new Set([leading, trailing].filter(Boolean));
+  const middle = staticSegments.filter((segment) => !edge.has(segment));
+  const onlyStatic = leading && leading === trailing;
+  return {
+    segments,
+    static_segments: staticSegments,
+    middle_static_frames: middle.reduce((sum, segment) => sum + segment.length, 0),
+    static_frames_excessive: middle.length > 0,
+    trim_start_frame: onlyStatic ? 0 : leading ? leading.end : 0,
+    trim_end_frame: onlyStatic ? labels.length : trailing ? trailing.start : labels.length,
+  };
+}
+
+function buildFrameControls(track, task, slot, analysis, total) {
+  const points = [...new Set([
+    0,
+    total,
+    ...(analysis.static_segments || []).flatMap((segment) => [segment.start, segment.end]),
+  ])].sort((left, right) => left - right);
+  const nearest = (value) => points.reduce((best, point) => (
+    Math.abs(point - value) < Math.abs(best - value) ? point : best
+  ), points[0]);
+  let start = Math.max(0, Math.min(total - 1, nearest(Number(analysis.trim_start_frame) || 0)));
+  let end = Math.max(start + 1, Math.min(total, nearest(Number(analysis.trim_end_frame) || total)));
+  if (end <= start) end = Math.min(total, start + 1);
+  const startMarker = node("span", "frame-label-trim-marker start");
+  const endMarker = node("span", "frame-label-trim-marker end");
+  const controls = node("div", "frame-label-controls");
+  const save = button(translate("qc.trimApply"), "", "button primary frame-label-trim");
+  const startControl = buildFrameBoundaryControl("start", translate("qc.trimStart"));
+  const endControl = buildFrameBoundaryControl("end", translate("qc.trimEnd"));
+  controls.append(startControl.wrapper, endControl.wrapper);
+
+  function buildFrameBoundaryControl(type, label) {
+    const wrapper = node("div", "frame-label-boundary-control " + type);
+    const heading = node("strong", "", label);
+    const left = button("←", "", "button frame-label-shift");
+    const value = node("span", "frame-label-control-value");
+    const right = button("→", "", "button frame-label-shift");
+    left.setAttribute("aria-label", `${label} ${translate("qc.moveLeft")}`);
+    right.setAttribute("aria-label", `${label} ${translate("qc.moveRight")}`);
+    left.title = `${label} ${translate("qc.moveLeft")}`;
+    right.title = `${label} ${translate("qc.moveRight")}`;
+    left.addEventListener("click", () => shift(type, -1));
+    right.addEventListener("click", () => shift(type, 1));
+    wrapper.append(heading, left, value, right);
+    return {wrapper, left, value, right};
+  }
+
+  const render = () => {
+    startMarker.style.setProperty("--trim-pct", `${start / Math.max(total, 1) * 100}%`);
+    endMarker.style.setProperty("--trim-pct", `${end / Math.max(total, 1) * 100}%`);
+    startControl.value.textContent = String(start + 1);
+    endControl.value.textContent = String(end);
+    startControl.value.title = `${translate("qc.trimStart")} ${start + 1}`;
+    endControl.value.title = `${translate("qc.trimEnd")} ${end}`;
+    const startIndex = points.indexOf(start);
+    const endIndex = points.indexOf(end);
+    startControl.left.disabled = startIndex <= 0;
+    startControl.right.disabled = startIndex >= points.length - 1 || points[startIndex + 1] >= end;
+    endControl.left.disabled = endIndex <= 0 || points[endIndex - 1] <= start;
+    endControl.right.disabled = endIndex >= points.length - 1;
+    const range = $("review-frame-range");
+    if (range) range.textContent = `${translate("qc.trimRange")} ${start + 1}-${end} / ${total}`;
+    save.disabled = start === 0 && end === total;
+  };
+
+  function shift(type, direction) {
+    const current = type === "start" ? start : end;
+    const index = points.indexOf(current);
+    const nextIndex = index + direction;
+    if (index < 0 || nextIndex < 0 || nextIndex >= points.length) return;
+    const value = points[nextIndex];
+    if (type === "start") {
+      if (value >= end) return;
+      start = value;
+    } else {
+      if (value <= start) return;
+      end = value;
+    }
+    render();
+  }
+
+  save.addEventListener("click", () => saveTrim(task, slot, start, end, save));
+  render();
+  return {startMarker, endMarker, controls, save};
+}
+
+async function saveTrim(task, slot, start, end, control) {
+  if (start === 0 && end === Number(app.review && app.review.series && app.review.series.state.length)) {
+    showToast(translate("qc.trimNoChange"), true);
+    return;
+  }
+  const saved = await runWrite(control, async () => {
+    await writeJson(
+      "/api/batches/" + encodeURIComponent(task.batch_id)
+        + "/episodes/" + slot.episode.episode_index + "/trim",
+      "POST",
+      {start_frame: start, end_frame: end},
+    );
+    await loadState(true, true);
+  }, translate("qc.trimSaved"));
+  if (!saved) return;
+  const currentTask = (app.state.tasks || []).find((item) => item.batch_id === task.batch_id && item.task_id === task.task_id);
+  const currentSlot = currentTask && currentTask.slots.find((item) => item.slot_id === slot.slot_id);
+  if (currentTask && currentSlot) openSlot(currentTask, currentSlot);
+}
+
+function frameLabelText(label) {
+  return translate(label === "static" ? "qc.staticFrames" : "qc.nonStaticFrames");
 }
 
 function buildScrubber(payload) {
@@ -256,56 +590,27 @@ function buildQcControls(task, slot) {
     ["image_quality", translate("qc.imageReason")],
     ["trajectory_quality", translate("qc.trajectoryReason")],
     ["task_mismatch", translate("qc.taskReason")],
+    [STATIC_REASON, translate("qc.staticFramesExcessive")],
     ["other", translate("qc.otherReason")],
   ];
   for (const [value, label] of reasonOptions) reason.add(new Option(label, value));
   reason.value = episode ? episode.qc_reason || "" : "";
   reason.addEventListener("change", () => { note.placeholder = reason.value === "other" ? translate("review.otherReasonPlaceholder") : translate("qc.notePlaceholder"); });
-  const next = button(translate("qc.nextItem"), "", "button");
-  next.addEventListener("click", () => navigateQcSlot(1));
-  const mark = button(translate("qc.mark"), "", "button danger");
-  mark.addEventListener("click", () => {
-    reason.focus();
-    reason.value = reason.value || "image_quality";
-    note.focus();
-  });
-  const pass = button(translate("qc.pass"), "", "button qc-pass");
-  const fail = button(translate("qc.fail"), "", "button danger");
-  const save = button(translate("qc.save"), "", "button");
-  save.addEventListener("click", () => saveQc(task, slot, episode ? episode.qc_verdict || "" : "", save));
+  const pass = button(translate("qc.pass"), "", "button qc-verdict-action qc-pass");
+  const fail = button(translate("qc.fail"), "", "button qc-verdict-action qc-fail");
   pass.classList.toggle("selected", Boolean(episode && episode.qc_verdict === "pass"));
   fail.classList.toggle("selected", Boolean(episode && episode.qc_verdict === "fail"));
   pass.addEventListener("click", () => saveQc(task, slot, "pass", pass));
   fail.addEventListener("click", () => saveQc(task, slot, "fail", fail));
-  const entries = (app.state.tasks || [])
-    .filter((item) => item.batch_id === app.batch)
-    .sort((left, right) => String(left.task_id).localeCompare(String(right.task_id), "en", {numeric: true}))
-    .flatMap((item) => (item.slots || []).map((itemSlot) => ({task: item, slot: itemSlot})))
-    .filter(({task: item, slot: itemSlot}) => (
-      (!app.qcSceneFilter || itemSlot.scene_id === app.qcSceneFilter)
-        && (!app.qcTaskFilter || item.task_id === app.qcTaskFilter)
-    ));
-  const currentIndex = entries.findIndex(({slot: itemSlot}) => itemSlot.slot_id === slot.slot_id);
-  next.disabled = currentIndex < 0 || currentIndex >= entries.length - 1;
-  mark.disabled = !hasEpisode;
   reason.disabled = !hasEpisode;
   note.disabled = !hasEpisode;
-  save.disabled = !hasEpisode;
   pass.disabled = !hasEpisode;
   fail.disabled = !hasEpisode;
-  const navigation = node("div", "qc-action-row");
-  navigation.append(next, mark);
-  const verdicts = node("div", "qc-verdict-row");
-  verdicts.append(pass, fail);
-  const saveRow = node("div", "qc-save-row");
-  saveRow.append(save);
-  section.append(
-    navigation,
-    verdicts,
-    reason,
-    note,
-    saveRow,
-  );
+  const passRow = node("div", "qc-verdict-row");
+  passRow.append(pass);
+  const failRow = node("div", "qc-verdict-row");
+  failRow.append(fail);
+  section.append(passRow, reason, note, failRow);
   return section;
 }
 
@@ -320,18 +625,50 @@ async function saveQc(task, slot, verdict, control) {
     showToast(translate("review.otherReasonRequired"), true);
     return;
   }
-  await runWrite(control, async () => {
+  const localEpisode = slot.episode;
+  const previous = {
+    verdict: localEpisode && localEpisode.qc_verdict,
+    note: localEpisode && localEpisode.qc_note,
+    reason: localEpisode && localEpisode.qc_reason,
+    qcState: slot.qc_state,
+    state: slot.state,
+  };
+  const effectiveVerdict = verdict || (localEpisode && localEpisode.qc_verdict) || "";
+  if (localEpisode) {
+    localEpisode.qc_verdict = effectiveVerdict;
+    localEpisode.qc_note = noteValue;
+    localEpisode.qc_reason = verdict === "fail" || !verdict ? reasonValue : "";
+  }
+  slot.qc_state = effectiveVerdict === "pass" ? "passed" : effectiveVerdict === "fail" ? "failed" : "unreviewed";
+  slot.state = slot.qc_state === "failed" ? "repair" : slot.qc_state === "pending" ? "pending" : "complete";
+  if (control && verdict) {
+    control.classList.add("selected");
+    const sibling = control.parentElement && [...control.parentElement.children].find((item) => item !== control);
+    if (sibling) sibling.classList.remove("selected");
+  }
+  renderTaskList();
+  const saved = await runWrite(control, async () => {
     await writeJson(
       "/api/batches/" + encodeURIComponent(task.batch_id)
         + "/episodes/" + slot.episode.episode_index + "/qc",
       "PUT",
       { verdict, note: noteValue, reason: verdict === "fail" || !verdict ? reasonValue : "" },
     );
-    await loadState(true, true);
-    navigateQcSlot(1);
   }, verdict === "pass"
     ? translate("qc.savePassed")
     : verdict === "fail" ? translate("qc.saveFailed") : translate("qc.saved"));
+  if (saved) {
+    navigateQcSlot(1);
+  } else {
+    if (localEpisode) {
+      localEpisode.qc_verdict = previous.verdict;
+      localEpisode.qc_note = previous.note;
+      localEpisode.qc_reason = previous.reason;
+    }
+    slot.qc_state = previous.qcState;
+    slot.state = previous.state;
+    renderTaskList();
+  }
 }
 
 function reviewSeries() {
@@ -467,6 +804,13 @@ function seekReview(frame, syncVideos = true, updateCharts = true) {
     "--pct",
     (index / Math.max(series.state.length - 1, 1) * 100).toFixed(2) + "%",
   );
+  const labelTrack = $("review-frame-labels");
+  if (labelTrack) {
+    labelTrack.style.setProperty(
+      "--frame-pct",
+      (index / Math.max(series.state.length - 1, 1) * 100).toFixed(2) + "%",
+    );
+  }
   $("review-position").textContent = (index + 1) + " / " + series.state.length;
   const elapsed = (Number(series.timestamp[index]) || 0) - (Number(series.timestamp[0]) || 0);
   $("review-time").textContent = elapsed.toFixed(1) + "s";
@@ -490,6 +834,20 @@ function frameForElapsed(timestamps, elapsed) {
     else high = middle;
   }
   return Math.max(0, low - 1);
+}
+
+function autoStartPlayback() {
+  const series = reviewSeries();
+  if (!series || !series.state.length) return;
+  const videos = [...document.querySelectorAll(".cam-strip video")];
+  const begin = () => {
+    if (!app.playing) togglePlayback();
+    videos.forEach((video) => video.play().catch(() => {}));
+  };
+  videos.forEach((video) => {
+    video.addEventListener("canplay", begin, {once: true});
+  });
+  begin();
 }
 
 function togglePlayback() {
@@ -523,7 +881,7 @@ function playbackTick(timestamp) {
   if (!app.playing || !$("review-range")) return;
   const series = reviewSeries();
   const videos = [...document.querySelectorAll(".cam-strip video")];
-  const master = videos.find((video) => !video.error);
+  const master = videos.find((video) => !video.error && !video.paused && video.readyState >= 2);
   const start = Number(series.timestamp[0]) || 0;
   const duration = (Number(series.timestamp[series.timestamp.length - 1]) || start) - start
     + 1 / Math.max(Number(app.review.fps) || 30, 1);
@@ -556,7 +914,9 @@ function playbackTick(timestamp) {
 export {
   configureReview,
   drawReviewCharts,
+  frameLabelAnalysis,
   openSlot,
+  openRobotCompare,
   renderReview,
   stopPlayback,
 };

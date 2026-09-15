@@ -80,6 +80,7 @@ from core.utils.dataset_upload import (
 )
 from core.utils.lerobot import LeRobotDatasetIO
 from core.utils.upload_plan import UploadProgress
+from tools.datasets.hf_task_sets import fetch_dataset, fetch_qc, fetch_task_set, publish_dataset, publish_qc
 from tools.conversion import (
     DATASET_EXPORT_FORMATS,
     DatasetExportProgress,
@@ -747,12 +748,10 @@ def _run_quality_upload(ctx: ConsoleContext, job_id: str) -> None:
 
 
 def _quality_export_paths(dataset_dir: Path, dataset_format: str) -> tuple[Path, Path]:
-    export_root = (
-        dataset_dir.parent / "export"
-        if dataset_dir.name == "raw"
-        else dataset_dir.with_name(f"{dataset_dir.name}_export")
-    )
-    format_root = export_root / dataset_format
+    if dataset_format == "lerobot":
+        return dataset_dir, dataset_dir
+    datasets_root = dataset_dir.parent.parent
+    format_root = datasets_root / f"{dataset_format}_datasets" / dataset_dir.name
     return format_root / "accepted", format_root / "rejected"
 
 
@@ -780,15 +779,18 @@ def _run_quality_export(
             active_job.source_episode_index = progress.source_episode_index
 
     try:
-        summary = export_dataset_by_quality(
-            source_dir,
-            accepted_dir,
-            rejected_dir,
-            dataset_format=dataset_format,
-            replace_existing=True,
-            progress_callback=update_progress,
-            source_episode_indices=source_episode_indices,
-        )
+        if dataset_format == "lerobot":
+            summary = None
+        else:
+            summary = export_dataset_by_quality(
+                source_dir,
+                accepted_dir,
+                rejected_dir,
+                dataset_format=dataset_format,
+                replace_existing=True,
+                progress_callback=update_progress,
+                source_episode_indices=source_episode_indices,
+            )
     except Exception as error:
         logger.exception("Failed to export collection quality split")
         with ctx.quality_upload_lock:
@@ -802,14 +804,15 @@ def _run_quality_export(
         job = ctx.quality_export_jobs.get(job_id)
         if job is not None:
             job.state = "completed"
-            job.episodes_completed = summary.source_episodes
-            job.episodes_total = summary.source_episodes
+            job.episodes_completed = 0 if summary is None else summary.source_episodes
+            job.episodes_total = 0 if summary is None else summary.source_episodes
             job.subset = ""
             job.source_episode_index = None
-            job.accepted_episodes = summary.accepted_episodes
-            job.rejected_episodes = summary.rejected_episodes
-            job.accepted_frames = summary.accepted_frames
-            job.rejected_frames = summary.rejected_frames
+            if summary is not None:
+                job.accepted_episodes = summary.accepted_episodes
+                job.rejected_episodes = summary.rejected_episodes
+                job.accepted_frames = summary.accepted_frames
+                job.rejected_frames = summary.rejected_frames
 
 
 def _serialize_prompt_config(prompt: Any) -> dict:
@@ -3382,6 +3385,40 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
     def _post_select_task(self, body: dict) -> None:
         self._enqueue_ok(f"web:switch_task:{body.get('task', '')}")
 
+    def _post_hf_task_set_sync(self, body: dict) -> None:
+        config = self.ctx.runtime.active_config or self.ctx.config
+        task_set = str(body.get("task_set", "")).strip()
+        destination = _scene_plan_root(config).parent
+        result = fetch_task_set(Path(__file__).resolve().parents[4], task_set, destination, config.collection.storage)
+        self._send_json(200, {"ok": True, **result})
+
+    def _post_hf_dataset_upload(self, body: dict) -> None:
+        dataset_dir = self._active_collection_dataset(body)
+        if dataset_dir is None:
+            return
+        dataset_name = dataset_dir.name
+        config = self.ctx.runtime.active_config or self.ctx.config
+        result = publish_dataset(Path(__file__).resolve().parents[4], dataset_dir, dataset_name, config.collection.storage)
+        self._send_json(200, {"ok": True, **result})
+
+    def _post_hf_dataset_download(self, body: dict) -> None:
+        config = self.ctx.runtime.active_config or self.ctx.config
+        dataset_dir = self._active_collection_dataset(body)
+        if dataset_dir is None:
+            return
+        result = fetch_dataset(Path(__file__).resolve().parents[4], dataset_dir.name, dataset_dir.parent, config.collection.storage)
+        self._send_json(200, {"ok": True, **result})
+
+    def _post_hf_qc_sync(self, body: dict) -> None:
+        config = self.ctx.runtime.active_config or self.ctx.config
+        dataset_dir = Path(str(body.get("dataset_dir", "")).strip()).expanduser().resolve()
+        dataset_name = str(body.get("dataset_name", "")).strip() or dataset_dir.name
+        if body.get("direction") == "upload":
+            result = publish_qc(Path(__file__).resolve().parents[4], dataset_dir, dataset_name)
+        else:
+            result = fetch_qc(Path(__file__).resolve().parents[4], dataset_name, dataset_dir)
+        self._send_json(200, {"ok": True, **result})
+
     def _post_select_collect_task(self, body: dict) -> None:
         task = str(body.get("task", "")).strip()
         dataset = str(body.get("dataset", "")).strip()
@@ -3973,6 +4010,15 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         if dataset_format is None:
             return
         local_dir, _ = _quality_export_paths(dataset_dir, dataset_format)
+        if dataset_format == "lerobot":
+            self._post_quality_upload(
+                body,
+                dataset_dir=dataset_dir,
+                local_dir=local_dir,
+                dataset_format=dataset_format,
+                dataset_name=self.ctx.session.selected_collect_set or dataset_dir.name,
+            )
+            return
         with self.ctx.quality_upload_lock:
             exports = [
                 job
@@ -4047,12 +4093,15 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         dataset_dir = dataset_dir.resolve()
         local_dir = local_dir.resolve()
         marker_path = local_dir / "meta" / "quality_split.json"
-        try:
-            marker = json.loads(marker_path.read_text())
-        except (OSError, ValueError):
-            logger.warning("Invalid accepted collection export marker", exc_info=True)
-            self._send_json(400, {"ok": False, "error": "invalid accepted export"})
-            return
+        if dataset_format == "lerobot":
+            marker = {"subset": "accepted", "dataset_format": "lerobot", "source_dir": str(dataset_dir)}
+        else:
+            try:
+                marker = json.loads(marker_path.read_text())
+            except (OSError, ValueError):
+                logger.warning("Invalid accepted collection export marker", exc_info=True)
+                self._send_json(400, {"ok": False, "error": "invalid accepted export"})
+                return
         if marker.get("subset") != "accepted":
             self._send_json(400, {"ok": False, "error": "only accepted exports can be uploaded"})
             return
@@ -4274,6 +4323,10 @@ _POST_ROUTES = {
     "/api/exit_collect_replay": ConsoleRequestHandler._post_exit_collection_replay,
     "/api/review_episode": ConsoleRequestHandler._post_review_episode,
     "/api/select_task": ConsoleRequestHandler._post_select_task,
+    "/api/hf/task_set/sync": ConsoleRequestHandler._post_hf_task_set_sync,
+    "/api/hf/dataset/upload": ConsoleRequestHandler._post_hf_dataset_upload,
+    "/api/hf/dataset/download": ConsoleRequestHandler._post_hf_dataset_download,
+    "/api/hf/qc/sync": ConsoleRequestHandler._post_hf_qc_sync,
     "/api/select_collect_task": ConsoleRequestHandler._post_select_collect_task,
     "/api/select_collection_slot": ConsoleRequestHandler._post_select_collection_slot,
     "/api/skip_collection_slot": ConsoleRequestHandler._post_skip_collection_slot,

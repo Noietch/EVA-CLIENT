@@ -1,3 +1,4 @@
+import { loadThree } from "./robot-viewer.js";
 import {
   configureEntityUi,
   newEntity,
@@ -32,7 +33,20 @@ const LOCALE_TABLE = {
   "actions.retry": ["重试", "Retry"],
   "actions.exportQc": ["导出补采清单", "Export reshoot list"],
   "actions.importPlan": ["导入计划压缩包", "Import plan ZIP"],
+  "actions.importObjects": ["批量导入物体 CSV（可同时选择照片）", "Import objects CSV (photos optional)"],
   "actions.exportPlan": ["导出计划压缩包", "Export plan ZIP"],
+  "actions.publishTaskSet": ["发布任务集到 HF", "Publish task set to HF"],
+  "sync.title": ["数据传输", "Data transfer"],
+  "sync.taskSet": ["下载任务集", "Download task set"],
+  "sync.assets": ["上传资源", "Upload assets"],
+  "sync.dataset": ["下载数据集", "Download dataset"],
+  "sync.uploadQc": ["上传质检结果", "Upload QC"],
+  "sync.downloadQc": ["下载质检结果", "Download QC"],
+  "sync.status": ["状态", "Status"],
+  "sync.idle": ["就绪", "Ready"],
+  "sync.running": ["正在处理", "In progress"],
+  "sync.done": ["已完成", "Completed"],
+  "sync.failed": ["同步失败", "Sync failed"],
   "tabs.aria": ["数据管理", "Data management"],
   "tabs.dashboard": ["看板", "Dashboard"],
   "tabs.qc": ["质检", "QC"],
@@ -62,6 +76,10 @@ const LOCALE_TABLE = {
   "qc.emptySlot": ["空槽位 · 等待采集", "EMPTY SLOT · WAITING FOR COLLECTION"],
   "qc.review": ["复核", "REVIEW"],
   "qc.pendingState": ["待采集", "PENDING"],
+  "qc.frameLabels": ["帧标签", "FRAME LABELS"],
+  "qc.staticFrames": ["静止帧", "STATIC FRAMES"],
+  "qc.nonStaticFrames": ["非静止帧", "NON-STATIC FRAMES"],
+  "qc.noFrameLabels": ["暂无帧标签", "NO FRAME LABELS"],
   "qc.qualityControl": ["质量控制", "Quality control"],
   "qc.notePlaceholder": ["质检备注（可选）", "QC note (optional)"],
   "qc.reasonPlaceholder": ["选择主要原因", "Select primary reason"],
@@ -69,6 +87,18 @@ const LOCALE_TABLE = {
   "qc.imageReason": ["图像质量问题", "Image quality"],
   "qc.trajectoryReason": ["轨迹质量问题", "Trajectory quality"],
   "qc.taskReason": ["任务完成不符合要求", "Task does not meet requirements"],
+  "qc.staticFramesExcessive": ["中间静止帧过多", "Too many middle static frames"],
+  "qc.staticFramesHint": ["机器识别：中间存在静止段，请人工复核", "Machine flag: middle static segment needs review"],
+  "qc.trimRange": ["保留帧范围", "Keep frame range"],
+  "qc.trimApply": ["截取并保存", "Trim and save"],
+  "qc.trimSaved": ["已按选定帧范围截取数据", "Episode trimmed to the selected frame range"],
+  "qc.trimNoChange": ["当前范围未改变，无需截取", "The selected range is unchanged"],
+  "qc.trimStart": ["起始边界", "Start boundary"],
+  "qc.trimEnd": ["结束边界", "End boundary"],
+  "qc.trimTag": ["帧范围调整", "FRAME RANGE"],
+  "qc.moveLeft": ["左移", "Move left"],
+  "qc.moveRight": ["右移", "Move right"],
+  "qc.frameBoundary": ["边界", "Boundary"],
   "qc.pass": ["通过", "Pass"],
   "qc.fail": ["未通过", "Fail"],
   "qc.save": ["保存", "Save"],
@@ -156,6 +186,7 @@ const LOCALE_TABLE = {
   "ui.import": ["导入", "Import"],
   "ui.planImported": ["计划压缩包已导入", "Plan ZIP imported"],
   "ui.photosUploaded": ["物体照片已上传", "Object photos uploaded"],
+  "ui.objectsImported": ["物体和照片已批量导入", "Objects and photos imported"],
   "actions.cancel": ["取消", "Cancel"],
   "actions.confirm": ["确认", "Confirm"],
   "actions.close": ["关闭", "Close"],
@@ -212,7 +243,7 @@ const LOCALE_TABLE = {
   "entity.placementRequired": ["每个物体组都需要物体和至少一个位置", "Each object group needs an object and at least one position"],
   "entity.promptRequired": ["任务编号和英文提示词不能为空", "Task ID and English prompt cannot be empty"],
   "entity.sceneRequired": ["任务至少需要一个场景", "A task needs at least one scene"],
-  "entity.objectNameRequired": ["物体编号和至少一种名称不能为空", "Object ID and at least one name cannot be empty"],
+  "entity.objectNameRequired": ["至少填写一种物体名称", "At least one object name is required"],
   "entity.sceneId": ["场景编号", "Scene ID"],
   "entity.taskId": ["任务编号", "Task ID"],
   "entity.action": ["动作", "Action"],
@@ -235,6 +266,14 @@ const LOCALE_TABLE = {
   "review.loading3d": ["正在载入三维模型", "Loading 3D"],
   "review.fetchingMeshes": ["正在读取机器人模型", "Fetching robot meshes"],
   "review.taskDescription": ["任务描述", "Task description"],
+  "review.compareRobots": ["机器人对比", "Compare robots"],
+  "review.compareTitle": ["机器人视频对比", "Robot video comparison"],
+  "review.compareLoading": ["正在准备机器人视频", "Preparing robot videos"],
+  "review.compareEmpty": ["暂无可对比的视频数据", "No video data available for comparison"],
+  "review.compareHint": ["按任务、场景和轮次对齐播放时间", "Playback is aligned by task, scene, and round"],
+  "review.comparePlayAll": ["全部播放", "Play all"],
+  "review.comparePauseAll": ["全部暂停", "Pause all"],
+  "review.robot": ["机器人", "Robot"],
   "review.scene": ["场景", "Scene"],
   "review.action": ["动作", "Action"],
   "review.state": ["状态", "State"],
@@ -273,6 +312,7 @@ const app = {
   toastTimer: 0,
   objectThumbObserver: null,
   stateCache: new Map(),
+  stateRequests: new Map(),
   reviewCache: new Map(),
   qcLoadingToken: 0,
 };
@@ -409,6 +449,32 @@ async function api(path, options = {}) {
   return payload;
 }
 
+const STATE_STORAGE_PREFIX = "eva-dataset-state::";
+
+function readStoredState(cacheKey) {
+  const storageKey = STATE_STORAGE_PREFIX + cacheKey;
+  try {
+    const raw = localStorage.getItem(storageKey);
+    if (!raw) return null;
+    const stored = JSON.parse(raw);
+    return stored && stored.state ? stored.state : null;
+  } catch (error) {
+    localStorage.removeItem(storageKey);
+    return null;
+  }
+}
+
+function storeState(cacheKey, state) {
+  try {
+    localStorage.setItem(STATE_STORAGE_PREFIX + cacheKey, JSON.stringify({
+      timestamp: Date.now(),
+      state,
+    }));
+  } catch (error) {
+    // Browser storage is an optional acceleration layer.
+  }
+}
+
 function writeJson(path, method, payload) {
   return api(path, {
     method,
@@ -418,7 +484,7 @@ function writeJson(path, method, payload) {
 }
 
 async function runWrite(control, operation, successMessage) {
-  if (app.writeBusy || (control && control.disabled)) return;
+  if (app.writeBusy || (control && control.disabled)) return false;
   app.writeBusy = true;
   app.stateCache.clear();
   app.reviewCache.clear();
@@ -426,8 +492,10 @@ async function runWrite(control, operation, successMessage) {
   try {
     await operation();
     showToast(successMessage);
+    return true;
   } catch (error) {
     showToast(error.message || String(error), true);
+    return false;
   } finally {
     app.writeBusy = false;
     if (control) control.disabled = false;
@@ -441,29 +509,42 @@ async function loadState(preserveReview = false, force = false) {
   const params = new URLSearchParams();
   if (app.batch) params.set("batch", app.batch);
   if (app.robot) params.set("robot_type", app.robot);
-  const query = params.toString() ? "?" + params.toString() : "";
+  const query = params.toString() ? "?" + params : "";
+  const cacheKey = (app.robot || "*") + "::" + (app.batch || "*");
+  const memory = app.stateCache.get(cacheKey);
+  const cached = memory || {
+    timestamp: 0,
+    state: readStoredState(cacheKey),
+  };
+  const hasCachedState = Boolean(cached.state);
+  if (!force && hasCachedState) {
+    app.stateCache.set(cacheKey, cached);
+    applyState(cached.state, preserveReview);
+    setQcLoading(false, loadingToken);
+    $("loading-state").hidden = true;
+    $("app").hidden = false;
+    requestAnimationFrame(moveTabThumb);
+  }
+  let request = app.stateRequests.get(cacheKey);
+  if (!request || force) {
+    request = api("/api/state" + query);
+    app.stateRequests.set(cacheKey, request);
+  }
   try {
-    const cacheKey = (app.robot || "*") + "::" + (app.batch || "*");
-    const cached = app.stateCache.get(cacheKey);
-    if (!force && cached && Date.now() - cached.timestamp < 300000) {
-      applyState(cached.state, preserveReview);
-      setQcLoading(false, loadingToken);
-      $("loading-state").hidden = true;
-      $("app").hidden = false;
-      requestAnimationFrame(moveTabThumb);
-      return;
-    }
-    const state = await api("/api/state" + query);
+    const state = await request;
+    if (app.stateRequests.get(cacheKey) === request) app.stateRequests.delete(cacheKey);
     app.stateCache.set(cacheKey, { timestamp: Date.now(), state });
+    storeState(cacheKey, state);
     applyState(state, preserveReview);
     setQcLoading(false, loadingToken);
     $("loading-state").hidden = true;
     $("app").hidden = false;
     requestAnimationFrame(moveTabThumb);
   } catch (error) {
+    if (app.stateRequests.get(cacheKey) === request) app.stateRequests.delete(cacheKey);
     setQcLoading(false, loadingToken);
     $("loading-state").hidden = true;
-    showGlobalError(error.message || String(error));
+    if (!hasCachedState) showGlobalError(error.message || String(error));
   }
 }
 
@@ -507,7 +588,10 @@ function renderBatchSelect() {
   select.replaceChildren(new Option(t("filters.chooseBatch"), ""));
   const batches = app.state.batches;
   for (const batch of batches) {
-    select.add(new Option(batch.batch_id + " · " + batch.robot_type, batch.batch_id));
+    const label = batch.batch_kind === "unmatched"
+      ? "unmatched · " + batch.robot_type
+      : batch.batch_id + " · " + batch.robot_type;
+    select.add(new Option(label, batch.batch_id));
   }
   select.value = app.batch;
   const currentIndex = batches.findIndex((batch) => batch.batch_id === app.batch);
@@ -522,6 +606,37 @@ function renderBatchSelect() {
     link.href = url || "#";
     link.classList.toggle("disabled", !url);
     link.setAttribute("aria-disabled", String(!url));
+  }
+  const publish = $("publish-task-set");
+  if (publish) publish.disabled = !app.batch;
+  for (const id of ["hf-publish-task-set", "hf-sync-task-set"]) {
+    const control = $(id);
+    if (control) control.disabled = !app.batch;
+  }
+  const download = $("hf-download-dataset");
+  if (download) download.disabled = !app.batch;
+  for (const id of ["hf-upload-qc", "hf-download-qc"]) {
+    const control = $(id);
+    if (control) control.disabled = !app.batch;
+  }
+}
+
+async function runHfSyncAction(path, message) {
+  const status = $("hf-sync-status");
+  const fill = $("hf-sync-progress-fill");
+  const bar = $("hf-sync-progress");
+  if (status) status.textContent = `${t(message)} · ${t("sync.running")}`;
+  if (bar) { bar.classList.add("indeterminate"); bar.removeAttribute("aria-valuenow"); }
+  try {
+    const result = await api(path, { method: "POST" });
+    if (fill) fill.style.width = "100%";
+    if (bar) { bar.classList.remove("indeterminate"); bar.setAttribute("aria-valuenow", "100"); }
+    if (status) status.textContent = `${t(message)} · ${t("sync.done")}`;
+    await loadState(false, true);
+  } catch (error) {
+    if (status) status.textContent = `${t("sync.failed")}: ${error.message}`;
+    if (fill) fill.style.width = "0%";
+    if (bar) { bar.classList.remove("indeterminate"); bar.setAttribute("aria-valuenow", "0"); }
   }
 }
 
@@ -618,7 +733,7 @@ function emptyList(host, message) {
   host.replaceChildren(node("div", "inline-empty", message));
 }
 
-function saveEntity(kind, control) {
+async function saveEntity(kind, control) {
   const draft = validateDraft(kind);
   const idField = kind === "scenes" ? "scene_id" : kind === "tasks" ? "task_id" : "object_id";
   const id = draft[idField];
@@ -632,10 +747,10 @@ function saveEntity(kind, control) {
     path = "/api/batches/" + encodeURIComponent(batch) + "/" + kind
       + (current ? "/" + encodeURIComponent(current) : "");
   }
-  runWrite(control, async () => {
+  return runWrite(control, async () => {
     await writeJson(path, current ? "PUT" : "POST", draft);
     app.original[kind] = id;
-    app.selected[kind] = (batch || "") + "::" + id;
+    app.selected[kind] = kind === "objects" ? "::" + id : (batch || "") + "::" + id;
     await loadState();
     const saved = app.state[kind].find((item) => recordKey(item, idField) === app.selected[kind]);
     app.draft[kind] = clone(saved);
@@ -703,7 +818,11 @@ async function importPlan(file, control) {
 }
 
 async function uploadPhotos(files) {
-  if (!files.length || !app.original.objects) return;
+  if (!files.length) return;
+  if (!app.original.objects) {
+    await saveEntity("objects", null);
+    if (!app.original.objects) return;
+  }
   const form = new FormData();
   [...files].forEach((file) => form.append("photos", file));
   await runWrite(null, async () => {
@@ -717,6 +836,29 @@ async function uploadPhotos(files) {
     renderObjectEditor();
   }, t("ui.photosUploaded"));
   $("photo-file").value = "";
+}
+
+function openPhotoPicker() {
+  if (!app.draft.objects) return;
+  $("photo-file").click();
+}
+
+async function importObjects(files, control) {
+  const selected = [...files];
+  const csvFiles = selected.filter((file) => file.name.toLowerCase().endsWith(".csv"));
+  const csv = csvFiles[0];
+  if (csvFiles.length !== 1) {
+    showToast("请选择对象 CSV 文件", true);
+    return;
+  }
+  const form = new FormData();
+  form.append("file", csv);
+  selected.filter((file) => file !== csv).forEach((file) => form.append("photos", file));
+  await runWrite(control, async () => {
+    await api("/api/objects/import", { method: "POST", body: form });
+    await loadState();
+  }, t("ui.objectsImported"));
+  $("object-import-file").value = "";
 }
 
 function clearEditors() {
@@ -795,6 +937,35 @@ function bindEvents() {
   $("object-modeling-filter").addEventListener("change", renderObjectList);
   $("retry-button").addEventListener("click", () => loadState());
   $("refresh-button").addEventListener("click", () => loadState(false, true));
+  $("publish-task-set").addEventListener("click", async () => {
+    if (!app.batch) return requireBatch();
+    const control = $("publish-task-set");
+    control.disabled = true;
+    try {
+      const result = await api("/api/batches/" + encodeURIComponent(app.batch) + "/hf/publish", {method: "POST"});
+      showToast(result.task_set + " @ " + result.revision);
+    } catch (error) {
+      showToast(error.message, true);
+    } finally {
+      control.disabled = !app.batch;
+    }
+  });
+  $("hf-publish-task-set").addEventListener("click", () => {
+    if (app.batch) runHfSyncAction(`/api/batches/${encodeURIComponent(app.batch)}/hf/publish`, "actions.publishTaskSet");
+  });
+  $("hf-sync-task-set").addEventListener("click", () => {
+    if (app.batch) runHfSyncAction(`/api/batches/${encodeURIComponent(app.batch)}/hf/sync`, "sync.taskSet");
+  });
+  $("hf-sync-assets").addEventListener("click", () => runHfSyncAction("/api/hf/assets/publish", "sync.assets"));
+  $("hf-download-dataset").addEventListener("click", () => {
+    if (app.batch) runHfSyncAction(`/api/batches/${encodeURIComponent(app.batch)}/hf/download`, "sync.dataset");
+  });
+  $("hf-upload-qc").addEventListener("click", () => {
+    if (app.batch) runHfSyncAction(`/api/batches/${encodeURIComponent(app.batch)}/hf/qc/upload`, "sync.uploadQc");
+  });
+  $("hf-download-qc").addEventListener("click", () => {
+    if (app.batch) runHfSyncAction(`/api/batches/${encodeURIComponent(app.batch)}/hf/qc/download`, "sync.downloadQc");
+  });
   $("import-trigger").addEventListener("click", () => {
     if (requireBatch()) $("import-file").click();
   });
@@ -802,8 +973,14 @@ function bindEvents() {
     importPlan(event.target.files[0], $("import-trigger"));
   });
   $("photo-file").addEventListener("change", (event) => uploadPhotos(event.target.files));
+  document.addEventListener("object-photo-upload", () => openPhotoPicker());
+  $("object-import-trigger").addEventListener("click", () => $("object-import-file").click());
+  $("object-import-file").addEventListener("change", (event) => importObjects(event.target.files, $("object-import-trigger")));
   document.querySelector("[data-close-object]").addEventListener("click", () => {
     $("object-dialog").close();
+  });
+  document.querySelector("[data-close-robot-compare]").addEventListener("click", () => {
+    $("robot-compare-dialog").close();
   });
   for (const link of [$('export-trigger'), $("qc-export")].filter(Boolean)) {
     link.addEventListener("click", (event) => {
@@ -860,10 +1037,14 @@ configureReview({
   sceneFor,
   renderGridCells,
   navigateQcSlot,
+  showToast,
   translate: t,
 });
 
 applyLocale();
 bindEvents();
 switchTab(app.tab);
+// Warm the shared 3D module while the initial catalog request is in flight.
+// Review clicks then only wait for the selected episode data.
+loadThree().catch(() => {});
 loadState();

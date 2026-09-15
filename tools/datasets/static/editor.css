@@ -415,11 +415,12 @@ input[type="color"] { padding: 4px; cursor: pointer; }
 }
 
 .scene-grid {
+  min-width: 0;
+  width: 100%;
   display: grid;
-  grid-template-columns: repeat(var(--grid-columns, 1), minmax(58px, 1fr));
+  grid-template-columns: repeat(var(--grid-columns, 1), minmax(0, 1fr));
   grid-template-rows: repeat(var(--grid-rows, 1), auto);
   gap: 7px;
-  width: 100%;
   align-content: start;
 }
 
@@ -794,7 +795,7 @@ dialog::backdrop { background: rgba(31, 30, 28, .38); backdrop-filter: blur(2px)
 .photo-tile { min-width: 0; margin: 0; border: 1px solid var(--rule); border-radius: var(--radius-sm); overflow: hidden; }
 .photo-tile img { width: 100%; aspect-ratio: 4 / 3; display: block; object-fit: contain; background: var(--surface-2); }
 .photo-tile figcaption { padding: 6px 8px; overflow: hidden; color: var(--ink-dim); font: 8px/1.2 var(--mono); text-overflow: ellipsis; white-space: nowrap; }
-.photo-slot { min-height: 150px; display: grid; place-content: center; justify-items: center; gap: 5px; border: 1px dashed var(--rule-strong); border-radius: var(--radius-sm); color: var(--ink-faint); }
+.photo-slot { min-height: 150px; display: grid; place-content: center; justify-items: center; gap: 5px; border: 1px dashed var(--rule-strong); border-radius: var(--radius-sm); color: var(--ink-faint); background: transparent; width: 100%; font: inherit; cursor: pointer; }
 .photo-slot b { font-size: 24px; font-weight: 400; }
 .photo-slot span { font: 8px/1 var(--mono); }
 
@@ -855,7 +856,7 @@ dialog::backdrop { background: rgba(31, 30, 28, .38); backdrop-filter: blur(2px)
 
 #view-tasks.view.active { grid-template-columns: 420px minmax(0, 1fr); gap: 0; }
 #view-tasks .task-sidebar { padding: 16px; border-right: 1px solid var(--rule); border-radius: var(--radius) 0 0 var(--radius); background: var(--surface-2); }
-#view-tasks .task-review-panel { border: 0; border-radius: 0 var(--radius) var(--radius) 0; background: var(--paper); }
+#view-tasks .task-review-panel { border: 0; border-radius: 0 var(--radius) var(--radius) 0; background: var(--surface-2); overflow-y: auto; overflow-x: hidden; }
 #view-tasks .task-sidebar { overflow-y: auto; overflow-x: hidden; }
 #view-tasks .collection-qc-panel { flex: 0 0 auto; }
 #view-tasks .collection-slot-grid { flex: 0 0 auto; min-height: 0; max-height: 330px; overflow-y: auto; }
@@ -871,7 +872,7 @@ dialog::backdrop { background: rgba(31, 30, 28, .38); backdrop-filter: blur(2px)
 .collection-panel-head { display: flex; align-items: center; gap: 8px; min-height: 32px; color: var(--ink); font: 700 10px/1 var(--mono); letter-spacing: .06em; text-transform: uppercase; }
 .collection-panel-head .step-badge { flex: 0 0 auto; }
 .step-badge { width: 26px; height: 26px; display: grid; place-items: center; border: 1px solid var(--rule-strong); border-radius: 50%; background: var(--paper); color: var(--ink-dim); font: 700 10px/1 var(--mono); }
-.collection-panel-card { min-width: 0; padding: 12px; border-radius: var(--radius); background: var(--paper); box-shadow: var(--shadow); }
+.collection-panel-card, .dataset-sync-card { min-width: 0; padding: 12px; border-radius: var(--radius); background: var(--paper); box-shadow: var(--shadow); }
 .collection-panel-card .batch-field:first-child { margin-top: 0; }
 .collection-panel-card .batch-field + .batch-field { margin-top: 10px; }
 .collection-batch-nav { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 10px; }
@@ -947,6 +948,24 @@ dialog::backdrop { background: rgba(31, 30, 28, .38); backdrop-filter: blur(2px)
 .collection-qc-controls .qc-save-row { grid-column: 1 / -1; display: grid; gap: 8px; }
 .collection-qc-controls .qc-action-row,
 .collection-qc-controls .qc-verdict-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.collection-qc-controls .qc-action-row { grid-template-columns: minmax(0, 1fr); }
+.collection-qc-controls .qc-action-row .button { width: 100%; min-width: 0; }
+.collection-qc-controls .qc-verdict-row { grid-template-columns: minmax(0, 1fr); }
+.collection-qc-controls .qc-verdict-action {
+  width: 100%;
+  min-height: 40px;
+  border-color: var(--ink);
+  background: var(--ink);
+  color: var(--paper);
+}
+.collection-qc-controls .qc-verdict-action.qc-pass.selected {
+  border-color: var(--ok);
+  background: var(--ok);
+}
+.collection-qc-controls .qc-verdict-action.qc-fail.selected {
+  border-color: var(--danger);
+  background: var(--danger);
+}
 .collection-qc-controls .qc-save-row { grid-template-columns: minmax(0, 1fr); }
 .collection-qc-controls .qc-save-row .button { min-height: 38px; }
 .qc-export-left { display: flex; align-items: center; justify-content: center; min-height: 40px; }
@@ -1005,7 +1024,7 @@ dialog::backdrop { background: rgba(31, 30, 28, .38); backdrop-filter: blur(2px)
 @media (max-width: 760px) {
   #view-tasks.view.active { grid-template-columns: minmax(0, 1fr); gap: 8px; }
   #view-tasks .task-sidebar { border-right: 1px solid var(--rule); border-radius: var(--radius); }
-  #view-tasks .task-review-panel { border-radius: var(--radius); }
+  #view-tasks .task-review-panel { border-radius: var(--radius); overflow: auto; }
   .task-sidebar { max-height: none; overflow: visible; }
   .collection-slot-grid { max-height: none; }
 }
@@ -1100,6 +1119,8 @@ dialog::backdrop { background: rgba(31, 30, 28, .38); backdrop-filter: blur(2px)
 .dashboard-filter-value { color: var(--ink-dim); }
 .dashboard-filter-summary { min-width: 0; margin-left: auto; color: var(--ink-dim); font: 10px/1.3 var(--mono); overflow-wrap: anywhere; text-align: right; }
 .dashboard-section { margin-top: 25px; }
+.dashboard-overview-section { margin-top: 18px; }
+.dashboard-overview-section .dashboard-kpi-grid { margin-top: 0; }
 .dashboard-section-head { display: grid; grid-template-columns: 44px minmax(0, 1fr) auto; align-items: start; gap: 14px; }
 .dashboard-section-number { display: grid; place-items: center; width: 42px; height: 42px; border-radius: 8px; background: var(--surface-2); color: var(--ink); font: 700 11px/1 var(--mono); }
 .dashboard-section-head h2 { margin-top: 5px; font-size: 22px; line-height: 1.05; }
@@ -1116,6 +1137,7 @@ dialog::backdrop { background: rgba(31, 30, 28, .38); backdrop-filter: blur(2px)
 .dashboard-kpi.pending b { color: var(--qc-failed); }
 .dashboard-lower-grid { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(320px, .85fr); gap: 18px; margin-top: 18px; }
 .dashboard-panel { min-width: 0; overflow: hidden; border-radius: var(--radius); background: var(--paper); box-shadow: var(--shadow); }
+.dashboard-qc-panel { margin-top: 18px; }
 .dashboard-panel-head { min-height: 80px; display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 18px 19px 14px; border-bottom: 1px solid var(--rule); }
 .dashboard-panel-head > div { min-width: 0; display: grid; gap: 4px; }
 .dashboard-panel-head .eyebrow { margin: 0; }
@@ -1126,3 +1148,15 @@ dialog::backdrop { background: rgba(31, 30, 28, .38); backdrop-filter: blur(2px)
 .dashboard-panel-total { flex: 0 0 auto; color: var(--ink-dim); font: 700 12px/1 var(--mono); white-space: nowrap; }
 /* Collection queue tiles: square cells with 50-slot paging. */
 .collection-slot-grid .slot-tile { aspect-ratio: 1; }
+.dataset-sync-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+.dataset-sync-actions .button { min-width: 0; white-space: normal; }
+.dataset-sync-card { flex: 0 0 auto; margin-top: 13px; }
+.dataset-sync-card .dataset-sync-actions { margin-top: 10px; }
+.dataset-sync-content .dataset-sync-actions { margin-top: 0; }
+.dataset-sync-card .button { min-height: 44px; padding: 6px; }
+.dataset-sync-card .collect-progress { height: 6px; margin-top: 12px; background: #e4e8ec; overflow: hidden; }
+.dataset-sync-card .collect-progress i { display: block; width: 0; height: 100%; background: #27856a; }
+.dataset-sync-card .kv { display: flex; gap: 12px; justify-content: space-between; margin-top: 8px; }
+.dataset-sync-card .v { min-width: 0; overflow-wrap: anywhere; }
+.dataset-sync-card .collect-progress.indeterminate i { width: 35% !important; animation: hf-sync-progress 1.4s linear infinite; }
+@keyframes hf-sync-progress { from { transform: translateX(-100%); } to { transform: translateX(300%); } }

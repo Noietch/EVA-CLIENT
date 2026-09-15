@@ -113,17 +113,21 @@ def _dataset_mode(raw_dir: Path) -> str | None:
 def _dataset_name(raw_dir: Path, mode: str) -> str:
     if mode == "eval" and raw_dir.parent.name == "episodes":
         return raw_dir.parent.parent.name
+    if raw_dir.parent.name == "lerobot_datasets" or raw_dir.parent.name.endswith("_datasets"):
+        return raw_dir.name
     return raw_dir.parent.name
 
 
 def discover_raw_datasets(roots: Iterable[Path]) -> list[tuple[Path, str]]:
-    """Find explicit ``raw`` LeRobot datasets, never export derivatives."""
+    """Find LeRobot source datasets, never format-specific export derivatives."""
     found: dict[Path, str] = {}
     for root in roots:
         if not root.exists():
             continue
-        candidates = [root] if root.name == "raw" else []
-        candidates.extend(path.parent.parent for path in root.rglob("raw/meta/episodes.jsonl"))
+        candidates = []
+        if (root / "meta" / "episodes.jsonl").is_file():
+            candidates.append(root)
+        candidates.extend(path.parent.parent for path in root.rglob("meta/episodes.jsonl"))
         for raw_dir in candidates:
             resolved = raw_dir.resolve()
             mode = _dataset_mode(resolved)
@@ -134,7 +138,7 @@ def discover_raw_datasets(roots: Iterable[Path]) -> list[tuple[Path, str]]:
 
 def _accepted_export(raw_dir: Path, marker_path: Path) -> dict[str, Any] | None:
     accepted_dir = marker_path.parent.parent.resolve()
-    dataset_format = accepted_dir.parent.name
+    dataset_format = accepted_dir.parent.parent.name.removesuffix("_datasets")
     marker = _read_json(marker_path)
     indices = marker.get("source_episode_indices")
     try:
@@ -168,8 +172,8 @@ def discover_dashboard_upload_candidates(roots: Iterable[Path]) -> list[dict[str
     for raw_dir, mode in discover_raw_datasets(roots):
         if mode != "collection":
             continue
-        export_root = raw_dir.parent / "export"
-        for marker_path in sorted(export_root.glob("*/accepted/meta/quality_split.json")):
+        datasets_root = raw_dir.parent.parent
+        for marker_path in sorted(datasets_root.glob("*_datasets/*/accepted/meta/quality_split.json")):
             candidate = _accepted_export(raw_dir, marker_path)
             if candidate is not None:
                 candidates.append(candidate)
@@ -194,9 +198,9 @@ def _episode_record(
         ended = started + dt.timedelta(seconds=duration)
     task_values = row.get("tasks") or []
     task = str(row.get("prompt") or (task_values[0] if task_values else ""))
-    quality = str(row.get("quality") or "green").lower()
-    qc_verdict = str(row.get("qc_verdict") or "").lower()
     status = str(row.get("status") or "valid").lower()
+    quality = str(row.get("quality") or "green").lower()
+    qc_verdict = str(row.get("qc_verdict") or ("fail" if status == "failed" else "")).lower()
     valid = (
         quality != "red"
         and qc_verdict != "fail"
@@ -233,6 +237,9 @@ def _episode_record(
         "session_id": str(row.get("session_id") or ""),
         "valid": valid,
         "quality": quality,
+        "qc_verdict": qc_verdict,
+        "qc_reason": str(row.get("qc_reason") or row.get("reason") or ""),
+        "qc_note": str(row.get("qc_note") or row.get("notes") or ""),
         "result": str(result or ""),
     }
 

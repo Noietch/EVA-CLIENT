@@ -259,6 +259,23 @@
             </div>
           </div>
         </div>
+        <div class="panel" id="collect-panel-sync">
+          <div class="panel-h"><span class="step-badge">1</span>DATA TRANSFER <span class="n" id="collect-dataset-sync-progress-label">0%</span></div>
+          <div class="card">
+            <div class="dataset-sync-content" aria-label="Dataset synchronization">
+              <div class="dataset-sync-actions">
+                <button class="btn" id="b-collect-assets-sync">SYNC ASSETS</button>
+                <button class="btn primary" id="b-collect-dataset-upload">UPLOAD DATASET</button>
+                <button class="btn" id="b-collect-qc-upload">UPLOAD QC</button>
+                <button class="btn" id="b-collect-task-set-sync">SYNC TASK SET</button>
+                <button class="btn" id="b-collect-dataset-download">DOWNLOAD DATASET</button>
+                <button class="btn" id="b-collect-qc-download">DOWNLOAD QC</button>
+              </div>
+              <div class="collect-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="collect-dataset-sync-progress"><i id="collect-dataset-sync-progress-fill"></i></div>
+              <div class="kv"><span class="k">sync</span><span class="v" id="collect-dataset-sync-status">idle</span></div>
+            </div>
+          </div>
+        </div>
 
         <div class="panel" id="collect-panel-record">
           <div class="panel-h"><span class="step-badge">2</span>RECORD</div>
@@ -327,31 +344,6 @@
           </div>
         </div>
 
-        <div class="panel" id="collect-panel-export">
-          <div class="panel-h"><span class="step-badge">5</span>QUALITY EXPORT <span class="n" id="collect-quality-progress-label">0%</span></div>
-          <div class="card">
-            <div class="quality-export-actions">
-              <label class="quality-export-format">
-                <span>EXPORT FORMAT</span>
-                <select id="collect-export-format" aria-label="Dataset export format">
-                  <option value="lerobot_v21">LeRobot v2.1</option>
-                  <option value="lerobot_v3">LeRobot v3</option>
-                  <option value="hdf5">HDF5</option>
-                  <option value="mcap">MCAP</option>
-                </select>
-              </label>
-              <button class="btn full" id="b-collect-quality-export">EXPORT DATASET</button>
-              <button class="btn primary full" id="b-collect-quality-upload">SCAN TARGET</button>
-            </div>
-            <div class="collect-progress" role="progressbar" aria-label="Dataset transfer progress"
-                 aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"
-                 id="collect-quality-progress-bar">
-              <i id="collect-quality-progress-fill"></i>
-            </div>
-            <div class="kv"><span class="k">progress</span><span class="v tnum" id="collect-quality-progress-detail">0/0 episodes</span></div>
-            <div class="qc-status" id="collect-quality-status" role="status" aria-live="polite"></div>
-          </div>
-        </div>
       </div>
 
       <!-- ============ stage (shared, reparented between tabs) ============
