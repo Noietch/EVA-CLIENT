@@ -3420,9 +3420,9 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         dataset_dir = Path(str(body.get("dataset_dir", "")).strip()).expanduser().resolve()
         dataset_name = str(body.get("dataset_name", "")).strip() or dataset_dir.name
         if body.get("direction") == "upload":
-            result = publish_qc(Path(__file__).resolve().parents[4], dataset_dir, dataset_name)
+            result = publish_qc(Path(__file__).resolve().parents[4], dataset_dir, dataset_name, config.collection.storage)
         else:
-            result = fetch_qc(Path(__file__).resolve().parents[4], dataset_name, dataset_dir)
+            result = fetch_qc(Path(__file__).resolve().parents[4], dataset_name, dataset_dir, config.collection.storage)
         self._send_json(200, {"ok": True, **result})
 
     def _post_select_collect_task(self, body: dict) -> None:

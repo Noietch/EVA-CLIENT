@@ -185,9 +185,9 @@ def fetch_dataset(project_root: Path, dataset_name: str, destination: Path, stor
     return {"repo_id": repo_id, "dataset": dataset_name, "revision": revision}
 
 
-def publish_qc(project_root: Path, dataset_dir: Path, dataset_name: str) -> dict[str, str]:
+def publish_qc(project_root: Path, dataset_dir: Path, dataset_name: str, storage: dict[str, Any] | None = None) -> dict[str, str]:
     from huggingface_hub import HfApi
-    cfg = _config(project_root)
+    cfg = _config(project_root, storage)
     _apply_proxy(cfg)
     token, repo_id = str(cfg.get("token", "")).strip(), str(cfg.get("repo_id", "")).strip()
     qc_path = dataset_dir / "meta" / "qc.jsonl"
@@ -200,9 +200,9 @@ def publish_qc(project_root: Path, dataset_dir: Path, dataset_name: str) -> dict
     return {"repo_id": repo_id, "dataset": dataset_name, "revision": commit.oid}
 
 
-def fetch_qc(project_root: Path, dataset_name: str, dataset_dir: Path) -> dict[str, str]:
+def fetch_qc(project_root: Path, dataset_name: str, dataset_dir: Path, storage: dict[str, Any] | None = None) -> dict[str, str]:
     from huggingface_hub import hf_hub_download
-    cfg = _config(project_root)
+    cfg = _config(project_root, storage)
     _apply_proxy(cfg)
     token, repo_id = str(cfg.get("token", "")).strip(), str(cfg.get("repo_id", "")).strip()
     if not token or not repo_id or Path(dataset_name).name != dataset_name:
