@@ -1660,13 +1660,13 @@ async function syncTaskSetFromHf() {
   }
 }
 
-async function syncAssetsToHf() {
+async function downloadAssetsFromHf() {
   const button = $("b-collect-assets-sync");
   const status = $("collect-dataset-sync-status");
   button.disabled = true;
   try {
-    const result = await apiPost("/api/hf/assets/publish", {});
-    if (status) status.textContent = `assets synced: ${result.files || 0} files`;
+    const result = await apiPost("/api/hf/assets/sync", {});
+    if (status) status.textContent = `assets downloaded: ${result.revision || "done"}`;
   } finally {
     button.disabled = false;
   }
@@ -2343,7 +2343,7 @@ export {
   installCollectKeyboardControls, renderCollectControls, uploadCollectionQuality,
   handleCollectionReviewInput, resetCollectionReviewInput,
   changeCollectionExportFormat, invalidateEpisodeHistory, pollEpisodeHistory,
-  syncTaskSetFromHf, syncAssetsToHf, uploadCollectionDatasetToHf, downloadCollectionDatasetFromHf, syncCollectionQc,
+  syncTaskSetFromHf, downloadAssetsFromHf, uploadCollectionDatasetToHf, downloadCollectionDatasetFromHf, syncCollectionQc,
   pollCollectionSlots, selectCollectionDataset,
   changeCollectionSlotFilter, changeCollectionSlotPage, toggleCollectionSlotAll,
 };

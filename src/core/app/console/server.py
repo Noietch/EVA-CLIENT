@@ -80,7 +80,7 @@ from core.utils.dataset_upload import (
 )
 from core.utils.lerobot import LeRobotDatasetIO
 from core.utils.upload_plan import UploadProgress
-from tools.datasets.hf_task_sets import fetch_dataset, fetch_qc, fetch_task_set, publish_dataset, publish_qc
+from tools.datasets.hf_task_sets import fetch_assets, fetch_dataset, fetch_qc, fetch_task_set, publish_dataset, publish_qc
 from tools.conversion import (
     DATASET_EXPORT_FORMATS,
     DatasetExportProgress,
@@ -3392,6 +3392,12 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         result = fetch_task_set(Path(__file__).resolve().parents[4], task_set, destination, config.collection.storage)
         self._send_json(200, {"ok": True, **result})
 
+    def _post_hf_assets_sync(self, body: dict) -> None:
+        config = self.ctx.runtime.active_config or self.ctx.config
+        destination = _scene_plan_root(config).parent
+        result = fetch_assets(Path(__file__).resolve().parents[4], destination, config.collection.storage)
+        self._send_json(200, {"ok": True, **result})
+
     def _post_hf_dataset_upload(self, body: dict) -> None:
         dataset_dir = self._active_collection_dataset(body)
         if dataset_dir is None:
@@ -4324,6 +4330,7 @@ _POST_ROUTES = {
     "/api/review_episode": ConsoleRequestHandler._post_review_episode,
     "/api/select_task": ConsoleRequestHandler._post_select_task,
     "/api/hf/task_set/sync": ConsoleRequestHandler._post_hf_task_set_sync,
+    "/api/hf/assets/sync": ConsoleRequestHandler._post_hf_assets_sync,
     "/api/hf/dataset/upload": ConsoleRequestHandler._post_hf_dataset_upload,
     "/api/hf/dataset/download": ConsoleRequestHandler._post_hf_dataset_download,
     "/api/hf/qc/sync": ConsoleRequestHandler._post_hf_qc_sync,

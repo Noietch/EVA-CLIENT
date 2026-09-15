@@ -105,6 +105,33 @@ def publish_assets(project_root: Path, assets_dir: Path) -> dict[str, str]:
     return {"repo_id": repo_id, "revision": commit.oid, "files": str(sum(1 for _ in assets_dir.rglob("*")))}
 
 
+def fetch_assets(project_root: Path, destination: Path, storage: dict[str, Any] | None = None) -> dict[str, str]:
+    from huggingface_hub import snapshot_download
+
+    cfg = _config(project_root, storage)
+    _apply_proxy(cfg)
+    token = str(cfg.get("token", "")).strip()
+    repo_id = str(cfg.get("repo_id", "")).strip()
+    if not token or not repo_id:
+        raise ValueError("Hugging Face config requires repo_id and token")
+    revision = str(cfg.get("revision", "main")).strip() or "main"
+    cache = destination / ".hf_assets_cache"
+    snapshot_download(repo_id=repo_id, repo_type="dataset", revision=revision,
+                      allow_patterns=["assets/*"], local_dir=str(cache.resolve()), token=token)
+    source = cache / "assets"
+    if not source.is_dir():
+        raise FileNotFoundError("assets were not found in HF repo")
+    target = destination / "assets"
+    target.mkdir(parents=True, exist_ok=True)
+    for item in source.iterdir():
+        target_item = target / item.name
+        if item.is_dir():
+            shutil.copytree(item, target_item, dirs_exist_ok=True)
+        else:
+            shutil.copy2(item, target_item)
+    return {"repo_id": repo_id, "revision": revision}
+
+
 def publish_dataset(project_root: Path, dataset_dir: Path, dataset_name: str, storage: dict[str, Any] | None = None) -> dict[str, str]:
     from huggingface_hub import HfApi
     cfg = _config(project_root, storage)
