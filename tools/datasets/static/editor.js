@@ -960,6 +960,9 @@ function bindEvents() {
   $("hf-upload-qc").addEventListener("click", () => {
     if (app.batch) runHfSyncAction(`/api/batches/${encodeURIComponent(app.batch)}/hf/qc/upload`, "sync.uploadQc");
   });
+  $("hf-download-qc").addEventListener("click", () => {
+    if (app.batch) runHfSyncAction(`/api/batches/${encodeURIComponent(app.batch)}/hf/qc/download`, "sync.downloadQc");
+  });
   $("import-trigger").addEventListener("click", () => {
     if (requireBatch()) $("import-file").click();
   });
