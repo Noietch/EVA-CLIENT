@@ -13,6 +13,25 @@ from teleop_client.vr.client import parse_operator_event
 pytestmark = pytest.mark.integration
 
 
+def test_b_toggles_arm_immediately_on_press_without_repeat():
+    mapper = OperatorEventMapper()
+
+    def update(at, pressed=False):
+        return mapper.update(
+            session_id="arm",
+            client_time_ms=at,
+            controllers={"left": {"thumbstick": (0.0, 0.0)}},
+            face_buttons={"left": {}, "right": {"secondary": pressed}},
+        )
+
+    events = update(0, pressed=True)
+    assert [event["intent"] for event in events] == ["arm_toggle"]
+    assert parse_operator_event(events[0]).intent == "arm_toggle"
+    assert update(10, pressed=True) == ()
+    assert update(20, pressed=False) == ()
+    assert update(30, pressed=True)[0]["intent"] == "arm_toggle"
+
+
 def test_stick_deadzone_repeat_and_y_release():
     mapper = OperatorEventMapper()
 

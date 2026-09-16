@@ -279,15 +279,21 @@ def save_slot_state(dataset_dir: Path, state: CollectionSlotState) -> None:
         temporary.replace(path)
 
 
-def _episode_outcome(episode: dict[str, Any]) -> str:
-    if str(episode.get("status") or "") != "saved":
+def episode_qc_state(episode: dict[str, Any] | None) -> str:
+    """Match datasets tools' four QC states, independently of capture selection."""
+    if not episode or episode.get("status") != "saved":
         return "pending"
     verdict = str(episode.get("qc_verdict") or "").lower()
-    if verdict == "pass":
-        return "usable"
-    if verdict == "fail" or str(episode.get("quality") or "green").lower() == "red":
-        return "rejected"
-    return "usable"
+    if verdict == "unreviewed":
+        return "unreviewed"
+    if verdict == "fail" or str(episode.get("quality") or "").lower() == "red":
+        return "failed"
+    return "passed" if verdict == "pass" else "unreviewed"
+
+
+def _episode_outcome(episode: dict[str, Any]) -> str:
+    state = episode_qc_state(episode)
+    return "rejected" if state == "failed" else "pending" if state == "pending" else "usable"
 
 
 def _episode_indices(
@@ -350,7 +356,8 @@ def collection_slot_status(
     rows: list[dict[str, Any]] = []
     unresolved_regular: list[dict[str, Any]] = []
     unresolved_deferred: dict[str, dict[str, Any]] = {}
-    counts = {"complete": 0, "rejected": 0, "deferred": 0, "pending": 0}
+    counts = {"complete": 0, "rejected": 0, "deferred": 0, "pending": 0,
+              "passed": 0, "unreviewed": 0, "failed": 0, "qc_pending": 0}
 
     for slot in slots:
         episode = episode_by_slot.get(slot.slot_id) or legacy_episode_by_target.get(
@@ -374,7 +381,9 @@ def collection_slot_status(
         else:
             state = "pending"
             counts["pending"] += 1
-        row = {**vars(slot), "state": state, "episode": episode}
+        qc_state = episode_qc_state(episode)
+        counts["qc_pending" if qc_state == "pending" else qc_state] += 1
+        row = {**vars(slot), "state": state, "qc_state": qc_state, "episode": episode}
         rows.append(row)
         if state not in {"complete", "saving"}:
             if state == "deferred":

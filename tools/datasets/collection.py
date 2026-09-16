@@ -792,8 +792,8 @@ class PlanCatalog:
     ) -> dict[str, Any]:
         if self._unmatched_robot(batch) is not None:
             raise ValueError("unmatched batches are read-only")
-        if verdict not in {"", "pass", "fail"}:
-            raise ValueError("QC verdict must be pass, fail, or empty")
+        if verdict not in {"", "pass", "fail", "unreviewed"}:
+            raise ValueError("QC verdict must be pass, fail, unreviewed, or empty")
         if reason not in {"", *QC_REASONS}:
             raise ValueError("Unknown QC reason")
         if reason == "other" and not note.strip():
@@ -1590,7 +1590,8 @@ class PlanCatalog:
         if summary is not None:
             verdict = summary["qc_verdict"].lower()
             rejected = summary["quality"].lower() == "red" or verdict == "fail"
-            state = "failed" if rejected else "passed" if verdict == "pass" else "unreviewed"
+            state = ("unreviewed" if verdict == "unreviewed" else
+                     "failed" if rejected else "passed" if verdict == "pass" else "unreviewed")
         legacy_state = (
             "repair" if state == "failed" else "pending" if state == "pending" else "complete"
         )
@@ -1739,10 +1740,16 @@ class PlanCatalog:
                         rows.append(payload)
         qc_rows = []
         if qc_path.is_file():
-            qc_rows = [json.loads(line) for line in qc_path.read_text().splitlines() if line.strip()]
+            qc_rows = [
+                json.loads(line) for line in qc_path.read_text().splitlines() if line.strip()
+            ]
         qc_by_episode = {int(row["episode_index"]): row for row in qc_rows}
         for row in rows:
-            row.update({key: value for key, value in qc_by_episode.get(int(row.get("episode_index", -1)), {}).items() if key != "episode_index"})
+            row.update({
+                key: value
+                for key, value in qc_by_episode.get(int(row.get("episode_index", -1)), {}).items()
+                if key != "episode_index"
+            })
         self._episode_rows_cache[key] = (token, rows)
         self._db_cache_put(f"episodes:{key}", token, rows)
         return rows

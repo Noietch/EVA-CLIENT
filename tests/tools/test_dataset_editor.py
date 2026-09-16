@@ -424,6 +424,24 @@ def test_qc_updates_episode_and_slot_state(tmp_path):
     assert qc["qc_note"] == "grasp missed"
 
 
+def test_explicit_unreviewed_overrides_capture_failure_without_erasing_issues(tmp_path):
+    client, _, _, collection = _workspace(tmp_path)
+    root = _episode_dataset(collection)
+    path = root / "meta/episodes.jsonl"
+    episode = json.loads(path.read_text())
+    episode.update(quality="red", quality_issues=[{"detail": "camera skew"}])
+    path.write_text(json.dumps(episode) + "\n")
+    response = client.put(
+        "/api/batches/" + BATCH + "/episodes/7/qc",
+        json={"verdict": "unreviewed", "note": "needs another review"},
+    )
+    assert response.status_code == 200
+    assert response.get_json()["tasks"][0]["slots"][0]["qc_state"] == "unreviewed"
+    saved = json.loads(path.read_text())
+    assert saved["quality"] == "red"
+    assert saved["quality_issues"] == [{"detail": "camera skew"}]
+
+
 def test_object_photo_upload_and_placeholder(tmp_path):
     client, _, _, _ = _workspace(tmp_path)
     state = client.get("/api/state").get_json()

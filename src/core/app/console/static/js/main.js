@@ -202,6 +202,8 @@ function setActiveTab(tab) {
     const viewTab = tab === "collect" ? "debug" : tab;
     $("view-" + viewTab).classList.add("active");
     $("guidebar").style.display = tab === "dashboard" ? "none" : "";
+    const transferInfo = $("collect-transfer-info");
+    transferInfo.style.display = tab === "collect" && transferInfo.textContent ? "" : "none";
     if (viewTab === "debug") {
       $("view-debug").classList.toggle("collect-mode", tab === "collect");
     }
@@ -445,6 +447,7 @@ $("b-collect-home").onclick = () => {
     });
   };
 $("b-collect-qc-pass").onclick = () => submitEpisodeQc("collect", "pass");
+$("b-collect-qc-unreviewed").onclick = () => submitEpisodeQc("collect", "unreviewed");
 $("b-goto-qc").onclick = () => submitEpisodeQc("collect", "fail");
 $("b-collect-note-save").onclick = () => submitEpisodeNote("collect");
 $("collect-slot-scene-filter").onchange = (event) => {
@@ -461,6 +464,8 @@ $("collect-slot-task-filter").onchange = (event) => {
 };
 $("b-collect-slot-prev").onclick = () => changeCollectionSlotPage(-1);
 $("b-collect-slot-next").onclick = () => changeCollectionSlotPage(1);
+$("b-collect-quality-export").onclick = exportCollectionQuality;
+$("collect-export-format").onchange = changeCollectionExportFormat;
 $("b-collect-dataset-upload").onclick = uploadCollectionDatasetToHf;
 $("b-collect-assets-download").onclick = downloadCollectionAssetsFromHf;
 $("b-collect-task-set-download").onclick = downloadCollectionTaskSetFromHf;

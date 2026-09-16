@@ -509,7 +509,7 @@ def test_collect_quality_export_uses_selected_dataset(
     assert status.json["accepted_episodes"] == 2
     assert status.json["rejected_episodes"] == 1
     assert calls[0][0] == source.resolve()
-    export_root = source.with_name("pick_up_cup_export") / "lerobot_v21"
+    export_root = source.parent.parent / "lerobot_v21_datasets" / source.name
     assert calls[0][1] == export_root / "accepted"
     assert calls[0][2] == export_root / "rejected"
 
@@ -520,8 +520,9 @@ def test_collect_quality_upload_scan_skips_matching_files_and_never_uses_rejecte
 ):
     source = tmp_path / "legacy_local_name" / "raw"
     source.mkdir(parents=True)
-    accepted = source.parent / "export" / "lerobot_v21" / "accepted"
-    rejected = source.parent / "export" / "lerobot_v21" / "rejected"
+    export_root = source.parent.parent / "lerobot_v21_datasets" / source.name
+    accepted = export_root / "accepted"
+    rejected = export_root / "rejected"
     _write_quality_split_marker(accepted, source, dataset_format="lerobot_v21")
     rejected.mkdir(parents=True)
     calls = []
@@ -581,7 +582,7 @@ def test_collect_quality_upload_scan_skips_matching_files_and_never_uses_rejecte
 def test_collect_quality_upload_serializes_confirmed_plans(tmp_path, monkeypatch):
     source = tmp_path / "legacy_local_name" / "raw"
     source.mkdir(parents=True)
-    accepted = source.parent / "export" / "lerobot_v21" / "accepted"
+    accepted = source.parent.parent / "lerobot_v21_datasets" / source.name / "accepted"
     _write_quality_split_marker(accepted, source, dataset_format="lerobot_v21")
     upload_started = threading.Event()
     upload_finished = threading.Event()
@@ -654,7 +655,7 @@ def test_collect_quality_upload_serializes_confirmed_plans(tmp_path, monkeypatch
 def test_collect_quality_upload_requires_export_and_sanitizes_invalid_marker(tmp_path):
     source = tmp_path / "pick_up_cup"
     source.mkdir()
-    accepted = source.with_name("pick_up_cup_export") / "lerobot_v21" / "accepted"
+    accepted = source.parent.parent / "lerobot_v21_datasets" / source.name / "accepted"
 
     with serve_console(console_config()) as h:
         _set_collect_dataset_logger(h, source)

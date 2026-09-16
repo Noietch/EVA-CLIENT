@@ -2,6 +2,7 @@
 
 import io
 import threading
+import time
 from pathlib import Path
 
 import numpy as np
@@ -55,6 +56,61 @@ def test_collection_set_selection_stays_on_set_without_active_slot(browser):
             page.close()
 
 
+def test_data_transfer_buttons_update_existing_progress_bar(browser):
+    config = console_config(collection={"enabled": True})
+    config.collection.schema.columns = {"qpos": "observation.qpos", "action_qpos": "action"}
+    with serve_console(config) as console:
+        page = browser.new_page()
+        page.route("**/api/camera/**", lambda route: route.abort())
+        def complete_qc(route):
+            time.sleep(0.35)
+            route.fulfill(json={
+                "ok": True, "source": "qc.jsonl", "path": "/tmp/cup_set/meta/qc.jsonl",
+            })
+        page.route("**/api/hf/qc/sync", complete_qc)
+        try:
+            page.goto(f"http://127.0.0.1:{console.port}", wait_until="domcontentloaded")
+            page.locator("button[data-tab=collect]").click()
+            page.locator("#collect-set-list").select_option("cup_set")
+            page.evaluate("""() => {
+                window.transferProgressSamples = [];
+                window.transferProgressTimer = setInterval(() => {
+                    const bar = document.getElementById('collect-dataset-sync-progress');
+                    if (bar.classList.contains('in-progress')) {
+                        transferProgressSamples.push(bar.getAttribute('aria-valuenow'));
+                    }
+                }, 20);
+            }""")
+            page.locator("#b-collect-qc-download").click()
+            page.locator("#collect-dataset-sync-progress-label").get_by_text("100%").wait_for()
+            page.evaluate("clearInterval(transferProgressTimer)")
+            bar = page.locator("#collect-dataset-sync-progress")
+            assert None in page.evaluate("transferProgressSamples")
+            assert bar.get_attribute("aria-valuenow") == "100"
+            assert "QC downloaded" in page.locator("#collect-quality-status").inner_text()
+            assert "QC downloaded" in page.locator("#collect-transfer-info").inner_text()
+            revision = "037034051265b06dbd0aa6ec6b78e6545ed560c5"
+            page.route("**/api/hf/dataset/upload", lambda route: route.fulfill(json={
+                "ok": True, "revision": revision,
+            }))
+            page.locator("#b-collect-dataset-upload").click()
+            page.wait_for_function("""revision =>
+                document.getElementById('collect-transfer-info').textContent.includes(revision)
+            """, arg=revision)
+            assert "cup_set uploaded:" in page.locator("#collect-transfer-info").inner_text()
+            page.unroute("**/api/hf/qc/sync", complete_qc)
+            page.route("**/api/hf/qc/sync", lambda route: route.fulfill(json={
+                "ok": False, "error": "upload rejected",
+            }))
+            page.locator("#b-collect-qc-upload").click()
+            page.locator("#collect-dataset-sync-progress-label").get_by_text("ERROR").wait_for()
+            assert bar.get_attribute("aria-valuenow") == "0"
+            assert "upload rejected" in page.locator("#collect-quality-status").inner_text()
+            assert "upload rejected" in page.locator("#collect-transfer-info").inner_text()
+        finally:
+            page.close()
+
+
 def test_collection_slot_click_selects_and_double_click_previews(browser, tmp_path):
     source = (
         Path(__file__).resolve().parents[2] / "src/core/app/console/static/js/collect.js"
@@ -62,12 +118,18 @@ def test_collection_slot_click_selects_and_double_click_previews(browser, tmp_pa
     renderer = source[
         source.index("function renderCollectTiles(") : source.index("function pipeBadge(")
     ]
+    helpers = source[
+        source.index("function collectQcState(") : source.index("function collectTone(")
+    ] + source[
+        source.index("let collectionReviewSeen = null;") : source.index(
+            "function clickCollectionReviewSlot("
+        )
+    ]
     page = browser.new_page()
     try:
         page.set_content('<div id="collect-queue-tiles"></div>')
         css = Path(__file__).resolve().parents[2] / "src/core/app/console/static/css/console.css"
         page.add_style_tag(path=str(css))
-        page.add_style_tag(content=":root { --danger: #ff0000; --ok: #00ff00; --accent: #ff8800; }")
         page.evaluate("""() => {
             window.S = {collectionSlots: {dataset: 'cup_set', slots: [], active: null},
                 STATUS: {collect: {collecting: false}}, collectTaskSelectionPending: false};
@@ -81,14 +143,17 @@ def test_collection_slot_click_selects_and_double_click_previews(browser, tmp_pa
             window.savedEpisodeId = (episode) => episode?.status === 'saved'
                 ? episode.episode_index : null;
         }""")
-        page.add_script_tag(content=renderer)
+        page.add_script_tag(content=helpers + renderer)
         page.evaluate("""() => {
             S.collectionSlots.slots = [
                 {slot_id:'done', dataset:'cup_set', ordinal:0, state:'complete',
                  episode:{status:'saved', episode_index:4, quality:'green'}},
                 {slot_id:'red', dataset:'cup_set', ordinal:1, state:'complete',
                  episode:{status:'saved', episode_index:5, quality:'red'}},
-                {slot_id:'busy', dataset:'cup_set', ordinal:2, state:'saving'}
+                {slot_id:'busy', dataset:'cup_set', ordinal:2, state:'saving'},
+                {slot_id:'passed', dataset:'cup_set', ordinal:3, state:'complete',
+                 episode:{status:'saved', episode_index:6, quality:'green', qc_verdict:'pass'}},
+                {slot_id:'pending', dataset:'cup_set', ordinal:4, state:'pending'}
             ];
             renderCollectTiles(S.collectionSlots.slots);
         }""")
@@ -96,11 +161,32 @@ def test_collection_slot_click_selects_and_double_click_previews(browser, tmp_pa
         assert "SLOT 2" in tiles.nth(1).get_attribute("title")
         assert "EPISODE 5 · RED" in tiles.nth(1).get_attribute("title")
         assert (
-            tiles.nth(1).evaluate("el => getComputedStyle(el).backgroundColor") == "rgb(255, 0, 0)"
+            tiles.nth(1).evaluate("el => getComputedStyle(el).backgroundColor")
+            == "rgb(217, 119, 106)"
         )
         assert (
-            tiles.nth(0).evaluate("el => getComputedStyle(el).backgroundColor") == "rgb(0, 255, 0)"
+            tiles.nth(0).evaluate("el => getComputedStyle(el).backgroundColor")
+            == "rgb(255, 246, 223)"
         )
+        dataset_page = browser.new_page()
+        try:
+            states = ["unreviewed", "failed", "passed", "pending"]
+            dataset_page.set_content('<div class="collection-slot-grid">' + "".join(
+                f'<button class="slot-tile {state}">1</button>' for state in states
+            ) + '</div>')
+            dataset_page.add_style_tag(path=str(
+                Path(__file__).resolve().parents[2] / "tools/datasets/static/editor.css"
+            ))
+            colors = """el => {
+                const css = getComputedStyle(el);
+                return [css.backgroundColor, css.borderColor, css.color];
+            }"""
+            for state in states:
+                assert page.locator(f".slot-{state}:not(.slot-saving)").evaluate(colors) == (
+                    dataset_page.locator(f".slot-tile.{state}").evaluate(colors)
+                )
+        finally:
+            dataset_page.close()
         tiles.nth(0).click()
         page.wait_for_function("selected.length === 1")
         assert page.evaluate("selected") == ["done"]
@@ -111,9 +197,9 @@ def test_collection_slot_click_selects_and_double_click_previews(browser, tmp_pa
         assert page.evaluate("previews") == [5]
         assert tiles.nth(2).is_disabled()
         assert "slot-saving" in tiles.nth(2).get_attribute("class")
+        assert tiles.nth(2).get_attribute("aria-busy") == "true"
         assert (
-            tiles.nth(2).evaluate("el => getComputedStyle(el).backgroundColor")
-            == "rgb(255, 136, 0)"
+            tiles.nth(2).evaluate("el => getComputedStyle(el).animationName") == "slot-save-pulse"
         )
         page.evaluate(
             "S.collectionSlots.active = S.collectionSlots.slots[1]; "
@@ -121,12 +207,13 @@ def test_collection_slot_click_selects_and_double_click_previews(browser, tmp_pa
         )
         assert "slot-current" in tiles.nth(1).get_attribute("class")
         assert (
-            tiles.nth(1).evaluate("el => getComputedStyle(el).backgroundColor") == "rgb(255, 0, 0)"
+            tiles.nth(1).evaluate("el => getComputedStyle(el).backgroundColor")
+            == "rgb(217, 119, 106)"
         )
         page.evaluate(
             "S.STATUS.collect.collecting = true; renderCollectTiles(S.collectionSlots.slots)"
         )
-        assert all(tiles.nth(index).is_disabled() for index in range(3))
+        assert all(tiles.nth(index).is_disabled() for index in range(5))
     finally:
         page.close()
 
@@ -194,6 +281,7 @@ def test_collection_qc_uses_clicked_episode_after_newer_save(browser):
         Path(__file__).resolve().parents[2] / "src/core/app/console/static/js/collect.js"
     ).read_text()
     fragments = [
+        source[source.index("function collectQcState(") : source.index("function collectTone(")],
         source[
             source.index("function selectCollectionQcTarget(") : source.index(
                 "function renderCollectionSlotFilters("
@@ -498,5 +586,35 @@ def test_console_tabs_change_backend_state(browser, tmp_path, monkeypatch):
                 Image.open(io.BytesIO(canvas.screenshot(path=tmp_path / "device-robot-mobile.png")))
             )
             assert np.sum(pixels[:, :, :3].mean(axis=2) < 120) > 2000
+        finally:
+            page.close()
+
+
+def test_collection_displays_four_qc_states(browser):
+    config = console_config(collection={"enabled": True})
+    config.collection.schema.columns = {"qpos": "observation.qpos", "action_qpos": "action"}
+    with serve_console(config) as console:
+        page = browser.new_page()
+        page.route("**/api/camera/**", lambda route: route.abort())
+        states = ["pending", "unreviewed", "passed", "failed"]
+        page.route("**/api/collection_slots?*", lambda route: route.fulfill(json={
+            "ok": True, "dataset": "cup_set", "dataset_dir": "", "active": None,
+            "counts": {"total": 4, "passed": 1, "unreviewed": 1, "failed": 1, "qc_pending": 1},
+            "slots": [{"slot_id": str(i), "ordinal": i, "dataset": "cup_set",
+                       "state": "pending", "qc_state": state, "round_index": 0, "round_total": 1}
+                      for i, state in enumerate(states)],
+            "scenes": [], "tasks": [], "page": 1, "page_count": 1, "filtered_total": 4,
+        }))
+        try:
+            page.goto(f"http://127.0.0.1:{console.port}", wait_until="domcontentloaded")
+            page.locator("button[data-tab=collect]").click()
+            page.wait_for_function(
+                "document.getElementById('collect-unreviewed-count').textContent === '001'"
+            )
+            for state in states:
+                assert page.locator(f".collect-tile.slot-{state}").count() == 1
+            for name in ("usable", "unreviewed", "rejected", "pending"):
+                assert page.locator(f"#collect-{name}-count").inner_text() == "001"
+            assert page.locator("#collect-requirement-count").inner_text() == "1 / 4"
         finally:
             page.close()

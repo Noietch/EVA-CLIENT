@@ -230,7 +230,7 @@ const GLOSSARY = {
   "word.video": ["视频", "video"],
 };
 
-const locale = document.documentElement.dataset.evaLanguage === "zh" ? "zh" : "en";
+const locale = "en";
 const index = new Map();
 const phrases = [];
 const templates = [];

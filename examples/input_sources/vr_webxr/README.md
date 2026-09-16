@@ -43,8 +43,9 @@ sends a short haptic feedback signal for the corresponding controller to the
 WebXR page. The actual vibration effect depends on WebXR Gamepad haptics support
 in the device browser.
 
-The existing short-press `arm_toggle` event for the right-hand B button (WebXR
-gamepad button 5) is unchanged; `client/app` still owns the global ARM state.
+The right-hand B button (WebXR gamepad button 5) emits the `arm_toggle` event
+immediately on press, once per press; `client/app` still owns the global ARM
+state.
 Pressing B does not calibrate the controllers. Grip authorization and the
 B-button ARM state are independent data streams.
 

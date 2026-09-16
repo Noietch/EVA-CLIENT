@@ -13,7 +13,7 @@ def test_review_cursor_and_qc_events():
         Path(__file__).resolve().parents[1] / "src/core/app/console/static/js/collect.js"
     ).read_text()
     outcome = source[
-        source.index("function collectOutcome(item)") : source.index("function collectTone(item)")
+        source.index("function collectQcState(item)") : source.index("function collectTone(item)")
     ]
     handlers = (
         outcome
@@ -95,7 +95,11 @@ const submitEpisodeQc = async (kind, verdict) => {
   send([{id: "4d", action: "toggle_qc"}]);
   await new Promise(setImmediate);
   assert.equal(target.qc_verdict, "pass");
+  assert.equal(collectOutcome(target), "rejected");
+  assert.equal(collectQcState(target), "failed");
+  target.qc_verdict = "unreviewed";
   assert.equal(collectOutcome(target), "usable");
+  assert.equal(collectQcState(target), "unreviewed");
   assert.equal(marks, 4);
   send([{id: "5", action: "right"}]);
   assert.equal(S.collectionSlots.selectedSlotId, "5");

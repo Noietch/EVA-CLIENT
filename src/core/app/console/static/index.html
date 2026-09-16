@@ -55,6 +55,7 @@
     <span class="timer" id="be-elapsed" style="display:none">⏱ 0.0s</span>
     <span class="gb-status" id="replay-episode-task" style="display:none">no episode selected</span>
     <span class="gb-status" id="collect-replay-status" style="display:none"></span>
+    <span class="gb-status collect-transfer-info" id="collect-transfer-info" role="status" style="display:none"></span>
     <span class="gb-status" id="manual-conn" style="display:none"></span>
     <span class="gb-msg" id="gb-msg"></span>
     <span class="gb-hint" id="gb-hint">Follow steps 1 → 4 on the left to run</span>
@@ -259,25 +260,8 @@
             </div>
           </div>
         </div>
-        <div class="panel" id="collect-panel-sync">
-          <div class="panel-h"><span class="step-badge">1</span>DATA TRANSFER <span class="n" id="collect-dataset-sync-progress-label">0%</span></div>
-          <div class="card">
-            <div class="dataset-sync-content" aria-label="Dataset synchronization">
-              <div class="dataset-sync-actions">
-                <button class="btn primary" id="b-collect-dataset-upload">UPLOAD DATA</button>
-                <button class="btn" id="b-collect-assets-download">DOWNLOAD ASSETS</button>
-                <button class="btn" id="b-collect-task-set-download">DOWNLOAD TASKS</button>
-                <button class="btn" id="b-collect-qc-download">DOWNLOAD QC</button>
-                <button class="btn" id="b-collect-qc-upload">UPLOAD QC</button>
-              </div>
-              <div class="collect-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="collect-dataset-sync-progress"><i id="collect-dataset-sync-progress-fill"></i></div>
-              <div class="kv"><span class="k">sync</span><span class="v" id="collect-dataset-sync-status">idle</span></div>
-            </div>
-          </div>
-        </div>
-
         <div class="panel" id="collect-panel-record">
-          <div class="panel-h"><span class="step-badge">2</span>RECORD</div>
+          <div class="panel-h"><span class="step-badge">1</span>RECORD</div>
           <div class="card">
             <div class="collect-actions">
               <div class="collect-motion-row">
@@ -298,7 +282,7 @@
         </div>
 
         <div class="panel" id="collect-panel-queue">
-          <div class="panel-h"><span class="step-badge">3</span>COLLECTION SLOTS <span class="n" id="collect-progress-label">0%</span></div>
+          <div class="panel-h"><span class="step-badge">2</span>COLLECTION SLOTS <span class="n" id="collect-progress-label">0%</span></div>
           <div class="card">
             <div class="collect-queue-head">
               <span><span id="collect-count">0/0</span> complete</span>
@@ -309,12 +293,13 @@
               <label><small>TASK</small><select class="choice-select" id="collect-slot-task-filter" aria-label="Filter collection slots by task"><option value="">ALL TASKS</option></select></label>
             </div>
             <div class="collect-episode-summary" aria-label="Collection episode counts">
-              <span class="usable"><b id="collect-usable-count">000</b><small>COMPLETE</small></span>
-              <span class="rejected"><b id="collect-rejected-count">000</b><small>REPAIR</small></span>
-              <span class="pending"><b id="collect-pending-count">000</b><small>PENDING</small></span>
+              <span class="unreviewed"><b id="collect-unreviewed-count">000</b><small>UNREVIEWED</small></span>
+              <span class="usable"><b id="collect-usable-count">000</b><small>PASSED</small></span>
+              <span class="rejected"><b id="collect-rejected-count">000</b><small>FAILED</small></span>
+              <span class="pending"><b id="collect-pending-count">000</b><small>TO COLLECT</small></span>
             </div>
             <div class="collect-requirement" id="collect-requirement">
-              <span><small>FIXED PLAN · GREEN ONLY</small><b id="collect-requirement-count">0 / --</b></span>
+              <span><small>FIXED PLAN · QC PASSED</small><b id="collect-requirement-count">0 / --</b></span>
               <strong id="collect-requirement-status">PENDING</strong>
             </div>
             <div class="collect-progress"><i id="collect-progress-fill"></i></div>
@@ -330,16 +315,48 @@
         </div>
 
         <div class="panel" id="collect-panel-replay">
-          <div class="panel-h"><span class="step-badge">4</span>QUALITY CHECK</div>
+          <div class="panel-h"><span class="step-badge">3</span>QUALITY CHECK</div>
           <div class="card">
             <div class="kv"><span class="k">SELECTED</span><span class="v" id="collect-qc-target">--</span></div>
             <div class="review-actions">
               <button class="btn" id="b-collect-qc-pass">PASS ✓</button>
               <button class="btn danger" id="b-goto-qc">FAIL ✗</button>
+              <button class="btn full" id="b-collect-qc-unreviewed">UNREVIEWED</button>
             </div>
             <textarea class="review-note" id="collect-qc-note" rows="3" placeholder="QC note (optional)" style="margin-top:8px"></textarea>
             <button class="btn full" id="b-collect-note-save" style="margin-top:6px">SAVE NOTE</button>
             <div class="qc-status" id="collect-qc-status"></div>
+          </div>
+        </div>
+
+        <div class="panel" id="collect-panel-sync">
+          <div class="panel-h"><span class="step-badge">4</span>DATA PROCESS <span class="n" id="collect-dataset-sync-progress-label">0%</span></div>
+          <div class="card">
+            <div class="dataset-sync-content" aria-label="Dataset synchronization">
+              <div class="dataset-sync-actions">
+                <button class="btn primary" id="b-collect-dataset-upload">UPLOAD DATA</button>
+                <button class="btn" id="b-collect-assets-download">DOWNLOAD ASSETS</button>
+                <button class="btn" id="b-collect-task-set-download">DOWNLOAD TASKS</button>
+                <button class="btn" id="b-collect-qc-download">DOWNLOAD QC</button>
+                <button class="btn" id="b-collect-qc-upload">UPLOAD QC</button>
+              </div>
+            </div>
+
+            <div class="collect-format-process">
+              <label for="collect-export-format">FORMAT</label>
+              <select class="choice-select has-value" id="collect-export-format" aria-label="Dataset export format">
+                <option value="lerobot_v21">LeRobot v2.1</option>
+                <option value="lerobot_v3">LeRobot v3</option>
+                <option value="hdf5">HDF5</option>
+                <option value="mcap">MCAP</option>
+              </select>
+              <div class="dataset-sync-actions">
+                <button class="btn" id="b-collect-quality-export">CONVERT DATASET</button>
+              </div>
+              <div class="collect-progress" role="progressbar" aria-label="Dataset conversion progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="collect-dataset-sync-progress"><i id="collect-dataset-sync-progress-fill"></i></div>
+              <div class="kv"><span class="k">progress</span><span class="v" id="collect-quality-progress-detail">0/0 episodes</span></div>
+              <div class="qc-status" id="collect-quality-status" role="status" aria-live="polite"></div>
+            </div>
           </div>
         </div>
 

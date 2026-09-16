@@ -62,5 +62,13 @@ def test_qc_survives_renamed_task_and_preserves_dataset_boundary(tmp_path):
             response = console.post("/api/collect_qc_mark", {**body, "verdict": "pass"})
             assert response.status == 200
             assert json.loads(meta.read_text())["qc_verdict"] == "pass"
+            response = console.post("/api/collect_qc_mark", {**body, "verdict": "unreviewed"})
+            assert response.status == 200
+            assert json.loads(meta.read_text())["qc_verdict"] == "unreviewed"
+            response = console.post(
+                "/api/collect_qc_mark", {**body, "verdict": "", "note": "keep review pending"}
+            )
+            assert response.status == 200
+            assert json.loads(meta.read_text())["qc_verdict"] == "unreviewed"
         finally:
             logger.finalize()

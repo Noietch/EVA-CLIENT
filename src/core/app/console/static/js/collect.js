@@ -255,6 +255,7 @@ async function selectCollectionDataset(dataset) {
   if (!value || (S.STATUS.collect && S.STATUS.collect.collecting)) return false;
   if (!selectCollectSet(value)) return false;
   const state = S.collectionSlots;
+  if (state.dataset !== value) setCollectTransferInfo("");
   state.dataset = value;
   state.loaded = false;
   state.active = null;
@@ -443,7 +444,7 @@ function renderCurrentSceneGrid(scene) {
   });
   host.querySelectorAll(".collect-scene-cell").forEach((cell) => {
     const placements = byPosition.get(cell.dataset.positionId) || [];
-    const names = [...new Set(placements.map((placement) => String(placement.name || "")))]
+    const names = [...new Set(placements.map((placement) => String(placement.name_en || (/[^\x00-\x7F]/.test(placement.name || "") ? placement.object_id : placement.name) || "")))]
       .filter(Boolean);
     cell.classList.toggle("empty", placements.length === 0);
     cell.classList.toggle("fixed", placements.length > 0);
@@ -1087,13 +1088,22 @@ function collectEnabled() {
     return !!(collectConfigured() && S.STATUS.collect);
   }
 
+function collectQcState(item) {
+    if (savedEpisodeId(item) == null) return "pending";
+    const verdict = String(item.qc_verdict || "").toLowerCase();
+    if (verdict === "unreviewed") return "unreviewed";
+    if (verdict === "fail" || String(item.quality || "").toLowerCase() === "red") return "failed";
+    return verdict === "pass" ? "passed" : "unreviewed";
+  }
+
+function collectQcLabel(state) {
+    return {pending: "TO COLLECT", unreviewed: "UNREVIEWED", passed: "PASSED", failed: "FAILED"}[state];
+  }
+
 function collectOutcome(item) {
-    if (item.status === "failed") return "rejected";
-    if (item.qc_verdict === "pass") return "usable";
-    if (item.qc_verdict === "fail") return "rejected";
-    if (item.quality === "red") return "rejected";
-    if (savedEpisodeId(item) != null && item.quality === "green") return "usable";
-    return "pending";
+    if (item && item.status === "failed") return "rejected";
+    const state = collectQcState(item);
+    return state === "failed" ? "rejected" : state === "pending" ? "pending" : "usable";
   }
 
 function collectResultLabel(item) {
@@ -1183,7 +1193,15 @@ function selectCollectionQcTarget(item) {
       dataset_dir: reviewDatasetFor("collect"),
       task: String(item.task || item.prompt || collectTaskValue()),
     };
-    if ($("collect-qc-note")) $("collect-qc-note").value = item ? item.qc_note || "" : "";
+    if ($("collect-qc-note")) {
+      const note = item && item.qc_note || "";
+      const issues = item && collectQcState(item) === "failed"
+        ? (item.quality_issues || []).map((issue) => {
+          const detail = issue.detail || issue.message || issue.code || "";
+          return `${detail}${Number(issue.count || 1) > 1 ? ` ×${issue.count}` : ""}`;
+        }).filter(Boolean).join("\n") : "";
+      $("collect-qc-note").value = note || issues || (item && item.error) || "";
+    }
     if ($("collect-qc-status")) $("collect-qc-status").textContent = "";
   }
 
@@ -1246,7 +1264,7 @@ function clickCollectionReviewSlot(slot) {
           renderCollect();
         }
       }).catch((error) => {
-        setCollectError(`选择采集位置失败：${error.message || error}`);
+        setCollectError(`Failed to select capture slot: ${error.message || error}`);
       }).finally(() => { collectionReviewBusy = false; });
     }, 300),
   };
@@ -1283,11 +1301,11 @@ function handleCollectionReviewInput(feedback) {
       const state = S.collectionSlots;
       const slot = (state.slots || []).find((item) => item.slot_id === state.selectedSlotId);
       if (!slot) {
-        setCollectError("请先用左摇杆选择采集位置");
+        setCollectError("Select a capture slot with the left stick first");
         continue;
       }
       if (S.STATUS.collect?.collecting || slot.state === "saving") {
-        setCollectError("请等待当前采集或保存完成后再选择采集位置");
+        setCollectError("Wait for recording or saving to finish before selecting a slot");
         continue;
       }
       clickCollectionReviewSlot(slot);
@@ -1296,14 +1314,15 @@ function handleCollectionReviewInput(feedback) {
     if (event.action === "toggle_qc" || event.action === "mark_red") {
       const selected = selectedCollectEpisodeItem();
       if (!selected) {
-        if ($("collect-qc-status")) $("collect-qc-status").textContent = "先选择已保存的数据";
+        if ($("collect-qc-status")) $("collect-qc-status").textContent = "Select a saved episode first";
         continue;
       }
       collectionReviewBusy = true;
-      const verdict = collectOutcome(selected) === "rejected" ? "pass" : "fail";
+      const verdict = String(selected.qc_verdict || "").toLowerCase() !== "pass" &&
+        collectQcState(selected) === "failed" ? "pass" : "fail";
       submitEpisodeQc("collect", verdict)
         .catch((error) => {
-          if ($("collect-qc-status")) $("collect-qc-status").textContent = `状态切换失败：${error.message || error}`;
+          if ($("collect-qc-status")) $("collect-qc-status").textContent = `Failed to change status: ${error.message || error}`;
         })
         .finally(() => { collectionReviewBusy = false; });
       continue;
@@ -1357,7 +1376,7 @@ function moveCollectionReviewCursor(direction) {
           .find((tile) => tile.dataset.slotId === state.selectedSlotId)
           ?.scrollIntoView({ block: "nearest", inline: "nearest" });
       }).catch((error) => {
-        setCollectError(`翻页失败：${error.message || error}`);
+        setCollectError(`Failed to change page: ${error.message || error}`);
       }).finally(() => { collectionReviewBusy = false; });
       return;
     }
@@ -1423,26 +1442,25 @@ function renderCollectTiles(items) {
       const tile = document.createElement("button");
       tile.type = "button";
       tile.dataset.slotId = slot.slot_id;
-      tile.title = `${slot.scene_label} · ${slot.task_zh || slot.task} · ` +
+      tile.title = `${slot.scene_id} · ${slot.task} · ` +
         `round ${Number(slot.round_index) + 1}/${slot.round_total}`;
       const episode = savedEpisodeId(slot.episode);
       tile.title = `SLOT ${Number(slot.ordinal) + 1} · ${tile.title}`;
       if (episode != null) {
         tile.title += ` · EPISODE ${episode} · ${collectResultLabel(slot.episode)}`;
       }
-      if (slot.state === "saving") tile.title += " · CONVERTING";
+      const saving = slot.state === "saving";
       tile.textContent = String(Number(slot.ordinal) + 1);
       tile.setAttribute("aria-label", tile.title);
       const saved = savedEpisodeId(slot.episode) != null;
       const current = S.collectionSlots.active &&
         S.collectionSlots.active.slot_id === slot.slot_id;
-      const outcome = saved ? collectOutcome(slot.episode) : "pending";
-      const rejected = outcome === "rejected";
-      const visibleState = slot.state === "saving" ? "saving"
-        : rejected ? "rejected"
-        : outcome === "usable" ? "complete"
-        : current ? "active" : (slot.state === "active" ? "pending" : slot.state);
+      const visibleState = slot.qc_state || collectQcState(slot.episode);
+      tile.title += saving ? " · SAVING" : ` · ${collectQcLabel(visibleState)}`;
+      tile.setAttribute("aria-label", tile.title);
+      tile.setAttribute("aria-busy", String(saving));
       tile.className = `collect-tile slot-${visibleState}` +
+        `${saving ? " slot-saving" : ""}` +
         `${current ? " slot-current" : ""}`;
       if (slot.slot_id === S.collectionSlots.selectedSlotId) tile.classList.add("selected");
       const locked = slot.state === "saving" || S.collectTaskSelectionPending ||
@@ -1596,13 +1614,13 @@ function renderCollectionTransfer(enabled, usableCount, rejectedCount) {
   const upload = (S.CFG && S.CFG.collection && S.CFG.collection.upload) || {};
   if (exportButton) {
     exportButton.disabled = !enabled || usableCount + rejectedCount === 0 ||
-      qualityTransfer.exporting || qualityTransfer.uploading;
+      qualityTransfer.exporting || qualityTransfer.uploading || datasetSyncBusy;
   }
   if (uploadButton) {
     const uploadPlanReady = qualityTransfer.uploadState === "ready" &&
       !!qualityTransfer.uploadPlanId;
     uploadButton.disabled = !upload.configured || !selectedExportReady ||
-      qualityTransfer.exporting || qualityTransfer.uploading;
+      qualityTransfer.exporting || qualityTransfer.uploading || datasetSyncBusy;
     const backendLabel = (upload.backends || []).map((value) => String(value).toUpperCase());
     const targetLabel = backendLabel.length ? backendLabel.join(" + ") : "TARGET";
     const operationCount = qualityTransfer.filesTotal + qualityTransfer.filesToDelete;
@@ -1611,11 +1629,15 @@ function renderCollectionTransfer(enabled, usableCount, rejectedCount) {
       : `SCAN ${targetLabel}`;
   }
   if (exportFormat) {
-    exportFormat.disabled = qualityTransfer.exporting || qualityTransfer.uploading;
+    exportFormat.disabled = qualityTransfer.exporting || qualityTransfer.uploading || datasetSyncBusy;
   }
-  const transferProgressBar = $("collect-quality-progress-bar");
-  const transferProgressFill = $("collect-quality-progress-fill");
-  const transferProgressLabel = $("collect-quality-progress-label");
+  datasetSyncButtons.forEach((id) => {
+    $(id).disabled = datasetSyncBusy || qualityTransfer.exporting || qualityTransfer.uploading;
+  });
+  if (processProgressOwner === "sync") return;
+  const transferProgressBar = $("collect-dataset-sync-progress");
+  const transferProgressFill = $("collect-dataset-sync-progress-fill");
+  const transferProgressLabel = $("collect-dataset-sync-progress-label");
   const transferProgressDetail = $("collect-quality-progress-detail");
   const showingExport = qualityTransfer.phase !== "upload";
   const formatLabel = qualityTransferFormatLabel(
@@ -1632,6 +1654,8 @@ function renderCollectionTransfer(enabled, usableCount, rejectedCount) {
             : (qualityTransfer.uploadState === "completed" ? 1 : 0)));
   const transferPercent = Math.round(Math.max(0, Math.min(1, transferFraction)) * 100);
   if (transferProgressBar) {
+    transferProgressBar.classList.remove("in-progress");
+    transferProgressBar.removeAttribute("aria-valuetext");
     transferProgressBar.setAttribute("aria-valuenow", String(transferPercent));
     transferProgressBar.setAttribute(
       "aria-label", `${formatLabel} ${showingExport ? "export" : "upload"} progress`
@@ -1652,68 +1676,111 @@ function renderCollectionTransfer(enabled, usableCount, rejectedCount) {
   }
 }
 
+const datasetSyncButtons = [
+  "b-collect-dataset-upload", "b-collect-assets-download",
+  "b-collect-task-set-download", "b-collect-qc-download", "b-collect-qc-upload",
+];
+let datasetSyncBusy = false;
+let processProgressOwner = "convert";
+
+function setCollectTransferInfo(message, tone = "") {
+  const info = $("collect-transfer-info");
+  info.textContent = message;
+  info.title = message;
+  info.classList.toggle("ok", tone === "ok");
+  info.classList.toggle("err", tone === "err");
+  info.style.display = S.ACTIVE_TAB === "collect" && message ? "" : "none";
+}
+
+function setDatasetSyncProgress(state, label) {
+  const bar = $("collect-dataset-sync-progress");
+  const fill = $("collect-dataset-sync-progress-fill");
+  const text = $("collect-dataset-sync-progress-label");
+  $("collect-quality-progress-detail").textContent = label;
+  bar.classList.toggle("in-progress", state === "running");
+  if (state === "running") {
+    bar.removeAttribute("aria-valuenow");
+    bar.setAttribute("aria-valuetext", `${label} in progress`);
+    fill.style.width = "35%";
+    text.textContent = `${label}…`;
+  } else {
+    const percent = state === "done" ? 100 : 0;
+    bar.setAttribute("aria-valuenow", String(percent));
+    bar.setAttribute("aria-valuetext", state === "done" ? `${label} complete` : `${label} failed`);
+    fill.style.width = `${percent}%`;
+    text.textContent = state === "done" ? "100%" : "ERROR";
+  }
+}
+
+async function runDatasetSync(label, request, onSuccess) {
+  if (datasetSyncBusy || qualityTransfer.exporting || qualityTransfer.uploading) return;
+  processProgressOwner = "sync";
+  datasetSyncBusy = true;
+  renderCollect();
+  datasetSyncButtons.forEach((id) => { $(id).disabled = true; });
+  const status = $("collect-quality-status");
+  status.textContent = `${label}…`;
+  setCollectTransferInfo(`${label}…`);
+  setDatasetSyncProgress("running", label);
+  let succeeded = false;
+  try {
+    const result = await request();
+    if (!result.ok) throw new Error(result.error || `${label} failed`);
+    await onSuccess(result, status);
+    setCollectTransferInfo(status.textContent, "ok");
+    succeeded = true;
+  } catch (error) {
+    status.textContent = error.message || String(error);
+    setCollectTransferInfo(`${label}: ${status.textContent}`, "err");
+  } finally {
+    setDatasetSyncProgress(succeeded ? "done" : "failed", label);
+    datasetSyncButtons.forEach((id) => { $(id).disabled = false; });
+    datasetSyncBusy = false;
+    renderCollect();
+  }
+}
+
 async function downloadCollectionTaskSetFromHf() {
   const taskSet = collectSetValue();
-  const button = $("b-collect-task-set-download");
-  const status = $("collect-dataset-sync-status");
-  if (!taskSet) { status.textContent = "请选择任务集 / Select a task set"; return; }
-  button.disabled = true;
-  status.textContent = `正在下载任务 / Downloading tasks: ${taskSet}`;
-  try {
-    const result = await apiPost("/api/hf/task_set/sync", {task_set: taskSet}, {timeoutMs: 0, concurrent: true});
-    if (!result.ok) throw new Error(result.error || "Task download failed");
-    status.textContent = `tasks downloaded: ${result.task_set || taskSet}`;
-    await pollCollectionSlots(true);
-  } catch (error) {
-    status.textContent = error.message;
-  } finally {
-    button.disabled = false;
-  }
+  const status = $("collect-quality-status");
+  if (!taskSet) { status.textContent = "Select a task set"; return; }
+  await runDatasetSync("DOWNLOAD TASKS",
+    () => apiPost("/api/hf/task_set/sync", {task_set: taskSet}, {timeoutMs: 0, concurrent: true}),
+    async (result, output) => {
+      output.textContent = `tasks downloaded: ${result.task_set || taskSet}`;
+      await pollCollectionSlots(true);
+    });
 }
 
 async function downloadCollectionAssetsFromHf() {
   const dataset = collectSetValue();
-  const button = $("b-collect-assets-download");
-  const status = $("collect-dataset-sync-status");
-  if (!dataset) { status.textContent = "请选择任务集 / Select a set"; return; }
-  button.disabled = true;
-  status.textContent = `正在下载资产 / Downloading assets: ${dataset}`;
-  try {
-    const result = await apiPost("/api/hf/assets/download", {dataset}, {timeoutMs: 0, concurrent: true});
-    if (!result.ok) throw new Error(result.error || "Asset download failed");
-    status.textContent = `assets downloaded for ${dataset}: ${result.files || 0} files`;
-  } catch (error) {
-    status.textContent = error.message;
-  } finally {
-    button.disabled = false;
-  }
+  const status = $("collect-quality-status");
+  if (!dataset) { status.textContent = "Select a set"; return; }
+  await runDatasetSync("DOWNLOAD ASSETS",
+    () => apiPost("/api/hf/assets/download", {dataset}, {timeoutMs: 0, concurrent: true}),
+    async (result, output) => {
+      output.textContent = `assets downloaded for ${dataset}: ${result.files || 0} files`;
+    });
 }
 
 async function uploadCollectionDatasetToHf() {
   const dataset = collectSetValue();
-  const button = $("b-collect-dataset-upload");
-  const status = $("collect-dataset-sync-status");
-  if (!dataset) { status.textContent = "请选择数据集 / Select a dataset"; return; }
-  button.disabled = true;
-  status.textContent = `正在上传 / Uploading: ${dataset}`;
-  try {
-    const result = await apiPost("/api/hf/dataset/upload", {dataset}, {timeoutMs: 0, concurrent: true});
-    if (!result.ok) throw new Error(result.error || "Upload failed");
-    if (status) status.textContent = `${dataset} uploaded: ${result.revision || "done"}`;
-  } catch (error) {
-    status.textContent = error.message;
-  } finally {
-    button.disabled = false;
-  }
+  const status = $("collect-quality-status");
+  if (!dataset) { status.textContent = "Select a dataset"; return; }
+  await runDatasetSync("UPLOAD DATA",
+    () => apiPost("/api/hf/dataset/upload", {dataset}, {timeoutMs: 0, concurrent: true}),
+    async (result, output) => {
+      output.textContent = `${dataset} uploaded: ${result.revision || "done"}`;
+    });
 }
 
 async function downloadCollectionDatasetFromHf() {
   const dataset = collectSetValue();
   const button = $("b-collect-dataset-download");
-  const status = $("collect-dataset-sync-status");
-  if (!dataset) { status.textContent = "请选择数据集 / Select a dataset"; return; }
+  const status = $("collect-quality-status");
+  if (!dataset) { status.textContent = "Select a dataset"; return; }
   button.disabled = true;
-  status.textContent = "正在下载 / Downloading";
+  status.textContent = "Downloading";
   try {
     const result = await apiPost("/api/hf/dataset/download", {dataset}, {timeoutMs: 0, concurrent: true});
     if (!result.ok) throw new Error(result.error || "Download failed");
@@ -1727,30 +1794,25 @@ async function downloadCollectionDatasetFromHf() {
 
 async function syncCollectionQc(direction) {
   const dataset = collectSetValue();
-  const button = $(direction === "upload" ? "b-collect-qc-upload" : "b-collect-qc-download");
-  const status = $("collect-dataset-sync-status");
-  if (!dataset) { status.textContent = "请选择数据集 / Select a dataset"; return; }
-  button.disabled = true;
-  status.textContent = `${direction === "upload" ? "正在上传 / Uploading" : "正在下载 / Downloading"} QC: ${dataset}`;
-  try {
-    const result = await apiPost("/api/hf/qc/sync", {direction, dataset}, {timeoutMs: 0, concurrent: true});
-    if (!result.ok) throw new Error(result.error || `QC ${direction} failed`);
-    status.textContent = direction === "upload"
+  const status = $("collect-quality-status");
+  if (!dataset) { status.textContent = "Select a dataset"; return; }
+  await runDatasetSync(direction === "upload" ? "UPLOAD QC" : "DOWNLOAD QC",
+    () => apiPost("/api/hf/qc/sync", {direction, dataset}, {timeoutMs: 0, concurrent: true}),
+    async (result, output) => {
+      output.textContent = direction === "upload"
       ? `${dataset} QC uploaded: ${result.path || dataset}`
       : result.source === "none"
-      ? `${dataset}: QC is not published; capture GREEN/RED is shown`
+      ? `${dataset}: QC is not published; saved captures remain unreviewed unless capture quality failed`
       : result.source === "episodes.jsonl"
       ? `${dataset} quality metadata downloaded: ${result.episodes || 0} episodes (no remote QC verdicts)`
       : `${dataset} QC downloaded: ${result.path || dataset}`;
-    if (direction === "download") {
-      invalidateEpisodeHistory("collect");
-      await pollEpisodeHistory(true);
-    }
-  } catch (error) {
-    status.textContent = error.message;
-  } finally {
-    button.disabled = false;
-  }
+      if (direction === "download") {
+        invalidateEpisodeHistory("collect");
+        await pollEpisodeHistory(true);
+        await pollCollectionSlots(true);
+        renderCollect();
+      }
+    });
 }
 
 function renderCollectionReplayStatus(selectedEpisodeSaved) {
@@ -1794,9 +1856,10 @@ function renderCollect() {
     const queue = history.queue;
     const counts = slotPlan.counts || {};
     const totalSlots = Number(counts.total) || 0;
-    const usableCount = Number(counts.complete) || 0;
-    const rejectedCount = (Number(counts.rejected) || 0) + (Number(counts.deferred) || 0);
-    const pendingCount = Math.max(0, totalSlots - usableCount - rejectedCount);
+    const usableCount = Number(counts.passed) || 0;
+    const unreviewedCount = Number(counts.unreviewed) || 0;
+    const rejectedCount = Number(counts.failed) || 0;
+    const pendingCount = Math.max(0, totalSlots - usableCount - unreviewedCount - rejectedCount);
     const progress = totalSlots > 0 ? usableCount / totalSlots : 0;
     const requirementComplete = totalSlots > 0 && usableCount >= totalSlots;
 
@@ -1805,6 +1868,7 @@ function renderCollect() {
     $("collect-fps").textContent = collectFps ? `${collectFps} FPS` : "";
     $("collect-count").textContent = `${usableCount}/${totalSlots}`;
     $("collect-usable-count").textContent = threeDigitCount(usableCount);
+    $("collect-unreviewed-count").textContent = threeDigitCount(unreviewedCount);
     $("collect-rejected-count").textContent = threeDigitCount(rejectedCount);
     $("collect-pending-count").textContent = threeDigitCount(pendingCount);
     $("collect-requirement-count").textContent = `${usableCount} / ${totalSlots || "--"}`;
@@ -1867,9 +1931,10 @@ function renderCollect() {
     $("collect-qc-target").textContent = selectedEpisodeSaved
       ? `EPISODE ${selectedEpisode.episode_index} · ${collectResultLabel(selectedEpisode)}` : "--";
     $("b-collect-qc-pass").disabled = !enabled || !selectedEpisodeSaved || qcPending;
+    $("b-collect-qc-unreviewed").disabled = !enabled || !selectedEpisodeSaved || qcPending;
     $("b-goto-qc").disabled = !enabled || !selectedEpisodeSaved || qcPending;
     $("b-collect-note-save").disabled = !selectedEpisodeSaved || qcPending;
-    renderCollectionTransfer(enabled, usableCount, rejectedCount);
+    renderCollectionTransfer(enabled, usableCount + unreviewedCount, rejectedCount);
 
     const recordState = collecting || (hasPrompt && !S.collectArmEnabled)
       ? "active"
@@ -1903,7 +1968,8 @@ function renderCollect() {
   }
 
 async function exportCollectionQuality() {
-    if (qualityTransfer.exporting || qualityTransfer.uploading) return;
+    if (qualityTransfer.exporting || qualityTransfer.uploading || datasetSyncBusy) return;
+    processProgressOwner = "convert";
     const status = $("collect-quality-status");
     const datasetFormat = $("collect-export-format").value;
     const formatLabel = qualityTransferFormatLabel(datasetFormat);
@@ -1966,7 +2032,8 @@ async function exportCollectionQuality() {
   }
 
 async function uploadCollectionQuality() {
-    if (qualityTransfer.exporting || qualityTransfer.uploading) return;
+    if (qualityTransfer.exporting || qualityTransfer.uploading || datasetSyncBusy) return;
+    processProgressOwner = "convert";
     const status = $("collect-quality-status");
     const selectedFormat = $("collect-export-format").value;
     const datasetFormat = qualityTransfer.datasetFormat;

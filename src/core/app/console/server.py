@@ -80,11 +80,18 @@ from core.utils.dataset_upload import (
 )
 from core.utils.lerobot import LeRobotDatasetIO
 from core.utils.upload_plan import UploadProgress
-from tools.datasets.hf_task_sets import fetch_assets, fetch_dataset, fetch_qc, fetch_task_set, publish_dataset, publish_qc
 from tools.conversion import (
     DATASET_EXPORT_FORMATS,
     DatasetExportProgress,
     export_dataset_by_quality,
+)
+from tools.datasets.hf_task_sets import (
+    fetch_assets,
+    fetch_dataset,
+    fetch_qc,
+    fetch_task_set,
+    publish_dataset,
+    publish_qc,
 )
 from transport.base import ObservationSource
 from transport.dataset import DatasetTransport
@@ -3419,7 +3426,9 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             self._send_json(409, {"ok": False, "error": "unknown collection set"})
             return
         destination = _scene_plan_root(config, task_set).parent
-        result = fetch_task_set(Path(__file__).resolve().parents[4], task_set, destination, config.collection.storage)
+        result = fetch_task_set(
+            Path(__file__).resolve().parents[4], task_set, destination, config.collection.storage,
+        )
         self._send_json(200, {"ok": True, **result})
 
     def _post_hf_assets_download(self, body: dict) -> None:
@@ -3455,13 +3464,19 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         dataset_dir = self._active_collection_dataset(body)
         if dataset_dir is None:
             return
-        result = fetch_dataset(Path(__file__).resolve().parents[4], dataset_dir.name, dataset_dir.parent, config.collection.storage)
+        result = fetch_dataset(
+            Path(__file__).resolve().parents[4], dataset_dir.name, dataset_dir.parent,
+            config.collection.storage,
+        )
         self._send_json(200, {"ok": True, **result})
 
     def _post_hf_qc_sync(self, body: dict) -> None:
         config = self.ctx.runtime.active_config or self.ctx.config
         dataset_name = str(body.get("dataset", "")).strip()
-        if not dataset_name or dataset_name not in config.collection.tasks or Path(dataset_name).name != dataset_name:
+        if (
+            not dataset_name or dataset_name not in config.collection.tasks
+            or Path(dataset_name).name != dataset_name
+        ):
             self._send_json(409, {"ok": False, "error": "unknown collection dataset"})
             return
         try:
@@ -3907,7 +3922,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             )
             return
         verdict = str(body.get("verdict", ""))
-        if verdict not in {"", "pass", "fail"}:
+        if verdict not in {"", "pass", "fail", "unreviewed"}:
             self._send_json(
                 400,
                 {"ok": False, "error": f"unsupported QC verdict: {verdict}"},
@@ -4160,7 +4175,9 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         local_dir = local_dir.resolve()
         marker_path = local_dir / "meta" / "quality_split.json"
         if dataset_format == "lerobot":
-            marker = {"subset": "accepted", "dataset_format": "lerobot", "source_dir": str(dataset_dir)}
+            marker = {
+                "subset": "accepted", "dataset_format": "lerobot", "source_dir": str(dataset_dir),
+            }
         else:
             try:
                 marker = json.loads(marker_path.read_text())
