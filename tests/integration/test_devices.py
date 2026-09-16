@@ -176,15 +176,20 @@ def test_robot_hardware_defaults_and_saved_overrides_preserve_business_config(tm
         workspace.resolve(dict(robot="agibot_g2", teleop="yam_leader", camera="none"))
 
 
-def test_native_pico_and_webxr_use_the_same_robot_frame(tmp_path):
+def test_every_webxr_robot_exposes_native_pico_control(tmp_path):
     workspace = DeviceWorkspace(tmp_path / "workstation.yaml")
-    selected = dict(robot="dual_yam", teleop="eva_pico", camera="none")
-    native = workspace.resolve(selected)["teleop"]["client"]
-    selected["teleop"] = "vr_webxr"
-    browser = workspace.resolve(selected)["teleop"]["client"]
-    np.testing.assert_array_equal(
-        native["base_from_xr_rotation"], browser["base_from_xr_rotation"]
-    )
+    for robot, options in sorted(workspace.hardware.devices.items()):
+        teleop = options["teleop"]
+        if "vr_webxr" not in teleop:
+            continue
+        assert "eva_pico" in teleop, robot
+        selected = dict(robot=robot, teleop="eva_pico", camera="none")
+        native = workspace.resolve(selected)["teleop"]["client"]
+        selected["teleop"] = "vr_webxr"
+        browser = workspace.resolve(selected)["teleop"]["client"]
+        np.testing.assert_array_equal(
+            native["base_from_xr_rotation"], browser["base_from_xr_rotation"]
+        )
 
 
 def test_disabled_cameras_use_camera_ids_independently_of_dataset_column_names(tmp_path):
