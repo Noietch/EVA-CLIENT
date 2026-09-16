@@ -109,7 +109,7 @@ adb devices -l
 4. 安装 APK：
 
 ```bash
-adb install -r EVA-VR-v0.2.1.apk
+adb install -r EVA-VR-v0.2.3.apk
 ```
 
 5. 启动 EVA-VR：
@@ -126,6 +126,8 @@ adb shell am start -n org.eva.pico.input/.MainActivity
 - 左右手柄 trigger、squeeze、摇杆、A/B/X/Y、menu 的按键/触摸状态；
 - `HOST: CONNECTED` 或 `HOST: DISCONNECTED`；
 - EVA 图标和原生 OpenXR 手柄震动。
+
+面板上的 **Exit** 按钮可以退出；也可以同时按住左右摇杆键约 2 秒退出。
 
 ### 通过 ADB reverse 连接 EVA
 
