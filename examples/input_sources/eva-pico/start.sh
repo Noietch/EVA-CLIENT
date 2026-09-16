@@ -113,22 +113,37 @@ ADB_SERVER_PORT="${ADB_PORTS[$SELECTED_INDEX]}"
 ADB_ARGS=(-P "$ADB_SERVER_PORT")
 adb_cmd() { "$ADB" "${ADB_ARGS[@]}" "$@"; }
 
-if [[ -z "$SERIAL" ]]; then
-  SERIAL="$(adb_cmd devices | awk '$2 == "device" {print $1; exit}')"
+SERIALS=()
+if [[ -n "$SERIAL" ]]; then
+  if adb_has_device_for "$ADB" "$ADB_SERVER_PORT" "$SERIAL"; then
+    SERIALS=("$SERIAL")
+  fi
+else
+  while read -r candidate state _; do
+    [[ "$state" == "device" ]] || continue
+    SERIALS+=("$candidate")
+  done < <(adb_cmd devices | tail -n +2)
 fi
-if [[ -z "$SERIAL" ]]; then
+if [[ "${#SERIALS[@]}" -eq 0 ]]; then
   echo "No authorized PICO device found. Check adb devices -l." >&2
   exit 1
 fi
 
 URL="ws://127.0.0.1:${PORT}/ws?token=${TOKEN}"
-adb_cmd -s "$SERIAL" reverse "tcp:${PORT}" "tcp:${PORT}" >/dev/null
+for SERIAL in "${SERIALS[@]}"; do
+  if ! adb_cmd -s "$SERIAL" reverse --list | awk -v port="tcp:${PORT}" \
+      '$2 == port && $3 == port {found=1} END {exit !found}'; then
+    adb_cmd -s "$SERIAL" reverse "tcp:${PORT}" "tcp:${PORT}" >/dev/null
+  fi
+done
 if (( PREPARE_ONLY )); then
-  echo "EVA-VR ADB reverse ready on ${SERIAL}: ${URL}"
+  echo "EVA-VR ADB reverse ready on ${#SERIALS[@]} PICO device(s): ${URL}"
   exit 0
 fi
-adb_cmd -s "$SERIAL" shell am force-stop "$PACKAGE"
-adb_cmd -s "$SERIAL" shell am start -S -n "${PACKAGE}/.MainActivity" \
-  --es server_url "$URL" >/dev/null
+for SERIAL in "${SERIALS[@]}"; do
+  adb_cmd -s "$SERIAL" shell am force-stop "$PACKAGE"
+  adb_cmd -s "$SERIAL" shell am start -S -n "${PACKAGE}/.MainActivity" \
+    --es server_url "$URL" >/dev/null
+done
 
-echo "EVA-VR started on ${SERIAL}: ${URL}"
+echo "EVA-VR started on ${#SERIALS[@]} PICO device(s): ${URL}"

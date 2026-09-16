@@ -49,9 +49,11 @@ port `43876` when the node listens on `0.0.0.0`.
 
 The device service uses `eva_pico` as the native teleop option. Select
 `EVA-VR (PICO)` in the Devices page and press the Operation `Start` button. This
-starts the host WebSocket node and best-effort local USB ADB reverse forwarding.
-Then open the installed `org.eva.pico.input` APK on the headset yourself. The
-robot still has its own explicit Start control.
+starts the host WebSocket node and a background USB watcher. The watcher keeps
+ADB reverse forwarding ready and automatically adopts a newly connected,
+authorized PICO, even if the headset was plugged in after EVA started. Then
+open the installed `org.eva.pico.input` APK on the headset yourself. The robot
+still has its own explicit Start control.
 
 The WebXR option is unchanged: it still uses the device Start control and the
 `WebXR` button in the Devices page.
@@ -107,15 +109,14 @@ adb devices -l
 4. 安装 APK：
 
 ```bash
-adb install -r EVA-VR-v0.2.0.apk
+adb install -r EVA-VR-v0.2.1.apk
 ```
 
-5. 启动本地 haptic 测试：
+5. 启动 EVA-VR：
 
 ```bash
 adb shell am force-stop org.eva.pico.input
-adb shell am start -n org.eva.pico.input/.MainActivity \
-  --ez haptic_test true
+adb shell am start -n org.eva.pico.input/.MainActivity
 ```
 
 此时应用名为 **EVA-VR**。正前方会显示状态面板，包含：
@@ -192,19 +193,16 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 adb shell am force-stop org.eva.pico.input
 ```
 
-重新连接时，先重新建立 reverse：
-
-```bash
-adb reverse tcp:43876 tcp:43876
-```
-
-然后重新执行原生 APK 的 `am start` 命令即可。
+在 EVA-CLIENT 的 `eva_pico` teleop 已启动时，不需要手动执行
+`adb reverse`。插入新的、已授权的 PICO 后等待约 1 秒，再打开 EVA-VR
+即可；App 自身也会持续重试 WebSocket 连接。
 
 ## 排错顺序
 
 1. `adb devices -l` 确认 PICO 已授权。
 2. 检查 `node.py` 是否监听 `43876`。
 3. 检查 token 是否一致。
-4. ADB reverse 模式下确认 `adb reverse tcp:43876 tcp:43876` 已执行。
+4. 如果没有使用 EVA-CLIENT 设备服务，手动执行
+   `examples/input_sources/eva-pico/start.sh --prepare-only`。
 5. 看原生面板是否从 `HOST: DISCONNECTED` 变为 `HOST: CONNECTED`。
 6. 看 `adb logcat` 是否出现 `XR_SUCCESS`。

@@ -18,6 +18,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -37,6 +38,10 @@ class DeviceProcesses:
         self.browser_url = ""
         self.commands = {}
         self.ready_pids = {}
+        self._native_link_stop = threading.Event()
+        self._native_link_thread: threading.Thread | None = None
+        self._native_link_log_lock = threading.Lock()
+        self._native_link_last_log = ""
 
     @staticmethod
     def _same_command(process: psutil.Process, command: list[str]) -> bool:
@@ -161,11 +166,50 @@ class DeviceProcesses:
             native_teleop = self.workspace.saved["selected"].get("teleop") == "eva_pico"
             teleop = self.processes.get("teleop")
             if native_teleop and teleop is not None and teleop.poll() is None:
-                self._prepare_native_pico_link()
+                self._start_native_pico_watcher()
         except OSError:
             for name in started:
                 self.stop(name)
             raise
+
+    def _start_native_pico_watcher(self) -> None:
+        """Keep ADB reverse ready when a PICO is plugged in after EVA starts."""
+        thread = self._native_link_thread
+        if thread is not None and thread.is_alive():
+            return
+        self._native_link_stop = threading.Event()
+        self._prepare_native_pico_link()
+        self._native_link_thread = threading.Thread(
+            target=self._native_pico_watch_loop,
+            args=(self._native_link_stop,),
+            name="eva-pico-adb-reverse",
+            daemon=True,
+        )
+        self._native_link_thread.start()
+
+    def _native_pico_watch_loop(self, stop: threading.Event) -> None:
+        while not stop.wait(1.0):
+            teleop = self.processes.get("teleop")
+            if teleop is None or teleop.poll() is not None:
+                return
+            self._prepare_native_pico_link()
+
+    def _stop_native_pico_watcher(self) -> None:
+        self._native_link_stop.set()
+        thread = self._native_link_thread
+        self._native_link_thread = None
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=2)
+
+    def _write_native_link_log(self, message: str) -> None:
+        # A disconnected host is normal while teleop is running. Avoid writing
+        # the same ADB error once per second while still recording state changes.
+        with self._native_link_log_lock:
+            if message == self._native_link_last_log:
+                return
+            self._native_link_last_log = message
+        with (self.log_root / "teleop.log").open("ab") as log:
+            log.write((f"[native] {message}\n").encode())
 
     def _prepare_native_pico_link(self) -> None:
         """Best-effort USB reverse forwarding for a manually opened EVA-VR APK."""
@@ -194,11 +238,9 @@ class DeviceProcesses:
                 # after the host starts, so an absent USB device must not fail teleop.
                 output = f"ADB reverse not ready: {output}" if output else "ADB reverse not ready"
             if output:
-                with (self.log_root / "teleop.log").open("ab") as log:
-                    log.write((f"[native] {output}\n").encode())
+                self._write_native_link_log(output)
         except (OSError, ValueError, subprocess.SubprocessError) as error:
-            with (self.log_root / "teleop.log").open("ab") as log:
-                log.write((f"[native] ADB reverse preparation skipped: {error}\n").encode())
+            self._write_native_link_log(f"ADB reverse preparation skipped: {error}")
 
     def stop(self, component: str | None = None) -> None:
         names = list(self.processes) if component is None else [component]
@@ -227,10 +269,12 @@ class DeviceProcesses:
             self.commands.pop(name, None)
             self.ready_pids.pop(name, None)
         if "teleop" not in self.processes:
+            self._stop_native_pico_watcher()
             self.browser_url = ""
 
     def kill_all(self) -> None:
         """Immediately force-kill every owned device process group."""
+        self._stop_native_pico_watcher()
         processes = list(self.processes.items())
         for _, process in processes:
             if process.poll() is None:
