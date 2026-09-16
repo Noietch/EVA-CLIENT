@@ -109,7 +109,7 @@ adb devices -l
 4. 安装 APK：
 
 ```bash
-adb install -r EVA-VR-v0.2.3.apk
+adb install -r EVA-VR-v0.2.4.apk
 ```
 
 5. 启动 EVA-VR：
