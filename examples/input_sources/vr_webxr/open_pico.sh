@@ -79,30 +79,30 @@ if [[ ! "$VR_TOKEN" =~ ^[a-zA-Z0-9._~-]+$ ]]; then
   exit 2
 fi
 readonly VR_URL="${SCHEME}://127.0.0.1:${PORT}/?token=${VR_TOKEN}&mode=${MODE}&haptic_test=${HAPTIC_TEST}&reload=$(date +%s)"
-readonly WOLVIC_PACKAGE="${WOLVIC_PACKAGE:-com.cn.igalia.wolvic}"
-if [[ ! "$WOLVIC_PACKAGE" =~ ^[a-zA-Z0-9_.]+$ ]]; then
-  echo "Invalid Wolvic package name." >&2
+readonly BROWSER_PACKAGE="${WOLVIC_PACKAGE:-com.pico.browser}"
+if [[ ! "$BROWSER_PACKAGE" =~ ^[a-zA-Z0-9_.]+$ ]]; then
+  echo "Invalid browser package name." >&2
   exit 2
 fi
 
 echo "Using PICO device: $PICO_SERIAL"
-package_path="$("$ADB" -s "$PICO_SERIAL" shell pm path "$WOLVIC_PACKAGE" 2>/dev/null || true)"
+package_path="$("$ADB" -s "$PICO_SERIAL" shell pm path "$BROWSER_PACKAGE" 2>/dev/null || true)"
 if [[ "$package_path" != *package:* ]]; then
-  echo "Wolvic package was not found: $WOLVIC_PACKAGE" >&2
-  echo "Install Wolvic first, or set WOLVIC_PACKAGE to the installed package name." >&2
+  echo "Browser package was not found: $BROWSER_PACKAGE" >&2
+  echo "Install a browser first, or set WOLVIC_PACKAGE to the installed package name." >&2
   exit 1
 fi
 "$ADB" -s "$PICO_SERIAL" reverse "tcp:${PORT}" "tcp:${PORT}"
 # adb shell joins arguments before remote shell parsing: preserve URL ampersands.
 launch_status=0
 launch_output="$("$ADB" -s "$PICO_SERIAL" shell \
-  "am start -S -a android.intent.action.VIEW -d '$VR_URL' -p '$WOLVIC_PACKAGE'" 2>&1)" || launch_status=$?
+  "am start -S -a android.intent.action.VIEW -d '$VR_URL' -p '$BROWSER_PACKAGE'" 2>&1)" || launch_status=$?
 if (( launch_status != 0 )) || [[ "$launch_output" == *Error:* || "$launch_output" == *Exception* ]]; then
-  echo "Wolvic launch failed: ${launch_output//"$VR_TOKEN"/[redacted]}" >&2
+  echo "Browser launch failed: ${launch_output//"$VR_TOKEN"/[redacted]}" >&2
   exit 1
 fi
 
-echo "Opened WebXR in Wolvic ($WOLVIC_PACKAGE)."
+echo "Opened WebXR in browser ($BROWSER_PACKAGE)."
 if [[ "$HAPTIC_TEST" == 1 ]]; then
   echo "Haptic test: enter XR, then pull each controller trigger. Teleoperation frames are disabled."
 fi

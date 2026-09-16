@@ -165,7 +165,7 @@ async function activateCollectionSlot(slot, { manual = false } = {}) {
   setCollectError();
   S.collectTaskSelectionPending = true;
   if (slot.task) state.active = { ...slot, state: "active" };
-  state.selectedSlotId = "";
+  if (manual) state.selectedSlotId = slot.slot_id;
   adoptCollectionSlot(state.active);
   renderCollect();
   try {
@@ -1430,6 +1430,8 @@ function renderCollectionSlotFilters() {
 
 function renderCollectTiles(items) {
     const host = $("collect-queue-tiles");
+    const focusedSlotId = host.contains(document.activeElement)
+      ? document.activeElement.dataset.slotId : null;
     host.innerHTML = "";
     if (!items.length) {
       const empty = document.createElement("span");
@@ -1489,6 +1491,11 @@ function renderCollectTiles(items) {
       };
       host.appendChild(tile);
     });
+    if (focusedSlotId) {
+      Array.from(host.querySelectorAll("[data-slot-id]"))
+        .find((tile) => tile.dataset.slotId === focusedSlotId && !tile.disabled)
+        ?.focus({ preventScroll: true });
+    }
   }
 
 function pipeBadge(el, text) {

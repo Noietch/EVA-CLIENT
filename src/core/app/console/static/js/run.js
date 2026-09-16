@@ -1276,7 +1276,6 @@ function renderControl() {
     const source = config.collection.teleop;
     const teleop = config.device_selection.teleop !== "joint";
     const name = source.client_type === "vr_webxr" ? "VR" : source.client_type || "LEADER";
-    $("control-teleop-controls").hidden = !teleop;
     document.querySelectorAll(".control-joints").forEach(panel => { panel.hidden = false; });
     const motionOwnedByTeleop = !!S.STATUS.collection_teleop_armed;
     S.manualActive = !motionOwnedByTeleop;
@@ -1293,8 +1292,6 @@ function renderControl() {
     if (!teleop) return false;
     const status = S.STATUS;
     const armed = !!status.collection_teleop_armed;
-    $("control-arm-enable").checked = armed;
-    $("control-arm-enable").disabled = !armed && !status.transport_connected;
     $("manual-conn").textContent = `${name} · ${armed ? "ENABLED" : "LOCKED"}`;
     return true;
   }

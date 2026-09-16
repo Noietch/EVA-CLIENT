@@ -177,7 +177,7 @@ def fetch_assets(project_root: Path, task_set_dir: Path, assets_dir: Path, stora
 
 
 def publish_dataset(project_root: Path, dataset_dir: Path, dataset_name: str, storage: dict[str, Any] | None = None,
-                    *, new_remote_path: str | None = None) -> dict[str, str]:
+                    *, new_remote_path: str | None = None, include_qc: bool = True) -> dict[str, str]:
     from huggingface_hub import HfApi
     cfg = _config(project_root, storage)
     _apply_proxy(cfg)
@@ -200,6 +200,7 @@ def publish_dataset(project_root: Path, dataset_dir: Path, dataset_name: str, st
         repo_id=repo_id, repo_type="dataset", folder_path=str(dataset_dir.resolve()),
         path_in_repo=remote_path, commit_message=f"Update dataset {dataset_name}", token=token,
         revision=revision,
+        **({"ignore_patterns": ["meta/qc.jsonl"]} if not include_qc else {}),
     )
     return {"repo_id": repo_id, "dataset": dataset_name, "revision": commit.oid}
 

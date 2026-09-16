@@ -47,6 +47,7 @@ from core.app.console.collection_slots import (
     select_collection_slot,
 )
 from core.app.console.dashboard import build_dashboard, discover_dashboard_upload_candidates
+from core.app.console.dataset_manager import DatasetManager
 from core.app.console.transform_worker import build_transform_blob
 from core.app.handlers import (
     _resolve_runtime_path,
@@ -628,6 +629,7 @@ class ConsoleContext:
     output_dir: str = ""  # results root; debug results land in <output_dir>/console/
     preview: Any = None  # EpisodePreview for RESULT-tab playback (lazily set)
     quality_upload_lock: threading.RLock = dataclasses.field(default_factory=threading.RLock)
+    dataset_manager: DatasetManager = dataclasses.field(default_factory=DatasetManager)
     quality_upload_jobs: OrderedDict[str, _QualityUploadJob] = dataclasses.field(
         default_factory=OrderedDict
     )
@@ -3419,6 +3421,63 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
     def _post_select_task(self, body: dict) -> None:
         self._enqueue_ok(f"web:switch_task:{body.get('task', '')}")
 
+    def _get_dataset_manager(self) -> None:
+        config = self.ctx.runtime.active_config or self.ctx.config
+        rows = []
+        for dataset in config.collection.tasks:
+            try:
+                snapshot = _collection_slots_snapshot(self.ctx, dataset)
+                counts = snapshot["counts"]
+                rows.append({"name": dataset, "robot": config.robot.type,
+                             "total": counts["total"],
+                             "collected": counts["total"] - counts.get("qc_pending", counts["pending"]),
+                             "accept": counts.get("passed", 0), "fail": counts.get("failed", 0),
+                             "unreviewed": counts.get("unreviewed", 0)})
+            except Exception as exc:
+                rows.append({"name": dataset, "error": str(exc)})
+        self._send_json(200, {"ok": True, "datasets": rows, **self.ctx.dataset_manager.snapshot()})
+
+    def _get_dataset_manager_job(self) -> None:
+        self._send_json(200, {"ok": True, **self.ctx.dataset_manager.snapshot()})
+
+    def _post_dataset_manager(self, body: dict) -> None:
+        manager = self.ctx.dataset_manager
+        if body.get("action") == "stop":
+            try:
+                manager.stop(str(body.get("job_id", "")))
+            except ValueError as exc:
+                self._send_json(400, {"ok": False, "error": str(exc)})
+                return
+            self._send_json(200, {"ok": True})
+            return
+        config = self.ctx.runtime.active_config or self.ctx.config
+        names = body.get("datasets")
+        if (not isinstance(names, list) or not names or
+                any(not isinstance(n, str) or n not in config.collection.tasks for n in names)):
+            self._send_json(400, {"ok": False, "error": "Select configured datasets"})
+            return
+        try:
+            targets = []
+            for name in dict.fromkeys(names):
+                snapshot = _collection_slots_snapshot(self.ctx, name)
+                entries = config.collection.tasks[name]
+                logger_obj = self.ctx.runtime.episode_logger
+                if logger_obj and entries:
+                    status = _status_snapshot_for_poll(logger_obj, str(entries[0][0]), name)
+                    if any(status.get(k) for k in ("collecting", "saving", "queued_jobs", "save_queue_size")):
+                        raise ValueError("Dataset is recording or saving; retry after collection finishes")
+                canonical, remote = _collection_transfer_path(config, name)
+                raw = Path(snapshot["dataset_dir"]) if snapshot["dataset_dir"] else canonical
+                qc_root = canonical if (canonical / "meta/qc.jsonl").is_file() else raw
+                targets.append({"name": name, "plan": _scene_plan_root(config, name),
+                                "raw": raw, "qc_root": qc_root, "remote_path": remote})
+            manager.start(str(body.get("action", "")), targets,
+                          Path(__file__).resolve().parents[4], config.collection.storage)
+        except ValueError as exc:
+            self._send_json(409, {"ok": False, "error": str(exc)})
+            return
+        self._send_json(200, {"ok": True, **manager.snapshot()})
+
     def _post_hf_task_set_sync(self, body: dict) -> None:
         config = self.ctx.runtime.active_config or self.ctx.config
         task_set = str(body.get("task_set", "")).strip()
@@ -4331,6 +4390,8 @@ _GET_ROUTES = {
     "/api/episodes": ConsoleRequestHandler._get_episodes,
     "/api/dashboard": ConsoleRequestHandler._get_dashboard,
     "/api/dashboard_upload": ConsoleRequestHandler._get_collect_quality_upload,
+    "/api/dataset_manager": ConsoleRequestHandler._get_dataset_manager,
+    "/api/dataset_manager/job": ConsoleRequestHandler._get_dataset_manager_job,
     "/api/collect_quality_export": ConsoleRequestHandler._get_collect_quality_export,
     "/api/collect_quality_upload": ConsoleRequestHandler._get_collect_quality_upload,
     "/api/frame": ConsoleRequestHandler._get_frame,
@@ -4426,6 +4487,7 @@ _POST_ROUTES = {
     "/api/collect_quality_export": ConsoleRequestHandler._post_collect_quality_export,
     "/api/collect_quality_upload": ConsoleRequestHandler._post_collect_quality_upload,
     "/api/dashboard_upload": ConsoleRequestHandler._post_dashboard_upload,
+    "/api/dataset_manager": ConsoleRequestHandler._post_dataset_manager,
     "/api/annotate": ConsoleRequestHandler._post_annotate,
     "/api/episode_annotation": ConsoleRequestHandler._post_episode_annotation,
     "/api/load_replay_dataset": ConsoleRequestHandler._post_load_replay_dataset,

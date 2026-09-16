@@ -1,5 +1,6 @@
 // dashboard.js: stacked raw-only collection and eval operations overview.
 import { $, apiGet, apiPost } from "./core.js";
+import { initDatasetManager, loadDatasetManager } from "./dataset_manager.js";
 
 let dashboardData = null;
 let dashboardLoading = null;
@@ -434,24 +435,6 @@ function renderRecent(mode, rows) {
   }).join("");
 }
 
-function renderDemand(tasks) {
-  const body = $("collection-demand");
-  $("collection-demand-empty").style.display = tasks.length ? "none" : "block";
-  body.innerHTML = tasks.map((task) => {
-    const requirement = Number(task.required_episodes) || 0;
-    const unlimited = requirement === -1;
-    const completion = requirement > 0 ? Number(task.episodes) / requirement : 0;
-    return `<tr>
-      <td><b>${escapeHtml(task.dataset)}</b><small>${escapeHtml(task.task || "No task")}</small></td>
-      <td class="tnum">${escapeHtml(task.robot_id)}</td>
-      <td class="tnum">${Number(task.episodes) || 0}</td>
-      <td class="tnum">${unlimited ? "∞" : (requirement > 0 ? requirement : "--")}</td>
-      <td class="tnum">${requirement > 0 ? Math.max(0, requirement - Number(task.episodes)) : "--"}</td>
-      <td><div class="dashboard-demand-progress"><i style="width:${Math.min(1, completion) * 100}%"></i></div><small>${unlimited ? "No limit" : (requirement > 0 ? percent(completion) : "Not set")}</small></td>
-    </tr>`;
-  }).join("");
-}
-
 function renderModeMetrics(mode) {
   const view = metricView(mode);
   $(`${mode}-duration`).textContent = duration(view.duration_seconds);
@@ -485,7 +468,6 @@ function renderMode(mode) {
   $(`${mode}-sources`).textContent = String(dashboardData.sources.filter((source) => source.mode === mode).length);
   renderTrend(mode, view.trend || [], dashboardData.filters || {});
   renderRecent(mode, view.recent || []);
-  if (mode === "collection") renderDemand(view.tasks || []);
 }
 
 function renderDashboard() {
@@ -497,6 +479,7 @@ function renderDashboard() {
 }
 
 export function initDashboard() {
+  initDatasetManager();
   $("collection-overview-scope").addEventListener("click", () => selectTrendDay("collection", ""));
   $("dash-date-apply").addEventListener("click", () => {
     selectedTrendDay.collection = "";
@@ -517,6 +500,7 @@ export function initDashboard() {
 }
 
 export async function loadDashboard(force = false) {
+  loadDatasetManager();
   if (dashboardData && !force) {
     renderDashboard();
     return dashboardData;

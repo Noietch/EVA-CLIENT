@@ -286,7 +286,7 @@ function translateNode(root) {
   const nodes = [];
   while (walker.nextNode()) nodes.push(walker.currentNode);
   for (const node of nodes) {
-    if (node.parentElement?.closest("script, style")) continue;
+    if (node.parentElement?.closest('script, style, [translate="no"]')) continue;
     const translated = translateText(node.nodeValue || "");
     if (translated !== node.nodeValue) node.nodeValue = translated;
   }
@@ -295,6 +295,7 @@ function translateNode(root) {
 function translateAttributes(root) {
   const elements = root.querySelectorAll ? root.querySelectorAll("*") : [];
   for (const element of elements) {
+    if (element.closest('[translate="no"]')) continue;
     for (const attribute of ["title", "aria-label", "placeholder"]) {
       const value = element.getAttribute(attribute);
       if (!value) continue;
@@ -314,6 +315,8 @@ export function initLocale() {
   applyLocale(document);
   const observer = new MutationObserver((records) => {
     for (const record of records) {
+      const parent = record.target.nodeType === Node.ELEMENT_NODE ? record.target : record.target.parentElement;
+      if (parent?.closest('[translate="no"]')) continue;
       if (record.type === "characterData") {
         const translated = translateText(record.target.nodeValue || "");
         if (translated !== record.target.nodeValue) record.target.nodeValue = translated;

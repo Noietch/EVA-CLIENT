@@ -111,6 +111,223 @@ def test_data_transfer_buttons_update_existing_progress_bar(browser):
             page.close()
 
 
+def test_dashboard_dataset_manager_selection_transfer_and_navigation(browser):
+    config = console_config(collection={"enabled": True})
+    config.collection.schema.columns = {"qpos": "observation.qpos", "action_qpos": "action"}
+    state = {"ok": True, "datasets": [
+        {"name": "cup_set", "robot": "dual_yam", "total": 10, "collected": 7, "accept": 2, "fail": 1, "unreviewed": 4},
+        {"name": "pouring_set", "robot": "dual_yam", "total": 20, "collected": 20, "accept": 10, "fail": 0, "unreviewed": 10},
+    ], "remote": {"cup_set": {"checked_at": 1789564586, "episodes": 8, "task_count": 2,
+        "files": 120, "bytes": 1048576, "qc": {"accept": 3, "fail": 1, "unreviewed": 4},
+        "verification": {"data": {"state": "same"}, "task": {"state": "different"}, "qc": {"state": "same"}}},
+        "pouring_set": {"verification": {"data": {"state": "different"}, "task": {"state": "same"}}}}, "job": None}
+    calls = []
+    with serve_console(config) as console:
+        page = browser.new_page(viewport={"width": 1098, "height": 926})
+        page.route("**/api/camera/**", lambda route: route.abort())
+
+        def manager(route):
+            if route.request.method == "POST":
+                body = route.request.post_data_json
+                calls.append(body)
+                state["job"] = {"action": body["action"], "state": "done", "total": len(body["datasets"]),
+                                "completed": len(body["datasets"]), "eta": None, "results": [
+                                    {"dataset": n, "ok": i != 0, "error": "simulated failure"}
+                                    for i, n in enumerate(body["datasets"])]}
+            route.fulfill(json=state)
+
+        page.route("**/api/dataset_manager**", manager)
+        errors = []
+        page.on("pageerror", lambda error: errors.append(str(error)))
+        try:
+            page.goto(f"http://127.0.0.1:{console.port}", wait_until="domcontentloaded")
+            page.locator("button[data-tab=dashboard]").click()
+            page.locator('[data-dm-open="cup_set"]').wait_for()
+            assert page.locator("#dm-interval").input_value() == "5"
+            assert page.locator("#dm-rows tr").count() == 2
+            assert page.locator('[data-dm-action="upload_data"]').is_disabled()
+            page.locator("#dm-search").fill("cup")
+            page.locator("#dm-select-all").click()
+            assert page.locator("#dm-rows tr.dm-selected").count() == 1
+            assert page.locator("#dm-select-all").get_attribute("aria-pressed") == "true"
+            row = page.locator('[data-dm-row="cup_set"]')
+            assert row.locator('[data-dm-field="cloud_episodes"]').inner_text() == "8"
+            assert row.locator('[data-dm-field="cloud_tasks"]').inner_text() == "2"
+            assert row.locator('[data-dm-field="cloud_accept"]').inner_text() == "3"
+            assert row.locator('[data-dm-field="cloud_fail"]').inner_text() == "1"
+            assert row.locator('[data-dm-field="cloud_unreviewed"]').inner_text() == "4"
+            row.locator("td").nth(2).click()
+            assert row.get_attribute("aria-selected") == "false"
+            row.locator("td").nth(3).click()
+            assert row.get_attribute("aria-selected") == "true"
+            row.locator("input").uncheck()
+            assert row.get_attribute("aria-selected") == "false"
+            row.focus()
+            page.keyboard.press("Space")
+            assert row.get_attribute("aria-selected") == "true"
+            assert row.evaluate("el => el === document.activeElement")
+            page.locator("#dm-select-all").click()
+            assert row.get_attribute("aria-selected") == "false"
+            page.locator("#dm-select-all").click()
+            assert page.locator('[data-dm-action="verify"]').count() == 0
+            for action in ("upload_qc", "upload_data", "upload_task", "download_task"):
+                page.locator(f'[data-dm-action="{action}"]').click()
+                page.wait_for_function("document.getElementById('dm-rows').textContent.includes('simulated failure')")
+                assert calls[-1] == {"action": action, "datasets": ["cup_set"]}
+            page.locator("#dm-search").fill("")
+            assert page.locator("#dm-select-all").get_attribute("aria-pressed") == "false"
+            page.locator("#dm-select-all").click()
+            assert page.locator("#dm-rows tr.dm-selected").count() == 2
+            page.locator("#dm-search").fill("cup")
+            page.locator("#dm-select-all").click()
+            page.locator("#dm-search").fill("")
+            assert page.locator('[data-dm-row="pouring_set"]').get_attribute("aria-selected") == "true"
+            assert row.get_attribute("aria-selected") == "false"
+            page.locator("#dm-clear").click()
+            assert page.locator("#dm-rows tr.dm-selected").count() == 0
+            row.locator("td").nth(2).click()
+            page.locator("#dm-sort").select_option("progress")
+            assert page.locator("#dm-rows tr").first.locator(".dm-name").inner_text() == "pouring_set"
+            assert page.locator('.dm-table thead tr').count() == 2
+            for key in ("collected", "total", "accept", "unreviewed"):
+                header = page.locator(f'[data-dm-sort="{key}"]')
+                header.click()
+                assert header.locator('..').get_attribute('aria-sort') == 'ascending'
+                assert page.locator('#dm-rows tr').first.get_attribute('data-dm-row') == 'cup_set'
+                header.click()
+                assert header.locator('..').get_attribute('aria-sort') == 'descending'
+                assert page.locator('#dm-rows tr').first.get_attribute('data-dm-row') == 'pouring_set'
+            cloud_header = page.locator('[data-dm-sort="cloud_episodes"]')
+            for direction in ('ascending', 'descending'):
+                cloud_header.click()
+                assert cloud_header.locator('..').get_attribute('aria-sort') == direction
+                assert page.locator('#dm-rows tr').first.get_attribute('data-dm-row') == 'cup_set'
+            page.locator("#dm-refresh").click()
+            page.wait_for_function("document.getElementById('dm-status').textContent.includes('刷新云端')")
+            assert set(calls[-1]["datasets"]) == {"cup_set", "pouring_set"}
+            for key, first, second in (
+                ("verify_data", "cup_set", "pouring_set"),
+                ("verify_task", "pouring_set", "cup_set"),
+                ("verify_qc", "cup_set", "cup_set"),
+            ):
+                header = page.locator(f'[data-dm-sort="{key}"]')
+                header.click()
+                assert header.locator('..').get_attribute('aria-sort') == 'ascending'
+                assert page.locator('#dm-sort').input_value() == f'{key}-asc'
+                assert page.locator('#dm-rows tr').first.get_attribute('data-dm-row') == first
+                header.click()
+                assert header.locator('..').get_attribute('aria-sort') == 'descending'
+                assert page.locator('#dm-rows tr').first.get_attribute('data-dm-row') == second
+            page.locator(".dashboard-demand-section").scroll_into_view_if_needed()
+            page.screenshot(path="/tmp/eva-dataset-manager-desktop.png")
+            page.set_viewport_size({"width": 390, "height": 844})
+            page.locator(".dashboard-demand-section").scroll_into_view_if_needed()
+            page.screenshot(path="/tmp/eva-dataset-manager-mobile.png")
+            page.set_viewport_size({"width": 1098, "height": 926})
+            page.locator('[data-dm-open="cup_set"]').click()
+            page.wait_for_function("document.getElementById('collect-set-list').value === 'cup_set'")
+            assert page.locator("button[data-tab=collect]").get_attribute("class").find("active") >= 0
+            assert not errors, errors
+        finally:
+            page.close()
+
+
+def test_dashboard_parallel_jobs_have_independent_stop_controls(browser):
+    config = console_config(collection={"enabled": True})
+    config.collection.schema.columns = {"qpos": "observation.qpos", "action_qpos": "action"}
+    jobs = []
+    requests = []
+    with serve_console(config) as console:
+        page = browser.new_page(viewport={"width": 1098, "height": 926})
+        page.route("**/api/camera/**", lambda route: route.abort())
+
+        def manager(route):
+            if route.request.method == "POST":
+                body = route.request.post_data_json
+                requests.append(body)
+                if body["action"] == "stop":
+                    next(job for job in jobs if job["id"] == body["job_id"])["state"] = "stopped"
+                else:
+                    jobs.append({"id": str(len(jobs)), "action": body["action"], "state": "running",
+                                 "completed": 0, "total": 1, "current": body["datasets"][0],
+                                 "results": [], "eta": None})
+            route.fulfill(json={"ok": True, "datasets": [{"name": "cup_set", "robot": "dual_yam",
+                                "collected": 0, "total": 10, "accept": 0, "fail": 0, "unreviewed": 0}],
+                                "remote": {}, "jobs": jobs, "job": jobs[-1] if jobs else None})
+
+        page.route("**/api/dataset_manager**", manager)
+        try:
+            page.goto(f"http://127.0.0.1:{console.port}", wait_until="domcontentloaded")
+            page.locator("button[data-tab=dashboard]").click()
+            page.locator('[data-dm-select="cup_set"]').check()
+            page.locator('[data-dm-action="upload_data"]').click()
+            page.locator('[data-dm-job="0"]').wait_for()
+            assert page.locator('#dm-refresh').is_enabled()
+            page.locator('#dm-refresh').click()
+            page.locator('[data-dm-job="1"]').wait_for()
+            assert page.locator('#dm-jobs progress').count() == 2
+            page.locator('[data-dm-stop="0"]').click()
+            page.locator('[data-dm-job="0"]').wait_for(state="detached")
+            assert requests[-1] == {"action": "stop", "job_id": "0"}
+            assert page.locator('[data-dm-stop="1"]').is_enabled()
+            assert jobs[1]["state"] == "running"
+            jobs[0]["results"] = [{"dataset": "cup_set", "ok": False, "error": "offline"}]
+            jobs.append({"id": "3", "action": "upload_qc", "state": "done",
+                         "completed": 1, "total": 1, "current": "", "eta": None,
+                         "results": [{"dataset": "cup_set", "ok": False, "error": "offline"}]})
+            jobs[1]["results"] = [{"dataset": "cup_set", "ok": False, "error": "mismatch"}]
+            first_details = page.locator('[data-dm-job="3"] details')
+            second_details = page.locator('[data-dm-job="1"] details')
+            first_details.locator("summary").wait_for()
+            first_details.locator("summary").click()
+            page.wait_for_timeout(2200)
+            assert first_details.evaluate("el => el.open")
+            assert not second_details.evaluate("el => el.open")
+            assert first_details.locator("summary").evaluate("el => el === document.activeElement")
+            first_details.locator("summary").click()
+            second_details.locator("summary").click()
+            page.wait_for_timeout(2200)
+            assert not first_details.evaluate("el => el.open")
+            assert second_details.evaluate("el => el.open")
+            jobs.append({"id": "2", "action": "upload_task", "state": "done",
+                         "completed": 1, "total": 1, "current": "", "eta": None,
+                         "results": [{"dataset": "cup_set", "ok": True}]})
+            jobs[1]["state"] = "done"
+            page.wait_for_function("!document.querySelector('[data-dm-stop=\"1\"]')")
+            assert page.locator('[data-dm-job="2"]').count() == 0
+            assert page.locator('[data-dm-job="0"]').count() == 0
+            assert page.locator('[data-dm-job="1"]').count() == 1
+            assert second_details.evaluate("el => el.open")
+            page.locator(".dashboard-demand-section").scroll_into_view_if_needed()
+            page.screenshot(path="/tmp/eva-parallel-jobs.png")
+        finally:
+            page.close()
+
+
+def test_collection_activation_preserves_review_cursor(browser):
+    source = (REPOSITORY_ROOT / "src/core/app/console/static/js/collect.js").read_text()
+    activation = source[source.index("async function activateCollectionSlot("):
+                        source.index("async function pollCollectionSlots(")]
+    page = browser.new_page()
+    try:
+        page.evaluate("""() => {
+            window.S = {collectionSlots: {selectedSlotId: 'review', active: null},
+                STATUS: {collect: {collecting: false}}};
+            window.setCollectError = window.adoptCollectionSlot = () => {};
+            window.renderCollect = () => {};
+            window.applyCollectTaskSelection = () => true;
+            window.apiPost = async (_, body) => ({ok: true,
+                active: {slot_id: body.slot_id, dataset: body.dataset, task: 'task'}});
+        }""")
+        page.add_script_tag(content=activation)
+        page.evaluate("activateCollectionSlot({slot_id: 'capture', dataset: 'set', task: 'task'})")
+        assert page.evaluate("S.collectionSlots.selectedSlotId") == "review"
+        page.evaluate("activateCollectionSlot({slot_id: 'chosen', dataset: 'set', task: 'task'}, {manual: true})")
+        assert page.evaluate("S.collectionSlots.selectedSlotId") == "chosen"
+    finally:
+        page.close()
+
+
 def test_collection_slot_click_selects_and_double_click_previews(browser, tmp_path):
     source = (
         Path(__file__).resolve().parents[2] / "src/core/app/console/static/js/collect.js"
@@ -195,6 +412,10 @@ def test_collection_slot_click_selects_and_double_click_previews(browser, tmp_pa
         page.wait_for_timeout(350)
         assert page.evaluate("selected") == ["done"]
         assert page.evaluate("previews") == [5]
+        tiles.nth(1).focus()
+        page.evaluate("renderCollectTiles(S.collectionSlots.slots)")
+        assert tiles.nth(1).evaluate("el => el === document.activeElement")
+        assert "selected" in tiles.nth(1).get_attribute("class")
         assert tiles.nth(2).is_disabled()
         assert "slot-saving" in tiles.nth(2).get_attribute("class")
         assert tiles.nth(2).get_attribute("aria-busy") == "true"

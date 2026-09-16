@@ -467,11 +467,6 @@ $("collect-slot-scene-filter").onchange = (event) => {
   changeCollectionSlotFilter("scene", event.target.value);
 };
 
-$("control-arm-enable").onchange = async () => {
-    const toggle = $("control-arm-enable");
-    toggle.disabled = true;
-    await apiPost("/api/control_arm", { enabled: toggle.checked });
-};
 $("collect-slot-task-filter").onchange = (event) => {
   changeCollectionSlotFilter("task", event.target.value);
 };
