@@ -21,10 +21,8 @@ teleop:
       heartbeat_timeout_s: 2.0
       position_scale: 1.0
       eef_filter_alpha: 0.5
-      # Native OpenXR LOCAL space faces opposite the robot base in the
-      # standard PICO launch orientation. Rotate the horizontal plane by 180
-      # degrees while preserving XR +Y as robot +Z.
-      base_from_xr_rotation: [[0, 0, 1], [1, 0, 0], [0, 1, 0]]
+      # The native app sends the same XR pose axes as the WebXR client.
+      base_from_xr_rotation: [[0, 0, -1], [-1, 0, 0], [0, 1, 0]]
       gripper:
         mode: linear
         threshold: 0.6

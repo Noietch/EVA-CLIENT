@@ -176,6 +176,17 @@ def test_robot_hardware_defaults_and_saved_overrides_preserve_business_config(tm
         workspace.resolve(dict(robot="agibot_g2", teleop="yam_leader", camera="none"))
 
 
+def test_native_pico_and_webxr_use_the_same_robot_frame(tmp_path):
+    workspace = DeviceWorkspace(tmp_path / "workstation.yaml")
+    selected = dict(robot="dual_yam", teleop="eva_pico", camera="none")
+    native = workspace.resolve(selected)["teleop"]["client"]
+    selected["teleop"] = "vr_webxr"
+    browser = workspace.resolve(selected)["teleop"]["client"]
+    np.testing.assert_array_equal(
+        native["base_from_xr_rotation"], browser["base_from_xr_rotation"]
+    )
+
+
 def test_disabled_cameras_use_camera_ids_independently_of_dataset_column_names(tmp_path):
     workspace = DeviceWorkspace(tmp_path / "workstation.yaml")
     selected = dict(robot="dual_franka", teleop="vr_webxr", camera="external")
