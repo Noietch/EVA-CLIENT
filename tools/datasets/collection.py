@@ -196,15 +196,8 @@ class PlanCatalog:
                 else []
             )
         plan_states = [self._plan_state(value) for value in selected]
-        if (
-            batch
-            and batch != "__all__"
-            and plan_states
-            and self._unmatched_robot(batch_id) is None
-        ):
-            detailed_summary = self._batch_summary(
-                batch_id, plan_states[0], analyze_static_qc=True
-            )
+        if batch and batch != "__all__" and plan_states and self._unmatched_robot(batch_id) is None:
+            detailed_summary = self._batch_summary(batch_id, plan_states[0], analyze_static_qc=True)
             for index, summary in enumerate(summaries):
                 if summary["batch_id"] == batch_id:
                     summaries[index] = detailed_summary
@@ -1590,8 +1583,15 @@ class PlanCatalog:
         if summary is not None:
             verdict = summary["qc_verdict"].lower()
             rejected = summary["quality"].lower() == "red" or verdict == "fail"
-            state = ("unreviewed" if verdict == "unreviewed" else
-                     "failed" if rejected else "passed" if verdict == "pass" else "unreviewed")
+            state = (
+                "unreviewed"
+                if verdict == "unreviewed"
+                else "failed"
+                if rejected
+                else "passed"
+                if verdict == "pass"
+                else "unreviewed"
+            )
         legacy_state = (
             "repair" if state == "failed" else "pending" if state == "pending" else "complete"
         )
@@ -1745,11 +1745,15 @@ class PlanCatalog:
             ]
         qc_by_episode = {int(row["episode_index"]): row for row in qc_rows}
         for row in rows:
-            row.update({
-                key: value
-                for key, value in qc_by_episode.get(int(row.get("episode_index", -1)), {}).items()
-                if key != "episode_index"
-            })
+            row.update(
+                {
+                    key: value
+                    for key, value in qc_by_episode.get(
+                        int(row.get("episode_index", -1)), {}
+                    ).items()
+                    if key != "episode_index"
+                }
+            )
         self._episode_rows_cache[key] = (token, rows)
         self._db_cache_put(f"episodes:{key}", token, rows)
         return rows

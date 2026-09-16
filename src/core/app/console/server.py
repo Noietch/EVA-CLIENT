@@ -99,6 +99,13 @@ from transport.dataset import DatasetTransport
 
 logger = logging.getLogger(__name__)
 
+
+class ReusableThreadingHTTPServer(ThreadingHTTPServer):
+    """Allow the console port to be rebound during EVA's in-process restart."""
+
+    allow_reuse_address = True
+
+
 STATIC_DIR = Path(__file__).parent / "static"
 
 # Transport counts as online only if a SUB message arrived within this window; the
@@ -1464,8 +1471,12 @@ def _collection_transfer_path(config: ConfigDict, dataset: str) -> tuple[Path, s
     info = _read_scene_plan_yaml(plan_root, "info.yaml")
     remote_path = str(info.get("collection_dir") or "").strip()
     relative_path = Path(remote_path)
-    if (not remote_path.startswith("datasets/") or relative_path.is_absolute()
-            or ".." in relative_path.parts or relative_path.name != dataset):
+    if (
+        not remote_path.startswith("datasets/")
+        or relative_path.is_absolute()
+        or ".." in relative_path.parts
+        or relative_path.name != dataset
+    ):
         raise ValueError("invalid collection_dir for selected set")
     return plan_root.parent.parent / relative_path, remote_path
 
@@ -1496,9 +1507,12 @@ def _collection_slots_snapshot(ctx: ConsoleContext, dataset: str) -> dict[str, A
         dataset_dir = Path(raw_dataset_dir).resolve() if raw_dataset_dir else None
         queue = list(status.get("queue") or [])
         if dataset_dir is not None:
-            episodes = list(load_episode_history(
-                dataset_dir, qc_path=_collection_qc_path(config, dataset)
-            ).get("episodes") or [])
+            episodes = list(
+                load_episode_history(dataset_dir, qc_path=_collection_qc_path(config, dataset)).get(
+                    "episodes"
+                )
+                or []
+            )
     slot_state = load_slot_state(dataset_dir)
     rows, active, counts = collection_slot_status(slots, episodes, queue, slot_state)
     scenes: list[dict[str, str]] = []
@@ -2663,8 +2677,11 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
 
         history = load_episode_history(
             Path(dataset_dir),
-            qc_path=(_collection_qc_path(config, collection_set)
-                     if scope == "collect" and collection_set else None),
+            qc_path=(
+                _collection_qc_path(config, collection_set)
+                if scope == "collect" and collection_set
+                else None
+            ),
             task=task_filter,
             task_id=task_id_filter,
             since=since,
@@ -3428,11 +3445,17 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             try:
                 snapshot = _collection_slots_snapshot(self.ctx, dataset)
                 counts = snapshot["counts"]
-                rows.append({"name": dataset, "robot": config.robot.type,
-                             "total": counts["total"],
-                             "collected": counts["total"] - counts.get("qc_pending", counts["pending"]),
-                             "accept": counts.get("passed", 0), "fail": counts.get("failed", 0),
-                             "unreviewed": counts.get("unreviewed", 0)})
+                rows.append(
+                    {
+                        "name": dataset,
+                        "robot": config.robot.type,
+                        "total": counts["total"],
+                        "collected": counts["total"] - counts.get("qc_pending", counts["pending"]),
+                        "accept": counts.get("passed", 0),
+                        "fail": counts.get("failed", 0),
+                        "unreviewed": counts.get("unreviewed", 0),
+                    }
+                )
             except Exception as exc:
                 rows.append({"name": dataset, "error": str(exc)})
         self._send_json(200, {"ok": True, "datasets": rows, **self.ctx.dataset_manager.snapshot()})
@@ -3452,8 +3475,11 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             return
         config = self.ctx.runtime.active_config or self.ctx.config
         names = body.get("datasets")
-        if (not isinstance(names, list) or not names or
-                any(not isinstance(n, str) or n not in config.collection.tasks for n in names)):
+        if (
+            not isinstance(names, list)
+            or not names
+            or any(not isinstance(n, str) or n not in config.collection.tasks for n in names)
+        ):
             self._send_json(400, {"ok": False, "error": "Select configured datasets"})
             return
         try:
@@ -3464,15 +3490,31 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                 logger_obj = self.ctx.runtime.episode_logger
                 if logger_obj and entries:
                     status = _status_snapshot_for_poll(logger_obj, str(entries[0][0]), name)
-                    if any(status.get(k) for k in ("collecting", "saving", "queued_jobs", "save_queue_size")):
-                        raise ValueError("Dataset is recording or saving; retry after collection finishes")
+                    if any(
+                        status.get(k)
+                        for k in ("collecting", "saving", "queued_jobs", "save_queue_size")
+                    ):
+                        raise ValueError(
+                            "Dataset is recording or saving; retry after collection finishes"
+                        )
                 canonical, remote = _collection_transfer_path(config, name)
                 raw = Path(snapshot["dataset_dir"]) if snapshot["dataset_dir"] else canonical
                 qc_root = canonical if (canonical / "meta/qc.jsonl").is_file() else raw
-                targets.append({"name": name, "plan": _scene_plan_root(config, name),
-                                "raw": raw, "qc_root": qc_root, "remote_path": remote})
-            manager.start(str(body.get("action", "")), targets,
-                          Path(__file__).resolve().parents[4], config.collection.storage)
+                targets.append(
+                    {
+                        "name": name,
+                        "plan": _scene_plan_root(config, name),
+                        "raw": raw,
+                        "qc_root": qc_root,
+                        "remote_path": remote,
+                    }
+                )
+            manager.start(
+                str(body.get("action", "")),
+                targets,
+                Path(__file__).resolve().parents[4],
+                config.collection.storage,
+            )
         except ValueError as exc:
             self._send_json(409, {"ok": False, "error": str(exc)})
             return
@@ -3486,7 +3528,10 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             return
         destination = _scene_plan_root(config, task_set).parent
         result = fetch_task_set(
-            Path(__file__).resolve().parents[4], task_set, destination, config.collection.storage,
+            Path(__file__).resolve().parents[4],
+            task_set,
+            destination,
+            config.collection.storage,
         )
         self._send_json(200, {"ok": True, **result})
 
@@ -3498,8 +3543,11 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             return
         project_root = Path(__file__).resolve().parents[4]
         plan_root = _scene_plan_root(config, dataset)
-        destination = (plan_root.parent.parent / "assets" if plan_root.parent.name == "task_sets"
-                       else project_root / "datasets/data_collection/assets")
+        destination = (
+            plan_root.parent.parent / "assets"
+            if plan_root.parent.name == "task_sets"
+            else project_root / "datasets/data_collection/assets"
+        )
         result = fetch_assets(project_root, plan_root, destination, config.collection.storage)
         self._send_json(200, {"ok": True, **result})
 
@@ -3512,7 +3560,9 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         plan_root = _scene_plan_root(config, dataset_name)
         info = _read_scene_plan_yaml(plan_root, "info.yaml")
         result = publish_dataset(
-            Path(__file__).resolve().parents[4], dataset_dir, dataset_name,
+            Path(__file__).resolve().parents[4],
+            dataset_dir,
+            dataset_name,
             config.collection.storage,
             new_remote_path=str(info.get("collection_dir") or "").strip() or None,
         )
@@ -3524,7 +3574,9 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         if dataset_dir is None:
             return
         result = fetch_dataset(
-            Path(__file__).resolve().parents[4], dataset_dir.name, dataset_dir.parent,
+            Path(__file__).resolve().parents[4],
+            dataset_dir.name,
+            dataset_dir.parent,
             config.collection.storage,
         )
         self._send_json(200, {"ok": True, **result})
@@ -3533,7 +3585,8 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         config = self.ctx.runtime.active_config or self.ctx.config
         dataset_name = str(body.get("dataset", "")).strip()
         if (
-            not dataset_name or dataset_name not in config.collection.tasks
+            not dataset_name
+            or dataset_name not in config.collection.tasks
             or Path(dataset_name).name != dataset_name
         ):
             self._send_json(409, {"ok": False, "error": "unknown collection dataset"})
@@ -3545,12 +3598,17 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             return
         if body.get("direction") == "upload":
             result = publish_qc(
-                Path(__file__).resolve().parents[4], dataset_dir, dataset_name,
-                config.collection.storage, expected_path=remote_path,
+                Path(__file__).resolve().parents[4],
+                dataset_dir,
+                dataset_name,
+                config.collection.storage,
+                expected_path=remote_path,
             )
         elif body.get("direction") == "download":
             result = fetch_qc(
-                Path(__file__).resolve().parents[4], dataset_name, dataset_dir,
+                Path(__file__).resolve().parents[4],
+                dataset_name,
+                dataset_dir,
                 config.collection.storage,
                 expected_path=remote_path,
             )
@@ -4235,7 +4293,9 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         marker_path = local_dir / "meta" / "quality_split.json"
         if dataset_format == "lerobot":
             marker = {
-                "subset": "accepted", "dataset_format": "lerobot", "source_dir": str(dataset_dir),
+                "subset": "accepted",
+                "dataset_format": "lerobot",
+                "source_dir": str(dataset_dir),
             }
         else:
             try:
@@ -4586,7 +4646,8 @@ def start_console_server(
     """Launch a daemon HTTP server thread bound to ``host:port``."""
     ctx = build_console_context(config, runtime, session, output_dir, language=language)
     ConsoleRequestHandler.ctx = ctx
-    server = ThreadingHTTPServer((host, port), ConsoleRequestHandler)
+    server = ReusableThreadingHTTPServer((host, port), ConsoleRequestHandler)
+    runtime.console_server = server
 
     def serve() -> None:
         """Thread body: serve requests until the server is shut down."""
@@ -4595,7 +4656,27 @@ def start_console_server(
         server.serve_forever()
 
     thread = threading.Thread(target=serve, name="eva-console-server", daemon=True)
+    runtime.console_server_thread = thread
     thread.start()
     if str(config.transport.type) in _LIVE_TRANSPORT_TYPES:
         _prewarm_transform_worker(config, runtime)
     return thread
+
+
+def stop_console_server(runtime: RuntimeState) -> None:
+    """Release the console listener before the process is restarted or exits."""
+    server = getattr(runtime, "console_server", None)
+    thread = getattr(runtime, "console_server_thread", None)
+    if server is None:
+        return
+    try:
+        # ``shutdown`` must be called outside the serve_forever thread. The application
+        # loop owns this cleanup, so it also guarantees the socket is closed before
+        # ``run()`` returns and main.py invokes os.execv for a device selection.
+        server.shutdown()
+    finally:
+        server.server_close()
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=2.0)
+        runtime.console_server = None
+        runtime.console_server_thread = None

@@ -356,8 +356,16 @@ def collection_slot_status(
     rows: list[dict[str, Any]] = []
     unresolved_regular: list[dict[str, Any]] = []
     unresolved_deferred: dict[str, dict[str, Any]] = {}
-    counts = {"complete": 0, "rejected": 0, "deferred": 0, "pending": 0,
-              "passed": 0, "unreviewed": 0, "failed": 0, "qc_pending": 0}
+    counts = {
+        "complete": 0,
+        "rejected": 0,
+        "deferred": 0,
+        "pending": 0,
+        "passed": 0,
+        "unreviewed": 0,
+        "failed": 0,
+        "qc_pending": 0,
+    }
 
     for slot in slots:
         episode = episode_by_slot.get(slot.slot_id) or legacy_episode_by_target.get(

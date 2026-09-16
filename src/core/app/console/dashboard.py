@@ -173,7 +173,9 @@ def discover_dashboard_upload_candidates(roots: Iterable[Path]) -> list[dict[str
         if mode != "collection":
             continue
         datasets_root = raw_dir.parent.parent
-        for marker_path in sorted(datasets_root.glob("*_datasets/*/accepted/meta/quality_split.json")):
+        for marker_path in sorted(
+            datasets_root.glob("*_datasets/*/accepted/meta/quality_split.json")
+        ):
             candidate = _accepted_export(raw_dir, marker_path)
             if candidate is not None:
                 candidates.append(candidate)

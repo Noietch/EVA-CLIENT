@@ -25,15 +25,20 @@ def test_fetch_qc_uses_actual_dataset_repo_path(tmp_path, monkeypatch):
             return SimpleNamespace(sha="revision-sha")
 
         def list_repo_files(self, repo_id, repo_type, revision):
-            return ["datasets/campaign/set_a/meta/episodes.jsonl",
-                    "datasets/campaign/set_a/meta/qc.jsonl"]
+            return [
+                "datasets/campaign/set_a/meta/episodes.jsonl",
+                "datasets/campaign/set_a/meta/qc.jsonl",
+            ]
 
     def fake_download(**kwargs):
         calls.update(kwargs)
         return str(source)
 
-    monkeypatch.setitem(sys.modules, "huggingface_hub", SimpleNamespace(
-        HfApi=FakeApi, hf_hub_download=fake_download))
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        SimpleNamespace(HfApi=FakeApi, hf_hub_download=fake_download),
+    )
     target = tmp_path / "local" / "set_a"
     storage = {"huggingface": {"repo_id": "team/data", "token": "test-token"}}
     result = hf_task_sets.fetch_qc(tmp_path, "set_a", target, storage)
@@ -59,29 +64,36 @@ def test_fetch_qc_selects_configured_path_when_remote_cache_duplicates_set(tmp_p
             return SimpleNamespace(sha="revision-sha")
 
         def list_repo_files(self, repo_id, repo_type, revision):
-            return [f"{cached}/meta/episodes.jsonl",
-                    f"{canonical}/meta/episodes.jsonl",
-                    f"{canonical}/meta/qc.jsonl"]
+            return [
+                f"{cached}/meta/episodes.jsonl",
+                f"{canonical}/meta/episodes.jsonl",
+                f"{canonical}/meta/qc.jsonl",
+            ]
 
     def fake_download(**kwargs):
         downloads.append(kwargs["filename"])
         return str(source)
 
-    monkeypatch.setitem(sys.modules, "huggingface_hub", SimpleNamespace(
-        HfApi=FakeApi, hf_hub_download=fake_download))
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        SimpleNamespace(HfApi=FakeApi, hf_hub_download=fake_download),
+    )
     target = tmp_path / "local" / name
     storage = {"huggingface": {"repo_id": "team/data"}}
-    result = hf_task_sets.fetch_qc(tmp_path, name, target, storage,
-                                    expected_path=canonical)
+    result = hf_task_sets.fetch_qc(tmp_path, name, target, storage, expected_path=canonical)
     assert downloads == [f"{canonical}/meta/qc.jsonl"]
     assert (target / "meta/qc.jsonl").read_bytes() == source.read_bytes()
     assert result["source"] == "qc.jsonl"
-    assert hf_task_sets.dataset_repo_path(FakeApi(None), "team/data", name,
-                                          "revision-sha") == canonical
+    assert (
+        hf_task_sets.dataset_repo_path(FakeApi(None), "team/data", name, "revision-sha")
+        == canonical
+    )
 
 
 def test_fetch_qc_falls_back_to_episode_quality_without_erasing_local_verdict(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     source = tmp_path / "remote_episodes.jsonl"
     source.write_text('{"episode_index": 1, "quality": "yellow", "quality_issues": ["skew"]}\n')
@@ -102,11 +114,16 @@ def test_fetch_qc_falls_back_to_episode_quality_without_erasing_local_verdict(
         def list_repo_files(self, repo_id, repo_type, revision):
             return ["datasets/campaign/set_a/meta/episodes.jsonl"]
 
-    monkeypatch.setitem(sys.modules, "huggingface_hub", SimpleNamespace(
-        HfApi=FakeApi, hf_hub_download=lambda **kwargs: str(source)))
-    result = hf_task_sets.fetch_qc(tmp_path, "set_a", target.parent.parent,
-                                    {"huggingface": {"repo_id": "team/data"}})
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        SimpleNamespace(HfApi=FakeApi, hf_hub_download=lambda **kwargs: str(source)),
+    )
+    result = hf_task_sets.fetch_qc(
+        tmp_path, "set_a", target.parent.parent, {"huggingface": {"repo_id": "team/data"}}
+    )
     import json
+
     rows = [json.loads(line) for line in target.read_text().splitlines()]
     assert rows[0]["quality"] == "yellow"
     assert rows[0]["quality_issues"] == ["skew"]
@@ -118,7 +135,8 @@ def test_fetch_qc_falls_back_to_episode_quality_without_erasing_local_verdict(
 
 
 def test_fetch_qc_reports_unpublished_qc_without_local_canonical_metadata(
-    tmp_path, monkeypatch,
+    tmp_path,
+    monkeypatch,
 ):
     downloads = []
 
@@ -132,11 +150,16 @@ def test_fetch_qc_reports_unpublished_qc_without_local_canonical_metadata(
         def list_repo_files(self, repo_id, repo_type, revision):
             return ["datasets/real_robot/dual_yam/debug_set/meta/episodes.jsonl"]
 
-    monkeypatch.setitem(sys.modules, "huggingface_hub", SimpleNamespace(
-        HfApi=FakeApi, hf_hub_download=lambda **kwargs: downloads.append(kwargs)))
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        SimpleNamespace(HfApi=FakeApi, hf_hub_download=lambda **kwargs: downloads.append(kwargs)),
+    )
     target = tmp_path / "data_collection/datasets/real_robot/dual_yam/debug_set"
     result = hf_task_sets.fetch_qc(
-        tmp_path, "debug_set", target,
+        tmp_path,
+        "debug_set",
+        target,
         {"huggingface": {"repo_id": "team/data"}},
         expected_path="datasets/real_robot/dual_yam/debug_set",
     )
@@ -153,7 +176,7 @@ def test_fetch_assets_copies_only_selected_set_photos(tmp_path, monkeypatch):
     remote = tmp_path / "remote"
     (remote / "assets/object_photos/cup").mkdir(parents=True)
     (remote / "assets/object_photos/bowl").mkdir(parents=True)
-    (remote / "assets/objects.csv").write_text('object_id,photo_dir\nAST-1,cup\nAST-2,bowl\n')
+    (remote / "assets/objects.csv").write_text("object_id,photo_dir\nAST-1,cup\nAST-2,bowl\n")
     (remote / "assets/object_photos/cup/top.png").write_bytes(b"cup photo")
     (remote / "assets/object_photos/bowl/top.png").write_bytes(b"bowl photo")
     downloaded = []
@@ -166,15 +189,21 @@ def test_fetch_assets_copies_only_selected_set_photos(tmp_path, monkeypatch):
             return SimpleNamespace(sha="revision-sha")
 
         def list_repo_files(self, repo_id, repo_type, revision):
-            return ["assets/objects.csv", "assets/object_photos/cup/top.png",
-                    "assets/object_photos/bowl/top.png"]
+            return [
+                "assets/objects.csv",
+                "assets/object_photos/cup/top.png",
+                "assets/object_photos/bowl/top.png",
+            ]
 
     def fake_download(**kwargs):
         downloaded.append(kwargs["filename"])
         return str(remote / kwargs["filename"])
 
-    monkeypatch.setitem(sys.modules, "huggingface_hub", SimpleNamespace(
-        HfApi=FakeApi, hf_hub_download=fake_download))
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        SimpleNamespace(HfApi=FakeApi, hf_hub_download=fake_download),
+    )
     target = tmp_path / "local" / "assets"
     storage = {"huggingface": {"repo_id": "team/data", "token": "test-token"}}
     result = hf_task_sets.fetch_assets(tmp_path, task_set, target, storage)
@@ -205,7 +234,10 @@ def test_publish_dataset_uses_selected_set_remote_path_when_new(tmp_path, monkey
 
     monkeypatch.setitem(sys.modules, "huggingface_hub", SimpleNamespace(HfApi=FakeApi))
     result = hf_task_sets.publish_dataset(
-        tmp_path, dataset, "set_a", {"huggingface": {"repo_id": "team/data"}},
+        tmp_path,
+        dataset,
+        "set_a",
+        {"huggingface": {"repo_id": "team/data"}},
         new_remote_path="datasets/real_robot/dual_yam/set_a",
     )
     assert uploaded["path_in_repo"] == "datasets/real_robot/dual_yam/set_a"
@@ -231,7 +263,10 @@ def test_publish_qc_uploads_only_selected_set_qc_to_configured_path(tmp_path, mo
 
     monkeypatch.setitem(sys.modules, "huggingface_hub", SimpleNamespace(HfApi=FakeApi))
     result = hf_task_sets.publish_qc(
-        tmp_path, dataset, "set_a", {"huggingface": {"repo_id": "team/data"}},
+        tmp_path,
+        dataset,
+        "set_a",
+        {"huggingface": {"repo_id": "team/data"}},
         expected_path="datasets/real_robot/dual_yam/set_a",
     )
     assert uploaded["path_or_fileobj"] == str(dataset / "meta/qc.jsonl")
@@ -261,11 +296,17 @@ def test_fetch_qc_finds_legacy_top_level_qc_for_selected_set(tmp_path, monkeypat
         downloads.append(kwargs["filename"])
         return str(source)
 
-    monkeypatch.setitem(sys.modules, "huggingface_hub", SimpleNamespace(
-        HfApi=FakeApi, hf_hub_download=fake_download))
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        SimpleNamespace(HfApi=FakeApi, hf_hub_download=fake_download),
+    )
     target = tmp_path / "data_collection/datasets/real_robot/dual_yam/debug_set"
     result = hf_task_sets.fetch_qc(
-        tmp_path, name, target, {"huggingface": {"repo_id": "team/data"}},
+        tmp_path,
+        name,
+        target,
+        {"huggingface": {"repo_id": "team/data"}},
         expected_path=canonical,
     )
     assert downloads == [legacy]
@@ -284,10 +325,20 @@ def test_asset_and_task_routes_reject_other_sets(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(server, "_scene_plan_root", lambda cfg, dataset=None: plan)
     fetched = []
-    monkeypatch.setattr(server, "fetch_assets", lambda project, selected, destination, storage:
-                        fetched.append((selected, destination)) or {"set": selected.name})
-    monkeypatch.setattr(server, "fetch_task_set", lambda project, name, destination, storage:
-                        fetched.append((name, destination)) or {"task_set": name})
+    monkeypatch.setattr(
+        server,
+        "fetch_assets",
+        lambda project, selected, destination, storage: (
+            fetched.append((selected, destination)) or {"set": selected.name}
+        ),
+    )
+    monkeypatch.setattr(
+        server,
+        "fetch_task_set",
+        lambda project, name, destination, storage: (
+            fetched.append((name, destination)) or {"task_set": name}
+        ),
+    )
     server.ConsoleRequestHandler._post_hf_assets_download(handler, {"dataset": "set_b"})
     server.ConsoleRequestHandler._post_hf_task_set_sync(handler, {"task_set": "set_b"})
     assert responses == [(409, {"ok": False, "error": "unknown collection set"})] * 2
@@ -301,7 +352,7 @@ def test_asset_and_task_routes_reject_other_sets(tmp_path, monkeypatch):
 def test_dataset_upload_route_names_selected_set_instead_of_raw(tmp_path, monkeypatch):
     plan = tmp_path / "task_sets" / "set_a"
     plan.mkdir(parents=True)
-    (plan / "info.yaml").write_text('collection_dir: datasets/real_robot/dual_yam/set_a\n')
+    (plan / "info.yaml").write_text("collection_dir: datasets/real_robot/dual_yam/set_a\n")
     dataset = tmp_path / "set_a" / "raw"
     dataset.mkdir(parents=True)
     config = ConfigDict(collection=dict(tasks={"set_a": [("task a", 1)]}, storage={}))
@@ -312,6 +363,7 @@ def test_dataset_upload_route_names_selected_set_instead_of_raw(tmp_path, monkey
         _send_json=lambda status, payload: captured.update(response=(status, payload)),
     )
     monkeypatch.setattr(server, "_scene_plan_root", lambda cfg, name=None: plan)
+
     def fake_publish(project, path, name, storage, **kwargs):
         captured.update(path=path, name=name, remote=kwargs["new_remote_path"])
         return {}
@@ -326,8 +378,7 @@ def test_dataset_upload_route_names_selected_set_instead_of_raw(tmp_path, monkey
 def test_qc_download_route_targets_selected_collection_dir_without_raw(tmp_path, monkeypatch):
     plan = tmp_path / "data_collection/task_sets/set_a"
     plan.mkdir(parents=True)
-    (plan / "info.yaml").write_text(
-        "collection_dir: datasets/real_robot/dual_yam/set_a\n")
+    (plan / "info.yaml").write_text("collection_dir: datasets/real_robot/dual_yam/set_a\n")
     config = ConfigDict(collection=dict(tasks={"set_a": [("task a", 1)]}, storage={}))
     captured = {}
     handler = SimpleNamespace(
@@ -342,10 +393,12 @@ def test_qc_download_route_targets_selected_collection_dir_without_raw(tmp_path,
 
     monkeypatch.setattr(server, "fetch_qc", fake_fetch)
     server.ConsoleRequestHandler._post_hf_qc_sync(
-        handler, {"dataset": "set_a", "direction": "download"})
+        handler, {"dataset": "set_a", "direction": "download"}
+    )
     assert captured["name"] == "set_a"
     assert captured["destination"] == (
-        tmp_path / "data_collection/datasets/real_robot/dual_yam/set_a")
+        tmp_path / "data_collection/datasets/real_robot/dual_yam/set_a"
+    )
     assert captured["remote"] == "datasets/real_robot/dual_yam/set_a"
     assert captured["response"][0] == 200
 
@@ -353,8 +406,7 @@ def test_qc_download_route_targets_selected_collection_dir_without_raw(tmp_path,
 def test_qc_upload_route_uses_selected_collection_dir_and_remote_path(tmp_path, monkeypatch):
     plan = tmp_path / "data_collection/task_sets/set_a"
     plan.mkdir(parents=True)
-    (plan / "info.yaml").write_text(
-        "collection_dir: datasets/real_robot/dual_yam/set_a\n")
+    (plan / "info.yaml").write_text("collection_dir: datasets/real_robot/dual_yam/set_a\n")
     config = ConfigDict(collection=dict(tasks={"set_a": [("task a", 1)]}, storage={}))
     captured = {}
     handler = SimpleNamespace(
@@ -369,9 +421,11 @@ def test_qc_upload_route_uses_selected_collection_dir_and_remote_path(tmp_path, 
 
     monkeypatch.setattr(server, "publish_qc", fake_publish)
     server.ConsoleRequestHandler._post_hf_qc_sync(
-        handler, {"dataset": "set_a", "direction": "upload"})
+        handler, {"dataset": "set_a", "direction": "upload"}
+    )
     assert captured["destination"] == (
-        tmp_path / "data_collection/datasets/real_robot/dual_yam/set_a")
+        tmp_path / "data_collection/datasets/real_robot/dual_yam/set_a"
+    )
     assert captured["remote"] == "datasets/real_robot/dual_yam/set_a"
     assert captured["response"][0] == 200
 

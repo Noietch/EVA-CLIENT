@@ -20,7 +20,7 @@ def test_prepare_only_preserves_existing_reverse_and_adopts_new_headset(tmp_path
         "elif [[ $1 == -s && $3 == reverse && $4 == --list ]]; then\n"
         "  [[ $2 == OLD ]] && printf 'UsbFfs tcp:43876 tcp:43876\\n'\n"
         "elif [[ $1 == -s && $3 == reverse ]]; then\n"
-        "  printf '%s\\n' \"$2\" >> \"$MOCK_ADB_ADDS\"\n"
+        '  printf \'%s\\n\' "$2" >> "$MOCK_ADB_ADDS"\n'
         "else exit 1; fi\n"
     )
     adb.chmod(0o755)

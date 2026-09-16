@@ -197,8 +197,12 @@ def test_cli_status_reads_live_state(capsys) -> None:
     runtime.policy = None
     runtime.web_phase = "idle"
     session = SimpleNamespace(
-        status=SimpleNamespace(value="unset"), mode=SimpleNamespace(value="real"),
-        step_index=0, last_infer_ms=0.0, selected_task=None, last_error="",
+        status=SimpleNamespace(value="unset"),
+        mode=SimpleNamespace(value="real"),
+        step_index=0,
+        last_infer_ms=0.0,
+        selected_task=None,
+        last_error="",
     )
     assert _dispatch("status", (config, runtime, session)) == []
     assert "transport=ok" in capsys.readouterr().out

@@ -121,7 +121,9 @@ def _read_episode_history_rows(path: Path, qc_path: Path | None = None) -> list[
         if type(row.get("episode_index")) is int
     }
     canonical_episodes = qc_path.parent / "episodes.jsonl"
-    using_canonical_rows = canonical_episodes.is_file() and canonical_episodes.resolve() != path.resolve()
+    using_canonical_rows = (
+        canonical_episodes.is_file() and canonical_episodes.resolve() != path.resolve()
+    )
     qc_by_capture = {}
     if using_canonical_rows:
         for canonical in _iter_json_objects(canonical_episodes):
@@ -131,11 +133,15 @@ def _read_episode_history_rows(path: Path, qc_path: Path | None = None) -> list[
             identity = _capture_identity(canonical)
             if qc is not None and identity is not None:
                 qc_by_capture[identity] = qc
-    for episode, source in zip(rows, source_rows):
-        qc = (qc_by_capture.get(_capture_identity(source)) if using_canonical_rows
-              else qc_by_episode.get(episode["episode_index"]))
-        if qc is None or (qc.get("slot_id") and episode.get("slot_id")
-                          and qc["slot_id"] != episode["slot_id"]):
+    for episode, source in zip(rows, source_rows, strict=True):
+        qc = (
+            qc_by_capture.get(_capture_identity(source))
+            if using_canonical_rows
+            else qc_by_episode.get(episode["episode_index"])
+        )
+        if qc is None or (
+            qc.get("slot_id") and episode.get("slot_id") and qc["slot_id"] != episode["slot_id"]
+        ):
             # A new take has no QC row yet; its capture quality is authoritative.
             episode.pop("qc_verdict", None)
             continue
@@ -145,8 +151,9 @@ def _read_episode_history_rows(path: Path, qc_path: Path | None = None) -> list[
 
 
 def _capture_identity(row: dict[str, Any]) -> tuple[str, str, str, str] | None:
-    fields = tuple(str(row.get(key) or "") for key in
-                   ("session_id", "started_at", "ended_at", "slot_id"))
+    fields = tuple(
+        str(row.get(key) or "") for key in ("session_id", "started_at", "ended_at", "slot_id")
+    )
     return fields if all(fields) else None
 
 

@@ -213,8 +213,12 @@ class LeRobotDatasetIO:
             return False
         qc_rows = []
         if qc_path.exists():
-            qc_rows = [json.loads(line) for line in qc_path.read_text().splitlines() if line.strip()]
-        qc_row = next((row for row in qc_rows if int(row.get("episode_index", -1)) == episode), None)
+            qc_rows = [
+                json.loads(line) for line in qc_path.read_text().splitlines() if line.strip()
+            ]
+        qc_row = next(
+            (row for row in qc_rows if int(row.get("episode_index", -1)) == episode), None
+        )
         if qc_row is None:
             qc_row = {"episode_index": episode}
             qc_rows.append(qc_row)

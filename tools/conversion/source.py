@@ -31,7 +31,13 @@ class LeRobotV21Source:
             qc_rows = _read_jsonl(qc_path)
             qc_by_episode = {int(row["episode_index"]): row for row in qc_rows}
             for row in self.episode_rows:
-                row.update({key: value for key, value in qc_by_episode.get(int(row["episode_index"]), {}).items() if key != "episode_index"})
+                row.update(
+                    {
+                        key: value
+                        for key, value in qc_by_episode.get(int(row["episode_index"]), {}).items()
+                        if key != "episode_index"
+                    }
+                )
         self.fps = float(self.info["fps"])
         self.chunk_size = int(self.info.get("chunks_size", 1000))
         self.data_path = str(

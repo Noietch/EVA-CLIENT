@@ -322,6 +322,11 @@ class RuntimeState:
     # Shared ConsoleContext, set by start_console_server. The ZMQ control channel reads
     # it so external callers see the exact tab/arm/collect state the web console does.
     console_ctx: Any | None = None
+    # The console server is owned by the current EVA run. Keep the handles here so a
+    # device-selection restart can close the listening socket before execv starts the
+    # replacement process.
+    console_server: Any | None = None
+    console_server_thread: threading.Thread | None = None
     # EVAL-tab INIT panel: when init_qpos is set, the arm's reset target becomes this
     # recorded start pose instead of robot.initial_qpos (home). init_ready latches once
     # the operator clicks DONE, gating RUN until the arm is positioned + gripper set.

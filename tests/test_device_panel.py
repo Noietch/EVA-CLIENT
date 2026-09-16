@@ -94,7 +94,8 @@ const statuses = [
   {processes: {}, ready: {}, operations: {}},
   {processes: {}, ready: {robot: true}, operations: {robot: {id: "robot-1", state: "ready"}}},
   {processes: {robot: null}, ready: {robot: true}, operations: {}},
-  {processes: {robot: null}, ready: {robot: true, teleop: true}, operations: {teleop: {id: "teleop-1", state: "ready"}}},
+  {processes: {robot: null}, ready: {robot: true, teleop: true},
+    operations: {teleop: {id: "teleop-1", state: "ready"}}},
 ];
 let statusIndex = 0;
 const context = vm.createContext({

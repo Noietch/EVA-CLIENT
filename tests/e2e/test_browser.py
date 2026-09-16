@@ -37,13 +37,25 @@ def test_collection_set_selection_stays_on_set_without_active_slot(browser):
     with serve_console(config) as console:
         page = browser.new_page()
         page.route("**/api/camera/**", lambda route: route.abort())
+
         def complete_set(route):
-            route.fulfill(json={
-                "ok": True, "dataset": "pouring_set", "dataset_dir": "",
-                "active": None, "counts": {"complete": 1, "pending": 0, "total": 1},
-                "slots": [], "scenes": [], "tasks": [], "page": 1,
-                "page_count": 1, "filtered_total": 0, "viewer_active": False,
-            })
+            route.fulfill(
+                json={
+                    "ok": True,
+                    "dataset": "pouring_set",
+                    "dataset_dir": "",
+                    "active": None,
+                    "counts": {"complete": 1, "pending": 0, "total": 1},
+                    "slots": [],
+                    "scenes": [],
+                    "tasks": [],
+                    "page": 1,
+                    "page_count": 1,
+                    "filtered_total": 0,
+                    "viewer_active": False,
+                }
+            )
+
         page.route("**/api/collection_slots?dataset=pouring_set*", complete_set)
         try:
             page.goto(f"http://127.0.0.1:{console.port}", wait_until="domcontentloaded")
@@ -62,11 +74,17 @@ def test_data_transfer_buttons_update_existing_progress_bar(browser):
     with serve_console(config) as console:
         page = browser.new_page()
         page.route("**/api/camera/**", lambda route: route.abort())
+
         def complete_qc(route):
             time.sleep(0.35)
-            route.fulfill(json={
-                "ok": True, "source": "qc.jsonl", "path": "/tmp/cup_set/meta/qc.jsonl",
-            })
+            route.fulfill(
+                json={
+                    "ok": True,
+                    "source": "qc.jsonl",
+                    "path": "/tmp/cup_set/meta/qc.jsonl",
+                }
+            )
+
         page.route("**/api/hf/qc/sync", complete_qc)
         try:
             page.goto(f"http://127.0.0.1:{console.port}", wait_until="domcontentloaded")
@@ -90,18 +108,33 @@ def test_data_transfer_buttons_update_existing_progress_bar(browser):
             assert "QC downloaded" in page.locator("#collect-quality-status").inner_text()
             assert "QC downloaded" in page.locator("#collect-transfer-info").inner_text()
             revision = "037034051265b06dbd0aa6ec6b78e6545ed560c5"
-            page.route("**/api/hf/dataset/upload", lambda route: route.fulfill(json={
-                "ok": True, "revision": revision,
-            }))
+            page.route(
+                "**/api/hf/dataset/upload",
+                lambda route: route.fulfill(
+                    json={
+                        "ok": True,
+                        "revision": revision,
+                    }
+                ),
+            )
             page.locator("#b-collect-dataset-upload").click()
-            page.wait_for_function("""revision =>
+            page.wait_for_function(
+                """revision =>
                 document.getElementById('collect-transfer-info').textContent.includes(revision)
-            """, arg=revision)
+            """,
+                arg=revision,
+            )
             assert "cup_set uploaded:" in page.locator("#collect-transfer-info").inner_text()
             page.unroute("**/api/hf/qc/sync", complete_qc)
-            page.route("**/api/hf/qc/sync", lambda route: route.fulfill(json={
-                "ok": False, "error": "upload rejected",
-            }))
+            page.route(
+                "**/api/hf/qc/sync",
+                lambda route: route.fulfill(
+                    json={
+                        "ok": False,
+                        "error": "upload rejected",
+                    }
+                ),
+            )
             page.locator("#b-collect-qc-upload").click()
             page.locator("#collect-dataset-sync-progress-label").get_by_text("ERROR").wait_for()
             assert bar.get_attribute("aria-valuenow") == "0"
@@ -114,13 +147,48 @@ def test_data_transfer_buttons_update_existing_progress_bar(browser):
 def test_dashboard_dataset_manager_selection_transfer_and_navigation(browser):
     config = console_config(collection={"enabled": True})
     config.collection.schema.columns = {"qpos": "observation.qpos", "action_qpos": "action"}
-    state = {"ok": True, "datasets": [
-        {"name": "cup_set", "robot": "dual_yam", "total": 10, "collected": 7, "accept": 2, "fail": 1, "unreviewed": 4},
-        {"name": "pouring_set", "robot": "dual_yam", "total": 20, "collected": 20, "accept": 10, "fail": 0, "unreviewed": 10},
-    ], "remote": {"cup_set": {"checked_at": 1789564586, "episodes": 8, "task_count": 2,
-        "files": 120, "bytes": 1048576, "qc": {"accept": 3, "fail": 1, "unreviewed": 4},
-        "verification": {"data": {"state": "same"}, "task": {"state": "different"}, "qc": {"state": "same"}}},
-        "pouring_set": {"verification": {"data": {"state": "different"}, "task": {"state": "same"}}}}, "job": None}
+    state = {
+        "ok": True,
+        "datasets": [
+            {
+                "name": "cup_set",
+                "robot": "dual_yam",
+                "total": 10,
+                "collected": 7,
+                "accept": 2,
+                "fail": 1,
+                "unreviewed": 4,
+            },
+            {
+                "name": "pouring_set",
+                "robot": "dual_yam",
+                "total": 20,
+                "collected": 20,
+                "accept": 10,
+                "fail": 0,
+                "unreviewed": 10,
+            },
+        ],
+        "remote": {
+            "cup_set": {
+                "checked_at": 1789564586,
+                "episodes": 8,
+                "task_count": 2,
+                "files": 120,
+                "bytes": 1048576,
+                "qc": {"accept": 3, "fail": 1, "unreviewed": 4},
+                "verification": {
+                    "data": {"state": "same"},
+                    "task": {"state": "different"},
+                    "qc": {"state": "same"},
+                },
+            },
+            "pouring_set": {
+                "verification": {"data": {"state": "different"}, "task": {"state": "same"}}
+            },
+        },
+        "job": None,
+    }
     calls = []
     with serve_console(config) as console:
         page = browser.new_page(viewport={"width": 1098, "height": 926})
@@ -130,10 +198,17 @@ def test_dashboard_dataset_manager_selection_transfer_and_navigation(browser):
             if route.request.method == "POST":
                 body = route.request.post_data_json
                 calls.append(body)
-                state["job"] = {"action": body["action"], "state": "done", "total": len(body["datasets"]),
-                                "completed": len(body["datasets"]), "eta": None, "results": [
-                                    {"dataset": n, "ok": i != 0, "error": "simulated failure"}
-                                    for i, n in enumerate(body["datasets"])]}
+                state["job"] = {
+                    "action": body["action"],
+                    "state": "done",
+                    "total": len(body["datasets"]),
+                    "completed": len(body["datasets"]),
+                    "eta": None,
+                    "results": [
+                        {"dataset": n, "ok": i != 0, "error": "simulated failure"}
+                        for i, n in enumerate(body["datasets"])
+                    ],
+                }
             route.fulfill(json=state)
 
         page.route("**/api/dataset_manager**", manager)
@@ -172,7 +247,9 @@ def test_dashboard_dataset_manager_selection_transfer_and_navigation(browser):
             assert page.locator('[data-dm-action="verify"]').count() == 0
             for action in ("upload_qc", "upload_data", "upload_task", "download_task"):
                 page.locator(f'[data-dm-action="{action}"]').click()
-                page.wait_for_function("document.getElementById('dm-rows').textContent.includes('simulated failure')")
+                page.wait_for_function(
+                    "document.getElementById('dm-rows').textContent.includes('simulated failure')"
+                )
                 assert calls[-1] == {"action": action, "datasets": ["cup_set"]}
             page.locator("#dm-search").fill("")
             assert page.locator("#dm-select-all").get_attribute("aria-pressed") == "false"
@@ -181,29 +258,37 @@ def test_dashboard_dataset_manager_selection_transfer_and_navigation(browser):
             page.locator("#dm-search").fill("cup")
             page.locator("#dm-select-all").click()
             page.locator("#dm-search").fill("")
-            assert page.locator('[data-dm-row="pouring_set"]').get_attribute("aria-selected") == "true"
+            assert (
+                page.locator('[data-dm-row="pouring_set"]').get_attribute("aria-selected") == "true"
+            )
             assert row.get_attribute("aria-selected") == "false"
             page.locator("#dm-clear").click()
             assert page.locator("#dm-rows tr.dm-selected").count() == 0
             row.locator("td").nth(2).click()
             page.locator("#dm-sort").select_option("progress")
-            assert page.locator("#dm-rows tr").first.locator(".dm-name").inner_text() == "pouring_set"
-            assert page.locator('.dm-table thead tr').count() == 2
+            assert (
+                page.locator("#dm-rows tr").first.locator(".dm-name").inner_text() == "pouring_set"
+            )
+            assert page.locator(".dm-table thead tr").count() == 2
             for key in ("collected", "total", "accept", "unreviewed"):
                 header = page.locator(f'[data-dm-sort="{key}"]')
                 header.click()
-                assert header.locator('..').get_attribute('aria-sort') == 'ascending'
-                assert page.locator('#dm-rows tr').first.get_attribute('data-dm-row') == 'cup_set'
+                assert header.locator("..").get_attribute("aria-sort") == "ascending"
+                assert page.locator("#dm-rows tr").first.get_attribute("data-dm-row") == "cup_set"
                 header.click()
-                assert header.locator('..').get_attribute('aria-sort') == 'descending'
-                assert page.locator('#dm-rows tr').first.get_attribute('data-dm-row') == 'pouring_set'
+                assert header.locator("..").get_attribute("aria-sort") == "descending"
+                assert (
+                    page.locator("#dm-rows tr").first.get_attribute("data-dm-row") == "pouring_set"
+                )
             cloud_header = page.locator('[data-dm-sort="cloud_episodes"]')
-            for direction in ('ascending', 'descending'):
+            for direction in ("ascending", "descending"):
                 cloud_header.click()
-                assert cloud_header.locator('..').get_attribute('aria-sort') == direction
-                assert page.locator('#dm-rows tr').first.get_attribute('data-dm-row') == 'cup_set'
+                assert cloud_header.locator("..").get_attribute("aria-sort") == direction
+                assert page.locator("#dm-rows tr").first.get_attribute("data-dm-row") == "cup_set"
             page.locator("#dm-refresh").click()
-            page.wait_for_function("document.getElementById('dm-status').textContent.includes('刷新云端')")
+            page.wait_for_function(
+                "document.getElementById('dm-status').textContent.includes('刷新云端')"
+            )
             assert set(calls[-1]["datasets"]) == {"cup_set", "pouring_set"}
             for key, first, second in (
                 ("verify_data", "cup_set", "pouring_set"),
@@ -212,12 +297,12 @@ def test_dashboard_dataset_manager_selection_transfer_and_navigation(browser):
             ):
                 header = page.locator(f'[data-dm-sort="{key}"]')
                 header.click()
-                assert header.locator('..').get_attribute('aria-sort') == 'ascending'
-                assert page.locator('#dm-sort').input_value() == f'{key}-asc'
-                assert page.locator('#dm-rows tr').first.get_attribute('data-dm-row') == first
+                assert header.locator("..").get_attribute("aria-sort") == "ascending"
+                assert page.locator("#dm-sort").input_value() == f"{key}-asc"
+                assert page.locator("#dm-rows tr").first.get_attribute("data-dm-row") == first
                 header.click()
-                assert header.locator('..').get_attribute('aria-sort') == 'descending'
-                assert page.locator('#dm-rows tr').first.get_attribute('data-dm-row') == second
+                assert header.locator("..").get_attribute("aria-sort") == "descending"
+                assert page.locator("#dm-rows tr").first.get_attribute("data-dm-row") == second
             page.locator(".dashboard-demand-section").scroll_into_view_if_needed()
             page.screenshot(path="/tmp/eva-dataset-manager-desktop.png")
             page.set_viewport_size({"width": 390, "height": 844})
@@ -225,8 +310,12 @@ def test_dashboard_dataset_manager_selection_transfer_and_navigation(browser):
             page.screenshot(path="/tmp/eva-dataset-manager-mobile.png")
             page.set_viewport_size({"width": 1098, "height": 926})
             page.locator('[data-dm-open="cup_set"]').click()
-            page.wait_for_function("document.getElementById('collect-set-list').value === 'cup_set'")
-            assert page.locator("button[data-tab=collect]").get_attribute("class").find("active") >= 0
+            page.wait_for_function(
+                "document.getElementById('collect-set-list').value === 'cup_set'"
+            )
+            assert (
+                page.locator("button[data-tab=collect]").get_attribute("class").find("active") >= 0
+            )
             assert not errors, errors
         finally:
             page.close()
@@ -248,12 +337,37 @@ def test_dashboard_parallel_jobs_have_independent_stop_controls(browser):
                 if body["action"] == "stop":
                     next(job for job in jobs if job["id"] == body["job_id"])["state"] = "stopped"
                 else:
-                    jobs.append({"id": str(len(jobs)), "action": body["action"], "state": "running",
-                                 "completed": 0, "total": 1, "current": body["datasets"][0],
-                                 "results": [], "eta": None})
-            route.fulfill(json={"ok": True, "datasets": [{"name": "cup_set", "robot": "dual_yam",
-                                "collected": 0, "total": 10, "accept": 0, "fail": 0, "unreviewed": 0}],
-                                "remote": {}, "jobs": jobs, "job": jobs[-1] if jobs else None})
+                    jobs.append(
+                        {
+                            "id": str(len(jobs)),
+                            "action": body["action"],
+                            "state": "running",
+                            "completed": 0,
+                            "total": 1,
+                            "current": body["datasets"][0],
+                            "results": [],
+                            "eta": None,
+                        }
+                    )
+            route.fulfill(
+                json={
+                    "ok": True,
+                    "datasets": [
+                        {
+                            "name": "cup_set",
+                            "robot": "dual_yam",
+                            "collected": 0,
+                            "total": 10,
+                            "accept": 0,
+                            "fail": 0,
+                            "unreviewed": 0,
+                        }
+                    ],
+                    "remote": {},
+                    "jobs": jobs,
+                    "job": jobs[-1] if jobs else None,
+                }
+            )
 
         page.route("**/api/dataset_manager**", manager)
         try:
@@ -262,19 +376,28 @@ def test_dashboard_parallel_jobs_have_independent_stop_controls(browser):
             page.locator('[data-dm-select="cup_set"]').check()
             page.locator('[data-dm-action="upload_data"]').click()
             page.locator('[data-dm-job="0"]').wait_for()
-            assert page.locator('#dm-refresh').is_enabled()
-            page.locator('#dm-refresh').click()
+            assert page.locator("#dm-refresh").is_enabled()
+            page.locator("#dm-refresh").click()
             page.locator('[data-dm-job="1"]').wait_for()
-            assert page.locator('#dm-jobs progress').count() == 2
+            assert page.locator("#dm-jobs progress").count() == 2
             page.locator('[data-dm-stop="0"]').click()
             page.locator('[data-dm-job="0"]').wait_for(state="detached")
             assert requests[-1] == {"action": "stop", "job_id": "0"}
             assert page.locator('[data-dm-stop="1"]').is_enabled()
             assert jobs[1]["state"] == "running"
             jobs[0]["results"] = [{"dataset": "cup_set", "ok": False, "error": "offline"}]
-            jobs.append({"id": "3", "action": "upload_qc", "state": "done",
-                         "completed": 1, "total": 1, "current": "", "eta": None,
-                         "results": [{"dataset": "cup_set", "ok": False, "error": "offline"}]})
+            jobs.append(
+                {
+                    "id": "3",
+                    "action": "upload_qc",
+                    "state": "done",
+                    "completed": 1,
+                    "total": 1,
+                    "current": "",
+                    "eta": None,
+                    "results": [{"dataset": "cup_set", "ok": False, "error": "offline"}],
+                }
+            )
             jobs[1]["results"] = [{"dataset": "cup_set", "ok": False, "error": "mismatch"}]
             first_details = page.locator('[data-dm-job="3"] details')
             second_details = page.locator('[data-dm-job="1"] details')
@@ -289,9 +412,18 @@ def test_dashboard_parallel_jobs_have_independent_stop_controls(browser):
             page.wait_for_timeout(2200)
             assert not first_details.evaluate("el => el.open")
             assert second_details.evaluate("el => el.open")
-            jobs.append({"id": "2", "action": "upload_task", "state": "done",
-                         "completed": 1, "total": 1, "current": "", "eta": None,
-                         "results": [{"dataset": "cup_set", "ok": True}]})
+            jobs.append(
+                {
+                    "id": "2",
+                    "action": "upload_task",
+                    "state": "done",
+                    "completed": 1,
+                    "total": 1,
+                    "current": "",
+                    "eta": None,
+                    "results": [{"dataset": "cup_set", "ok": True}],
+                }
+            )
             jobs[1]["state"] = "done"
             page.wait_for_function("!document.querySelector('[data-dm-stop=\"1\"]')")
             assert page.locator('[data-dm-job="2"]').count() == 0
@@ -306,8 +438,11 @@ def test_dashboard_parallel_jobs_have_independent_stop_controls(browser):
 
 def test_collection_activation_preserves_review_cursor(browser):
     source = (REPOSITORY_ROOT / "src/core/app/console/static/js/collect.js").read_text()
-    activation = source[source.index("async function activateCollectionSlot("):
-                        source.index("async function pollCollectionSlots(")]
+    activation = source[
+        source.index("async function activateCollectionSlot(") : source.index(
+            "async function pollCollectionSlots("
+        )
+    ]
     page = browser.new_page()
     try:
         page.evaluate("""() => {
@@ -322,7 +457,10 @@ def test_collection_activation_preserves_review_cursor(browser):
         page.add_script_tag(content=activation)
         page.evaluate("activateCollectionSlot({slot_id: 'capture', dataset: 'set', task: 'task'})")
         assert page.evaluate("S.collectionSlots.selectedSlotId") == "review"
-        page.evaluate("activateCollectionSlot({slot_id: 'chosen', dataset: 'set', task: 'task'}, {manual: true})")
+        page.evaluate(
+            "activateCollectionSlot({slot_id: 'chosen', dataset: 'set', task: 'task'}, "
+            "{manual: true})"
+        )
         assert page.evaluate("S.collectionSlots.selectedSlotId") == "chosen"
     finally:
         page.close()
@@ -335,13 +473,14 @@ def test_collection_slot_click_selects_and_double_click_previews(browser, tmp_pa
     renderer = source[
         source.index("function renderCollectTiles(") : source.index("function pipeBadge(")
     ]
-    helpers = source[
-        source.index("function collectQcState(") : source.index("function collectTone(")
-    ] + source[
-        source.index("let collectionReviewSeen = null;") : source.index(
-            "function clickCollectionReviewSlot("
-        )
-    ]
+    helpers = (
+        source[source.index("function collectQcState(") : source.index("function collectTone(")]
+        + source[
+            source.index("let collectionReviewSeen = null;") : source.index(
+                "function clickCollectionReviewSlot("
+            )
+        ]
+    )
     page = browser.new_page()
     try:
         page.set_content('<div id="collect-queue-tiles"></div>')
@@ -388,12 +527,14 @@ def test_collection_slot_click_selects_and_double_click_previews(browser, tmp_pa
         dataset_page = browser.new_page()
         try:
             states = ["unreviewed", "failed", "passed", "pending"]
-            dataset_page.set_content('<div class="collection-slot-grid">' + "".join(
-                f'<button class="slot-tile {state}">1</button>' for state in states
-            ) + '</div>')
-            dataset_page.add_style_tag(path=str(
-                Path(__file__).resolve().parents[2] / "tools/datasets/static/editor.css"
-            ))
+            dataset_page.set_content(
+                '<div class="collection-slot-grid">'
+                + "".join(f'<button class="slot-tile {state}">1</button>' for state in states)
+                + "</div>"
+            )
+            dataset_page.add_style_tag(
+                path=str(Path(__file__).resolve().parents[2] / "tools/datasets/static/editor.css")
+            )
             colors = """el => {
                 const css = getComputedStyle(el);
                 return [css.backgroundColor, css.borderColor, css.color];
@@ -818,14 +959,41 @@ def test_collection_displays_four_qc_states(browser):
         page = browser.new_page()
         page.route("**/api/camera/**", lambda route: route.abort())
         states = ["pending", "unreviewed", "passed", "failed"]
-        page.route("**/api/collection_slots?*", lambda route: route.fulfill(json={
-            "ok": True, "dataset": "cup_set", "dataset_dir": "", "active": None,
-            "counts": {"total": 4, "passed": 1, "unreviewed": 1, "failed": 1, "qc_pending": 1},
-            "slots": [{"slot_id": str(i), "ordinal": i, "dataset": "cup_set",
-                       "state": "pending", "qc_state": state, "round_index": 0, "round_total": 1}
-                      for i, state in enumerate(states)],
-            "scenes": [], "tasks": [], "page": 1, "page_count": 1, "filtered_total": 4,
-        }))
+        page.route(
+            "**/api/collection_slots?*",
+            lambda route: route.fulfill(
+                json={
+                    "ok": True,
+                    "dataset": "cup_set",
+                    "dataset_dir": "",
+                    "active": None,
+                    "counts": {
+                        "total": 4,
+                        "passed": 1,
+                        "unreviewed": 1,
+                        "failed": 1,
+                        "qc_pending": 1,
+                    },
+                    "slots": [
+                        {
+                            "slot_id": str(i),
+                            "ordinal": i,
+                            "dataset": "cup_set",
+                            "state": "pending",
+                            "qc_state": state,
+                            "round_index": 0,
+                            "round_total": 1,
+                        }
+                        for i, state in enumerate(states)
+                    ],
+                    "scenes": [],
+                    "tasks": [],
+                    "page": 1,
+                    "page_count": 1,
+                    "filtered_total": 4,
+                }
+            ),
+        )
         try:
             page.goto(f"http://127.0.0.1:{console.port}", wait_until="domcontentloaded")
             page.locator("button[data-tab=collect]").click()
