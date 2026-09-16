@@ -358,8 +358,10 @@ function collectInputSourceSuffix(status) {
     if (!teleopCfg || teleopCfg.control_source !== "client" || !teleopCfg.client_type) return "";
     const label = TELEOP_CLIENT_LABELS[teleopCfg.client_type] || "INPUT";
     const teleop = status && status.teleop;
-    const faulted = !!(teleop && (teleop.last_fault || teleop.source_error));
-    const state = faulted ? "ERROR" : (teleop && teleop.connected ? "LINKED" : "DOWN");
+    // Keep transport health separate from execution faults. An IK rejection can
+    // stop one robot tick while the VR socket and input stream remain healthy.
+    const sourceFaulted = !!(teleop && teleop.source_error);
+    const state = sourceFaulted ? "ERROR" : (teleop && teleop.connected ? "LINKED" : "DOWN");
     const stateClass = state === "LINKED" ? "linked" : (state === "DOWN" ? "down" : "error");
     let suffix = ` | <span class="vr-input-status ${stateClass}">${label} ${state}</span>`;
     if (teleopCfg.client_type === "vr_webxr") {

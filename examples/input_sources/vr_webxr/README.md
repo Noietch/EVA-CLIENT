@@ -41,13 +41,51 @@ When ARM is OFF or teleop is reset, the client clears the accumulated deltas
 and reference poses for both hands. After each grip long-press toggle, the node
 sends a short haptic feedback signal for the corresponding controller to the
 WebXR page. The actual vibration effect depends on WebXR Gamepad haptics support
-in the device browser.
+in the device browser. The PICO launcher opens the page explicitly in Wolvic,
+whose OpenXR backend includes WebXR haptic support.
 
 The right-hand B button (WebXR gamepad button 5) emits the `arm_toggle` event
 immediately on press, once per press; `client/app` still owns the global ARM
 state.
 Pressing B does not calibrate the controllers. Grip authorization and the
 B-button ARM state are independent data streams.
+
+## Native PICO client
+
+统一启动和安装说明见 [`../eva-pico/README.md`](../eva-pico/README.md)。
+
+WebXR is only one transport. The standalone [EVA-VR repository](https://github.com/Noietch/EVA-VR)
+is a native OpenXR APK named **EVA-VR**. Source: [github.com/Noietch/EVA-VR](https://github.com/Noietch/EVA-VR); direct APK: [latest release](https://github.com/Noietch/EVA-VR/releases/latest). It connects to the same
+WebSocket endpoint, sends the same `frame` payload, and handles `haptic`
+messages through the native PICO/OpenXR action. Mac and Linux can run the
+unchanged EVA server.
+
+The native client sends messages in this shape:
+
+```json
+{
+  "type": "frame",
+  "version": 1,
+  "seq": 42,
+  "client_time_ms": 1234567890,
+  "reference_space": "local-floor",
+  "controllers": {
+    "left": {"valid": true, "position": [0, 0, 0], "orientation_xyzw": [0, 0, 0, 1], "buttons": [], "axes": [], "profiles": ["pico-4-ultra"]},
+    "right": {"valid": true, "position": [0, 0, 0], "orientation_xyzw": [0, 0, 0, 1], "buttons": [], "axes": [], "profiles": ["pico-4-ultra"]}
+  }
+}
+```
+
+EVA sends a haptic request only for an explicit response or haptic event;
+ordinary `frame` messages do not vibrate the controller. The wire message is:
+
+
+```json
+{"type":"haptic","hand":"left","intensity":0.6,"duration_ms":80}
+```
+
+Only the native PICO APK handles device-specific vibration. The WebSocket
+server remains portable across Mac and Linux.
 
 ## Ubuntu Port Forwarding
 
@@ -98,5 +136,14 @@ VR_URL="http://127.0.0.1:43876/?token=<TOKEN_FROM_NODE_LOG>&mode=ar&reload=$(dat
 adb -s "$PICO_SERIAL" shell "am start -S -a android.intent.action.VIEW -d '$VR_URL'"
 ```
 
-After opening the page, click `ENTER MR`. The example uses `127.0.0.1` through
-SSH/ADB. Directly accessing the node through a remote IP requires HTTPS/WSS.
+After opening the page, click `ENTER MR`. The launcher targets the mainland
+Wolvic package `com.cn.igalia.wolvic` and activity
+`com.igalia.wolvic.VRBrowserActivity`. For an overseas Wolvic build, override
+the package if needed:
+
+```bash
+WOLVIC_PACKAGE=com.igalia.wolvic ./examples/input_sources/vr_webxr/open_pico.sh
+```
+
+The example uses `127.0.0.1` through SSH/ADB. Directly accessing the node
+through a remote IP requires HTTPS/WSS.

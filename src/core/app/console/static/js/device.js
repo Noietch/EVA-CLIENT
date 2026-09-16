@@ -73,15 +73,6 @@ class DevicePanel {
         pico.title = "Open WebXR on the headset";
         pico.onclick = () => this.openPico();
         actions.append(pico);
-      } else if (kind === "teleop" && selected.teleop === "eva_pico") {
-        const pico = document.createElement("button");
-        pico.id = "device-connect-pico";
-        pico.type = "button";
-        pico.className = "btn primary";
-        pico.textContent = "Connect PICO";
-        pico.title = "Start the native PICO input and connect it over ADB";
-        pico.onclick = () => this.connectPico();
-        actions.append(pico);
       }
       row.append(label, select, actions);
       $("device-selections").append(row);

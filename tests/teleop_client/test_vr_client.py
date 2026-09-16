@@ -127,6 +127,26 @@ def test_client_result_token_rejects_reset_disconnect_and_source_timeout(monkeyp
     assert not client.validate_result(fresh)
 
 
+def test_client_queues_explicit_host_haptic_without_motion_feedback() -> None:
+    client = _client()
+    client._ingest(json.dumps(_frame(squeeze=0.0)).encode())
+
+    assert client.send_haptic(hand="right", intensity=0.35, duration_ms=70.0) is True
+    message = client._ack_queue.get_nowait()
+
+    assert message["type"] == "haptic"
+    assert message["session_id"] == "s"
+    assert message["hand"] == "right"
+    assert message["intensity"] == pytest.approx(0.35)
+    assert message["duration_ms"] == pytest.approx(70.0)
+
+
+def test_client_reports_haptic_delivery_only_when_a_vr_session_is_live() -> None:
+    client = _client()
+
+    assert client.send_haptic(hand="right", intensity=0.35, duration_ms=70.0) is False
+
+
 def test_client_connection_requires_fresh_vr_frames(monkeypatch) -> None:
     clock = [10.0]
     monkeypatch.setattr(vr_client_module.time, "monotonic", lambda: clock[0])
@@ -300,6 +320,13 @@ def test_external_zmq_bridge_reaches_vr_client() -> None:
         assert ack["session_id"] == "wire-session"
         assert ack["event_id"] == 0
         assert ack["accepted"] is True
+        client.send_haptic(hand="right", intensity=0.35, duration_ms=70.0)
+        haptic = bridge.acknowledgements.get(timeout=3.0)
+        assert haptic["type"] == "haptic"
+        assert haptic["session_id"] == "wire-session"
+        assert haptic["hand"] == "right"
+        assert haptic["intensity"] == pytest.approx(0.35)
+        assert haptic["duration_ms"] == pytest.approx(70.0)
     finally:
         client.close()
         bridge.close()

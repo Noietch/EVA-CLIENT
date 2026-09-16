@@ -5,7 +5,7 @@ robot:
     repeat:
     - follower_can
     launch:
-      python: examples/hardware/yam/.venv/bin/python
+      python: .venv/bin/python
       module: examples.hardware.yam.node
       fixed:
       - --idle-mode

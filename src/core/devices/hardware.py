@@ -82,12 +82,17 @@ class HardwareCatalog:
                         device: Config._merge_a_into_b(values, templates[kind].get(device, {}))
                         for device, values in device_specs.items()
                     }
+                    if kind == "teleop" and "vr_webxr" in options and "eva_pico" not in options:
+                        options["eva_pico"] = Config._merge_a_into_b(
+                            copy.deepcopy(templates[kind].get("eva_pico", {})),
+                            options["vr_webxr"],
+                        )
                     if kind == "teleop":
                         modes = [option.get("operation") for option in options.values()]
                         if not modes or any(mode not in {"vr", "leader"} for mode in modes):
                             raise ValueError(f"{path}: Operation must be VR or Leader")
-                        if len(set(modes)) != len(modes):
-                            raise ValueError(f"{path}: Declare at most one adapter per Operation")
+                        if modes.count("leader") > 1:
+                            raise ValueError(f"{path}: Declare at most one leader adapter")
                         if spec["defaults"]["teleop"] not in options:
                             raise ValueError(f"{path}: Default Operation must be supported")
                     spec[kind] = list(options)

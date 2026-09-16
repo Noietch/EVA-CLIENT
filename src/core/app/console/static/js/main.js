@@ -261,11 +261,24 @@ async function openCollectRobotReplay() {
 
 "use strict";
 
+async function waitForBootApi(path) {
+    for (;;) {
+      try {
+        return await apiGet(path, { timeoutMs: 2000 });
+      } catch (error) {
+        // The browser can be opened a moment before EVA finishes binding the
+        // console port, or while the process is restarting. Keep boot pending
+        // and recover automatically instead of leaving a permanent spinner.
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+    }
+  }
+
 // Expose handlers referenced by inline on* attributes in index.html.
 Object.assign(window, { tpToggle, tpSeek, trialPopClose, replayToggle });
 
 async function boot() {
-    S.CFG = await apiGet("/api/config");
+    S.CFG = await waitForBootApi("/api/config");
     try {
       S.SCENE_PLAN = await apiGet("/api/scene_plan");
     } catch {
@@ -278,7 +291,7 @@ async function boot() {
     // EVAL/RESULT use inline onclick handlers; expose them.
     window.tpToggle = tpToggle; window.tpSeek = tpSeek;
     window.trialPopClose = trialPopClose;
-    const s = await apiGet("/api/status");
+    const s = await waitForBootApi("/api/status");
     applyStatus(s);
     renderRlStatus(s);
     if (!collectConfigured()) {

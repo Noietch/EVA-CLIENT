@@ -20,7 +20,7 @@ The native path uses ADB reverse for a USB-connected PICO or a LAN URL.
 在 `EVA-CLIENT` 根目录启动：
 
 ```bash
-cd /Users/yhq/Workspace/EVA-CLIENT
+cd /path/to/EVA-CLIENT
 source .venv/bin/activate
 
 python examples/input_sources/vr_webxr/node.py \
@@ -37,25 +37,36 @@ python examples/input_sources/vr_webxr/node.py \
 python examples/input_sources/vr_webxr/node.py \
   --host 0.0.0.0 \
   --port 43876 \
-  --token YOUR_TOKEN \
+  --token eva \
   --endpoint tcp://127.0.0.1:8765 \
   --ack-endpoint tcp://127.0.0.1:8766
 ```
 
-The native client uses the fixed host token `eva`.
+The native client uses the fixed development token `eva`. Restrict access to
+port `43876` when the node listens on `0.0.0.0`.
 
-## One-Click Native Start
+## Native Start
 
-The device service uses `eva_pico` as the native teleop option. After selecting
-Robot, `EVA-VR (PICO)`, and a camera in the Device panel, press Start once. The
-service starts the WebSocket node, establishes ADB reverse, and launches the
-installed `org.eva.pico.input` APK.
+The device service uses `eva_pico` as the native teleop option. Select
+`EVA-VR (PICO)` in the Devices page and press the Operation `Start` button. This
+starts the host WebSocket node and best-effort local USB ADB reverse forwarding.
+Then open the installed `org.eva.pico.input` APK on the headset yourself. The
+robot still has its own explicit Start control.
 
-The same launcher can be used directly:
+The WebXR option is unchanged: it still uses the device Start control and the
+`WebXR` button in the Devices page.
+
+The launcher can still be used directly when needed:
 
 ```bash
 PICO_SERIAL="$(adb devices | awk 'NR==2 && $2=="device" {print $1}')" \
-  examples/input_sources/eva-pico/start.sh --launch-only
+examples/input_sources/eva-pico/start.sh --launch-only
+```
+
+To prepare only USB forwarding without launching the APK:
+
+```bash
+examples/input_sources/eva-pico/start.sh --prepare-only
 ```
 
 The app connects to:
@@ -124,7 +135,7 @@ adb reverse tcp:43876 tcp:43876
 adb shell am force-stop org.eva.pico.input
 adb shell am start -n org.eva.pico.input/.MainActivity \
   --es server_url \
-  'ws://127.0.0.1:43876/ws?token=YOUR_TOKEN'
+  'ws://127.0.0.1:43876/ws?token=eva'
 ```
 
 查看连接和震动日志：
@@ -153,7 +164,7 @@ EVA-VR haptic hand=1 amplitude=1.00 duration_ms=300 result=XR_SUCCESS
 ```bash
 adb shell am start -n org.eva.pico.input/.MainActivity \
   --es server_url \
-  'ws://192.168.1.20:43876/ws?token=YOUR_TOKEN'
+  'ws://192.168.1.20:43876/ws?token=eva'
 ```
 
 如果连接失败，检查主机防火墙是否放行 TCP `43876`，并确认 node 使用了

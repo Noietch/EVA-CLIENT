@@ -759,8 +759,28 @@ def acknowledge_teleop_event(
     message: str,
 ) -> None:
     client = getattr(runtime, "teleop_client", None)
-    if client is not None:
-        client.acknowledge_event(event, accepted=accepted, message=message)
+    if client is None:
+        return
+    client.acknowledge_event(event, accepted=accepted, message=message)
+
+
+def send_teleop_haptic(
+    runtime: RuntimeState,
+    *,
+    hand: str,
+    intensity: float,
+    duration_ms: float,
+) -> bool:
+    """Send one explicit host-side haptic request to the active VR client."""
+    client = getattr(runtime, "teleop_client", None)
+    send_haptic = None if client is None else getattr(client, "send_haptic", None)
+    if send_haptic is None:
+        return False
+    result = send_haptic(hand=hand, intensity=intensity, duration_ms=duration_ms)
+    # Older/custom teleop clients may implement the original None-returning method;
+    # treat a non-False return as accepted while allowing VrTeleopClient to report
+    # that the headset is currently disconnected.
+    return result is not False
 
 
 def teleop_status(runtime: RuntimeState) -> dict[str, object] | None:
@@ -798,6 +818,7 @@ __all__ = [
     "TeleopExecutionState",
     "PublishedTeleopAction",
     "acknowledge_teleop_event",
+    "send_teleop_haptic",
     "activate_teleop",
     "activate_rollout_teleop",
     "close_teleop",
