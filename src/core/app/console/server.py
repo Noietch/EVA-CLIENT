@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import concurrent.futures
 import copy
-import csv
 import dataclasses
 import datetime as _dt
 import gzip
@@ -80,6 +79,7 @@ from core.utils.dataset_upload import (
     upload_dataset_directory,
 )
 from core.utils.lerobot import LeRobotDatasetIO
+from core.utils.scene_plan import read_plan_csv, read_plan_yaml, scene_plan_from_dir
 from core.utils.upload_plan import UploadProgress
 from tools.conversion import (
     DATASET_EXPORT_FORMATS,
@@ -999,70 +999,9 @@ def _scene_plan_root(config: ConfigDict | None = None, dataset: str | None = Non
     return cwd_root if has_canonical_plan else repo_root
 
 
-def _read_scene_plan_csv(root: Path, filename: str) -> list[dict[str, str]]:
-    path = root / filename
-    if not path.is_file():
-        return []
-    try:
-        with path.open("r", encoding="utf-8-sig", newline="") as handle:
-            return [dict(row) for row in csv.DictReader(handle)]
-    except (OSError, UnicodeError, csv.Error) as exc:
-        logger.warning("Unable to read scene plan %s: %s", path, exc)
-        return []
-
-
-def _read_scene_plan_yaml(root: Path, filename: str) -> dict[str, Any]:
-    path = root / filename
-    if not path.is_file():
-        return {}
-    try:
-        with path.open("r", encoding="utf-8") as handle:
-            payload = yaml.safe_load(handle)
-        return payload if isinstance(payload, dict) else {}
-    except (OSError, UnicodeError, yaml.YAMLError) as exc:
-        logger.warning("Unable to read scene plan %s: %s", path, exc)
-        return {}
-
-
-def _optional_scene_float(value: Any) -> float | None:
-    try:
-        text = "" if value is None else str(value).strip()
-        return float(text) if text else None
-    except (TypeError, ValueError):
-        return None
-
-
-def _scene_plan_placements(value: Any) -> list[dict[str, Any]]:
-    try:
-        payload = json.loads(str(value or "[]"))
-    except (TypeError, ValueError, json.JSONDecodeError) as exc:
-        logger.warning("Invalid scene placements JSON: %s", exc)
-        return []
-    if not isinstance(payload, list):
-        return []
-    placements = []
-    for item in payload:
-        if not isinstance(item, dict):
-            continue
-        object_id = str(item.get("object_id", "") or "").strip()
-        position_ids = item.get("position_ids")
-        if not object_id or not isinstance(position_ids, list):
-            continue
-        position_ids = [str(position_id or "").strip() for position_id in position_ids]
-        position_ids = [position_id for position_id in position_ids if position_id]
-        if position_ids:
-            placements.append(
-                {
-                    "position_ids": position_ids,
-                    "object_id": object_id,
-                }
-            )
-    return placements
-
-
 def _scene_plan_signature(root: Path) -> tuple[Any, ...]:
     signature: list[Any] = [str(root)]
-    info = _read_scene_plan_yaml(root, "info.yaml")
+    info = read_plan_yaml(root, "info.yaml")
     objects_file = str(info.get("objects_file", "objects.csv") or "objects.csv")
     paths = [root / name for name in ("info.yaml", "tasks.csv", "scene.csv", "layout.yaml")]
     paths.append(root / objects_file)
@@ -1075,194 +1014,16 @@ def _scene_plan_signature(root: Path) -> tuple[Any, ...]:
     return tuple(signature)
 
 
-def _scene_plan_positions(layout_doc: dict[str, Any]) -> list[dict[str, Any]]:
-    positions = []
-    unit = str(layout_doc.get("unit", "") or "")
-    frame = str(layout_doc.get("coordinate_frame", "") or "")
-    status = str(layout_doc.get("calibration_status", "unverified") or "unverified")
-    for point in layout_doc.get("sampling_points", []):
-        if not isinstance(point, dict):
-            continue
-        position_id = str(point.get("position_id", point.get("id", "")) or "").strip()
-        if not position_id:
-            continue
-        positions.append(
-            {
-                "position_id": position_id,
-                "x": _optional_scene_float(point.get("x")),
-                "y": _optional_scene_float(point.get("y")),
-                "unit": str(point.get("unit", unit) or unit),
-                "coordinate_frame": str(point.get("coordinate_frame", frame) or frame),
-                "calibration_status": str(point.get("calibration_status", status) or status),
-            }
-        )
-    return positions
-
-
-def _scene_plan_objects(root: Path) -> dict[str, dict[str, Any]]:
-    payload = {}
-    info = _read_scene_plan_yaml(root, "info.yaml")
-    objects_file = str(info.get("objects_file", "objects.csv") or "objects.csv")
-    objects_path = (root / objects_file).resolve()
-    photo_root = objects_path.parent / "object_photos"
-    for row in _read_scene_plan_csv(root, objects_file):
-        object_id = str(row.get("object_id") or row.get("物品代码") or "").strip()
-        if not object_id:
-            continue
-        photo_dir = str(
-            row.get("photo_dir") or row.get("照片目录") or row.get("名称") or ""
-        ).strip()
-        photos = sorted((photo_root / photo_dir).glob("*")) if photo_dir else []
-        photo = next(
-            (
-                path
-                for path in photos
-                if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}
-            ),
-            None,
-        )
-        payload[object_id] = {
-            "object_id": object_id,
-            "name": str(
-                row.get("object_name_zh") or row.get("名称") or row.get("object_name") or object_id
-            ),
-            "name_zh": str(row.get("object_name_zh") or row.get("名称") or ""),
-            "name_en": str(row.get("object_name") or row.get("英文名") or ""),
-            "color": str(row.get("color", "") or ""),
-            "photo_url": (
-                f"/api/scene_plan/object-photo/{quote(object_id)}/"
-                f"{quote(photo.name)}?set={quote(root.name)}"
-            )
-            if photo
-            else "",
-        }
-    return payload
-
-
-def _scene_plan_scenes(
-    rows: list[dict[str, str]],
-    objects: dict[str, dict[str, Any]],
-    calibration_status: str,
-) -> list[dict[str, Any]]:
-    scenes: dict[str, dict[str, Any]] = {}
-    for row in rows:
-        scene_id = str(row.get("scene_id", "")).strip()
-        if not scene_id:
-            continue
-        scene = scenes.setdefault(
-            scene_id,
-            {
-                "scene_id": scene_id,
-                "placements": [],
-                "placement_groups": [],
-                "calibration_status": calibration_status,
-            },
-        )
-        for group_index, placement in enumerate(_scene_plan_placements(row.get("placements"))):
-            object_id = placement["object_id"]
-            position_ids = placement["position_ids"]
-            obj = objects.get(object_id, {"name": object_id, "color": ""})
-            group_id = f"{scene_id}:{group_index}"
-            scene["placement_groups"].append(
-                {
-                    "group_id": group_id,
-                    "position_ids": position_ids,
-                    "object_id": object_id,
-                    "name": obj["name"],
-                    "name_zh": obj.get("name_zh", ""),
-                    "name_en": obj.get("name_en", ""),
-                    "color": obj.get("color", ""),
-                    "photo_url": obj.get("photo_url", ""),
-                }
-            )
-            for position_index, position_id in enumerate(position_ids):
-                scene["placements"].append(
-                    {
-                        "position_id": position_id,
-                        "object_id": object_id,
-                        "name": obj["name"],
-                        "name_zh": obj.get("name_zh", ""),
-                        "name_en": obj.get("name_en", ""),
-                        "color": obj.get("color", ""),
-                        "photo_url": obj.get("photo_url", ""),
-                        "group_id": group_id,
-                        "group_position_index": position_index,
-                        "group_size": len(position_ids),
-                        "group_position_ids": position_ids,
-                    }
-                )
-    return list(scenes.values())
-
-
-def _scene_plan_tasks(rows: list[dict[str, str]]) -> list[dict[str, Any]]:
-    tasks = []
-    for row in rows:
-        task_id = str(row.get("task_id", "")).strip()
-        scene_ids = [value for value in str(row.get("scene_ids", "")).split(";") if value]
-        if not task_id or not scene_ids:
-            continue
-        episode_counts = str(row.get("scene_epsiodes_count", "")).split(";")
-        tasks.append(
-            {
-                "task_id": task_id,
-                "action": str(row.get("action", "") or ""),
-                "category": str(row.get("category", "") or ""),
-                "operation_object": str(
-                    row.get("operation_object") or row.get("操作对象") or ""
-                ).strip(),
-                "operation_object_ids": [
-                    value.strip()
-                    for value in str(row.get("operation_object_ids", "")).split(";")
-                    if value.strip()
-                ],
-                "prompt_en": str(row.get("prompt_en", "") or ""),
-                "prompt_zh": str(row.get("prompt_zh", "") or ""),
-                "display_name": str(
-                    row.get("prompt_zh") or row.get("prompt_en") or task_id
-                ).strip(),
-                "scene_ids": scene_ids,
-                "scene_epsiodes_count": [int(value) for value in episode_counts if value.isdigit()],
-                "total_epsiodes_count": int(row.get("total_epsiodes_count", 0) or 0),
-            }
-        )
-    return tasks
-
-
 def _build_scene_plan(root: Path) -> dict[str, Any]:
-    """Parse one normalized scene catalog directory."""
-    task_rows = _read_scene_plan_csv(root, "tasks.csv")
-    layout_doc = _read_scene_plan_yaml(root, "layout.yaml")
-    layout_unit = str(layout_doc.get("unit", "") or "")
-    layout_frame = str(layout_doc.get("coordinate_frame", "") or "")
-    layout_status = str(layout_doc.get("calibration_status", "unverified") or "unverified")
-    positions = _scene_plan_positions(layout_doc)
-    objects = _scene_plan_objects(root)
-    raw_bounds = layout_doc.get("bounds")
-    bounds = raw_bounds if isinstance(raw_bounds, dict) else {}
-    return {
-        "ok": True,
-        "source": str(root / "tasks.csv") if task_rows else "",
-        "layout_id": str(layout_doc.get("layout_id", "") or ""),
-        "coordinate_frame": layout_frame,
-        "bounds": {
-            "width": _optional_scene_float(bounds.get("width")),
-            "height": _optional_scene_float(bounds.get("height")),
-            "unit": layout_unit,
-        },
-        "calibrated": bool(positions)
-        and all(
-            row["x"] is not None
-            and row["y"] is not None
-            and row["calibration_status"] == "verified"
-            for row in positions
-        ),
-        "positions": positions,
-        "objects": list(objects.values()),
-        "scenes": _scene_plan_scenes(
-            _read_scene_plan_csv(root, "scene.csv"), objects, layout_status
-        ),
-        "tasks": _scene_plan_tasks(task_rows),
-    }
+    """Parse one normalized scene catalog directory for the console UI."""
+
+    def photo_url(object_id: str, photo_name: str) -> str:
+        return (
+            f"/api/scene_plan/object-photo/{quote(object_id)}/{quote(photo_name)}"
+            f"?set={quote(root.name)}"
+        )
+
+    return scene_plan_from_dir(root, photo_url)
 
 
 def _load_scene_plan(
@@ -2465,12 +2226,12 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         except ValueError:
             self._send_empty(404)
             return
-        info = _read_scene_plan_yaml(root, "info.yaml")
+        info = read_plan_yaml(root, "info.yaml")
         objects_file = str(info.get("objects_file", "objects.csv") or "objects.csv")
         row = next(
             (
                 item
-                for item in _read_scene_plan_csv(root, objects_file)
+                for item in read_plan_csv(root, objects_file)
                 if str(item.get("object_id") or item.get("物品代码") or "").strip() == parts[0]
             ),
             None,
@@ -3521,7 +3282,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             return
         config = self.ctx.runtime.active_config or self.ctx.config
         plan_root = _scene_plan_root(config, dataset_name)
-        info = _read_scene_plan_yaml(plan_root, "info.yaml")
+        info = read_plan_yaml(plan_root, "info.yaml")
         result = publish_dataset(
             Path(__file__).resolve().parents[4],
             dataset_dir,

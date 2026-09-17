@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from core.app.console.server import _scene_plan_scenes
+from core.utils.scene_plan import plan_scenes
 
 pytestmark = pytest.mark.unit
 
@@ -20,7 +20,7 @@ def test_scene_placements_without_random_preserve_all_configured_positions():
             ),
         }
     ]
-    (scene,) = _scene_plan_scenes(rows, {}, "unverified")
+    (scene,) = plan_scenes(rows, {}, "unverified")
 
     assert [(item["object_id"], item["position_id"]) for item in scene["placements"]] == [
         ("rack", "P1"),

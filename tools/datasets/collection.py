@@ -23,6 +23,7 @@ import yaml
 import robots  # noqa: F401
 from core.registry import ROBOT_REGISTRY
 from core.utils.lerobot import LeRobotDatasetIO
+from core.utils.scene_plan import plan_slots, scene_plan_from_dir
 from robots.utils import UrdfScene
 from tools.datasets.assets import ObjectCatalog
 from tools.datasets.store import ConflictError, RecordNotFoundError, TaskSetStore
@@ -33,7 +34,7 @@ SERIES_CACHE_MAX = 8
 TRANSFORM_CACHE_MAX = 32
 UNMATCHED_CACHE_SECONDS = 300.0
 PLAN_PAYLOAD_KEYS = ("batch_id", "info", "layout", "dataset_dir", "collection")
-STATE_CACHE_VERSION = 5
+STATE_CACHE_VERSION = 7
 # Bump when the derived-row shape changes so existing database caches are ignored.
 DATA_CACHE_VERSION = 2
 STATIC_FRAMES_REASON = "static_frames_excessive"
@@ -215,6 +216,11 @@ class PlanCatalog:
                     summaries[index] = detailed_summary
                     break
         tasks = [task for plan in plan_states for task in plan["tasks"]]
+        slot_order = [
+            {"batch_id": plan["batch_id"], "slot_id": slot_id}
+            for plan in plan_states
+            for slot_id in plan.get("slot_order") or []
+        ]
         scenes = [scene for plan in plan_states for scene in plan["scenes"]]
         issues = [issue for plan in plan_states for issue in plan["issues"]]
         plans = [{key: plan[key] for key in PLAN_PAYLOAD_KEYS} for plan in plan_states]
@@ -232,6 +238,7 @@ class PlanCatalog:
             "robot_types": robot_types,
             "plans": plans,
             "tasks": tasks,
+            "slot_order": slot_order,
             "scenes": scenes,
             "objects": self.assets.records(),
             "issues": issues,
@@ -1067,6 +1074,7 @@ class PlanCatalog:
             state["batch_id"] = batch_id
             state["dataset_dir"] = str(self._batch_root(batch_id))
             state["tasks"] = collection.pop("tasks")
+            state["slot_order"] = collection.pop("slot_order")
             state["scenes"] = [{**scene, "batch_id": batch_id} for scene in state["scenes"]]
             state["collection"] = collection
             state["issues"] = [{**issue, "batch_id": batch_id} for issue in state["issues"]]
@@ -1231,7 +1239,28 @@ class PlanCatalog:
             "duplicates": duplicates,
             "orphaned": [self._episode_summary(row) for row in episodes if id(row) not in matched],
             "tasks": tasks,
+            "slot_order": self._slot_order(batch, tasks),
         }
+
+    def _slot_order(self, batch: str, tasks: list[dict[str, Any]]) -> list[str]:
+        """Order the batch's slots the way the console's collect grid does.
+
+        The console owns the scene -> task -> round order operators work in, so
+        the plan is expanded here from the same task-set directory and every
+        slot carries its place in that order; the review grid numbers the tiles
+        from it.
+        """
+        slots = {slot["slot_id"]: slot for task in tasks for slot in task.get("slots", [])}
+        order = [
+            slot.slot_id
+            for slot in plan_slots(scene_plan_from_dir(self._batch_root(batch)))
+            if slot.slot_id in slots
+        ]
+        # Slots no longer described by the plan keep an authored place at the end.
+        order.extend(slot_id for slot_id in slots if slot_id not in set(order))
+        for ordinal, slot_id in enumerate(order):
+            slots[slot_id]["ordinal"] = ordinal
+        return order
 
     def _dataset_dir(self, batch: str, info: dict[str, Any]) -> Path:
         """The dataset's one directory: ``collection_dir`` or the shared layout."""

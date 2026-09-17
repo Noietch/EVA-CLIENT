@@ -77,13 +77,34 @@ function configureEntityUi(context) {
   } = context);
 }
 
+function qcSlotEntries() {
+  const authored = (app.state.tasks || [])
+    .filter((task) => !app.batch || task.batch_id === app.batch)
+    .sort(compareTaskIds)
+    .flatMap((task) => (task.slots || []).map((slot) => ({task, slot})));
+  const order = app.state.slot_order || [];
+  if (!order.length) return authored;
+  // The console's collect grid owns the tile order, so review follows it and
+  // appends any slot the plan no longer describes.
+  const key = (batchId, slotId) => batchId + "::" + slotId;
+  const pending = new Map(authored.map((entry) => [key(entry.task.batch_id, entry.slot.slot_id), entry]));
+  const entries = [];
+  for (const item of order) {
+    const entry = pending.get(key(item.batch_id, item.slot_id));
+    if (!entry) continue;
+    pending.delete(key(item.batch_id, item.slot_id));
+    entries.push(entry);
+  }
+  for (const entry of authored) {
+    if (pending.delete(key(entry.task.batch_id, entry.slot.slot_id))) entries.push(entry);
+  }
+  return entries;
+}
+
 function renderTaskList() {
   if (!app.state) return;
   const host = $("task-list");
-  const tasks = (app.state.tasks || [])
-    .filter((task) => !app.batch || task.batch_id === app.batch)
-    .sort(compareTaskIds);
-  const entries = tasks.flatMap((task) => (task.slots || []).map((slot) => ({task, slot})));
+  const entries = qcSlotEntries();
   const sceneSelect = $("qc-scene-select");
   const taskSelect = $("qc-task-select");
   const sceneIds = [...new Set(entries.map(({slot}) => slot.scene_id).filter(Boolean))].sort();
@@ -157,10 +178,7 @@ function renderTaskList() {
 
 function navigateQcSlot(offset) {
   if (!app.state || !app.batch) return;
-  const entries = (app.state.tasks || [])
-    .filter((task) => task.batch_id === app.batch)
-    .sort(compareTaskIds)
-    .flatMap((task) => (task.slots || []).map((slot) => ({task, slot})));
+  const entries = qcSlotEntries();
   const filtered = entries.filter(({task, slot}) => (
     (!app.qcSceneFilter || slot.scene_id === app.qcSceneFilter)
       && (!app.qcTaskFilter || task.task_id === app.qcTaskFilter)
@@ -257,7 +275,9 @@ function buildSlotTile(task, slot, index) {
   };
   tile.title = slot.slot_id + " · " + stateLabels[qcState(slot)] + (slot.episode ? " · " + translate("qc.episode") + " " + slot.episode.episode_index : "");
   tile.setAttribute("aria-label", tile.title);
-  tile.append(node("b", "", String(index + 1)));
+  // Number the square by the plan's place for the slot so it matches the same
+  // square in the console's collect grid; unplanned slots fall back to the list.
+  tile.append(node("b", "", String(Number.isFinite(slot.ordinal) ? slot.ordinal + 1 : index + 1)));
   tile.addEventListener("click", (event) => {
     event.stopPropagation();
     openSlot(task, slot);
