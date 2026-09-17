@@ -39,4 +39,5 @@ def test_qc_comparison_overlays_reviews_and_compares_episode_identity():
     local = qc_entries(episodes, qc)
     assert compare_qc(local, qc_entries(list(reversed(episodes)), qc))["state"] == "same"
     assert compare_qc(local, qc_entries(episodes, []))["changed"] == ["3"]
-    assert compare_qc({}, {})["state"] == "absent"
+    # Nothing recorded on either side is a match, not a separate state.
+    assert compare_qc({}, {})["state"] == "same"

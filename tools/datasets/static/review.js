@@ -31,12 +31,16 @@ let showToast;
 let translate;
 const STATIC_REASON = "static_frames_excessive";
 const CAMERA_REASON = "camera_offline";
+const SHORT_REASON = "trajectory_too_short";
+const REVIEW_REASON = "needs_manual_review";
 const REASON_KEYS = {
   image_quality: "qc.imageReason",
   trajectory_quality: "qc.trajectoryReason",
   task_mismatch: "qc.taskReason",
   [STATIC_REASON]: "qc.staticFramesExcessive",
   [CAMERA_REASON]: "qc.cameraOffline",
+  [SHORT_REASON]: "qc.shortEpisode",
+  [REVIEW_REASON]: "qc.needsReview",
   other: "qc.otherReason",
 };
 
@@ -605,6 +609,8 @@ function buildQcControls(task, slot) {
     ["task_mismatch", translate("qc.taskReason")],
     [STATIC_REASON, translate("qc.staticFramesExcessive")],
     [CAMERA_REASON, translate("qc.cameraOffline")],
+    [SHORT_REASON, translate("qc.shortEpisode")],
+    [REVIEW_REASON, translate("qc.needsReview")],
     ["other", translate("qc.otherReason")],
   ];
   for (const [value, label] of reasonOptions) reason.add(new Option(label, value));
@@ -640,7 +646,8 @@ function buildQcControls(task, slot) {
 async function saveQc(task, slot, verdict, control) {
   const reasonValue = $("qc-reason").value;
   const noteValue = $("qc-note").value.trim();
-  if (verdict === "fail" && !reasonValue) {
+  // "待人工审核" is the machine handing the episode over, not a failure cause.
+  if (verdict === "fail" && (!reasonValue || reasonValue === REVIEW_REASON)) {
     showToast(translate("review.failureReasonRequired"), true);
     return;
   }

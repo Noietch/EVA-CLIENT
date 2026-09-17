@@ -10,8 +10,8 @@ let requesting = false;
 let loaded = false;
 const selected = new Set();
 const labels = { refresh: "刷新云端并校验", verify: "校验", upload_data: "上传数据",
-  upload_qc: "上传 QC", download_qc: "下载 QC", upload_task: "上传任务",
-  download_task: "下载任务" };
+  download_data: "下载数据", upload_qc: "上传 QC", download_qc: "下载 QC",
+  upload_task: "上传任务", download_task: "下载任务" };
 const resourceLabels = { local_data: "本地数据", local_qc: "本地 QC", local_task: "本地任务文件",
   remote_data: "云端数据", remote_qc: "云端 QC", remote_task: "云端任务文件" };
 const escape = (value) => String(value ?? "").replace(/[&<>"']/g,
@@ -38,7 +38,7 @@ function sortValue(row) {
   if (sortKey.startsWith("cloud_")) return cloud?.qc?.[sortKey.slice(6)] ?? null;
   if (sortKey.startsWith("verify_")) {
     const state = cloud?.verification?.[sortKey.slice(7)]?.state;
-    return ({ same: 0, absent: 1, unknown: 2, different: 3 })[state] ?? null;
+    return ({ same: 0, unknown: 1, different: 2 })[state] ?? null;
   }
   return row[sortKey] ?? null;
 }
@@ -61,7 +61,7 @@ function visibleRows() {
 
 function verification(item) {
   if (!item) return '<span class="dm-muted">未校验</span>';
-  const label = { same: "一致", different: "不一致", absent: "两端均缺失", unknown: "无法确认" }[item.state];
+  const label = { same: "一致", different: "不一致", unknown: "无法确认" }[item.state];
   const details = [
     ["本地缺失", item.missing_local], ["仅本地", item.local_only],
     ["内容不同", item.changed], ["无法确认", item.unknown],

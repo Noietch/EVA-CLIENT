@@ -36,17 +36,25 @@ UNMATCHED_CACHE_SECONDS = 300.0
 PLAN_PAYLOAD_KEYS = ("batch_id", "info", "layout", "dataset_dir", "collection")
 STATE_CACHE_VERSION = 7
 # Bump when the derived-row shape changes so existing database caches are ignored.
-DATA_CACHE_VERSION = 2
+DATA_CACHE_VERSION = 3
 STATIC_FRAMES_REASON = "static_frames_excessive"
 CAMERA_OFFLINE_REASON = "camera_offline"
+SHORT_EPISODE_REASON = "trajectory_too_short"
+# The machine never closes an episode: what it finds is handed to a reviewer.
+MANUAL_REVIEW_REASON = "needs_manual_review"
 QC_REASONS = {
     "image_quality",
     "trajectory_quality",
     "task_mismatch",
     STATIC_FRAMES_REASON,
     CAMERA_OFFLINE_REASON,
+    SHORT_EPISODE_REASON,
+    MANUAL_REVIEW_REASON,
     "other",
 }
+# A demonstration naturally holds still for a few frames while the operator
+# repositions; only a longer pause means the recording sat idle.
+STATIC_RUN_MIN_FRAMES = 5
 STATIC_QC_ANALYSIS_LIMIT = 64
 STATE_CACHE_SECONDS = 300.0
 
@@ -1396,7 +1404,11 @@ class PlanCatalog:
         leading = static[0] if static and static[0]["start"] == 0 else None
         trailing = static[-1] if static and static[-1]["end"] == len(labels) else None
         edge_ids = {id(segment) for segment in (leading, trailing) if segment is not None}
-        middle = [segment for segment in static if id(segment) not in edge_ids]
+        middle = [
+            segment
+            for segment in static
+            if id(segment) not in edge_ids and int(segment["length"]) > STATIC_RUN_MIN_FRAMES
+        ]
         only_static = leading is not None and leading is trailing
         trim_start = 0 if only_static else int(leading["end"]) if leading is not None else 0
         trim_end = (

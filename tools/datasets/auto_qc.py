@@ -9,6 +9,7 @@ merely static scene.
 
 from __future__ import annotations
 
+import json
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -24,6 +25,8 @@ from core.registry import ROBOT_REGISTRY
 from core.utils.lerobot import LeRobotDatasetIO
 from tools.datasets.collection import (
     CAMERA_OFFLINE_REASON,
+    MANUAL_REVIEW_REASON,
+    SHORT_EPISODE_REASON,
     STATIC_FRAMES_REASON,
     PlanCatalog,
 )
@@ -36,6 +39,10 @@ STALL_FRACTION = 0.5
 ARM_TRAVEL = 0.05
 SAMPLE_STRIDE = 2
 MIN_PAIRS = 8
+# Durations differ per task, so one fixed floor fits no dataset; a broken take
+# is one far below the rest of its own. Tukey's far-out fence (Q1 - 3 IQR) marks
+# that extreme and leaves ordinary takes and uniformly short datasets alone.
+FAR_OUT_IQR = 3.0
 QPOS_KEYS = ("observations.state.qpos", "action.qpos")
 
 
@@ -50,6 +57,17 @@ class CameraMotion:
     @property
     def repeated_fraction(self) -> float:
         return self.repeated / self.pairs if self.pairs else 0.0
+
+
+def episode_seconds(row: dict[str, Any], fps: float) -> float:
+    """Recorded duration of one episode row."""
+    return int(row.get("length", 0) or 0) / fps
+
+
+def short_episode_fence(seconds: list[float]) -> float:
+    """Duration floor of one dataset: the far-out bound of its own episodes."""
+    q1, q3 = np.percentile(seconds, [25, 75])
+    return float(q1 - FAR_OUT_IQR * (q3 - q1))
 
 
 def camera_motion(path: Path) -> CameraMotion:
@@ -114,9 +132,9 @@ def offline_cameras(
 class DatasetAutoQc:
     """Flag static middle frames and stalled cameras in one collected dataset.
 
-    A scan appends what it finds: an episode without a human verdict takes the
-    machine verdict, and one a human already reviewed keeps that verdict with
-    the machine opinion recorded beside it.
+    A scan only reports: an episode a human has not judged is marked for manual
+    review with what the machine saw, and one a human already judged keeps that
+    verdict with the machine opinion recorded beside it. Judging stays human.
     """
 
     def __init__(
@@ -140,34 +158,43 @@ class DatasetAutoQc:
             else {}
         )
         self.groups = robot.actuator_groups if robot else ()
+        info = json.loads((dataset_dir / "meta/info.json").read_text())
+        self.fps = float(info.get("fps", 30) or 30)
 
     def run(self, progress: Callable[[int, int], None]) -> dict[str, Any]:
         """Scan every episode and record the failures it finds."""
-        counts = {CAMERA_OFFLINE_REASON: 0, STATIC_FRAMES_REASON: 0}
+        counts = {CAMERA_OFFLINE_REASON: 0, SHORT_EPISODE_REASON: 0, STATIC_FRAMES_REASON: 0}
         checked = flagged = reviewed = cleared = 0
         rows = self.catalog.episode_rows(self.dataset_dir)
+        durations = [episode_seconds(row, self.fps) for row in rows]
+        fence = short_episode_fence(durations) if durations else 0.0
         for position, row in enumerate(rows, 1):
             if self.stop.is_set():
                 break
             progress(position, len(rows))
             checked += 1
             episode_index = int(row["episode_index"])
-            issues = self._episode_issues(episode_index)
+            issues = self._episode_issues(row, fence)
             if not issues:
                 cleared += self.io.drop_auto_qc(episode_index)
                 continue
             reason = issues[0][0]
             counts[reason] += 1
+            note = "；".join(note for _, note in issues)
             if str(row.get("qc_verdict") or "").strip() in {"pass", "fail"}:
+                # The verdict stays the reviewer's; the finding is filed beside it.
                 reviewed += 1
+                self.io.mark_qc(episode_index, "fail", note, reason, auto=True)
             else:
                 flagged += 1
-            self.io.mark_qc(
-                episode_index, "fail", "；".join(note for _, note in issues), reason, auto=True
-            )
+                self.io.mark_qc(episode_index, "unreviewed", note, MANUAL_REVIEW_REASON, auto=True)
         offline = counts[CAMERA_OFFLINE_REASON]
         static = counts[STATIC_FRAMES_REASON]
-        summary = f"检查 {checked} 条；标记 {flagged} 条（发现相机离线 {offline}、静止帧 {static}）"
+        short = counts[SHORT_EPISODE_REASON]
+        summary = (
+            f"检查 {checked} 条；标记 {flagged} 条待人工审核"
+            f"（发现相机离线 {offline}、轨迹过短 {short}、静止帧 {static}）"
+        )
         if reviewed:
             summary += f"；人工已判定 {reviewed} 条只记录机器意见"
         if cleared:
@@ -181,9 +208,18 @@ class DatasetAutoQc:
             **counts,
         }
 
-    def _episode_issues(self, episode_index: int) -> list[tuple[str, str]]:
+    def _episode_issues(self, row: dict[str, Any], fence: float) -> list[tuple[str, str]]:
         """Automatic failures as (reason, note), most severe first."""
+        episode_index = int(row["episode_index"])
         issues = [(CAMERA_OFFLINE_REASON, note) for note in self._camera_notes(episode_index)]
+        seconds = episode_seconds(row, self.fps)
+        if seconds < fence:
+            issues.append(
+                (
+                    SHORT_EPISODE_REASON,
+                    f"时长 {seconds:.1f}s（低于本数据集极端离群下限 {fence:.1f}s）",
+                )
+            )
         analysis = self.catalog.frame_analysis(self.dataset_dir, episode_index)
         if analysis["static_frames_excessive"]:
             issues.append(

@@ -116,6 +116,75 @@ def test_qc_upload_sends_the_local_ledger_and_requires_one(monkeypatch, tmp_path
     assert (dataset / "meta/episodes.jsonl").read_text(encoding="utf-8") == episodes
 
 
+def test_data_download_targets_the_local_dataset_and_holds_the_upload_off(monkeypatch, tmp_path):
+    from tools.datasets import dataset_transfer as module
+
+    dataset = tmp_path / "collection" / "bench" / "raw"
+    (dataset / "meta").mkdir(parents=True)
+    target = {
+        "name": BATCH,
+        "dataset_dir": dataset,
+        "plan": tmp_path / BATCH,
+        "remote_path": "datasets/real_robot/dual_yam/bench_batch",
+    }
+    pulled = {}
+    started = threading.Event()
+    release = threading.Event()
+
+    def fetch_dataset(project_root, name, destination, storage=None, *, expected_path=None):
+        pulled.update(name=name, destination=destination, remote_path=expected_path)
+        started.set()
+        assert release.wait(5)
+
+    monkeypatch.setattr(module, "fetch_dataset", fetch_dataset)
+    monkeypatch.setattr(module, "publish_dataset", lambda *args, **kwargs: None)
+    transfer = DatasetTransfer(tmp_path)
+    download_id = transfer.start("download_data", [target])
+    assert started.wait(5)
+    assert pulled == {
+        "name": BATCH,
+        "destination": dataset.parent,
+        "remote_path": target["remote_path"],
+    }
+    # The download rewrites the dataset and its ledger, so an upload of the
+    # same set waits instead of racing it.
+    upload_id = transfer.start("upload_data", [target])
+    deadline = time.monotonic() + 3
+    while not transfer.jobs[upload_id]["waiting"] and time.monotonic() < deadline:
+        threading.Event().wait(0.01)
+    assert transfer.jobs[upload_id]["waiting_resources"] == ["local_data", "remote_data"]
+    release.set()
+    assert _wait_job(transfer, download_id)["results"][0]["ok"]
+    assert _wait_job(transfer, upload_id)["results"][0]["ok"]
+
+
+def test_cloud_refresh_inspects_datasets_in_parallel(monkeypatch, tmp_path):
+    from tools.datasets import dataset_transfer as module
+
+    monkeypatch.setattr(module, "PARALLEL_WORKERS", 3)
+    # A sequential refresh never gathers three inspections at once.
+    overlapping = threading.Barrier(3, timeout=5)
+    transfer = DatasetTransfer(tmp_path)
+
+    def inspect(target, storage, progress):
+        overlapping.wait()
+        return {"checked_at": 0.0, "verification": {"data": {"state": "same"}}}
+
+    monkeypatch.setattr(transfer, "_inspect", inspect)
+    targets = [
+        {
+            "name": name,
+            "plan": tmp_path / name,
+            "dataset_dir": tmp_path / name,
+            "remote_path": f"datasets/real_robot/dual_yam/{name}",
+        }
+        for name in ("set_a", "set_b", "set_c")
+    ]
+    job = _wait_job(transfer, transfer.start("refresh", targets))
+    assert [result["ok"] for result in job["results"]] == [True, True, True]
+    assert sorted(result["dataset"] for result in job["results"]) == ["set_a", "set_b", "set_c"]
+
+
 def test_jobs_run_in_parallel_and_cancel_only_the_conflicting_waiter(monkeypatch, tmp_path):
     from tools.datasets import dataset_transfer as module
 

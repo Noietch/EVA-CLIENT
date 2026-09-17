@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import pytest
@@ -53,6 +54,27 @@ def test_transfer_validation_rejects_bad_requests(tmp_path):
     assert _start(client, "refresh", ["missing_set"]).status_code == 404
     unknown_stop = client.post("/api/transfers", json={"action": "stop", "job_id": "nope"})
     assert unknown_stop.status_code == 400
+
+
+def test_download_data_pulls_the_selected_set_into_its_collection_dir(tmp_path, monkeypatch):
+    from tools.datasets import dataset_transfer as module
+
+    calls = []
+
+    def fetch_dataset(project_root, name, destination, storage=None, *, expected_path=None):
+        calls.append((name, destination, expected_path))
+
+    monkeypatch.setattr(module, "fetch_dataset", fetch_dataset)
+    client = _client(tmp_path)
+    assert _start(client, "download_data", [BATCH]).status_code == 200
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        job = client.get("/api/transfers/job").get_json()["job"]
+        if job["state"] != "running":
+            break
+        time.sleep(0.01)
+    assert job["results"] == [{"dataset": BATCH, "ok": True, "detail": ""}]
+    assert calls == [(BATCH, tmp_path / "collection" / "bench", None)]
 
 
 def test_transfer_writes_require_edit_mode_and_are_read_only_safe(tmp_path):

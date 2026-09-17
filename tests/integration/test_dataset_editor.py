@@ -17,6 +17,7 @@ from tools.datasets.app import (
     create_app,
 )
 from tools.datasets.assets import ObjectCatalog
+from tools.datasets.collection import STATIC_RUN_MIN_FRAMES, PlanCatalog
 from tools.datasets.store import TaskSetStore
 
 pytestmark = pytest.mark.integration
@@ -270,22 +271,26 @@ def test_episode_matches_slot_and_review_returns_series(tmp_path):
 
 
 def test_middle_static_frames_auto_fail_and_expose_trim_boundaries(tmp_path):
+    """A long idle stretch fails the episode; a brief pause is forgiven."""
     client, _, _, collection = _workspace(tmp_path)
     root = _episode_dataset(collection)
     vector = pa.list_(pa.float32(), 1)
+    pause = STATIC_RUN_MIN_FRAMES + 1
+    frames = 2 + pause + 2
+    values = [[0], [1]] + [[1]] * pause + [[2], [3]]
     pq.write_table(
         pa.table(
             {
-                "observation.state": pa.array([[0], [1], [1], [2]], vector),
-                "action": pa.array([[0], [1], [1], [2]], vector),
-                "timestamp": pa.array([0.0, 0.1, 0.2, 0.3]),
+                "observation.state": pa.array(values, vector),
+                "action": pa.array(values, vector),
+                "timestamp": pa.array([index / 10 for index in range(frames)]),
             }
         ),
         root / "data/chunk-000/episode_000007.parquet",
     )
     row_path = root / "meta/episodes.jsonl"
     row = json.loads(row_path.read_text())
-    row["length"] = 4
+    row["length"] = frames
     row_path.write_text(json.dumps(row) + "\n")
 
     state = client.get("/api/state?batch=" + BATCH).get_json()
@@ -295,8 +300,16 @@ def test_middle_static_frames_auto_fail_and_expose_trim_boundaries(tmp_path):
     review = client.get("/api/review?batch=" + BATCH + "&slot_id=TASK-1:SC-1:0").get_json()
     analysis = review["series"]["frame_label_analysis"]
     assert analysis["trim_start_frame"] == 1
-    assert analysis["trim_end_frame"] == 4
-    assert analysis["middle_static_frames"] == 1
+    assert analysis["trim_end_frame"] == frames
+    assert analysis["middle_static_frames"] == pause
+
+    def labels(idle):
+        return ["static", "non-static"] + ["static"] * idle + ["non-static"]
+
+    tolerated = PlanCatalog._frame_label_analysis(labels(STATIC_RUN_MIN_FRAMES))
+    flagged = PlanCatalog._frame_label_analysis(labels(pause))
+    assert tolerated["static_frames_excessive"] is False
+    assert flagged["middle_static_frames"] == pause
 
 
 def test_trim_episode_updates_parquet_and_episode_metadata(tmp_path):

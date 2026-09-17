@@ -115,11 +115,7 @@ def compare_qc(local: dict, remote: dict) -> dict:
     extra = sorted(set(local) - set(remote))
     changed = sorted(k for k in set(local) & set(remote) if local[k] != remote[k])
     return {
-        "state": "absent"
-        if not local and not remote
-        else "different"
-        if missing or extra or changed
-        else "same",
+        "state": "different" if missing or extra or changed else "same",
         "missing_local": missing,
         "local_only": extra,
         "changed": changed,

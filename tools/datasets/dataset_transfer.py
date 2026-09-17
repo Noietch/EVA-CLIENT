@@ -37,6 +37,7 @@ from tools.datasets.hf_task_sets import (
     _apply_proxy,
     _config,
     dataset_repo_path,
+    fetch_dataset,
     fetch_qc,
     fetch_task_set,
     publish_dataset,
@@ -50,15 +51,16 @@ ACCESS = {
     "verify": {"local_data": "read", "local_qc": "read", "local_task": "read"},
     "auto_qc": {"local_data": "read", "local_qc": "write"},
     "upload_data": {"local_data": "read", "remote_data": "write"},
+    "download_data": {"local_data": "write", "local_qc": "write", "remote_data": "read"},
     "upload_qc": {"local_qc": "read", "local_data": "read", "remote_qc": "write"},
     "download_qc": {"local_qc": "write", "remote_qc": "read"},
     "upload_task": {"local_task": "read", "remote_task": "write"},
     "download_task": {"local_task": "write"},
 }
 
-# Automatic QC is CPU-bound video decoding; keep a dataset scan on one worker
-# and cap the datasets scanned in parallel.
-SCAN_WORKERS = min(4, max(1, (os.cpu_count() or 1) // 4))
+# Automatic QC decodes video and cloud inspections list trees and digest files;
+# both work one dataset per worker, so cap how many datasets run at once.
+PARALLEL_WORKERS = min(4, max(1, (os.cpu_count() or 1) // 4))
 
 
 class DatasetTransfer:
@@ -72,6 +74,7 @@ class DatasetTransfer:
         "refresh",
         "verify",
         "upload_data",
+        "download_data",
         "upload_qc",
         "download_qc",
         "upload_task",
@@ -131,7 +134,10 @@ class DatasetTransfer:
                 "detail": "",
                 "waiting": False,
             }
-        runner = self._run_scan if action == "auto_qc" else self._run
+        # Scans and cloud inspections are independent per dataset; transfers
+        # touch one dataset and share one remote, so they stay sequential.
+        parallel = action in {"auto_qc", "refresh", "verify"}
+        runner = self._run_parallel if parallel else self._run
         threading.Thread(
             target=runner,
             args=(job_id, targets, copy.deepcopy(storage)),
@@ -188,11 +194,11 @@ class DatasetTransfer:
             self._process(job_id, action, target, storage)
         self._finish(job_id)
 
-    def _run_scan(self, job_id: str, targets: list[dict], storage: dict | None) -> None:
-        """Scan datasets in parallel; one worker owns one dataset."""
-        scan = partial(self._process, job_id, self.jobs[job_id]["action"], storage=storage)
-        with ThreadPoolExecutor(max_workers=SCAN_WORKERS) as pool:
-            list(pool.map(scan, targets))
+    def _run_parallel(self, job_id: str, targets: list[dict], storage: dict | None) -> None:
+        """Run the targets on a bounded pool; one worker owns one dataset."""
+        run = partial(self._process, job_id, self.jobs[job_id]["action"], storage=storage)
+        with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as pool:
+            list(pool.map(run, targets))
         self._finish(job_id)
 
     def _finish(self, job_id: str) -> None:
@@ -247,7 +253,7 @@ class DatasetTransfer:
 
         def progress(index, total, filename):
             with self.lock:
-                job["detail"] = f"{index}/{total} · {filename}"
+                job["detail"] = f"{name} · {index}/{total} · {filename}"
 
         result = self._inspect(target, storage, progress)
         with self.lock:
@@ -266,6 +272,16 @@ class DatasetTransfer:
                 self.project_root,
                 name,
                 target["dataset_dir"],
+                storage,
+                expected_path=target["remote_path"],
+            )
+        elif action == "download_data":
+            # The download merges the remote QC ledger into the local one
+            # instead of overwriting it.
+            fetch_dataset(
+                self.project_root,
+                name,
+                target["dataset_dir"].parent,
                 storage,
                 expected_path=target["remote_path"],
             )
@@ -362,9 +378,6 @@ class DatasetTransfer:
             "qc": qc_summary(episodes, qc),
             "files": len(files),
             "bytes": sum(f.size for f in files.values()),
-            "data_exists": "meta/episodes.jsonl" in files,
-            "task_exists": all(n in plan_files for n in TASK_FILES),
-            "qc_exists": "meta/qc.jsonl" in files,
         }
         remote_data = {n: f for n, f in files.items() if is_dataset_content(n)}
         qc_root = target["dataset_dir"]
@@ -383,9 +396,6 @@ class DatasetTransfer:
                 qc_entries(episodes, qc),
             ),
         }
-        for kind, present in (("data", result["data_exists"]), ("task", result["task_exists"])):
-            if not present and result["verification"][kind]["state"] == "same":
-                result["verification"][kind]["state"] = "absent"
         return result
 
 

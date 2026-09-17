@@ -22,7 +22,7 @@ const SORT_KEYS = ["status", "name", "collected", "total", "progress", "pending"
   "cloud_unreviewed", "verify_data", "verify_task", "verify_qc"];
 const RESOURCES = ["local_data", "local_qc", "local_task", "remote_data", "remote_qc",
   "remote_task"];
-const VERIFY_ORDER = { same: 0, absent: 1, unknown: 2, different: 3 };
+const VERIFY_ORDER = { same: 0, unknown: 1, different: 2 };
 const STATUS_ORDER = { error: 0, warn: 1, unknown: 2, ok: 3 };
 
 const t = (key) => context.translate(key);
@@ -111,7 +111,7 @@ function statusOf(row) {
     ? Math.max(0, row.total - row.collected) : null;
   const verification = cloud?.verification;
   const mismatch = Boolean(verification && ["data", "task", "qc"].some((kind) =>
-    verification[kind] && !["same", "absent"].includes(verification[kind].state)));
+    verification[kind] && verification[kind].state !== "same"));
   const issues = [];
   if (cloud?.error) issues.push(t("dm.issue.cloud"));
   if (mismatch) issues.push(t("dm.issue.verify"));
@@ -129,7 +129,7 @@ function verification(item) {
   if (!item) return `<span class="dm-muted">${t("dm.verifyUnchecked")}</span>`;
   const label = {
     same: t("dm.verify.same"), different: t("dm.verify.different"),
-    absent: t("dm.verify.absent"), unknown: t("dm.verify.unknown"),
+    unknown: t("dm.verify.unknown"),
   }[item.state];
   const details = [
     [t("dm.missingLocal"), item.missing_local], [t("dm.localOnly"), item.local_only],

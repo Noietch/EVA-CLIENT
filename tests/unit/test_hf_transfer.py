@@ -2,6 +2,7 @@
 
 import json
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -268,3 +269,67 @@ def test_publish_dataset_merges_qc_after_data_upload(tmp_path, monkeypatch):
     (assets / ".preview_cache").mkdir()
     hf_task_sets.publish_assets(tmp_path, assets)
     assert uploaded["allow_patterns"] == ["objects.csv", "object_photos/**"]
+
+
+def test_dataset_download_replaces_content_and_merges_the_qc_ledger(tmp_path, monkeypatch):
+    name = "set_a"
+    remote = f"datasets/real_robot/dual_yam/{name}"
+    requested = []
+    day = "2026-09-16T00:00:00+08:00"
+
+    def snapshot_download(**kwargs):
+        requested.append(kwargs["allow_patterns"])
+        source = Path(kwargs["local_dir"]) / remote
+        (source / "meta").mkdir(parents=True)
+        (source / "meta/episodes.jsonl").write_text(
+            '{"episode_index": 0}\n{"episode_index": 1}\n', encoding="utf-8"
+        )
+        (source / "meta/qc.jsonl").write_text(
+            f'{{"episode_index": 0, "qc_verdict": "pass", "qc_updated_at": "{day}"}}\n'
+            f'{{"episode_index": 1, "qc_verdict": "fail", "qc_updated_at": "{day}"}}\n',
+            encoding="utf-8",
+        )
+
+    class FakeApi:
+        def __init__(self, token):
+            pass
+
+        def repo_info(self, repo_id, repo_type, revision):
+            return SimpleNamespace(sha="revision-sha")
+
+        def list_repo_files(self, repo_id, repo_type, revision):
+            return [f"{remote}/meta/episodes.jsonl"]
+
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        SimpleNamespace(HfApi=FakeApi, snapshot_download=snapshot_download),
+    )
+    dataset = tmp_path / "data_collection/datasets/real_robot/dual_yam/set_a"
+    newer, older = "2026-09-17T08:00:00+08:00", "2026-09-10T08:00:00+08:00"
+    (dataset / "meta").mkdir(parents=True)
+    (dataset / "meta/episodes.jsonl").write_text("{}\n", encoding="utf-8")
+    (dataset / "meta/qc.jsonl").write_text(
+        f'{{"episode_index": 0, "qc_verdict": "fail", "qc_updated_at": "{newer}"}}\n'
+        f'{{"episode_index": 2, "qc_verdict": "pass", "qc_updated_at": "{older}"}}\n',
+        encoding="utf-8",
+    )
+    hf_task_sets.fetch_dataset(
+        tmp_path,
+        name,
+        dataset.parent,
+        {"huggingface": {"repo_id": "team/data"}},
+        expected_path=remote,
+    )
+    assert requested == [[f"{remote}/**"]]
+    # Dataset content comes down as published ...
+    assert (dataset / "meta/episodes.jsonl").read_text(encoding="utf-8") == (
+        '{"episode_index": 0}\n{"episode_index": 1}\n'
+    )
+    # ... while QC keeps the newest row per episode from either side.
+    rows = [json.loads(line) for line in (dataset / "meta/qc.jsonl").read_text().splitlines()]
+    assert [(row["episode_index"], row["qc_verdict"]) for row in rows] == [
+        (0, "fail"),
+        (1, "fail"),
+        (2, "pass"),
+    ]
