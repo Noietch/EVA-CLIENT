@@ -1,5 +1,6 @@
 """Exercise the review grid's tile order against the plan's published slot order."""
 
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -9,13 +10,13 @@ pytestmark = pytest.mark.static
 
 
 def test_review_grid_follows_the_plan_slot_order():
+    node = shutil.which("node")
+    assert node is not None, "Install Node.js to run JavaScript syntax validation"
     source = (
         Path(__file__).resolve().parents[2] / "tools/datasets/static/entity-ui.js"
     ).read_text()
     functions = (
-        source[
-            source.index("function compareTaskIds(") : source.index("function buildTaskAccordion(")
-        ]
+        source[source.index("function compareTaskIds(") : source.index("function buildSlotTile(")]
         + source[
             source.index("function qcSlotEntries()") : source.index("function renderTaskList()")
         ]
@@ -56,6 +57,11 @@ assert.deepEqual(ids(), [
 """
     )
     result = subprocess.run(
-        ["node", "--input-type=module"], input=script, capture_output=True, text=True, timeout=10
+        [node, "--input-type=module"], input=script, capture_output=True, text=True, timeout=10
     )
     assert result.returncode == 0, result.stderr
+
+    # The grid only follows that order while both render paths go through it.
+    for caller in ("renderTaskList", "navigateQcSlot"):
+        body = source[source.index(f"function {caller}(") :][:400]
+        assert "const entries = qcSlotEntries();" in body, caller
