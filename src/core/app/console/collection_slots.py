@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from core.config import ConfigDict
+from core.utils.qc import qc_state
 from core.utils.scene_plan import plan_slots
 
 _STATE_LOCK = threading.RLock()
@@ -152,12 +153,7 @@ def episode_qc_state(episode: dict[str, Any] | None) -> str:
     """Match datasets tools' four QC states, independently of capture selection."""
     if not episode or episode.get("status") != "saved":
         return "pending"
-    verdict = str(episode.get("qc_verdict") or "").lower()
-    if verdict == "unreviewed":
-        return "unreviewed"
-    if verdict == "fail" or str(episode.get("quality") or "").lower() == "red":
-        return "failed"
-    return "passed" if verdict == "pass" else "unreviewed"
+    return qc_state(episode.get("qc_verdict"), episode.get("quality"))
 
 
 def _episode_outcome(episode: dict[str, Any]) -> str:

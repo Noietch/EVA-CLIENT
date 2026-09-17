@@ -239,7 +239,7 @@ async function pollCollectionSlots(force = false) {
     renderCollect();
     const active = state.active;
     const collecting = !!(S.STATUS.collect && S.STATUS.collect.collecting);
-    if (active && !collecting && !S.collectTaskSelectionPending &&
+    if (active && state.followActivePage && !collecting && !S.collectTaskSelectionPending &&
         S.STATUS.collection_slot_id !== active.slot_id) {
       queueMicrotask(() => activateCollectionSlot(active));
     }
@@ -1092,9 +1092,10 @@ function collectQcState(item) {
     if (savedEpisodeId(item) == null) return "pending";
     const verdict = String(item.qc_verdict || "").toLowerCase();
     if (verdict === "unreviewed") return "unreviewed";
-    if (verdict === "fail" || String(item.quality || "").toLowerCase() === "red") return "failed";
-    return verdict === "pass" ? "passed" : "unreviewed";
-  }
+    if (verdict === "pass") return "passed";
+    if (verdict === "fail") return "failed";
+    return String(item.quality || "").toLowerCase() === "red" ? "failed" : "unreviewed";
+}
 
 function collectQcLabel(state) {
     return {pending: "TO COLLECT", unreviewed: "UNREVIEWED", passed: "PASSED", failed: "FAILED"}[state];
@@ -1234,6 +1235,7 @@ function previewCollectionSlot(slot) {
       slot.dataset !== S.collectionSlots.dataset || S.collectTaskSelectionPending ||
       S.STATUS.collect?.collecting) return;
   S.collectionSlots.selectedSlotId = slot.slot_id;
+  S.collectionSlots.followActivePage = false;
   selectCollectEpisode(slot.episode);
 }
 
@@ -1318,8 +1320,11 @@ function handleCollectionReviewInput(feedback) {
         continue;
       }
       collectionReviewBusy = true;
-      const verdict = String(selected.qc_verdict || "").toLowerCase() !== "pass" &&
-        collectQcState(selected) === "failed" ? "pass" : "fail";
+      const verdict = event.action === "mark_red"
+        ? "fail"
+        : ({ passed: "fail", failed: "unreviewed", unreviewed: "pass" }[
+          collectQcState(selected)
+        ] || "pass");
       submitEpisodeQc("collect", verdict)
         .catch((error) => {
           if ($("collect-qc-status")) $("collect-qc-status").textContent = `Failed to change status: ${error.message || error}`;
@@ -1815,6 +1820,10 @@ function renderCollect() {
     }
     const toggleBusy = S.collectToggleBusy !== null;
     const activeSlot = slotPlan.active;
+    const selectedSlot = (slotPlan.slots || []).find(
+      (slot) => slot.slot_id === slotPlan.selectedSlotId && savedEpisodeId(slot.episode) != null
+    );
+    const displaySlot = selectedSlot || activeSlot;
     const prompt = activeSlot ? activeSlot.task : collectTaskValue();
     const collectionSet = slotPlan.dataset || collectSetValue();
     const hasPrompt = !!activeSlot;
@@ -1850,12 +1859,12 @@ function renderCollect() {
     $("collect-current-position").textContent = activeSlot
       ? `${Number(activeSlot.ordinal) + 1} / ${totalSlots}` : `${totalSlots} / ${totalSlots}`;
     renderCurrentSceneGrid(scenePlanScene());
-    $("collect-current-task").textContent = activeSlot
-      ? (activeSlot.task_zh || activeSlot.task) : "--";
-    $("collect-current-task-en").textContent = activeSlot && activeSlot.task_zh
-      ? (scenePlanTask()?.prompt_en || activeSlot.task) : "";
-    $("collect-current-round").textContent = activeSlot
-      ? `ROUND ${Number(activeSlot.round_index) + 1} / ${activeSlot.round_total}` : "ROUND -- / --";
+    $("collect-current-task").textContent = displaySlot
+      ? (displaySlot.task_zh || displaySlot.task || displaySlot.episode?.task || displaySlot.episode?.prompt || "--") : "--";
+    $("collect-current-task-en").textContent = displaySlot && displaySlot.task_zh
+      ? (scenePlanTask()?.prompt_en || displaySlot.task || "") : "";
+    $("collect-current-round").textContent = displaySlot
+      ? `ROUND ${Number(displaySlot.round_index) + 1} / ${displaySlot.round_total}` : "ROUND -- / --";
     renderCollectionSlotFilters();
     if ($("collect-vr-review-hint")) {
       $("collect-vr-review-hint").hidden = collectControlsConfig().mode !== "vr";

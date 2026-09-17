@@ -277,13 +277,16 @@ class DatasetTransfer:
             )
         elif action == "download_data":
             # The download merges the remote QC ledger into the local one
-            # instead of overwriting it.
+            # instead of overwriting it, and lands in the configured directory
+            # rather than one named after the task set.
+            dataset_dir = target["dataset_dir"]
             fetch_dataset(
                 self.project_root,
                 name,
-                target["dataset_dir"].parent,
+                dataset_dir.parent,
                 storage,
                 expected_path=target["remote_path"],
+                target_dir=dataset_dir,
             )
         elif action == "upload_data":
             publish_dataset(

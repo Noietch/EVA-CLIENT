@@ -23,6 +23,7 @@ import yaml
 import robots  # noqa: F401
 from core.registry import ROBOT_REGISTRY
 from core.utils.lerobot import LeRobotDatasetIO
+from core.utils.qc import qc_state
 from core.utils.scene_plan import plan_slots, scene_plan_from_dir
 from robots.utils import UrdfScene
 from tools.datasets.assets import ObjectCatalog
@@ -394,14 +395,7 @@ class PlanCatalog:
         frames = sum(int(row.get("length", 0) or 0) for row in records)
         status_counts = {"unreviewed": 0, "passed": 0, "failed": 0}
         for row in records:
-            verdict = str(row.get("qc_verdict", "")).lower()
-            quality = str(row.get("quality", "green")).lower()
-            if quality == "red" or verdict == "fail":
-                status_counts["failed"] += 1
-            elif verdict == "pass":
-                status_counts["passed"] += 1
-            else:
-                status_counts["unreviewed"] += 1
+            status_counts[qc_state(row.get("qc_verdict"), row.get("quality"))] += 1
         batch = self._unmatched_batch_id(robot_type)
         return {
             "batch_id": batch,
@@ -1538,14 +1532,7 @@ class PlanCatalog:
                 daily[day] += 1
         status_counts = {"unreviewed": 0, "passed": 0, "failed": 0}
         for row in collected_rows:
-            verdict = str(row.get("qc_verdict", "")).lower()
-            quality = str(row.get("quality", "green")).lower()
-            if quality == "red" or verdict == "fail":
-                status_counts["failed"] += 1
-            elif verdict == "pass":
-                status_counts["passed"] += 1
-            else:
-                status_counts["unreviewed"] += 1
+            status_counts[qc_state(row.get("qc_verdict"), row.get("quality"))] += 1
         collected = sum(status_counts.values())
         summary = {
             "batch_id": batch,

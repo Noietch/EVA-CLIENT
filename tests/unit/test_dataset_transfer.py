@@ -116,7 +116,9 @@ def test_qc_upload_sends_the_local_ledger_and_requires_one(monkeypatch, tmp_path
     assert (dataset / "meta/episodes.jsonl").read_text(encoding="utf-8") == episodes
 
 
-def test_data_download_targets_the_local_dataset_and_holds_the_upload_off(monkeypatch, tmp_path):
+def test_data_download_targets_the_configured_directory_and_holds_the_upload_off(
+    monkeypatch, tmp_path
+):
     from tools.datasets import dataset_transfer as module
 
     dataset = tmp_path / "collection" / "bench" / "raw"
@@ -131,20 +133,29 @@ def test_data_download_targets_the_local_dataset_and_holds_the_upload_off(monkey
     started = threading.Event()
     release = threading.Event()
 
-    def fetch_dataset(project_root, name, destination, storage=None, *, expected_path=None):
-        pulled.update(name=name, destination=destination, remote_path=expected_path)
+    def fetch_dataset(
+        project_root, name, destination, storage=None, *, expected_path=None, target_dir=None
+    ):
+        pulled.update(
+            name=name,
+            destination=destination,
+            remote_path=expected_path,
+            target_dir=target_dir,
+        )
         started.set()
         assert release.wait(5)
 
     monkeypatch.setattr(module, "fetch_dataset", fetch_dataset)
     monkeypatch.setattr(module, "publish_dataset", lambda *args, **kwargs: None)
     transfer = DatasetTransfer(tmp_path)
+    transfer.remote[BATCH] = {"checked_at": 1}
     download_id = transfer.start("download_data", [target])
     assert started.wait(5)
     assert pulled == {
         "name": BATCH,
         "destination": dataset.parent,
         "remote_path": target["remote_path"],
+        "target_dir": dataset,
     }
     # The download rewrites the dataset and its ledger, so an upload of the
     # same set waits instead of racing it.
@@ -156,6 +167,7 @@ def test_data_download_targets_the_local_dataset_and_holds_the_upload_off(monkey
     release.set()
     assert _wait_job(transfer, download_id)["results"][0]["ok"]
     assert _wait_job(transfer, upload_id)["results"][0]["ok"]
+    assert BATCH not in transfer.snapshot()["remote"]
 
 
 def test_cloud_refresh_inspects_datasets_in_parallel(monkeypatch, tmp_path):

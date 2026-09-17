@@ -61,8 +61,10 @@ def test_download_data_pulls_the_selected_set_into_its_collection_dir(tmp_path, 
 
     calls = []
 
-    def fetch_dataset(project_root, name, destination, storage=None, *, expected_path=None):
-        calls.append((name, destination, expected_path))
+    def fetch_dataset(
+        project_root, name, destination, storage=None, *, expected_path=None, target_dir=None
+    ):
+        calls.append((name, destination, expected_path, target_dir))
 
     monkeypatch.setattr(module, "fetch_dataset", fetch_dataset)
     client = _client(tmp_path)
@@ -74,7 +76,9 @@ def test_download_data_pulls_the_selected_set_into_its_collection_dir(tmp_path, 
             break
         time.sleep(0.01)
     assert job["results"] == [{"dataset": BATCH, "ok": True, "detail": ""}]
-    assert calls == [(BATCH, tmp_path / "collection" / "bench", None)]
+    assert calls == [
+        (BATCH, tmp_path / "collection" / "bench", None, tmp_path / "collection" / "bench" / "raw")
+    ]
 
 
 def test_transfer_writes_require_edit_mode_and_are_read_only_safe(tmp_path):

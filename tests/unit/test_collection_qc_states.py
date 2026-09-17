@@ -41,13 +41,13 @@ def test_four_qc_states_match_dataset_tools_and_ignore_stale_queue():
         "unreviewed",
         "passed",
         "failed",
-        "failed",
+        "passed",
         "pending",
     ]
     assert {key: counts[key] for key in ("unreviewed", "passed", "failed", "qc_pending")} == {
         "unreviewed": 1,
-        "passed": 1,
-        "failed": 2,
+        "passed": 2,
+        "failed": 1,
         "qc_pending": 1,
     }
     assert active["qc_state"] == "failed"

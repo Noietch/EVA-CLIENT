@@ -347,6 +347,7 @@ def fetch_dataset(
     storage: dict[str, Any] | None = None,
     *,
     expected_path: str | None = None,
+    target_dir: Path | None = None,
 ) -> dict[str, str]:
     from huggingface_hub import HfApi, snapshot_download
 
@@ -373,7 +374,7 @@ def fetch_dataset(
         source = cache / remote_path
         if not (source / "meta/episodes.jsonl").is_file():
             raise FileNotFoundError(f"Downloaded dataset metadata missing: {dataset_name}")
-        target = destination / dataset_name
+        target = target_dir if target_dir is not None else destination / dataset_name
         target.mkdir(parents=True, exist_ok=True)
         for item in source.rglob("*"):
             if item.is_file():

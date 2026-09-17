@@ -10,6 +10,8 @@ import hashlib
 import json
 from pathlib import Path
 
+from core.utils.qc import qc_state
+
 
 def file_digest(path: Path, lfs: bool) -> str:
     digest = hashlib.sha256() if lfs else hashlib.sha1()
@@ -77,17 +79,8 @@ def qc_summary(episodes: list[dict], qc: list[dict]) -> dict:
     counts = {"accept": 0, "fail": 0, "unreviewed": 0}
     for episode in episodes:
         row = {**episode, **overrides.get(episode.get("episode_index"), {})}
-        verdict = row.get("qc_verdict", "")
-        state = (
-            "unreviewed"
-            if verdict == "unreviewed"
-            else "fail"
-            if verdict == "fail" or row.get("quality") == "red"
-            else "accept"
-            if verdict == "pass"
-            else "unreviewed"
-        )
-        counts[state] += 1
+        state = qc_state(row.get("qc_verdict"), row.get("quality"))
+        counts[{"failed": "fail", "passed": "accept"}.get(state, "unreviewed")] += 1
     return counts
 
 
