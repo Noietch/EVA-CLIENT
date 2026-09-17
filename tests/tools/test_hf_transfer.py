@@ -1,5 +1,6 @@
 """Hugging Face transfer paths without network access."""
 
+import json
 import sys
 from types import SimpleNamespace
 
@@ -7,7 +8,7 @@ import pytest
 
 from core.app.console import server
 from core.config import ConfigDict
-from tools.datasets import hf_task_sets
+from tools.datasets import hf_qc, hf_task_sets
 
 pytestmark = pytest.mark.unit
 
@@ -44,7 +45,9 @@ def test_fetch_qc_uses_actual_dataset_repo_path(tmp_path, monkeypatch):
     result = hf_task_sets.fetch_qc(tmp_path, "set_a", target, storage)
     assert calls["filename"] == "datasets/campaign/set_a/meta/qc.jsonl"
     assert calls["revision"] == "revision-sha"
-    assert (target / "meta/qc.jsonl").read_bytes() == source.read_bytes()
+    saved = json.loads((target / "meta/qc.jsonl").read_text())
+    assert saved["verdict"] == "pass"
+    assert saved["qc_updated_at"] == hf_qc.LEGACY_QC_UPDATED_AT
     assert result["path"] == str(target / "meta/qc.jsonl")
 
 
@@ -83,7 +86,9 @@ def test_fetch_qc_selects_configured_path_when_remote_cache_duplicates_set(tmp_p
     storage = {"huggingface": {"repo_id": "team/data"}}
     result = hf_task_sets.fetch_qc(tmp_path, name, target, storage, expected_path=canonical)
     assert downloads == [f"{canonical}/meta/qc.jsonl"]
-    assert (target / "meta/qc.jsonl").read_bytes() == source.read_bytes()
+    saved = json.loads((target / "meta/qc.jsonl").read_text())
+    assert saved["verdict"] == "pass"
+    assert saved["qc_updated_at"] == hf_qc.LEGACY_QC_UPDATED_AT
     assert result["source"] == "qc.jsonl"
     assert (
         hf_task_sets.dataset_repo_path(FakeApi(None), "team/data", name, "revision-sha")
@@ -254,14 +259,25 @@ def test_publish_qc_uploads_only_selected_set_qc_to_configured_path(tmp_path, mo
         def __init__(self, token):
             pass
 
+        def repo_info(self, repo_id, repo_type, revision):
+            return SimpleNamespace(sha="previous-revision")
+
         def list_repo_files(self, repo_id, repo_type, revision):
             return []
 
-        def upload_file(self, **kwargs):
+        def create_commit(self, **kwargs):
             uploaded.update(kwargs)
             return SimpleNamespace(oid="new-revision")
 
-    monkeypatch.setitem(sys.modules, "huggingface_hub", SimpleNamespace(HfApi=FakeApi))
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        SimpleNamespace(
+            HfApi=FakeApi,
+            hf_hub_download=lambda **kwargs: None,
+            CommitOperationAdd=lambda **kwargs: SimpleNamespace(**kwargs),
+        ),
+    )
     result = hf_task_sets.publish_qc(
         tmp_path,
         dataset,
@@ -269,8 +285,10 @@ def test_publish_qc_uploads_only_selected_set_qc_to_configured_path(tmp_path, mo
         {"huggingface": {"repo_id": "team/data"}},
         expected_path="datasets/real_robot/dual_yam/set_a",
     )
-    assert uploaded["path_or_fileobj"] == str(dataset / "meta/qc.jsonl")
-    assert uploaded["path_in_repo"] == "datasets/real_robot/dual_yam/set_a/meta/qc.jsonl"
+    operation = uploaded["operations"][0]
+    assert operation.path_in_repo == "datasets/real_robot/dual_yam/set_a/meta/qc.jsonl"
+    assert json.loads(operation.path_or_fileobj)["qc_updated_at"] == (hf_qc.LEGACY_QC_UPDATED_AT)
+    assert uploaded["parent_commit"] == "previous-revision"
     assert result["dataset"] == "set_a"
 
 
@@ -310,7 +328,9 @@ def test_fetch_qc_finds_legacy_top_level_qc_for_selected_set(tmp_path, monkeypat
         expected_path=canonical,
     )
     assert downloads == [legacy]
-    assert (target / "meta/qc.jsonl").read_bytes() == source.read_bytes()
+    saved = json.loads((target / "meta/qc.jsonl").read_text())
+    assert saved["qc_verdict"] == "fail"
+    assert saved["qc_updated_at"] == hf_qc.LEGACY_QC_UPDATED_AT
     assert result["source"] == "qc.jsonl"
 
 
@@ -433,3 +453,44 @@ def test_qc_upload_route_uses_selected_collection_dir_and_remote_path(tmp_path, 
 def test_default_hf_config_matches_sync_script(tmp_path):
     config = hf_task_sets._config(tmp_path, {"huggingface": {}})
     assert config["repo_id"] == "Noietch/data_collection"
+
+
+def test_publish_dataset_merges_qc_after_data_upload(tmp_path, monkeypatch):
+    dataset = tmp_path / "set_a"
+    (dataset / "meta").mkdir(parents=True)
+    (dataset / "meta/episodes.jsonl").write_text("{}\n")
+    (dataset / "meta/qc.jsonl").write_text('{"episode_index": 0, "qc_verdict": "pass"}\n')
+    uploaded = {}
+    qc_call = {}
+
+    class FakeApi:
+        def __init__(self, token):
+            pass
+
+        def list_repo_files(self, repo_id, repo_type, revision):
+            return []
+
+        def upload_folder(self, **kwargs):
+            uploaded.update(kwargs)
+            return SimpleNamespace(oid="data-revision")
+
+    def fake_publish_qc(project_root, dataset_dir, dataset_name, storage, **kwargs):
+        qc_call.update(dataset_dir=dataset_dir, dataset_name=dataset_name, **kwargs)
+        return {"repo_id": "team/data", "revision": "qc-revision"}
+
+    monkeypatch.setitem(sys.modules, "huggingface_hub", SimpleNamespace(HfApi=FakeApi))
+    monkeypatch.setattr(hf_task_sets, "publish_qc", fake_publish_qc)
+    result = hf_task_sets.publish_dataset(
+        tmp_path,
+        dataset,
+        "set_a",
+        {"huggingface": {"repo_id": "team/data"}},
+        new_remote_path="datasets/real_robot/dual_yam/set_a",
+    )
+    assert uploaded["ignore_patterns"] == ["meta/qc.jsonl"]
+    assert qc_call == {
+        "dataset_dir": dataset,
+        "dataset_name": "set_a",
+        "expected_path": "datasets/real_robot/dual_yam/set_a",
+    }
+    assert result["revision"] == "qc-revision"

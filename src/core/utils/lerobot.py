@@ -9,6 +9,7 @@ The DatasetTransport (transport/dataset.py) holds one of these for its own reads
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -226,6 +227,11 @@ class LeRobotDatasetIO:
             qc_row["qc_verdict"] = verdict
         qc_row["qc_note"] = note
         qc_row["qc_reason"] = reason
+        timestamp = datetime.now(UTC)
+        if "qc_updated_at" in qc_row:
+            previous = datetime.fromisoformat(qc_row["qc_updated_at"].replace("Z", "+00:00"))
+            timestamp = max(timestamp, previous + timedelta(microseconds=1))
+        qc_row["qc_updated_at"] = timestamp.isoformat(timespec="microseconds")
         qc_path.parent.mkdir(parents=True, exist_ok=True)
         qc_path.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in qc_rows))
         return True

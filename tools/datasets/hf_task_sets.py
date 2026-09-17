@@ -12,6 +12,8 @@ from typing import Any
 
 import yaml
 
+from tools.datasets.hf_qc import merge_qc, write_qc
+
 
 def dataset_repo_path(
     api, repo_id: str, dataset_name: str, revision: str, expected_path: str | None = None
@@ -249,6 +251,7 @@ def publish_dataset(
         remote_path = dataset_repo_path(api, repo_id, dataset_name, revision, new_remote_path)
     except FileNotFoundError:
         remote_path = new_remote_path or f"datasets/{dataset_name}"
+    qc_path = dataset_dir / "meta/qc.jsonl"
     commit = api.upload_folder(
         repo_id=repo_id,
         repo_type="dataset",
@@ -257,8 +260,12 @@ def publish_dataset(
         commit_message=f"Update dataset {dataset_name}",
         token=token,
         revision=revision,
-        **({"ignore_patterns": ["meta/qc.jsonl"]} if not include_qc else {}),
+        **({"ignore_patterns": ["meta/qc.jsonl"]} if not include_qc or qc_path.is_file() else {}),
     )
+    if include_qc and qc_path.is_file():
+        return publish_qc(
+            project_root, dataset_dir, dataset_name, storage, expected_path=remote_path
+        )
     return {"repo_id": repo_id, "dataset": dataset_name, "revision": commit.oid}
 
 
@@ -301,7 +308,11 @@ def fetch_dataset(
             if item.is_file():
                 output = target / item.relative_to(source)
                 output.parent.mkdir(parents=True, exist_ok=True)
-                if item.relative_to(source).as_posix() == "meta/qc.jsonl" and output.exists():
+                if item.relative_to(source).as_posix() == "meta/qc.jsonl":
+                    local = output.read_bytes() if output.is_file() else b""
+                    merged = merge_qc(local, item.read_bytes())
+                    if merged != local:
+                        write_qc(output, merged)
                     continue
                 shutil.copyfile(item, output)
     return {"repo_id": repo_id, "dataset": dataset_name, "revision": revision}
@@ -315,14 +326,16 @@ def publish_qc(
     *,
     expected_path: str | None = None,
 ) -> dict[str, str]:
-    from huggingface_hub import HfApi
+    from huggingface_hub import CommitOperationAdd, HfApi, hf_hub_download
 
     cfg = _config(project_root, storage)
     _apply_proxy(cfg)
     token, repo_id = str(cfg.get("token", "")).strip() or None, str(cfg.get("repo_id", "")).strip()
     qc_path = dataset_dir / "meta" / "qc.jsonl"
-    if not repo_id or not qc_path.is_file():
-        raise FileNotFoundError("QC file or Hugging Face configuration is missing")
+    if not repo_id:
+        raise ValueError("Hugging Face config requires repo_id")
+    if not qc_path.is_file():
+        raise FileNotFoundError(f"QC file is missing: {qc_path}")
     remote_path = expected_path or f"datasets/{dataset_name}"
     if (
         not remote_path.startswith("datasets/")
@@ -330,19 +343,44 @@ def publish_qc(
         or ".." in Path(remote_path).parts
     ):
         raise ValueError("invalid remote QC path for selected set")
-    commit = HfApi(token=token).upload_file(
-        path_or_fileobj=str(qc_path),
-        path_in_repo=f"{remote_path}/meta/qc.jsonl",
-        repo_id=repo_id,
-        repo_type="dataset",
-        commit_message=f"Update QC {dataset_name}",
-        token=token,
-    )
+    api = HfApi(token=token)
+    branch = str(cfg.get("revision", "main")).strip() or "main"
+    revision = api.repo_info(repo_id, repo_type="dataset", revision=branch).sha
+    remote_files = set(api.list_repo_files(repo_id, repo_type="dataset", revision=revision))
+    published_path = qc_repo_path(remote_files, dataset_name, remote_path)
+    path_in_repo = f"{remote_path}/meta/qc.jsonl"
+    remote = b""
+    if published_path:
+        remote_file = hf_hub_download(
+            repo_id,
+            filename=f"{published_path}/meta/qc.jsonl",
+            repo_type="dataset",
+            revision=revision,
+            token=token,
+        )
+        remote = Path(remote_file).read_bytes()
+    local = qc_path.read_bytes()
+    merged = merge_qc(local, remote)
+    if merged != remote or published_path != remote_path:
+        commit = api.create_commit(
+            repo_id=repo_id,
+            repo_type="dataset",
+            revision=branch,
+            parent_commit=revision,
+            operations=[CommitOperationAdd(path_in_repo=path_in_repo, path_or_fileobj=merged)],
+            commit_message=f"Merge QC {dataset_name}",
+            token=token,
+        )
+        revision = commit.oid
+    if merged != local:
+        if qc_path.read_bytes() != local:
+            raise ValueError(f"Local QC changed during upload; retry: {qc_path}")
+        write_qc(qc_path, merged)
     return {
         "repo_id": repo_id,
         "dataset": dataset_name,
-        "revision": commit.oid,
-        "path": f"{remote_path}/meta/qc.jsonl",
+        "revision": revision,
+        "path": path_in_repo,
     }
 
 
@@ -377,8 +415,10 @@ def fetch_qc(
             token=token,
         )
         target = dataset_dir / "meta" / "qc.jsonl"
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(Path(path).read_bytes())
+        local = target.read_bytes() if target.is_file() else b""
+        merged = merge_qc(local, Path(path).read_bytes())
+        if merged != local:
+            write_qc(target, merged)
         return {
             "repo_id": repo_id,
             "dataset": dataset_name,
@@ -386,8 +426,7 @@ def fetch_qc(
             "source": "qc.jsonl",
         }
 
-    # sync_hf.sh publishes full collection datasets; older datasets keep their
-    # quality metadata in episodes.jsonl rather than a separate qc.jsonl.
+    # Older datasets keep quality metadata in episodes.jsonl instead of qc.jsonl.
     episodes_filename = f"{remote_path}/meta/episodes.jsonl"
     target = dataset_dir / "meta" / "episodes.jsonl"
     if not target.is_file():
