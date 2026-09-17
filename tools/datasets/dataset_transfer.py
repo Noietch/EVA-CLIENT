@@ -1,8 +1,8 @@
-"""Background dataset operations: task-set transfers, Hugging Face comparisons,
-and automatic QC scans.
+"""Background dataset operations: Hugging Face transfers and remote inspections.
 
-Rows are task sets: one row per ``<collection_root>/task_sets/<set>`` plan
-directory, mirroring the EVA-CLIENT console dataset manager.
+The console and the dataset service both drive ``DatasetTransfer``: each app
+resolves its own targets and supplies its own Hugging Face storage config, so
+one engine serves both dataset pages.
 """
 
 from __future__ import annotations
@@ -11,7 +11,6 @@ import copy
 import csv
 import json
 import os
-import tempfile
 import threading
 import time
 import uuid
@@ -45,17 +44,6 @@ from tools.datasets.hf_task_sets import (
     publish_task_set,
 )
 
-ACTIONS = {
-    "refresh",
-    "verify",
-    "auto_qc",
-    "upload_data",
-    "upload_qc",
-    "download_qc",
-    "upload_task",
-    "download_task",
-}
-
 # Remote reads use immutable HF revisions; only local reads need leases.
 ACCESS = {
     "refresh": {"local_data": "read", "local_qc": "read", "local_task": "read"},
@@ -74,11 +62,24 @@ SCAN_WORKERS = min(4, max(1, (os.cpu_count() or 1) // 4))
 
 
 class DatasetTransfer:
-    """Run dataset operations: Hugging Face transfers, comparisons, QC scans."""
+    """Run dataset jobs: transfers, remote inspections and comparisons.
 
-    def __init__(self, project_root: Path, catalog: PlanCatalog):
+    A target is ``{"name", "plan", "dataset_dir", "remote_path"}``, resolved by
+    the calling app. Every job reports its progress through ``snapshot``.
+    """
+
+    ACTIONS = {
+        "refresh",
+        "verify",
+        "upload_data",
+        "upload_qc",
+        "download_qc",
+        "upload_task",
+        "download_task",
+    }
+
+    def __init__(self, project_root: Path) -> None:
         self.project_root = project_root
-        self.catalog = catalog
         self.lock = threading.RLock()
         self.remote: dict[str, dict] = {}
         self.jobs: dict[str, dict] = {}
@@ -86,21 +87,6 @@ class DatasetTransfer:
         self.leases: dict[tuple[str, str], tuple[str, dict]] = {}
         self.generations: dict[str, int] = {}
         self.condition = threading.Condition(self.lock)
-
-    def rows(self) -> list[dict[str, Any]]:
-        summaries = {row["batch_id"]: row for row in self.catalog.state()["all_batches"]}
-        return [
-            {
-                "name": name,
-                "robot": summaries[name]["robot_type"],
-                "total": summaries[name]["target_episodes"],
-                "collected": summaries[name]["collected"],
-                "accept": summaries[name]["passed"],
-                "fail": summaries[name]["failed"],
-                "unreviewed": summaries[name]["unreviewed"],
-            }
-            for name in self.catalog.batch_ids()
-        ]
 
     def snapshot(self) -> dict[str, Any]:
         with self.lock:
@@ -119,10 +105,9 @@ class DatasetTransfer:
                 "job": jobs[-1] if jobs else None,
             }
 
-    def start(self, action: str, names: list[str]) -> str:
-        if action not in ACTIONS:
+    def start(self, action: str, targets: list[dict], storage: dict | None = None) -> str:
+        if action not in self.ACTIONS:
             raise ValueError("Unknown dataset action")
-        targets = [self._target(name) for name in names]
         with self.lock:
             if sum(job["state"] == "running" for job in self.jobs.values()) >= 8:
                 raise ValueError("Eight dataset jobs are already active")
@@ -147,7 +132,11 @@ class DatasetTransfer:
                 "waiting": False,
             }
         runner = self._run_scan if action == "auto_qc" else self._run
-        threading.Thread(target=runner, args=(job_id, targets), daemon=True).start()
+        threading.Thread(
+            target=runner,
+            args=(job_id, targets, copy.deepcopy(storage)),
+            daemon=True,
+        ).start()
         return job_id
 
     def stop(self, job_id: str) -> None:
@@ -157,20 +146,6 @@ class DatasetTransfer:
             self.cancellations[job_id].set()
             self.jobs[job_id]["stop_requested"] = True
             self.condition.notify_all()
-
-    def _target(self, name: str) -> dict[str, Any]:
-        plan = self.catalog._batch_root(name)
-        info = yaml.safe_load((plan / "info.yaml").read_text(encoding="utf-8-sig")) or {}
-        dataset_dir = self.catalog._source_dataset_dir(name, info)
-        relative = dataset_dir.relative_to(self.catalog.collection_root).as_posix()
-        return {
-            "name": name,
-            "plan": plan,
-            "dataset_dir": dataset_dir,
-            # Local collection paths are not the remote layout; inspection
-            # resolves the real prefix from the repository when this is None.
-            "remote_path": relative if relative.startswith("datasets/") else None,
-        }
 
     def _acquire(self, job_id: str, name: str, action: str) -> bool:
         access = ACCESS[action]
@@ -204,20 +179,20 @@ class DatasetTransfer:
                 self.remote.pop(name, None)
             self.condition.notify_all()
 
-    def _run(self, job_id: str, targets: list[dict]) -> None:
+    def _run(self, job_id: str, targets: list[dict], storage: dict | None) -> None:
         """Run the targets one after another."""
         action = self.jobs[job_id]["action"]
         for target in targets:
             if self.cancellations[job_id].is_set():
                 break
-            self._process(job_id, action, target)
+            self._process(job_id, action, target, storage)
         self._finish(job_id)
 
-    def _run_scan(self, job_id: str, targets: list[dict]) -> None:
+    def _run_scan(self, job_id: str, targets: list[dict], storage: dict | None) -> None:
         """Scan datasets in parallel; one worker owns one dataset."""
-        action = self.jobs[job_id]["action"]
+        scan = partial(self._process, job_id, self.jobs[job_id]["action"], storage=storage)
         with ThreadPoolExecutor(max_workers=SCAN_WORKERS) as pool:
-            list(pool.map(partial(self._process, job_id, action), targets))
+            list(pool.map(scan, targets))
         self._finish(job_id)
 
     def _finish(self, job_id: str) -> None:
@@ -230,7 +205,7 @@ class DatasetTransfer:
                 finished=time.time(),
             )
 
-    def _process(self, job_id: str, action: str, target: dict) -> None:
+    def _process(self, job_id: str, action: str, target: dict, storage: dict | None = None) -> None:
         """Run one dataset operation and record its outcome on the job."""
         job = self.jobs[job_id]
         name = target["name"]
@@ -241,16 +216,7 @@ class DatasetTransfer:
         try:
             with self.lock:
                 job["waiting"] = False
-            if action in {"refresh", "verify"}:
-                self._refresh(job, target, name)
-                detail = ""
-            elif action == "auto_qc":
-                detail = self._auto_qc(job_id, target, name)
-            else:
-                self._transfer(action, target, name)
-                with self.lock:
-                    self.remote.pop(name, None)
-                detail = ""
+            detail = self._operate(job_id, action, target, name, storage)
             outcome = {"dataset": name, "ok": True, "detail": detail}
         except Exception as exc:  # per-set failure is reported in the job result
             outcome = {"dataset": name, "ok": False, "error": str(exc)}
@@ -262,22 +228,19 @@ class DatasetTransfer:
             job["results"].append(outcome)
             job["completed"] += 1
 
-    def _auto_qc(self, job_id: str, target: dict, name: str) -> str:
-        plan = yaml.safe_load((target["plan"] / "info.yaml").read_text(encoding="utf-8-sig"))
-        robot_type = str((plan or {}).get("robot_type", ""))
+    def _operate(
+        self, job_id: str, action: str, target: dict, name: str, storage: dict | None
+    ) -> str:
+        """Run one dataset operation and return the job's detail line."""
+        if action in {"refresh", "verify"}:
+            self._refresh(self.jobs[job_id], target, name, storage)
+            return ""
+        self._transfer(action, target, name, storage)
+        with self.lock:
+            self.remote.pop(name, None)
+        return ""
 
-        def report(position: int, total: int) -> None:
-            with self.lock:
-                self.jobs[job_id]["detail"] = f"{name} · {position}/{total}"
-
-        scan = DatasetAutoQc(
-            self.catalog, target["dataset_dir"], robot_type, self.cancellations[job_id]
-        )
-        result = scan.run(report)
-        self.catalog._invalidate_plan_cache(name)
-        return result["summary"]
-
-    def _refresh(self, job: dict, target: dict, name: str) -> None:
+    def _refresh(self, job: dict, target: dict, name: str, storage: dict | None) -> None:
         with self.lock:
             generation = self.generations.get(name, 0)
             inspection_started = time.time()
@@ -286,7 +249,7 @@ class DatasetTransfer:
             with self.lock:
                 job["detail"] = f"{index}/{total} · {filename}"
 
-        result = self._inspect(target, progress)
+        result = self._inspect(target, storage, progress)
         with self.lock:
             writing = any(n == name and "write" in a.values() for n, a in self.leases.values())
             if generation != self.generations.get(name, 0) or writing:
@@ -296,13 +259,14 @@ class DatasetTransfer:
             if self.remote.get(name, {}).get("inspection_started", 0) <= inspection_started:
                 self.remote[name] = result
 
-    def _transfer(self, action: str, target: dict, name: str) -> None:
+    def _transfer(self, action: str, target: dict, name: str, storage: dict | None) -> None:
         if action == "download_qc":
             # The remote may only hand down QC, never dataset content.
             fetch_qc(
                 self.project_root,
                 name,
                 target["dataset_dir"],
+                storage,
                 expected_path=target["remote_path"],
             )
         elif action == "upload_data":
@@ -310,38 +274,33 @@ class DatasetTransfer:
                 self.project_root,
                 target["dataset_dir"],
                 name,
+                storage,
                 new_remote_path=target["remote_path"],
                 include_qc=False,
             )
         elif action == "upload_task":
-            publish_task_set(self.project_root, target["plan"])
+            publish_task_set(self.project_root, target["plan"], storage)
         elif action == "download_task":
-            fetch_task_set(self.project_root, name, target["plan"].parent)
+            fetch_task_set(self.project_root, name, target["plan"].parent, storage)
         elif action == "upload_qc":
-            qc_root = target["dataset_dir"]
-            if (qc_root / "meta/qc.jsonl").is_file():
-                publish_qc(self.project_root, qc_root, name, expected_path=target["remote_path"])
-            else:
-                entries = qc_entries(read_jsonl(qc_root / "meta/episodes.jsonl"), [])
-                if not entries:
-                    raise ValueError("No local episodes or QC to upload")
-                with tempfile.TemporaryDirectory(prefix="eva-qc-upload-") as directory:
-                    root = Path(directory)
-                    (root / "meta").mkdir()
-                    (root / "meta/qc.jsonl").write_text(
-                        "".join(
-                            json.dumps({"episode_index": int(index), **row}, ensure_ascii=False)
-                            + "\n"
-                            for index, row in entries.items()
-                        )
-                    )
-                    publish_qc(self.project_root, root, name, expected_path=target["remote_path"])
+            dataset_dir = target["dataset_dir"]
+            if not (dataset_dir / "meta/qc.jsonl").is_file():
+                raise ValueError(f"No QC ledger to upload: {dataset_dir}/meta/qc.jsonl")
+            publish_qc(
+                self.project_root,
+                dataset_dir,
+                name,
+                storage,
+                expected_path=target["remote_path"],
+            )
+        else:
+            raise ValueError(f"Unknown dataset action: {action}")
 
-    def _inspect(self, target: dict, progress=lambda *_: None) -> dict:
+    def _inspect(self, target: dict, storage: dict | None, progress=lambda *_: None) -> dict:
         from huggingface_hub import HfApi, hf_hub_download
         from huggingface_hub.errors import EntryNotFoundError
 
-        cfg = _config(self.project_root)
+        cfg = _config(self.project_root, storage)
         _apply_proxy(cfg)
         token = cfg.get("token") or None
         repo = cfg["repo_id"]
@@ -428,3 +387,67 @@ class DatasetTransfer:
             if not present and result["verification"][kind]["state"] == "same":
                 result["verification"][kind]["state"] = "absent"
         return result
+
+
+class CatalogTransfer(DatasetTransfer):
+    """The dataset service's engine, bound to the parsed plan catalog."""
+
+    ACTIONS = DatasetTransfer.ACTIONS | {"auto_qc"}
+
+    def __init__(self, project_root: Path, catalog: PlanCatalog) -> None:
+        super().__init__(project_root)
+        self.catalog = catalog
+
+    def rows(self) -> list[dict[str, Any]]:
+        summaries = {row["batch_id"]: row for row in self.catalog.state()["all_batches"]}
+        return [
+            {
+                "name": name,
+                "robot": summaries[name]["robot_type"],
+                "total": summaries[name]["target_episodes"],
+                "collected": summaries[name]["collected"],
+                "accept": summaries[name]["passed"],
+                "fail": summaries[name]["failed"],
+                "unreviewed": summaries[name]["unreviewed"],
+            }
+            for name in self.catalog.batch_ids()
+        ]
+
+    def targets(self, names: list[str]) -> list[dict[str, Any]]:
+        """Resolve each named task set into a transfer target."""
+        targets = []
+        for name in names:
+            plan = self.catalog._batch_root(name)
+            info = yaml.safe_load((plan / "info.yaml").read_text(encoding="utf-8-sig")) or {}
+            dataset_dir = self.catalog._source_dataset_dir(name, info)
+            relative = dataset_dir.relative_to(self.catalog.collection_root).as_posix()
+            targets.append(
+                {
+                    "name": name,
+                    "plan": plan,
+                    "dataset_dir": dataset_dir,
+                    # Local collection paths are not the remote layout; inspection
+                    # resolves the real prefix from the repository when this is None.
+                    "remote_path": relative if relative.startswith("datasets/") else None,
+                }
+            )
+        return targets
+
+    def _operate(
+        self, job_id: str, action: str, target: dict, name: str, storage: dict | None
+    ) -> str:
+        if action != "auto_qc":
+            return super()._operate(job_id, action, target, name, storage)
+        plan = yaml.safe_load((target["plan"] / "info.yaml").read_text(encoding="utf-8-sig"))
+        robot_type = str((plan or {}).get("robot_type", ""))
+
+        def report(position: int, total: int) -> None:
+            with self.lock:
+                self.jobs[job_id]["detail"] = f"{name} · {position}/{total}"
+
+        scan = DatasetAutoQc(
+            self.catalog, target["dataset_dir"], robot_type, self.cancellations[job_id]
+        )
+        result = scan.run(report)
+        self.catalog.invalidate(name)
+        return result["summary"]

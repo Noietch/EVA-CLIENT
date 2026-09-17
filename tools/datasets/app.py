@@ -21,7 +21,7 @@ from flask import Flask, jsonify, render_template, request, send_file, send_from
 from werkzeug.exceptions import Forbidden, HTTPException
 
 from tools.datasets.collection import PlanCatalog
-from tools.datasets.dataset_transfer import DatasetTransfer
+from tools.datasets.dataset_transfer import CatalogTransfer
 from tools.datasets.hf_task_sets import (
     fetch_dataset,
     fetch_qc,
@@ -52,7 +52,7 @@ class DatasetService:
         app.config["DATASET_READ_ONLY"] = read_only
         app.config["DATASET_LOCALE"] = locale
         self.catalog = PlanCatalog(plans_root, assets_root, collection_root)
-        self.transfers = DatasetTransfer(PROJECT_ROOT, self.catalog)
+        self.transfers = CatalogTransfer(PROJECT_ROOT, self.catalog)
 
         # Register the catalog and review endpoints
         app.after_request(self.compress_json)
@@ -253,7 +253,8 @@ class DatasetService:
         names = body.get("datasets")
         if not isinstance(names, list) or not names:
             raise ValueError("Select datasets to transfer")
-        self.transfers.start(str(body.get("action", "")), list(dict.fromkeys(names)))
+        targets = self.transfers.targets(list(dict.fromkeys(names)))
+        self.transfers.start(str(body.get("action", "")), targets)
         return jsonify({"ok": True, **self.transfers.snapshot()})
 
     def export_qc(self, batch: str) -> Any:

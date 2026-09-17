@@ -47,7 +47,6 @@ from core.app.console.collection_slots import (
     select_collection_slot,
 )
 from core.app.console.dashboard import build_dashboard, discover_dashboard_upload_candidates
-from core.app.console.dataset_manager import DatasetManager
 from core.app.console.transform_worker import build_transform_blob
 from core.app.handlers import (
     _resolve_runtime_path,
@@ -87,6 +86,7 @@ from tools.conversion import (
     DatasetExportProgress,
     export_dataset,
 )
+from tools.datasets.dataset_transfer import DatasetTransfer
 from tools.datasets.hf_task_sets import (
     fetch_assets,
     fetch_qc,
@@ -98,6 +98,8 @@ from transport.base import ObservationSource
 from transport.dataset import DatasetTransport
 
 logger = logging.getLogger(__name__)
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[4]
 
 
 class ReusableThreadingHTTPServer(ThreadingHTTPServer):
@@ -632,7 +634,9 @@ class ConsoleContext:
     output_dir: str = ""  # results root; debug results land in <output_dir>/console/
     preview: Any = None  # EpisodePreview for RESULT-tab playback (lazily set)
     quality_upload_lock: threading.RLock = dataclasses.field(default_factory=threading.RLock)
-    dataset_manager: DatasetManager = dataclasses.field(default_factory=DatasetManager)
+    dataset_manager: DatasetTransfer = dataclasses.field(
+        default_factory=lambda: DatasetTransfer(_PROJECT_ROOT)
+    )
     quality_upload_jobs: OrderedDict[str, _QualityUploadJob] = dataclasses.field(
         default_factory=OrderedDict
     )
@@ -3470,12 +3474,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                         "remote_path": remote,
                     }
                 )
-            manager.start(
-                str(body.get("action", "")),
-                targets,
-                Path(__file__).resolve().parents[4],
-                config.collection.storage,
-            )
+            manager.start(str(body.get("action", "")), targets, config.collection.storage)
         except ValueError as exc:
             self._send_json(409, {"ok": False, "error": str(exc)})
             return

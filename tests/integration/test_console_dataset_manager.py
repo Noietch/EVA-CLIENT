@@ -32,9 +32,11 @@ def test_dataset_manager_selection_is_validated_and_local_stats_are_slot_based(
     monkeypatch.setattr(server, "_scene_plan_root", lambda config, name: tmp_path / "plans" / name)
     calls = []
     monkeypatch.setattr(
-        server.DatasetManager,
+        server.DatasetTransfer,
         "start",
-        lambda self, action, targets, *args: calls.append((action, [t["name"] for t in targets])),
+        lambda self, action, targets, storage=None: calls.append(
+            (action, [t["name"] for t in targets])
+        ),
     )
     with serve_console(console_config(collection={"enabled": True})) as console:
         response = console.get("/api/dataset_manager")

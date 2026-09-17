@@ -10,6 +10,7 @@ import threading
 import time
 import zipfile
 from collections import OrderedDict, defaultdict
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -325,7 +326,7 @@ class PlanCatalog:
                 for round_index in range(total)
             }
             for row in self._annotate_static_qc(
-                dataset_dir, self._episode_rows(dataset_dir), analyze=False
+                dataset_dir, self.episode_rows(dataset_dir), analyze=False
             ):
                 marker = str(row.get("taskset_match", ""))
                 target = (
@@ -515,23 +516,23 @@ class PlanCatalog:
     ) -> dict[str, Any]:
         store = self._store(batch)
         store.upsert(kind, current_id, payload)
-        self._invalidate_plan_cache(batch)
+        self.invalidate(batch)
         return self.state(batch)
 
     def delete_plan(self, batch: str, kind: str, record_id: str) -> dict[str, Any]:
         self._store(batch).delete(kind, record_id)
-        self._invalidate_plan_cache(batch)
+        self.invalidate(batch)
         return self.state(batch)
 
     def update_info(self, batch: str, payload: Any) -> dict[str, Any]:
         self._store(batch).update_info(payload)
-        self._invalidate_plan_cache(batch)
+        self.invalidate(batch)
         return self.state(batch)
 
     def import_plan(self, batch: str, content: bytes) -> dict[str, Any]:
         batch_id = self._batch_id(batch)
         TaskSetStore(self.plans_root / batch_id, self.assets.path).import_zip(content)
-        self._invalidate_plan_cache(batch_id)
+        self.invalidate(batch_id)
         return self.state(batch_id)
 
     def export_plan(self, batch: str) -> io.BytesIO:
@@ -539,7 +540,7 @@ class PlanCatalog:
 
     def upsert_asset(self, current_id: str | None, payload: Any) -> None:
         self.assets.upsert(current_id, payload)
-        self._invalidate_plan_cache()
+        self.invalidate()
 
     def delete_asset(self, object_id: str) -> None:
         references = []
@@ -555,16 +556,16 @@ class PlanCatalog:
         if references:
             raise ConflictError(f"{object_id} is referenced by {', '.join(references[:6])}")
         self.assets.delete(object_id)
-        self._invalidate_plan_cache()
+        self.invalidate()
 
     def upload_photos(self, object_id: str, uploads: list[tuple[str, bytes]]) -> dict[str, Any]:
         result = self.assets.save_photos(object_id, uploads)
-        self._invalidate_plan_cache()
+        self.invalidate()
         return result
 
     def import_assets_csv(self, content: bytes, uploads: list[tuple[str, bytes]]) -> dict[str, Any]:
         summary = self.assets.import_csv(content, uploads)
-        self._invalidate_plan_cache()
+        self.invalidate()
         state = self.state()
         state["import_summary"] = summary
         return state
@@ -815,7 +816,7 @@ class PlanCatalog:
             updated = LeRobotDatasetIO(dataset_dir).mark_qc(episode_index, verdict, note, reason)
         if not updated:
             raise RecordNotFoundError(f"Episode {episode_index}")
-        self._invalidate_plan_cache(batch)
+        self.invalidate(batch)
         updated_plan = self._plan_state(batch)
         return {
             "batch_id": batch,
@@ -844,7 +845,7 @@ class PlanCatalog:
         parquet_path = store.episode_parquet(episode_index)
         if not parquet_path.is_file():
             raise RecordNotFoundError(f"Episode {episode_index}")
-        episode_rows = self._episode_rows(dataset_dir)
+        episode_rows = self.episode_rows(dataset_dir)
         if not any(int(row.get("episode_index", -1)) == episode_index for row in episode_rows):
             raise RecordNotFoundError(f"Episode {episode_index}")
         table = pq.read_table(str(parquet_path))
@@ -871,7 +872,7 @@ class PlanCatalog:
             temporary_parquet.unlink(missing_ok=True)
             for temporary in temporary_videos.values():
                 temporary.unlink(missing_ok=True)
-        self._invalidate_plan_cache(batch)
+        self.invalidate(batch)
         return {
             "batch_id": batch,
             "episode_index": episode_index,
@@ -944,7 +945,7 @@ class PlanCatalog:
         end: int,
     ) -> None:
         episodes_path = dataset_dir / "meta" / "episodes.jsonl"
-        rows = self._episode_rows(dataset_dir)
+        rows = self.episode_rows(dataset_dir)
         found = False
         for row in rows:
             if int(row.get("episode_index", -1)) != episode_index:
@@ -1081,7 +1082,7 @@ class PlanCatalog:
             self._plan_cache[batch_id] = (now, source_token, state)
             return state
 
-    def _invalidate_plan_cache(self, batch: str = "") -> None:
+    def invalidate(self, batch: str = "") -> None:
         with self._state_lock:
             if batch:
                 batch_id = self._batch_id(batch)
@@ -1159,7 +1160,7 @@ class PlanCatalog:
 
     def _decorate(self, batch: str, state: dict[str, Any]) -> dict[str, Any]:
         dataset_dir = self._dataset_dir(batch, state["info"])
-        episodes = self._annotate_static_qc(dataset_dir, self._episode_rows(dataset_dir))
+        episodes = self._annotate_static_qc(dataset_dir, self.episode_rows(dataset_dir))
         by_slot: dict[str, list[dict[str, Any]]] = {}
         by_target: dict[tuple[str, str, int], list[dict[str, Any]]] = {}
         for episode in episodes:
@@ -1235,6 +1236,10 @@ class PlanCatalog:
     def _dataset_dir(self, batch: str, info: dict[str, Any]) -> Path:
         """The dataset's one directory: ``collection_dir`` or the shared layout."""
         return self._source_dataset_dir(batch, info)
+
+    def frame_analysis(self, dataset_dir: Path, episode_index: int) -> dict[str, Any]:
+        """Recorded frame labelling of one episode, shared by review and auto QC."""
+        return self._series(dataset_dir, episode_index)["frame_label_analysis"]
 
     def _series(self, dataset_dir: Path, episode_index: int) -> dict[str, Any]:
         io_store = LeRobotDatasetIO(dataset_dir)
@@ -1442,7 +1447,7 @@ class PlanCatalog:
             ]
         target = sum(task["total_epsiodes_count"] for task in state["tasks"])
         collection_dir = self._dataset_dir(batch, state["info"])
-        episode_rows = self._episode_rows(collection_dir)
+        episode_rows = self.episode_rows(collection_dir)
         if analyze_static_qc:
             episode_rows = self._annotate_static_qc(collection_dir, episode_rows)
         slot_ids = set()
@@ -1662,6 +1667,24 @@ class PlanCatalog:
         self._db_cache_put(f"inferred:{key}", token, inferred)
         return inferred
 
+    def camera_videos(
+        self, dataset_dir: Path, episode_index: int, cameras: Iterable[str]
+    ) -> dict[str, Path]:
+        """Recorded video file of each named camera in one episode."""
+        candidates = self._inferred_keys(dataset_dir)["image"]["candidates"]
+        keys = {
+            camera: next(
+                (name for name in candidates if name == camera or name.endswith("." + camera)),
+                None,
+            )
+            for camera in cameras
+        }
+        return {
+            camera: self._cached_video_path(dataset_dir, episode_index, key)
+            for camera, key in keys.items()
+            if key
+        }
+
     def _cached_video_path(self, dataset_dir: Path, episode_index: int, video_key: str) -> Path:
         info = self._dataset_info(dataset_dir)
         inferred = self._inferred_keys(dataset_dir)
@@ -1684,7 +1707,7 @@ class PlanCatalog:
             raise FileNotFoundError(video_key)
         return path
 
-    def _episode_rows(self, dataset_dir: Path) -> list[dict[str, Any]]:
+    def episode_rows(self, dataset_dir: Path) -> list[dict[str, Any]]:
         path = dataset_dir / "meta" / "episodes.jsonl"
         qc_path = dataset_dir / "meta" / "qc.jsonl"
         token = self._file_token(path) + "|" + self._file_token(qc_path)

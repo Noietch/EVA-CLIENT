@@ -140,20 +140,12 @@ class DatasetAutoQc:
             else {}
         )
         self.groups = robot.actuator_groups if robot else ()
-        candidates = catalog._inferred_keys(dataset_dir)["image"]["candidates"]
-        self.video_keys = {
-            camera: next(
-                (name for name in candidates if name == camera or name.endswith("." + camera)),
-                None,
-            )
-            for camera in self.attached_to
-        }
 
     def run(self, progress: Callable[[int, int], None]) -> dict[str, Any]:
         """Scan every episode and record the failures it finds."""
         counts = {CAMERA_OFFLINE_REASON: 0, STATIC_FRAMES_REASON: 0}
         checked = flagged = reviewed = cleared = 0
-        rows = self.catalog._episode_rows(self.dataset_dir)
+        rows = self.catalog.episode_rows(self.dataset_dir)
         for position, row in enumerate(rows, 1):
             if self.stop.is_set():
                 break
@@ -192,7 +184,7 @@ class DatasetAutoQc:
     def _episode_issues(self, episode_index: int) -> list[tuple[str, str]]:
         """Automatic failures as (reason, note), most severe first."""
         issues = [(CAMERA_OFFLINE_REASON, note) for note in self._camera_notes(episode_index)]
-        analysis = self.catalog._series(self.dataset_dir, episode_index)["frame_label_analysis"]
+        analysis = self.catalog.frame_analysis(self.dataset_dir, episode_index)
         if analysis["static_frames_excessive"]:
             issues.append(
                 (STATIC_FRAMES_REASON, f"中间静止帧 {analysis['middle_static_frames']} 帧")
@@ -200,11 +192,7 @@ class DatasetAutoQc:
         return issues
 
     def _camera_notes(self, episode_index: int) -> list[str]:
-        videos = {
-            camera: self.catalog._cached_video_path(self.dataset_dir, episode_index, video_key)
-            for camera, video_key in self.video_keys.items()
-            if video_key
-        }
+        videos = self.catalog.camera_videos(self.dataset_dir, episode_index, self.attached_to)
         if not videos:
             return []
         qpos = self._qpos(episode_index)

@@ -60,7 +60,7 @@ def _catalog(tmp_path: Path) -> PlanCatalog:
 def test_qc_rows_keep_recording_identity_and_join_by_slot(tmp_path):
     catalog = _catalog(tmp_path)
     dataset_dir = tmp_path / "collection" / "bench" / "raw"
-    rows = {row["episode_index"]: row for row in catalog._episode_rows(dataset_dir)}
+    rows = {row["episode_index"]: row for row in catalog.episode_rows(dataset_dir)}
     assert [rows[index]["slot_id"] for index in range(3)] == [
         "TASK-1:SC-1:0",
         "TASK-1:SC-1:1",

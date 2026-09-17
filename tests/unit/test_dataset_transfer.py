@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from tools.datasets.collection import PlanCatalog
-from tools.datasets.dataset_transfer import DatasetTransfer
+from tools.datasets.dataset_transfer import CatalogTransfer, DatasetTransfer
 
 pytestmark = pytest.mark.unit
 
@@ -52,7 +52,8 @@ def _wait_job(transfer: DatasetTransfer, job_id: str) -> dict:
 def test_inspect_resolves_the_remote_prefix_when_collection_dir_is_local(monkeypatch, tmp_path):
     import huggingface_hub
 
-    transfer = DatasetTransfer(tmp_path, _catalog(tmp_path))
+    transfer = CatalogTransfer(tmp_path, _catalog(tmp_path))
+    target = transfer.targets([BATCH])[0]
     episodes = tmp_path / "episodes.jsonl"
     episodes.write_text('{"episode_index": 0}\n{"episode_index": 1}\n', encoding="utf-8")
     listings = []
@@ -79,27 +80,128 @@ def test_inspect_resolves_the_remote_prefix_when_collection_dir_is_local(monkeyp
 
     monkeypatch.setattr(huggingface_hub, "HfApi", Api)
     monkeypatch.setattr(huggingface_hub, "hf_hub_download", lambda *args, **kwargs: str(episodes))
-    result = transfer._inspect(transfer._target(BATCH))
+    result = transfer._inspect(target, None)
     assert result["episodes"] == 2
     assert f"datasets/{BATCH}" in listings
     assert result["verification"]["data"]["state"] == "different"
 
 
-def test_qc_upload_synthesizes_records_without_touching_source_episodes(monkeypatch, tmp_path):
-    transfer = DatasetTransfer(tmp_path, _catalog(tmp_path))
+def test_qc_upload_sends_the_local_ledger_and_requires_one(monkeypatch, tmp_path):
+    transfer = DatasetTransfer(tmp_path)
     dataset = tmp_path / "collection" / "bench" / "raw"
+    (dataset / "meta").mkdir(parents=True)
     episodes = json.dumps({"episode_index": 3, "qc_verdict": "fail"}) + "\n"
     (dataset / "meta/episodes.jsonl").write_text(episodes, encoding="utf-8")
-    published = {}
+    target = {
+        "name": BATCH,
+        "dataset_dir": dataset,
+        "plan": tmp_path / BATCH,
+        "remote_path": None,
+    }
+    published = []
 
-    def publish(root, path, name, expected_path=None):
-        published.update(root=root, path=path, name=name, expected_path=expected_path)
-        assert (path / "meta/qc.jsonl").is_file()
+    def publish(root, path, name, storage=None, expected_path=None):
+        published.append(path)
         return {"revision": "fixed"}
 
     monkeypatch.setattr("tools.datasets.dataset_transfer.publish_qc", publish)
-    assert _wait_job(transfer, transfer.start("upload_qc", [BATCH]))["results"][0]["ok"]
-    assert published["name"] == BATCH
-    assert published["path"] != dataset
+    failed = _wait_job(transfer, transfer.start("upload_qc", [target]))["results"][0]
+    assert failed["ok"] is False
+    assert "No QC ledger" in failed["error"]
+    assert published == []
+
+    (dataset / "meta/qc.jsonl").write_text(episodes, encoding="utf-8")
+    assert _wait_job(transfer, transfer.start("upload_qc", [target]))["results"][0]["ok"]
+    assert published == [dataset]
     assert (dataset / "meta/episodes.jsonl").read_text(encoding="utf-8") == episodes
-    assert not (dataset / "meta/qc.jsonl").exists()
+
+
+def test_jobs_run_in_parallel_and_cancel_only_the_conflicting_waiter(monkeypatch, tmp_path):
+    from tools.datasets import dataset_transfer as module
+
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    calls = []
+
+    def publish(root, path, storage):
+        calls.append(path.name)
+        if path.name == "first":
+            started.set()
+            assert release.wait(5)
+            raise ValueError("offline")
+        finished.set()
+
+    monkeypatch.setattr(module, "publish_task_set", publish)
+    transfer = DatasetTransfer(tmp_path)
+    targets = [{"name": name, "plan": tmp_path / name} for name in ("first", "second")]
+    first_id = transfer.start("upload_task", targets)
+    assert started.wait(5)
+    parallel_id = transfer.start("upload_task", [{"name": "third", "plan": tmp_path / "third"}])
+    assert _wait_job(transfer, parallel_id)["state"] == "done"
+    waiting_id = transfer.start("upload_task", targets[:1])
+    transfer.stop(waiting_id)
+    assert _wait_job(transfer, waiting_id)["state"] == "stopped"
+    assert calls == ["first", "third"]
+    release.set()
+    assert finished.wait(5)
+    first = _wait_job(transfer, first_id)
+    assert calls == ["first", "third", "second"]
+    assert first["results"][0]["error"] == "offline"
+    assert first["results"][1]["ok"]
+
+
+def test_same_dataset_disjoint_uploads_and_remote_reads_run_together(monkeypatch, tmp_path):
+    from tools.datasets import dataset_transfer as module
+
+    (tmp_path / "meta").mkdir()
+    (tmp_path / "meta/qc.jsonl").write_text("{}\n")
+    started = {name: threading.Event() for name in ("data", "qc", "task")}
+    release = threading.Event()
+
+    def upload(kind):
+        def run(*args, **kwargs):
+            if kind == "data":
+                assert kwargs["include_qc"] is False
+            started[kind].set()
+            assert release.wait(5)
+
+        return run
+
+    monkeypatch.setattr(module, "publish_dataset", upload("data"))
+    monkeypatch.setattr(module, "publish_qc", upload("qc"))
+    monkeypatch.setattr(module, "publish_task_set", upload("task"))
+    transfer = DatasetTransfer(tmp_path)
+    monkeypatch.setattr(
+        transfer,
+        "_inspect",
+        lambda *args: {"revision": "snapshot", "verification": {"data": {"state": "same"}}},
+    )
+    target = {
+        "name": "fold",
+        "dataset_dir": tmp_path,
+        "plan": tmp_path,
+        "remote_path": "datasets/fold",
+    }
+    ids = []
+    try:
+        for kind in started:
+            ids.append(transfer.start(f"upload_{kind}", [target]))
+        assert all(event.wait(3) for event in started.values())
+        for action in ("refresh", "verify"):
+            read_id = transfer.start(action, [target])
+            assert _wait_job(transfer, read_id)["results"][0]["ok"]
+            cloud = transfer.snapshot()["remote"]["fold"]
+            assert cloud["stale"] is True
+            assert "verification" not in cloud
+        blocked_id = transfer.start("download_task", [target])
+        deadline = time.monotonic() + 3
+        while not transfer.jobs[blocked_id]["waiting"] and time.monotonic() < deadline:
+            threading.Event().wait(0.01)
+        assert transfer.jobs[blocked_id]["waiting_resources"] == ["local_task"]
+        transfer.stop(blocked_id)
+        assert _wait_job(transfer, blocked_id)["state"] == "stopped"
+    finally:
+        release.set()
+        for job_id in ids:
+            assert _wait_job(transfer, job_id)["results"][0]["ok"]

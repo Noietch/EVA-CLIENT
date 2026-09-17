@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import datetime as dt
 import json
+import os
 import threading
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -108,17 +109,29 @@ def _episode_indices(dataset_dir: Path) -> list[int]:
 
 
 def _export_signature(local_dir: Path) -> dict[str, int]:
-    """Cheap fingerprint of an export so a receipt cannot outlive its content."""
-    files = 0
-    total = 0
-    newest = 0
-    for path in local_dir.rglob("*"):
-        if path.is_file():
-            stat = path.stat()
-            files += 1
-            total += stat.st_size
-            newest = max(newest, stat.st_mtime_ns)
-    return {"files": files, "bytes": total, "newest_mtime_ns": newest}
+    """Cheap fingerprint of an export so a receipt cannot outlive its content.
+
+    Exporting publishes a new directory, and every file the export gains or
+    loses touches the directory holding it, so directory identity plus each
+    directory's mtime and entry count identify the content without statting
+    every recorded file. ``mtime_ns`` is the sum over the export's directories.
+    """
+    if not (local_dir / "meta" / "episodes.jsonl").is_file():
+        return {}
+    inode = int(local_dir.stat().st_ino)
+    directories = 0
+    entries = 0
+    mtime_ns = 0
+    for parent, directory_names, file_names in os.walk(local_dir):
+        directories += 1
+        entries += len(directory_names) + len(file_names)
+        mtime_ns += Path(parent).stat().st_mtime_ns
+    return {
+        "inode": inode,
+        "directories": directories,
+        "entries": entries,
+        "mtime_ns": mtime_ns,
+    }
 
 
 def upload_receipt_path(local_dir: Path) -> Path:
@@ -144,7 +157,7 @@ def record_dataset_upload_receipt(
     temporary.write_text(
         json.dumps(
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "uploaded_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
                 "source_dir": str(source_root),
                 "source_episode_indices": _episode_indices(source_root),
@@ -193,7 +206,7 @@ def uploaded_source_episode_indices_for_export(
         receipt_source = Path(str(receipt.get("source_dir") or "")).resolve()
         expected_source = Path(dataset_dir).resolve() if dataset_dir is not None else receipt_source
         if (
-            int(receipt.get("schema_version", 0)) != 2
+            int(receipt.get("schema_version", 0)) != 3
             or receipt_source != expected_source
             or receipt.get("export_signature") != _export_signature(local_root)
             or not isinstance(receipt_indices, list)
