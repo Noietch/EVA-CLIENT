@@ -98,7 +98,7 @@ function dashboardUploadHasChanges() {
 
 function dashboardUploadStatus(candidate, configured) {
   if (!configured) return "UPLOAD TARGET NOT CONFIGURED";
-  if (!candidate) return "NO ACCEPTED EXPORT FOUND";
+  if (!candidate) return "NO EXPORT FOUND";
   if (dashboardUpload.error) return dashboardUpload.error.toUpperCase();
   if (dashboardUpload.posting) return "STARTING REMOTE CHECK";
   if (["queued", "scanning"].includes(dashboardUpload.state)) return "SCANNING LOCAL AND REMOTE FILES";
@@ -113,7 +113,7 @@ function dashboardUploadStatus(candidate, configured) {
   if (dashboardUpload.state === "completed") {
     return `SYNC COMPLETE · ${dashboardUpload.filesCompleted} UPLOADED · ${dashboardUpload.filesDeleted} REMOVED`;
   }
-  return `${Number(candidate.accepted_episodes) || 0} ACCEPTED · ${Number(candidate.uploaded_episodes) || 0} UPLOADED`;
+  return `${Number(candidate.episodes) || 0} EPISODES · ${Number(candidate.uploaded_episodes) || 0} UPLOADED`;
 }
 
 function renderDashboardUpload() {
@@ -127,7 +127,7 @@ function renderDashboardUpload() {
   select.replaceChildren(...candidates.map((candidate) => {
     const option = document.createElement("option");
     option.value = uploadCandidateKey(candidate);
-    option.textContent = `${candidate.dataset} · ${candidate.dataset_format} · ${candidate.accepted_episodes} accepted · ${candidate.uploaded_episodes} uploaded`;
+    option.textContent = `${candidate.dataset} · ${candidate.dataset_format} · ${candidate.episodes} episodes · ${candidate.uploaded_episodes} uploaded`;
     return option;
   }));
   select.value = dashboardUpload.candidateKey;
@@ -137,7 +137,7 @@ function renderDashboardUpload() {
   $("dashboard-upload-config").textContent = configured
     ? (dashboardData.upload.targets || []).join(" / ")
     : "NOT CONFIGURED";
-  $("dashboard-upload-local").textContent = candidate?.accepted_dir || "--";
+  $("dashboard-upload-local").textContent = candidate?.output_dir || "--";
   $("dashboard-upload-remote").textContent = (candidate?.remote_dirs || []).join(" / ") || "--";
 
   const scanned = dashboardUpload.localFiles != null;

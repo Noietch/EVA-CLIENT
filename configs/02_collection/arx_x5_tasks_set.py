@@ -1,4 +1,9 @@
-"""ARX X5 collection using the dataset service's task-plan directory."""
+"""ARX X5 collection synced to exactly one remote.
+
+Pick one of the three remotes below and leave the others commented out:
+``huggingface`` (task sets, QC ledgers and datasets), ``sftp`` or ``s3``
+(export delivery). Credentials live in the matching ``*.local.py``.
+"""
 
 _base_ = ["arx_x5.py"]
 
@@ -12,12 +17,19 @@ collection = dict(
             proxy="http://proxy.example.com:8080",
             revision="main",
         ),
-        s3=dict(
-            endpoint="DATASET_ENDPOINT.example.com",
-            bucket="omni-video",
-            prefix="embodied_raw_files",
-            sign_service="https://SIGN_SERVICE.example.com",
-            secure=False,
-        ),
+        # sftp=dict(
+        #     host="sftp.example.com",
+        #     port=22,
+        #     user="collector",
+        #     identity_file="~/.ssh/id_ed25519",
+        #     remote_dir="/srv/datasets",
+        # ),
+        # s3=dict(
+        #     endpoint="DATASET_ENDPOINT.example.com",
+        #     bucket="omni-video",
+        #     prefix="embodied_raw_files",
+        #     sign_service="https://SIGN_SERVICE.example.com",
+        #     secure=False,
+        # ),
     ),
 )

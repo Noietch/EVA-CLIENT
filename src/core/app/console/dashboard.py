@@ -14,6 +14,7 @@ from core.utils.dataset_upload import (
     uploaded_source_episode_indices,
     uploaded_source_episode_indices_for_export,
 )
+from tools.conversion import DATASET_EXPORT_FORMATS
 
 _DATASET_CACHE_MAX = 32
 _DATASET_CACHE_LOCK = threading.RLock()
@@ -102,24 +103,23 @@ def _local_date(value: dt.datetime | None) -> dt.date | None:
     return value.astimezone().date() if value.tzinfo is not None else value.date()
 
 
-def _dataset_mode(raw_dir: Path) -> str | None:
-    if raw_dir.parent.name == "episodes":
+def _dataset_mode(dataset_dir: Path) -> str | None:
+    if dataset_dir.parent.name == "episodes":
         return "eval"
-    if "collection" in raw_dir.parts:
+    # Collection datasets live under the shared <data_root>/datasets tree.
+    if "datasets" in dataset_dir.parts:
         return "collection"
     return None
 
 
-def _dataset_name(raw_dir: Path, mode: str) -> str:
-    if mode == "eval" and raw_dir.parent.name == "episodes":
-        return raw_dir.parent.parent.name
-    if raw_dir.parent.name == "lerobot_datasets" or raw_dir.parent.name.endswith("_datasets"):
-        return raw_dir.name
-    return raw_dir.parent.name
+def _dataset_name(dataset_dir: Path, mode: str) -> str:
+    if mode == "eval" and dataset_dir.parent.name == "episodes":
+        return dataset_dir.parent.parent.name
+    return dataset_dir.name
 
 
 def discover_raw_datasets(roots: Iterable[Path]) -> list[tuple[Path, str]]:
-    """Find LeRobot source datasets, never format-specific export derivatives."""
+    """Find LeRobot source datasets, never their converted export copies."""
     found: dict[Path, str] = {}
     for root in roots:
         if not root.exists():
@@ -136,47 +136,40 @@ def discover_raw_datasets(roots: Iterable[Path]) -> list[tuple[Path, str]]:
     return sorted(found.items(), key=lambda item: str(item[0]))
 
 
-def _accepted_export(raw_dir: Path, marker_path: Path) -> dict[str, Any] | None:
-    accepted_dir = marker_path.parent.parent.resolve()
-    dataset_format = accepted_dir.parent.parent.name.removesuffix("_datasets")
-    marker = _read_json(marker_path)
-    indices = marker.get("source_episode_indices")
-    try:
-        marker_source = Path(str(marker.get("source_dir") or "")).resolve()
-    except (OSError, ValueError):
-        return None
+def _dataset_export(dataset_dir: Path, output_dir: Path) -> dict[str, Any] | None:
+    """A converted copy of ``dataset_dir`` named ``<name>_<format>`` beside it."""
+    dataset_format = output_dir.name.removeprefix(f"{dataset_dir.name}_")
     if (
-        marker.get("subset") != "accepted"
-        or marker.get("dataset_format") != dataset_format
-        or marker_source != raw_dir
-        or not isinstance(indices, list)
-        or any(type(value) is not int or value < 0 for value in indices)
+        not output_dir.is_dir()
+        or dataset_format not in DATASET_EXPORT_FORMATS
+        or not (output_dir / "meta" / "episodes.jsonl").is_file()
     ):
         return None
-    source_indices = set(indices)
-    uploaded_indices = uploaded_source_episode_indices_for_export(accepted_dir, raw_dir)
+    episodes = sum(
+        1
+        for line in (output_dir / "meta" / "episodes.jsonl").read_text().splitlines()
+        if line.strip()
+    )
+    uploaded_indices = uploaded_source_episode_indices_for_export(output_dir, dataset_dir)
     return {
-        "dataset": _dataset_name(raw_dir, "collection"),
-        "source_dir": str(raw_dir),
-        "accepted_dir": str(accepted_dir),
+        "dataset": dataset_dir.name,
+        "source_dir": str(dataset_dir),
+        "output_dir": str(output_dir),
         "dataset_format": dataset_format,
-        "accepted_episodes": len(source_indices),
-        "uploaded_episodes": len(source_indices & uploaded_indices),
-        "not_uploaded_episodes": len(source_indices - uploaded_indices),
+        "episodes": episodes,
+        "uploaded_episodes": len(uploaded_indices),
+        "not_uploaded_episodes": max(0, episodes - len(uploaded_indices)),
     }
 
 
 def discover_dashboard_upload_candidates(roots: Iterable[Path]) -> list[dict[str, Any]]:
-    """Find validated accepted exports belonging to discovered collection datasets."""
+    """Find converted exports of discovered collection datasets."""
     candidates: list[dict[str, Any]] = []
-    for raw_dir, mode in discover_raw_datasets(roots):
+    for dataset_dir, mode in discover_raw_datasets(roots):
         if mode != "collection":
             continue
-        datasets_root = raw_dir.parent.parent
-        for marker_path in sorted(
-            datasets_root.glob("*_datasets/*/accepted/meta/quality_split.json")
-        ):
-            candidate = _accepted_export(raw_dir, marker_path)
+        for output_dir in sorted(dataset_dir.parent.glob(f"{dataset_dir.name}_*")):
+            candidate = _dataset_export(dataset_dir, output_dir)
             if candidate is not None:
                 candidates.append(candidate)
     return candidates

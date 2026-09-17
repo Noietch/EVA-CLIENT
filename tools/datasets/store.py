@@ -53,6 +53,17 @@ class ConflictError(ValueError): ...
 class RecordNotFoundError(LookupError): ...
 
 
+def _valid_collection_dir(value: str, dataset: str) -> bool:
+    """A dataset lives under datasets/ and is named after its task set."""
+    path = Path(value)
+    return (
+        value.startswith("datasets/")
+        and not path.is_absolute()
+        and ".." not in path.parts
+        and path.name == dataset
+    )
+
+
 class TaskSetStore:
     """Own canonical task-set parsing, validation, and atomic persistence."""
 
@@ -116,6 +127,11 @@ class TaskSetStore:
     def update_info(self, payload: Any) -> dict[str, Any]:
         if not isinstance(payload, dict):
             raise ValueError("info must be an object")
+        collection_dir = str(payload.get("collection_dir", "")).strip()
+        if collection_dir and not _valid_collection_dir(collection_dir, self.root.name):
+            raise ValueError(
+                f"collection_dir must be 'datasets/<...>/{self.root.name}', got {collection_dir!r}"
+            )
         with self.lock, self._write_lock():
             state = self._read_state()
             state["info"].update(

@@ -39,7 +39,14 @@ collection = dict(
             right_arm_toggle=dict(control="right.grip", key="R GRIP", gesture="hold", hold_ms=1000),
         ),
     ),
-    storage=dict(log_dir="", fps=30, save_queue_max=15, image_skew_tolerance_sec=None),
+    storage=dict(
+        log_dir="",
+        # One root holds task_sets/, datasets/ and assets/ on every machine.
+        data_root="datasets/data_collection",
+        fps=30,
+        save_queue_max=15,
+        image_skew_tolerance_sec=None,
+    ),
     schema=dict(
         min_episode_frames=1,
         max_frame_dt_factor=3.0,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import fnmatch
 import json
 import os
 import shutil
@@ -13,6 +14,33 @@ from typing import Any
 import yaml
 
 from tools.datasets.hf_qc import merge_qc, write_qc
+
+TASK_FILES = ("info.yaml", "layout.yaml", "scene.csv", "tasks.csv")
+# Uploads are allow-listed: only recorded content may reach the remote, so
+# caches, local state files and backups never leave the machine.
+DATASET_ALLOW_PATTERNS = [
+    "data/**",
+    "videos/**",
+    "meta/info.json",
+    "meta/episodes.jsonl",
+    "meta/episodes_stats.jsonl",
+    "meta/tasks.jsonl",
+    "meta/stats.json",
+]
+ASSET_ALLOW_PATTERNS = ["objects.csv", "object_photos/**"]
+
+
+def skipped_upload_files(local_dir: Path, patterns: list[str]) -> list[str]:
+    """Local files the allowlist keeps off the remote, for operator visibility."""
+    return [
+        relative
+        for path in sorted(local_dir.rglob("*"))
+        if path.is_file()
+        and not any(
+            fnmatch.fnmatch(relative := path.relative_to(local_dir).as_posix(), pattern)
+            for pattern in patterns
+        )
+    ]
 
 
 def dataset_repo_path(
@@ -81,8 +109,7 @@ def publish_task_set(
     if not repo_id:
         raise ValueError("Hugging Face config requires repo_id and token")
     task_set_dir = task_set_dir.resolve()
-    required = ("info.yaml", "layout.yaml", "scene.csv", "tasks.csv")
-    missing = [name for name in required if not (task_set_dir / name).is_file()]
+    missing = [name for name in TASK_FILES if not (task_set_dir / name).is_file()]
     if missing:
         raise ValueError(f"task-set is missing: {', '.join(missing)}")
     commit = HfApi(token=token).upload_folder(
@@ -92,6 +119,7 @@ def publish_task_set(
         path_in_repo=f"task_sets/{task_set_dir.name}",
         commit_message=f"Publish task set {task_set_dir.name}",
         token=token,
+        allow_patterns=list(TASK_FILES),
     )
     return {"repo_id": repo_id, "task_set": task_set_dir.name, "revision": commit.oid}
 
@@ -129,6 +157,38 @@ def fetch_task_set(
     return {"repo_id": repo_id, "task_set": task_set, "revision": revision}
 
 
+def publish_task_sets(
+    project_root: Path, task_sets: dict[str, Path], storage: dict[str, Any] | None = None
+) -> dict[str, list[str]]:
+    """Publish every named task set; report the ones that failed to publish."""
+    published: list[str] = []
+    failed: list[str] = []
+    for name, task_set_dir in task_sets.items():
+        try:
+            publish_task_set(project_root, task_set_dir, storage)
+        except (OSError, ValueError):
+            failed.append(name)
+        else:
+            published.append(name)
+    return {"published": published, "failed": failed}
+
+
+def fetch_task_sets(
+    project_root: Path, task_sets: dict[str, Path], storage: dict[str, Any] | None = None
+) -> dict[str, list[str]]:
+    """Download every named task set; report the ones that are not published yet."""
+    fetched: list[str] = []
+    missing: list[str] = []
+    for name, destination in task_sets.items():
+        try:
+            fetch_task_set(project_root, name, destination, storage)
+        except FileNotFoundError:
+            missing.append(name)
+        else:
+            fetched.append(name)
+    return {"fetched": fetched, "missing": missing}
+
+
 def publish_assets(project_root: Path, assets_dir: Path) -> dict[str, str]:
     from huggingface_hub import HfApi
 
@@ -145,6 +205,7 @@ def publish_assets(project_root: Path, assets_dir: Path) -> dict[str, str]:
         path_in_repo="assets",
         commit_message="Update dataset assets",
         token=token,
+        allow_patterns=ASSET_ALLOW_PATTERNS,
     )
     return {
         "repo_id": repo_id,
@@ -252,6 +313,8 @@ def publish_dataset(
     except FileNotFoundError:
         remote_path = new_remote_path or f"datasets/{dataset_name}"
     qc_path = dataset_dir / "meta/qc.jsonl"
+    # Only recorded content travels; the QC ledger merges on its own so that
+    # verdicts written on both sides survive.
     commit = api.upload_folder(
         repo_id=repo_id,
         repo_type="dataset",
@@ -260,13 +323,21 @@ def publish_dataset(
         commit_message=f"Update dataset {dataset_name}",
         token=token,
         revision=revision,
-        **({"ignore_patterns": ["meta/qc.jsonl"]} if not include_qc or qc_path.is_file() else {}),
+        allow_patterns=DATASET_ALLOW_PATTERNS,
     )
+    skipped = skipped_upload_files(dataset_dir, DATASET_ALLOW_PATTERNS)
+    result = {
+        "repo_id": repo_id,
+        "dataset": dataset_name,
+        "revision": commit.oid,
+        "not_uploaded": skipped[:20],
+        "not_uploaded_count": str(len(skipped)),
+    }
     if include_qc and qc_path.is_file():
-        return publish_qc(
-            project_root, dataset_dir, dataset_name, storage, expected_path=remote_path
+        result.update(
+            publish_qc(project_root, dataset_dir, dataset_name, storage, expected_path=remote_path)
         )
-    return {"repo_id": repo_id, "dataset": dataset_name, "revision": commit.oid}
+    return result
 
 
 def fetch_dataset(

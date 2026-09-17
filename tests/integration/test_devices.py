@@ -19,7 +19,7 @@ from core.config import load_config
 from core.devices import REPOSITORY_ROOT, DeviceWorkspace
 from core.devices.service import DeviceProcesses, DeviceService
 from core.registry import ROBOT_REGISTRY
-from tests.integration.web._harness import console_config, serve_console
+from tests.integration._harness import console_config, serve_console
 
 pytestmark = pytest.mark.integration
 

@@ -360,6 +360,13 @@ def _validate(cfg: ConfigDict) -> None:
         raise ValueError(
             "collection.task_requirements was removed; put each target beside its prompt"
         )
+    storage = coll.get("storage") or {}
+    remotes = [name for name in ("huggingface", "sftp", "s3", "loopback") if storage.get(name)]
+    if len(remotes) > 1:
+        raise ValueError(
+            f"collection.storage configures multiple remotes: {', '.join(remotes)}; "
+            "sync with exactly one"
+        )
     sftp = (coll.get("storage") or {}).get("sftp") or {}
     if sftp:
         if not str(sftp.get("host", "")).strip():

@@ -32,10 +32,21 @@ SERIES_CACHE_MAX = 8
 TRANSFORM_CACHE_MAX = 32
 UNMATCHED_CACHE_SECONDS = 300.0
 PLAN_PAYLOAD_KEYS = ("batch_id", "info", "layout", "dataset_dir", "collection")
-STATE_CACHE_VERSION = 4
+STATE_CACHE_VERSION = 5
+# Bump when the derived-row shape changes so existing database caches are ignored.
+DATA_CACHE_VERSION = 2
 STATIC_FRAMES_REASON = "static_frames_excessive"
-QC_REASONS = {"image_quality", "trajectory_quality", "task_mismatch", STATIC_FRAMES_REASON, "other"}
+CAMERA_OFFLINE_REASON = "camera_offline"
+QC_REASONS = {
+    "image_quality",
+    "trajectory_quality",
+    "task_mismatch",
+    STATIC_FRAMES_REASON,
+    CAMERA_OFFLINE_REASON,
+    "other",
+}
 STATIC_QC_ANALYSIS_LIMIT = 64
+STATE_CACHE_SECONDS = 300.0
 
 
 class PlanCatalog:
@@ -104,8 +115,8 @@ class PlanCatalog:
             with self._db_lock:
                 row = self._db.execute(
                     "SELECT updated, payload FROM data_cache "
-                    "WHERE cache_key = ? AND cache_version = 1 AND source_token = ?",
-                    (key, source_token),
+                    "WHERE cache_key = ? AND cache_version = ? AND source_token = ?",
+                    (key, DATA_CACHE_VERSION, source_token),
                 ).fetchone()
             if row and time.time() - float(row[0]) < ttl:
                 return json.loads(row[1])
@@ -122,8 +133,8 @@ class PlanCatalog:
                 self._db.execute(
                     "INSERT OR REPLACE INTO data_cache "
                     "(cache_key, updated, payload, cache_version, source_token) "
-                    "VALUES (?, ?, ?, 1, ?)",
-                    (key, time.time(), encoded, source_token),
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (key, time.time(), encoded, DATA_CACHE_VERSION, source_token),
                 )
                 self._db.commit()
         except (sqlite3.Error, TypeError, ValueError):
@@ -145,7 +156,7 @@ class PlanCatalog:
                     ).fetchone()
             except sqlite3.Error:
                 self._db_cache_disabled = True
-        if cached and time.time() - float(cached[0]) < 300:
+        if cached and time.time() - float(cached[0]) < STATE_CACHE_SECONDS:
             return json.loads(cached[1])
 
         summaries = [self._batch_summary(value) for value in batches]
@@ -228,6 +239,7 @@ class PlanCatalog:
             "collection_root": str(self.collection_root),
         }
         if not self._db_cache_disabled:
+            now = time.time()
             try:
                 with self._db_lock:
                     self._db.execute(
@@ -236,11 +248,17 @@ class PlanCatalog:
                         "VALUES (?, ?, ?, ?, ?)",
                         (
                             cache_key,
-                            time.time(),
+                            now,
                             json.dumps(result, ensure_ascii=False),
                             STATE_CACHE_VERSION,
                             source_token,
                         ),
+                    )
+                    # A token change strands its predecessor; drop rows past
+                    # the read TTL instead of one payload per review click.
+                    self._db.execute(
+                        "DELETE FROM state_cache WHERE updated < ?",
+                        (now - STATE_CACHE_SECONDS,),
                     )
                     self._db.commit()
             except sqlite3.Error:
@@ -1109,6 +1127,7 @@ class PlanCatalog:
                 dataset_dir / "meta" / "info.json",
                 dataset_dir / "meta" / "episodes.jsonl",
                 dataset_dir / "meta" / "tasks.jsonl",
+                dataset_dir / "meta" / "qc.jsonl",
             ):
                 parts.append(self._file_token(path))
         token = "|".join(parts)
@@ -1131,27 +1150,12 @@ class PlanCatalog:
             if resolved != self.collection_root and self.collection_root not in resolved.parents:
                 raise ValueError("collection_dir must stay inside the configured collection root")
             return resolved
+        # One dataset, one directory: the plan names it, otherwise it is the
+        # canonical location under the shared data root.
         dataset_name = str(info.get("dataset_name") or batch)
         robot_type = str(info.get("robot_type", ""))
-        candidates = [
-            self.collection_root / dataset_name / "raw",
-            self.collection_root / batch / "raw",
-            self.collection_root / robot_type / dataset_name / "raw",
-            self.collection_root / robot_type / batch / "raw",
-            self.collection_root / "datasets" / dataset_name,
-            self.collection_root / "datasets" / dataset_name / "raw",
-            self.collection_root / "datasets" / robot_type / dataset_name,
-            self.collection_root / "datasets" / robot_type / dataset_name / "raw",
-        ]
-        datasets_root = self.collection_root / "datasets"
-        if datasets_root.is_dir():
-            candidates.extend(
-                group / dataset_name for group in datasets_root.iterdir() if group.is_dir()
-            )
-        return next(
-            (path.resolve() for path in candidates if (path / "meta" / "episodes.jsonl").is_file()),
-            candidates[0].resolve(),
-        )
+        located = self.collection_root / "datasets" / "real_robot" / robot_type / dataset_name
+        return located.resolve()
 
     def _decorate(self, batch: str, state: dict[str, Any]) -> dict[str, Any]:
         dataset_dir = self._dataset_dir(batch, state["info"])
@@ -1229,46 +1233,8 @@ class PlanCatalog:
         }
 
     def _dataset_dir(self, batch: str, info: dict[str, Any]) -> Path:
-        configured = str(info.get("collection_dir", "")).strip()
-        if configured:
-            path = Path(configured).expanduser()
-            resolved = (path if path.is_absolute() else self.collection_root / path).resolve()
-            if resolved != self.collection_root and self.collection_root not in resolved.parents:
-                raise ValueError("collection_dir must stay inside the configured collection root")
-            return resolved
-        dataset_name = str(info.get("dataset_name") or batch)
-        robot_type = str(info.get("robot_type", ""))
-        candidates = [
-            self.collection_root / dataset_name / "raw",
-            self.collection_root / batch / "raw",
-            self.collection_root / robot_type / dataset_name / "raw",
-            self.collection_root / robot_type / batch / "raw",
-            # Canonical datasets synced below data_collection/datasets may be
-            # grouped by source/robot and commonly have no ``raw`` level.
-            self.collection_root / "datasets" / dataset_name,
-            self.collection_root / "datasets" / dataset_name / "raw",
-            self.collection_root / "datasets" / robot_type / dataset_name,
-            self.collection_root / "datasets" / robot_type / dataset_name / "raw",
-        ]
-        if self.collection_root.is_dir():
-            candidates.extend(
-                path / dataset_name / "raw" for path in self.collection_root.iterdir()
-            )
-            datasets_root = self.collection_root / "datasets"
-            if datasets_root.is_dir():
-                # Support one additional grouping level (for example
-                # datasets/real_robot/dual_yam/<dataset>).
-                candidates.extend(
-                    path
-                    for group in datasets_root.iterdir()
-                    if group.is_dir()
-                    for path in group.rglob(dataset_name)
-                    if path.is_dir()
-                )
-        return next(
-            (path.resolve() for path in candidates if (path / "meta" / "episodes.jsonl").is_file()),
-            candidates[0].resolve(),
-        )
+        """The dataset's one directory: ``collection_dir`` or the shared layout."""
+        return self._source_dataset_dir(batch, info)
 
     def _series(self, dataset_dir: Path, episode_index: int) -> dict[str, Any]:
         io_store = LeRobotDatasetIO(dataset_dir)
@@ -1619,6 +1585,8 @@ class PlanCatalog:
             "qc_note": str(row.get("qc_note") or row.get("notes") or ""),
             "qc_reason": str(row.get("qc_reason") or row.get("reason") or ""),
             "qc_auto": bool(row.get("qc_auto", False)),
+            "qc_auto_note": str(row.get("qc_auto_note") or ""),
+            "qc_auto_reason": str(row.get("qc_auto_reason") or ""),
             "frame_label_analysis": analysis,
             "middle_static_frames": int(analysis.get("middle_static_frames", 0) or 0),
             "machine_label": str(analysis.get("machine_label", "")),
@@ -1744,16 +1712,16 @@ class PlanCatalog:
                 json.loads(line) for line in qc_path.read_text().splitlines() if line.strip()
             ]
         qc_by_episode = {int(row["episode_index"]): row for row in qc_rows}
+        # QC files written against another enumeration keep their slot column as
+        # the only trustworthy link; recordings own their identity fields.
+        qc_by_slot = {
+            str(row["slot_id"]): row for row in qc_rows if str(row.get("slot_id", "")).strip()
+        }
         for row in rows:
-            row.update(
-                {
-                    key: value
-                    for key, value in qc_by_episode.get(
-                        int(row.get("episode_index", -1)), {}
-                    ).items()
-                    if key != "episode_index"
-                }
+            source = qc_by_slot.get(str(row.get("slot_id", ""))) or qc_by_episode.get(
+                int(row.get("episode_index", -1)), {}
             )
+            row.update({key: value for key, value in source.items() if key.startswith("qc_")})
         self._episode_rows_cache[key] = (token, rows)
         self._db_cache_put(f"episodes:{key}", token, rows)
         return rows

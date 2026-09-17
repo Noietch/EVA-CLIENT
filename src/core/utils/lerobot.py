@@ -9,6 +9,7 @@ The DatasetTransport (transport/dataset.py) holds one of these for its own reads
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -187,14 +188,66 @@ class LeRobotDatasetIO:
                 return int(total)
         return len(list(self.root.glob("data/**/*.parquet")))
 
-    def mark_qc(self, episode: int, verdict: str, note: str = "", reason: str = "") -> bool:
+    def mark_qc(
+        self, episode: int, verdict: str, note: str = "", reason: str = "", auto: bool = False
+    ) -> bool:
         """Write a quality-check verdict onto the episode's meta/qc.jsonl row.
 
-        Merges ``qc_verdict`` ("pass"/"fail"), ``qc_note``, and ``qc_reason`` into the
-        matching row in place, leaving the recorded trajectory untouched. An empty
-        ``verdict`` keeps the existing verdict so a note can be saved on its own. Returns
+        Merges ``qc_verdict`` ("pass"/"fail"), ``qc_note``, ``qc_reason``, and the
+        ``qc_auto`` provenance flag into the matching row in place, leaving the recorded
+        trajectory untouched. An empty ``verdict`` keeps the existing verdict so a note
+        can be saved on its own. A human verdict always wins over a machine one, which is
+        kept beside it in ``qc_auto_verdict``/``qc_auto_note``/``qc_auto_reason``; a
+        machine verdict only becomes effective while no human verdict stands. Returns
         False when the dataset has no episodes.jsonl or the episode index is absent.
         """
+
+        def edit(row: dict) -> bool:
+            if auto:
+                if row.get("qc_verdict") in {"pass", "fail"} and row.get("qc_auto") is not True:
+                    row.update(qc_auto_verdict=verdict, qc_auto_note=note, qc_auto_reason=reason)
+                else:
+                    row.update(qc_verdict=verdict, qc_note=note, qc_reason=reason, qc_auto=True)
+                    self._drop_auto_fields(row)
+                return True
+            if verdict:
+                if row.get("qc_auto") is True:
+                    row.update(
+                        qc_auto_verdict=row.get("qc_verdict", ""),
+                        qc_auto_note=row.get("qc_note", ""),
+                        qc_auto_reason=row.get("qc_reason", ""),
+                    )
+                row.update(qc_verdict=verdict, qc_auto=False)
+            row.update(qc_note=note, qc_reason=reason)
+            return True
+
+        return self._edit_qc(episode, edit)
+
+    def drop_auto_qc(self, episode: int) -> bool:
+        """Remove a machine verdict once a scan stops reporting the issue.
+
+        A human verdict is untouched; a machine verdict returns the episode to
+        unreviewed so the review queue reflects the fixed recording.
+        """
+
+        def edit(row: dict) -> bool:
+            recorded = any(key.startswith("qc_auto_") for key in row)
+            if not recorded and row.get("qc_auto") is not True:
+                return False
+            self._drop_auto_fields(row)
+            if row.get("qc_auto") is True:
+                row.update(qc_verdict="unreviewed", qc_note="", qc_reason="", qc_auto=False)
+            return True
+
+        return self._edit_qc(episode, edit)
+
+    @staticmethod
+    def _drop_auto_fields(row: dict) -> None:
+        for key in ("qc_auto_verdict", "qc_auto_note", "qc_auto_reason"):
+            row.pop(key, None)
+
+    def _edit_qc(self, episode: int, edit: Callable[[dict], bool]) -> bool:
+        """Apply ``edit`` to one episode's QC row and persist a changed row."""
         path = self.root / "meta" / "episodes.jsonl"
         qc_path = self.root / "meta" / "qc.jsonl"
         if not path.exists():
@@ -205,12 +258,7 @@ class LeRobotDatasetIO:
                 line = line.strip()
                 if line:
                     rows.append(json.loads(line))
-        patched = False
-        for row in rows:
-            if int(row.get("episode_index", -1)) == episode:
-                patched = True
-                break
-        if not patched:
+        if not any(int(row.get("episode_index", -1)) == episode for row in rows):
             return False
         qc_rows = []
         if qc_path.exists():
@@ -223,17 +271,18 @@ class LeRobotDatasetIO:
         if qc_row is None:
             qc_row = {"episode_index": episode}
             qc_rows.append(qc_row)
-        if verdict:
-            qc_row["qc_verdict"] = verdict
-        qc_row["qc_note"] = note
-        qc_row["qc_reason"] = reason
+        if not edit(qc_row):
+            return False
         timestamp = datetime.now(UTC)
         if "qc_updated_at" in qc_row:
             previous = datetime.fromisoformat(qc_row["qc_updated_at"].replace("Z", "+00:00"))
             timestamp = max(timestamp, previous + timedelta(microseconds=1))
         qc_row["qc_updated_at"] = timestamp.isoformat(timespec="microseconds")
         qc_path.parent.mkdir(parents=True, exist_ok=True)
-        qc_path.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in qc_rows))
+        replacement = qc_path.with_suffix(f"{qc_path.suffix}.qc.tmp")
+        body = "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in qc_rows)
+        replacement.write_text(body)
+        replacement.replace(qc_path)
         return True
 
     def read_annotation(self, episode: int) -> str:

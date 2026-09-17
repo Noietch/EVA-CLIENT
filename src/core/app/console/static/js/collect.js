@@ -21,7 +21,7 @@ const qualityTransfer = {
   episodesCompleted: 0,
   episodesTotal: 0,
   uploading: false,
-  acceptedDir: "",
+  outputDir: "",
   uploadJobId: "",
   uploadPlanId: "",
   uploadState: "idle",
@@ -687,12 +687,12 @@ function qualityTransferFormatLabel(value) {
 function changeCollectionExportFormat() {
   const select = $("collect-export-format");
   if (!select || qualityTransfer.exporting || qualityTransfer.uploading) return;
-  if (qualityTransfer.datasetFormat === select.value && !qualityTransfer.acceptedDir) return;
+  if (qualityTransfer.datasetFormat === select.value && !qualityTransfer.outputDir) return;
 
   qualityTransfer.phase = "export";
   qualityTransfer.exportState = "idle";
   qualityTransfer.uploadState = "idle";
-  qualityTransfer.acceptedDir = "";
+  qualityTransfer.outputDir = "";
   qualityTransfer.exportJobId = "";
   qualityTransfer.uploadJobId = "";
   qualityTransfer.uploadPlanId = "";
@@ -1616,7 +1616,7 @@ function renderCollectionTransfer(enabled, usableCount, rejectedCount) {
   const uploadButton = $("b-collect-quality-upload");
   const exportFormat = $("collect-export-format");
   const selectedFormat = exportFormat ? exportFormat.value : "";
-  const selectedExportReady = !!qualityTransfer.acceptedDir &&
+  const selectedExportReady = !!qualityTransfer.outputDir &&
     qualityTransfer.datasetFormat === selectedFormat;
   const upload = (S.CFG && S.CFG.collection && S.CFG.collection.upload) || {};
   if (exportButton) {
@@ -1685,7 +1685,7 @@ function renderCollectionTransfer(enabled, usableCount, rejectedCount) {
 
 const datasetSyncButtons = [
   "b-collect-dataset-upload", "b-collect-assets-download",
-  "b-collect-task-set-download", "b-collect-qc-download", "b-collect-qc-upload",
+  "b-collect-task-set-download",
 ];
 let datasetSyncBusy = false;
 let processProgressOwner = "convert";
@@ -1748,15 +1748,16 @@ async function runDatasetSync(label, request, onSuccess) {
 }
 
 async function downloadCollectionTaskSetFromHf() {
-  const taskSet = collectSetValue();
+  // Task sets always sync as a whole: every set this machine is configured with.
   const status = $("collect-quality-status");
-  if (!taskSet) { status.textContent = "Select a task set"; return; }
-  await runDatasetSync("DOWNLOAD TASKS",
-    () => apiPost("/api/hf/task_set/sync", {task_set: taskSet}, {timeoutMs: 0, concurrent: true}),
+  await runDatasetSync("下载任务集",
+    () => apiPost("/api/hf/task_set/sync", {}, {timeoutMs: 0, concurrent: true}),
     async (result, output) => {
-      output.textContent = `tasks downloaded: ${result.task_set || taskSet}`;
+      const missing = result.missing?.length ? `, ${result.missing.length} not published` : "";
+      output.textContent = `task sets: ${result.fetched?.length || 0} updated${missing}`;
       await pollCollectionSlots(true);
     });
+  if (!status.textContent) status.textContent = "task sets synced";
 }
 
 async function downloadCollectionAssetsFromHf() {
@@ -1778,47 +1779,6 @@ async function uploadCollectionDatasetToHf() {
     () => apiPost("/api/hf/dataset/upload", {dataset}, {timeoutMs: 0, concurrent: true}),
     async (result, output) => {
       output.textContent = `${dataset} uploaded: ${result.revision || "done"}`;
-    });
-}
-
-async function downloadCollectionDatasetFromHf() {
-  const dataset = collectSetValue();
-  const button = $("b-collect-dataset-download");
-  const status = $("collect-quality-status");
-  if (!dataset) { status.textContent = "Select a dataset"; return; }
-  button.disabled = true;
-  status.textContent = "Downloading";
-  try {
-    const result = await apiPost("/api/hf/dataset/download", {dataset}, {timeoutMs: 0, concurrent: true});
-    if (!result.ok) throw new Error(result.error || "Download failed");
-    status.textContent = "dataset downloaded";
-  } catch (error) {
-    status.textContent = error.message;
-  } finally {
-    button.disabled = false;
-  }
-}
-
-async function syncCollectionQc(direction) {
-  const dataset = collectSetValue();
-  const status = $("collect-quality-status");
-  if (!dataset) { status.textContent = "Select a dataset"; return; }
-  await runDatasetSync(direction === "upload" ? "UPLOAD QC" : "DOWNLOAD QC",
-    () => apiPost("/api/hf/qc/sync", {direction, dataset}, {timeoutMs: 0, concurrent: true}),
-    async (result, output) => {
-      output.textContent = direction === "upload"
-      ? `${dataset} QC uploaded: ${result.path || dataset}`
-      : result.source === "none"
-      ? `${dataset}: QC is not published; saved captures remain unreviewed unless capture quality failed`
-      : result.source === "episodes.jsonl"
-      ? `${dataset} quality metadata downloaded: ${result.episodes || 0} episodes (no remote QC verdicts)`
-      : `${dataset} QC downloaded: ${result.path || dataset}`;
-      if (direction === "download") {
-        invalidateEpisodeHistory("collect");
-        await pollEpisodeHistory(true);
-        await pollCollectionSlots(true);
-        renderCollect();
-      }
     });
 }
 
@@ -1986,7 +1946,7 @@ async function exportCollectionQuality() {
     qualityTransfer.exportState = "queued";
     qualityTransfer.episodesCompleted = 0;
     qualityTransfer.episodesTotal = 0;
-    qualityTransfer.acceptedDir = "";
+    qualityTransfer.outputDir = "";
     qualityTransfer.uploadPlanId = "";
     qualityTransfer.datasetFormat = datasetFormat;
     if (status) status.textContent = `exporting ${formatLabel}…`;
@@ -2013,12 +1973,12 @@ async function exportCollectionQuality() {
         qualityTransfer.episodesTotal = Number(job.episodes_total || 0);
         renderCollect();
         if (job.state === "completed") {
-          qualityTransfer.acceptedDir = job.accepted_dir || "";
+          qualityTransfer.outputDir = job.output_dir || "";
           qualityTransfer.datasetFormat = job.dataset_format || datasetFormat;
           if (status) {
             const completedFormat = qualityTransferFormatLabel(qualityTransfer.datasetFormat);
             status.textContent = `${completedFormat} export complete · ` +
-              `${job.accepted_episodes || 0} accepted · ${job.rejected_episodes || 0} rejected`;
+              `${job.episodes || 0} episodes`;
           }
           return;
         }
@@ -2044,7 +2004,7 @@ async function uploadCollectionQuality() {
     const status = $("collect-quality-status");
     const selectedFormat = $("collect-export-format").value;
     const datasetFormat = qualityTransfer.datasetFormat;
-    if (!qualityTransfer.acceptedDir || datasetFormat !== selectedFormat) {
+    if (!qualityTransfer.outputDir || datasetFormat !== selectedFormat) {
       if (status) {
         status.textContent = `${qualityTransferFormatLabel(selectedFormat)} export required before upload`;
       }
@@ -2454,7 +2414,7 @@ export {
   handleCollectionReviewInput, resetCollectionReviewInput,
   changeCollectionExportFormat, invalidateEpisodeHistory, pollEpisodeHistory,
   downloadCollectionTaskSetFromHf, downloadCollectionAssetsFromHf,
-  uploadCollectionDatasetToHf, downloadCollectionDatasetFromHf, syncCollectionQc,
+  uploadCollectionDatasetToHf,
   pollCollectionSlots, selectCollectionDataset,
   changeCollectionSlotFilter, changeCollectionSlotPage, toggleCollectionSlotAll,
 };

@@ -1,0 +1,55 @@
+"""Console EVAL/RESULT tabs: config serialization + result persistence contract.
+
+The eval state machine (start/stop) needs a live policy + the main loop, which is
+out of scope offline. What this test pins down is the part that survives a reload:
+the clip_id-keyed result store the EVAL tab writes and the RESULT tab reads back
+(with the episode-index join).
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from core.config import ConfigDict
+from tests.integration._harness import console_config, serve_console
+
+pytestmark = pytest.mark.integration
+
+
+def _eval_config():
+    eval_cfg = ConfigDict(
+        trials_per_prompt=3,
+        cli_mode="real",
+        checkpoints=(),
+        tasks=(
+            ConfigDict(
+                prompt_en="pick up the block",
+                prompt_zh="pick up the block",
+                milestones=(("grasp", "grasp"), ("place", "place")),
+            ),
+            ConfigDict(
+                prompt_en="pick up the cup",
+                prompt_zh="pick up the cup",
+                milestones=(("grasp", "grasp"), ("place", "place")),
+            ),
+        ),
+    )
+    cfg = console_config()
+    cfg.eval = eval_cfg
+    return cfg
+
+
+def test_results_dedup_latest_episode_per_clip(tmp_path):
+    # A re-test reuses the clip_id on a later episode; the latest episode row wins.
+    with serve_console(_eval_config(), tmp_path) as h:
+        ep_meta = tmp_path / "episodes" / "raw" / "meta"
+        ep_meta.mkdir(parents=True)
+        (ep_meta / "episodes.jsonl").write_text(
+            '{"episode_index": 0, "clip_id": "c1", "trial": 1, "score": 1}\n'
+            '{"episode_index": 3, "clip_id": "c1", "trial": 1, "score": 4}\n',
+            encoding="utf-8",
+        )
+        recs = h.get("/api/results").json["records"]
+        assert len(recs) == 1  # one row per clip
+        assert recs[0]["episode_index"] == 3  # latest episode wins
+        assert recs[0]["score"] == 4

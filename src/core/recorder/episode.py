@@ -37,7 +37,7 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from core.config import resolve_video_key
+from core.config import ConfigDict, resolve_video_key
 from core.recorder.collection_alignment import (
     align_collection_samples,
     image_skew_tolerance_sec,
@@ -52,7 +52,9 @@ from core.types import (
     RawCollectionSnapshot,
     RolloutInterventionSegment,
 )
+from core.utils.collection_paths import dataset_location
 from core.utils.images import resize_direct
+from core.utils.lerobot import LeRobotDatasetIO
 
 if TYPE_CHECKING:
     from core.config import ConfigDict
@@ -611,7 +613,10 @@ class EpisodeLogger:
         *,
         collection_dataset: str | None = None,
     ) -> bool:
-        """Write QC metadata for one fully saved collection episode.
+        """Write a quality verdict into the dataset's ``meta/qc.jsonl`` ledger.
+
+        The ledger is the only QC record: it carries the verdict, the note, and a
+        monotonic timestamp, so the same file merges by timestamp across machines.
 
         Args:
             task: Collection task whose task-specific dataset contains the episode.
@@ -620,12 +625,11 @@ class EpisodeLogger:
             note: QC note to replace the existing value.
 
         Returns:
-            True when the saved episode row was updated, otherwise False.
+            True when the episode exists and the ledger was written, otherwise False.
         """
         if self._collection_writer is None:
             return False
         dataset_dir = self._collection_dataset_dir(task, collection_dataset)
-        path = self._meta_path("episodes.jsonl", dataset_dir)
         with self._lock:
             if any(
                 job.episode_index == episode_index
@@ -633,20 +637,7 @@ class EpisodeLogger:
                 for job in self._save_jobs
             ):
                 return False
-            rows = _read_jsonl(path)
-            for row in rows:
-                if int(row.get("episode_index", -1)) != episode_index:
-                    continue
-                if verdict:
-                    row["qc_verdict"] = verdict
-                row["qc_note"] = note
-                replacement = path.with_suffix(f"{path.suffix}.qc.tmp")
-                with replacement.open("w") as f:
-                    for existing in rows:
-                        f.write(json.dumps(existing, ensure_ascii=False) + "\n")
-                replacement.replace(path)
-                return True
-        return False
+            return LeRobotDatasetIO(dataset_dir).mark_qc(episode_index, verdict, note)
 
     def patch_episode_meta_by_clip(self, clip_id: str, **fields: Any) -> int | None:
         """Merge eval metadata into an existing or still-saving episode for clip_id.
@@ -2403,24 +2394,28 @@ class EpisodeLogger:
         if collection_dataset is not None:
             # A mounted task set is authoritative. Its task definitions may be
             # loaded by the dataset service and need not mirror collection.tasks.
-            if str(collection.get("task_set_dir", "") or "").strip():
-                return self._log_dir / sanitize_path_component(collection_dataset) / "raw"
-            entries = configured_tasks.get(collection_dataset)
-            if entries is None or prompt not in {str(entry[0]) for entry in entries}:
-                raise ValueError(
-                    f"collection task {prompt!r} is not configured in dataset "
-                    f"{collection_dataset!r}"
-                )
-            return self._log_dir / sanitize_path_component(collection_dataset) / "raw"
+            if not str(collection.get("task_set_dir", "") or "").strip():
+                entries = configured_tasks.get(collection_dataset)
+                if entries is None or prompt not in {str(entry[0]) for entry in entries}:
+                    raise ValueError(
+                        f"collection task {prompt!r} is not configured in dataset "
+                        f"{collection_dataset!r}"
+                    )
+            return self._collection_location(str(collection_dataset))[0]
         for dataset_name, entries in configured_tasks.items():
             if prompt in {str(entry[0]) for entry in entries}:
-                return self._log_dir / sanitize_path_component(str(dataset_name)) / "raw"
-        return self._log_dir / sanitize_path_component(prompt or "unset") / "raw"
+                return self._collection_location(str(dataset_name))[0]
+        return self._collection_location(prompt or "unset")[0]
+
+    def _collection_location(self, dataset: str) -> tuple[Path, str]:
+        """The dataset's directory and remote path, identical on both apps."""
+        config = ConfigDict(collection=self._collection or {}, robot=dict(type=self._robot.name))
+        return dataset_location(config, sanitize_path_component(dataset), self._robot.name)
 
     def _collection_task_target(self, task: str, dataset_dir: Path | None = None) -> int | None:
         configured_tasks = (self._collection or {}).get("tasks") or {}
         for dataset_name, entries in configured_tasks.items():
-            configured_dir = self._log_dir / sanitize_path_component(str(dataset_name)) / "raw"
+            configured_dir = self._collection_location(str(dataset_name))[0]
             if dataset_dir is not None and configured_dir != dataset_dir:
                 continue
             for prompt, target in entries:

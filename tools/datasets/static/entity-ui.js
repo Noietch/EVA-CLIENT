@@ -1025,10 +1025,6 @@ function renderInfo() {
     "dashboard-health-rate",
     formatDashboardPercent(qcTotal ? summary.passed / qcTotal : 0),
   );
-  setDashboardText(
-    "dashboard-qc-summary",
-    formatDashboardNumber(summary.pending + summary.failed) + " " + translate("dashboard.pending"),
-  );
 
   const robotHost = $("dashboard-robot-list");
   if (robotHost) {
@@ -1040,9 +1036,10 @@ function renderInfo() {
         (total, batch) => ({
           target: total.target + dashboardBatchTarget(batch),
           collected: total.collected + Number(batch.collected || 0),
-          pending: total.pending + Number(batch.pending || 0) + Number(batch.failed || 0),
+          pending: total.pending + Number(batch.pending || 0),
+          failed: total.failed + Number(batch.failed || 0),
         }),
-        { target: 0, collected: 0, pending: 0 },
+        { target: 0, collected: 0, pending: 0, failed: 0 },
       );
       const row = node("div", "dashboard-robot-row");
       const copy = node("div", "dashboard-robot-copy");
@@ -1059,7 +1056,8 @@ function renderInfo() {
       const value = node("div", "dashboard-robot-value");
       value.append(
         node("b", "", formatDashboardNumber(robotSummary.collected) + " / " + formatDashboardNumber(robotSummary.target)),
-        node("small", "", translate("dashboard.remaining") + " " + formatDashboardNumber(robotSummary.pending)),
+        node("small", "", translate("dashboard.remaining") + " " + formatDashboardNumber(robotSummary.pending)
+          + (robotSummary.failed ? " · " + translate("dashboard.repair") + " " + formatDashboardNumber(robotSummary.failed) : "")),
       );
       row.append(copy, track, value);
       return row;
@@ -1086,43 +1084,6 @@ function renderInfo() {
     }));
   }
 
-  const reportHost = $("dashboard-qc-list");
-  if (!reportHost) return;
-  const reports = [...batches].filter(
-    (batch) => dashboardBatchCount(batch) > 0 && Number(batch.failed || 0) > 0,
-  ).sort((left, right) => (
-    Number(right.failed || 0) - Number(left.failed || 0)
-  ));
-  reportHost.replaceChildren(...reports.map((batch) => {
-    const failed = Number(batch.failed || 0);
-    const row = node("div", "dashboard-qc-row failed");
-    const copy = node("div", "dashboard-qc-copy");
-    copy.append(
-      node("strong", "", batch.batch_id),
-      node(
-        "span",
-        "",
-        (batch.robot_type || translate("dashboard.unknownRobot")) + " · " + formatDashboardNumber(batch.collected)
-          + " / " + formatDashboardNumber(dashboardBatchTarget(batch))
-          + " · " + translate("status.failed") + " " + formatDashboardNumber(failed),
-      ),
-    );
-    const openQc = button(translate("dashboard.openQc"), "", "button primary");
-    openQc.addEventListener("click", async () => {
-      app.batch = batch.batch_id;
-      app.qcSceneFilter = "";
-      app.qcTaskFilter = "";
-      app.qcPage = 0;
-      app.selectedSlot = "";
-      app.selected.tasks = "";
-      app.review = null;
-      await loadState();
-      switchTab("tasks");
-    });
-    row.append(copy, openQc);
-    return row;
-  }));
-  if (!reportHost.childElementCount) emptyList(reportHost, translate("dashboard.noReports"));
 }
 
 function renderIssues() {

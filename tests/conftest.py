@@ -4,7 +4,7 @@ import pytest
 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
-    layers = {"unit", "integration", "static", "e2e"}
+    layers = {"unit", "integration", "static"}
     for item in items:
         selected = {marker.name for marker in item.iter_markers()} & layers
         if len(selected) != 1:

@@ -1,4 +1,4 @@
-"""Record, replay, quality-split and upload an actual dataset with encoded video."""
+"""Record, replay and upload an actual dataset with encoded video."""
 
 import json
 from pathlib import Path
@@ -10,7 +10,6 @@ from core.config import ConfigDict, load_config
 from core.recorder.episode import EpisodeLogger
 from core.types import CollectionRawBatch, CollectionRawSample, RawCollectionSnapshot
 from core.utils import dataset_upload
-from core.utils.quality_dataset import split_dataset_by_quality
 from robots.base import ActuatorGroup, CameraSpec, ObservationSchema, Robot
 from transport.dataset import DatasetTransport
 
@@ -39,6 +38,7 @@ def test_record_replay_export_upload_round_trip(tmp_path, async_save):
         dataset_keys=keys,
         collection=ConfigDict(
             enabled=True,
+            storage=ConfigDict(data_root=str(tmp_path / "data")),
             schema=ConfigDict(
                 robot_type=robot.name,
                 min_episode_frames=1,
@@ -81,25 +81,32 @@ def test_record_replay_export_upload_round_trip(tmp_path, async_save):
     finally:
         logger.finalize()
 
-    # Split persisted episodes and publish only the accepted dataset
-    raw = tmp_path / "recorded/task/raw"
-    accepted, rejected = tmp_path / "accepted", tmp_path / "rejected"
-    summary = split_dataset_by_quality(raw, accepted, rejected)
-    assert (summary.accepted_episodes, summary.rejected_episodes) == (1, 1)
+    # The dataset is the one copy: QC verdicts live in its ledger, and it is
+    # what gets delivered.
+    dataset = tmp_path / "data" / "datasets" / "real_robot" / robot.name / "task"
+    ledger = [
+        json.loads(line)
+        for line in (dataset / "meta" / "qc.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    assert [(row["episode_index"], row["qc_verdict"]) for row in ledger] == [
+        (0, "pass"),
+        (1, "fail"),
+    ]
     specs = dataset_upload.resolve_dataset_uploads(
         {"loopback": {"remote_dir": str(tmp_path / "uploaded")}}, "task"
     )
-    plan = dataset_upload.scan_dataset_directory(accepted, specs)
-    result = dataset_upload.upload_dataset_directory(accepted, specs, plan=plan)
+    plan = dataset_upload.scan_dataset_directory(dataset, specs)
+    result = dataset_upload.upload_dataset_directory(dataset, specs, plan=plan)
     assert result.files == plan.new_files
     assert result.files > 0
-    assert dataset_upload.scan_dataset_directory(accepted, specs).files_to_upload == 0
+    assert dataset_upload.scan_dataset_directory(dataset, specs).files_to_upload == 0
 
-    # Replay both the recorder output and the published export through the real reader
+    # Replay both the recorder output and the delivered copy through the real reader
     config = load_config(Path(__file__).resolve().parents[2] / "configs/00_base/defaults.py")
     config.transport.dataset_keys = keys
-    for dataset in (raw, tmp_path / "uploaded/task"):
-        replay = DatasetTransport(config, robot, dataset)
+    for source in (dataset, tmp_path / "uploaded/task"):
+        replay = DatasetTransport(config, robot, source)
         try:
             assert replay.n_steps == 3
             assert replay.current_task == "task"
@@ -113,7 +120,21 @@ def test_record_replay_export_upload_round_trip(tmp_path, async_save):
             assert not replay.advance()
         finally:
             replay.close()
-    published = tmp_path / "uploaded/task/meta/episodes.jsonl"
-    rows = [json.loads(line) for line in published.read_text().splitlines()]
-    assert len(rows) == 1
-    assert rows[0]["qc_verdict"] == "pass"
+    # The delivered copy carries the same recordings and the same ledger.
+    published = tmp_path / "uploaded/task"
+    rows = [
+        json.loads(line)
+        for line in (published / "meta" / "episodes.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    assert len(rows) == 2
+    assert all("qc_verdict" not in row for row in rows)
+    delivered = [
+        json.loads(line)
+        for line in (published / "meta" / "qc.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    assert [(row["episode_index"], row["qc_verdict"]) for row in delivered] == [
+        (0, "pass"),
+        (1, "fail"),
+    ]

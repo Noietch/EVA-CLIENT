@@ -5,14 +5,13 @@ let datasets = [];
 let remote = {};
 let job = null;
 let jobs = [];
-let timer = null;
 let pollTimer = null;
 let requesting = false;
 let loaded = false;
-let lastCloudRefresh = 0;
 const selected = new Set();
 const labels = { refresh: "刷新云端并校验", verify: "校验", upload_data: "上传数据",
-  upload_qc: "上传 QC", upload_task: "上传任务", download_task: "下载任务" };
+  upload_qc: "上传 QC", download_qc: "下载 QC", upload_task: "上传任务",
+  download_task: "下载任务" };
 const resourceLabels = { local_data: "本地数据", local_qc: "本地 QC", local_task: "本地任务文件",
   remote_data: "云端数据", remote_qc: "云端 QC", remote_task: "云端任务文件" };
 const escape = (value) => String(value ?? "").replace(/[&<>"']/g,
@@ -200,7 +199,6 @@ async function start(action, names = [...selected]) {
     const data = await apiPost("/api/dataset_manager", { action, datasets: names }, { timeoutMs: 30000 });
     if (!data.ok) throw new Error(data.error || "操作失败");
     acceptSnapshot(data);
-    if (action === "refresh") lastCloudRefresh = Date.now();
     render();
     schedulePoll();
   } catch (error) {
@@ -210,21 +208,6 @@ async function start(action, names = [...selected]) {
     document.querySelectorAll("[data-dm-action]").forEach((b) => { b.disabled = busy() || !selected.size; });
     $("dm-refresh").disabled = busy() || !datasets.length;
   }
-}
-
-function configureRefresh() {
-  clearInterval(timer);
-  const minutes = Math.max(0, Math.min(1440, Number($("dm-interval").value) || 0));
-  $("dm-interval").value = minutes;
-  localStorage.setItem("eva.datasetRefreshMinutes", String(minutes));
-  if (!minutes) return;
-  timer = setInterval(() => {
-    if (loaded && S.ACTIVE_TAB === "dashboard" && !document.hidden && !busy()
-        && !jobs.some((item) => item.state === "running" && item.action === "refresh")
-        && Date.now() - lastCloudRefresh >= minutes * 60000) {
-      start("refresh", datasets.map((row) => row.name));
-    }
-  }, Math.min(minutes * 60000, 30000));
 }
 
 export function initDatasetManager() {
@@ -292,8 +275,4 @@ export function initDatasetManager() {
       render();
     } catch (error) { button.disabled = false; $("dm-status").textContent = error.message; }
   });
-  $("dm-interval").value = localStorage.getItem("eva.datasetRefreshMinutes") ?? "5";
-  lastCloudRefresh = Date.now();
-  $("dm-interval").addEventListener("change", configureRefresh);
-  configureRefresh();
 }

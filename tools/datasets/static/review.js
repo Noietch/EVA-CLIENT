@@ -30,6 +30,15 @@ let navigateQcSlot;
 let showToast;
 let translate;
 const STATIC_REASON = "static_frames_excessive";
+const CAMERA_REASON = "camera_offline";
+const REASON_KEYS = {
+  image_quality: "qc.imageReason",
+  trajectory_quality: "qc.trajectoryReason",
+  task_mismatch: "qc.taskReason",
+  [STATIC_REASON]: "qc.staticFramesExcessive",
+  [CAMERA_REASON]: "qc.cameraOffline",
+  other: "qc.otherReason",
+};
 
 function configureReview(context) {
   ({
@@ -577,6 +586,10 @@ function buildScrubber(payload) {
   return bar;
 }
 
+function reasonLabel(reason) {
+  return reason ? translate(REASON_KEYS[reason] || reason) : "";
+}
+
 function buildQcControls(task, slot) {
   const section = node("div", "qc-controls");
   const hasEpisode = Boolean(slot.episode);
@@ -591,6 +604,7 @@ function buildQcControls(task, slot) {
     ["trajectory_quality", translate("qc.trajectoryReason")],
     ["task_mismatch", translate("qc.taskReason")],
     [STATIC_REASON, translate("qc.staticFramesExcessive")],
+    [CAMERA_REASON, translate("qc.cameraOffline")],
     ["other", translate("qc.otherReason")],
   ];
   for (const [value, label] of reasonOptions) reason.add(new Option(label, value));
@@ -610,7 +624,16 @@ function buildQcControls(task, slot) {
   passRow.append(pass);
   const failRow = node("div", "qc-verdict-row");
   failRow.append(fail);
-  section.append(passRow, reason, note, failRow);
+  section.append(passRow, reason, note);
+  if (episode && episode.qc_auto_note) {
+    const machine = node("div", "frame-label-warning");
+    machine.append(
+      node("b", "", translate("qc.machineOpinion")),
+      node("span", "", `${reasonLabel(episode.qc_auto_reason)}：${episode.qc_auto_note}`),
+    );
+    section.append(machine);
+  }
+  section.append(failRow);
   return section;
 }
 

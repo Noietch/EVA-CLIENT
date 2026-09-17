@@ -13,7 +13,6 @@ from typing import Any
 from core.config import ConfigDict
 
 _STATE_LOCK = threading.RLock()
-_STATE_FILE = "collection_slots.json"
 
 
 @dataclass(frozen=True)
@@ -234,10 +233,11 @@ def build_collection_slots(
     return slots
 
 
-def load_slot_state(dataset_dir: Path | None) -> CollectionSlotState:
-    if dataset_dir is None:
+def load_slot_state(state_path: Path | None) -> CollectionSlotState:
+    """Read the console's slot selection; it stays machine-local."""
+    if state_path is None:
         return CollectionSlotState([])
-    path = dataset_dir / "meta" / _STATE_FILE
+    path = Path(state_path)
     with _STATE_LOCK:
         try:
             payload = json.loads(path.read_text())
@@ -258,8 +258,8 @@ def load_slot_state(dataset_dir: Path | None) -> CollectionSlotState:
     )
 
 
-def save_slot_state(dataset_dir: Path, state: CollectionSlotState) -> None:
-    path = dataset_dir / "meta" / _STATE_FILE
+def save_slot_state(state_path: Path, state: CollectionSlotState) -> None:
+    path = Path(state_path)
     with _STATE_LOCK:
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_suffix(f"{path.suffix}.tmp")
@@ -448,7 +448,7 @@ def collection_slot_status(
 
 
 def defer_active_slot(
-    dataset_dir: Path,
+    state_path: Path,
     active_slot_id: str,
     state: CollectionSlotState,
 ) -> CollectionSlotState:
@@ -456,12 +456,12 @@ def defer_active_slot(
     ordered = [slot_id for slot_id in state.deferred if slot_id != active_slot_id]
     ordered.append(active_slot_id)
     updated = CollectionSlotState(ordered, active_slot_id)
-    save_slot_state(dataset_dir, updated)
+    save_slot_state(state_path, updated)
     return updated
 
 
 def select_collection_slot(
-    dataset_dir: Path,
+    state_path: Path,
     slot_id: str,
     state: CollectionSlotState,
     *,
@@ -470,5 +470,5 @@ def select_collection_slot(
 ) -> CollectionSlotState:
     """Select a capture target, optionally retaining a completed episode for retake."""
     updated = CollectionSlotState(state.deferred, slot_id, episode_index, manual)
-    save_slot_state(dataset_dir, updated)
+    save_slot_state(state_path, updated)
     return updated

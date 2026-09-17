@@ -154,7 +154,43 @@
           <section class="dashboard-panel dashboard-collection-panel"><header class="dashboard-panel-head"><div><span class="eyebrow" data-i18n="dashboard.collectionEyebrow">采集需求</span><h2 data-i18n="dashboard.collectionTitle">按机器人统计</h2></div><span class="dashboard-panel-total" id="dashboard-robot-total">0 / 0</span></header><div class="dashboard-robot-list" id="dashboard-robot-list"></div></section>
           <section class="dashboard-panel dashboard-health-panel"><header class="dashboard-panel-head"><div><span class="eyebrow" data-i18n="dashboard.healthEyebrow">流程健康度</span><h2 data-i18n="dashboard.healthTitle">质检健康度</h2></div><span class="dashboard-panel-total" id="dashboard-health-rate">0%</span></header><div class="dashboard-health-list" id="dashboard-health-list"></div></section>
         </div>
-        <section class="dashboard-panel dashboard-qc-panel"><header class="dashboard-panel-head"><div><span class="eyebrow" data-i18n="dashboard.qcEyebrow">质量控制</span><h2 data-i18n="dashboard.qcTitle">质检报告</h2><p data-i18n="dashboard.qcSubtitle">只有质检报告可以打开任务数据进行复核。</p></div><span class="dashboard-panel-total" id="dashboard-qc-summary">0</span></header><div class="dashboard-qc-list" id="dashboard-qc-list"></div></section>
+        <section class="dm-panel" id="dm-panel">
+          <div class="dm-panel-head"><h2 data-i18n="dm.title">数据集管理</h2><div class="dm-selection-summary"><span id="dm-selected" data-i18n="dm.selectedEmpty">已选 0</span><button class="btn" id="dm-clear" disabled data-i18n="dm.clear">清空选择</button></div></div>
+          <div class="dm-toolbar">
+            <button class="btn" data-dm-action="auto_qc" data-i18n-title="dm.autoQcTitle" title="对选中的数据播放静止帧与相机离线检查并写入质检结论；未选择时检查全部数据集" data-i18n="dm.action.auto_qc">自动质检</button>
+            <button class="btn" data-dm-action="download_qc" data-i18n="dm.action.download_qc">下载 QC</button>
+            <button class="btn" data-dm-action="upload_qc" data-i18n="dm.action.upload_qc">上传 QC</button>
+            <button class="btn" data-dm-action="upload_data" data-i18n="dm.action.upload_data">上传数据</button>
+            <button class="btn" data-dm-action="upload_task" data-i18n="dm.action.upload_task">上传任务</button>
+            <button class="btn" data-dm-action="download_task" data-i18n="dm.action.download_task">下载任务</button>
+            <button class="btn" id="dm-refresh" data-i18n-title="dm.refreshTitle" title="刷新所有数据集的云端信息并校验数据、任务和 QC" data-i18n="dm.action.refresh">刷新云端并校验</button>
+          </div>
+          <div class="dm-toolbar">
+            <input id="dm-search" type="search" data-i18n-placeholder="dm.search" placeholder="搜索数据集" data-i18n-aria-label="dm.search" aria-label="搜索数据集">
+            <select id="dm-robot" data-i18n-aria-label="dm.robotFilter" aria-label="按机器人过滤"></select>
+            <select id="dm-sort" data-i18n-aria-label="dm.sortLabel" aria-label="数据集排序"></select>
+            <button class="btn" id="dm-select-all" aria-pressed="false" data-i18n="dm.selectAll">全选筛选结果</button>
+          </div>
+          <div class="dm-job" aria-live="polite">
+            <span id="dm-status" data-i18n="dm.notRefreshed">尚未刷新云端</span><span id="dm-eta">ETA --</span>
+            <progress id="dm-progress" value="0" max="1" data-i18n-aria-label="dm.progress" aria-label="数据集操作进度"></progress>
+          </div>
+          <div id="dm-jobs" aria-live="polite"></div>
+          <div class="dashboard-table-wrap"><table class="dashboard-table dm-table">
+            <colgroup><col class="dm-col-select"><col class="dm-col-name"><col span="11" class="dm-col-number"><col span="3" class="dm-col-check"><col class="dm-col-state"></colgroup>
+            <thead>
+              <tr><th rowspan="2" scope="col" data-i18n="dm.col.select">选择</th><th rowspan="2" scope="col"><button data-dm-sort="name" data-i18n="dm.col.dataset">数据集</button></th><th colspan="3" scope="colgroup" data-i18n="dm.group.localCollection">本地采集</th><th colspan="3" scope="colgroup" data-i18n="dm.group.localQc">本地 QC</th><th colspan="2" scope="colgroup" data-i18n="dm.group.cloudData">云端数据</th><th colspan="3" scope="colgroup" data-i18n="dm.group.cloudQc">云端 QC</th><th colspan="3" scope="colgroup" data-i18n="dm.group.verify">一致性校验</th><th rowspan="2" scope="col"><button data-dm-sort="status" data-i18n="dm.col.state">状态 · 最近刷新</button></th></tr>
+              <tr>
+                <th scope="col"><button data-dm-sort="collected" data-i18n="dm.col.collected">已采</button></th><th scope="col"><button data-dm-sort="total" data-i18n="dm.col.target">目标</button></th><th scope="col"><button data-dm-sort="progress" data-i18n="dm.col.ratio">比例</button></th>
+                <th scope="col"><button data-dm-sort="accept" data-i18n="dm.col.accept">通过</button></th><th scope="col"><button data-dm-sort="fail" data-i18n="dm.col.fail">失败</button></th><th scope="col"><button data-dm-sort="unreviewed" data-i18n="dm.col.unreviewed">未标注</button></th>
+                <th scope="col"><button data-dm-sort="cloud_episodes" data-i18n="dm.col.cloudEpisodes">条数</button></th><th scope="col"><button data-dm-sort="cloud_tasks" data-i18n="dm.col.cloudTasks">任务数</button></th>
+                <th scope="col"><button data-dm-sort="cloud_accept" data-i18n="dm.col.accept">通过</button></th><th scope="col"><button data-dm-sort="cloud_fail" data-i18n="dm.col.fail">失败</button></th><th scope="col"><button data-dm-sort="cloud_unreviewed" data-i18n="dm.col.unreviewed">未标注</button></th>
+                <th scope="col"><button data-dm-sort="verify_data" data-i18n="dm.col.data">数据</button></th><th scope="col"><button data-dm-sort="verify_task" data-i18n="dm.col.task">任务</button></th><th scope="col"><button data-dm-sort="verify_qc">QC</button></th>
+              </tr>
+            </thead>
+            <tbody id="dm-rows"></tbody>
+          </table><div class="dashboard-empty" id="dm-empty" hidden data-i18n="dm.empty">没有匹配的数据集</div></div>
+        </section>
       </section>
     </div>
   </main>

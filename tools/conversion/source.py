@@ -141,9 +141,6 @@ def write_common_metadata(source: LeRobotV21Source, output: Path, data_format: s
     _copy_optional(source.meta_dir / "tasks.jsonl", meta_dir / "tasks.jsonl")
     _copy_optional(source.meta_dir / "qc.jsonl", meta_dir / "qc.jsonl")
     _write_episode_rows(source.episode_rows, meta_dir / "episodes.jsonl", data_format)
-    marker = json.loads((source.meta_dir / "quality_split.json").read_text())
-    marker["dataset_format"] = data_format
-    (meta_dir / "quality_split.json").write_text(json.dumps(marker, indent=2) + "\n")
 
 
 def _converted_info(source_info: dict[str, Any], data_format: str) -> dict[str, Any]:

@@ -21,13 +21,14 @@ from flask import Flask, jsonify, render_template, request, send_file, send_from
 from werkzeug.exceptions import Forbidden, HTTPException
 
 from tools.datasets.collection import PlanCatalog
+from tools.datasets.dataset_transfer import DatasetTransfer
 from tools.datasets.hf_task_sets import (
     fetch_dataset,
     fetch_qc,
     fetch_task_set,
     publish_assets,
     publish_qc,
-    publish_task_set,
+    publish_task_sets,
 )
 from tools.datasets.store import ConflictError, RecordNotFoundError
 
@@ -35,7 +36,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DATA_ROOT = PROJECT_ROOT / "datasets/data_collection"
 DEFAULT_PLANS_ROOT = DEFAULT_DATA_ROOT / "task_sets"
 DEFAULT_ASSETS_ROOT = DEFAULT_DATA_ROOT / "assets"
-DEFAULT_COLLECTION_ROOT = DEFAULT_DATA_ROOT / "datasets" / "lerobot_datasets"
+DEFAULT_COLLECTION_ROOT = DEFAULT_DATA_ROOT
 CONSOLE_STATIC_ROOT = PROJECT_ROOT / "src/core/app/console/static"
 
 
@@ -51,6 +52,7 @@ class DatasetService:
         app.config["DATASET_READ_ONLY"] = read_only
         app.config["DATASET_LOCALE"] = locale
         self.catalog = PlanCatalog(plans_root, assets_root, collection_root)
+        self.transfers = DatasetTransfer(PROJECT_ROOT, self.catalog)
 
         # Register the catalog and review endpoints
         app.after_request(self.compress_json)
@@ -72,12 +74,15 @@ class DatasetService:
         app.get("/api/batches/<batch>/validate")(self.validate)
         app.post("/api/batches/<batch>/import")(self.import_plan)
         app.get("/api/batches/<batch>/export")(self.export_plan)
-        app.post("/api/batches/<batch>/hf/publish")(self.publish_hf_task_set)
+        app.post("/api/hf/task_sets/publish")(self.publish_hf_task_sets)
         app.post("/api/batches/<batch>/hf/sync")(self.sync_hf_task_set)
         app.post("/api/hf/assets/publish")(self.publish_hf_assets)
         app.post("/api/batches/<batch>/hf/download")(self.download_hf_dataset)
         app.post("/api/batches/<batch>/hf/qc/upload")(self.publish_hf_qc)
         app.post("/api/batches/<batch>/hf/qc/download")(self.download_hf_qc)
+        app.get("/api/transfers")(self.transfers_state)
+        app.get("/api/transfers/job")(self.transfers_job)
+        app.post("/api/transfers")(self.start_transfer)
         app.get("/api/batches/<batch>/qc/export")(self.export_qc)
         app.post("/api/objects")(self.create_object)
         app.put("/api/objects/<object_id>")(self.update_object)
@@ -196,8 +201,14 @@ class DatasetService:
             download_name=f"{name}.zip",
         )
 
-    def publish_hf_task_set(self, batch: str) -> Any:
-        return jsonify(publish_task_set(PROJECT_ROOT, self.catalog.plans_root / batch))
+    def publish_hf_task_sets(self) -> Any:
+        """Publish every task set: task sets always sync as a whole."""
+        task_sets = {
+            path.name: path
+            for path in sorted(self.catalog.plans_root.iterdir())
+            if path.is_dir() and (path / "tasks.csv").is_file()
+        }
+        return jsonify({"ok": True, **publish_task_sets(PROJECT_ROOT, task_sets)})
 
     def publish_hf_assets(self) -> Any:
         return jsonify(publish_assets(PROJECT_ROOT, self.catalog.assets.path))
@@ -227,6 +238,23 @@ class DatasetService:
         return jsonify(
             fetch_qc(PROJECT_ROOT, dataset_dir.name, dataset_dir, expected_path=remote_path)
         )
+
+    def transfers_state(self) -> Any:
+        return jsonify({"ok": True, "datasets": self.transfers.rows(), **self.transfers.snapshot()})
+
+    def transfers_job(self) -> Any:
+        return jsonify({"ok": True, **self.transfers.snapshot()})
+
+    def start_transfer(self) -> Any:
+        body = request.get_json(silent=True) or {}
+        if body.get("action") == "stop":
+            self.transfers.stop(str(body.get("job_id", "")))
+            return jsonify({"ok": True})
+        names = body.get("datasets")
+        if not isinstance(names, list) or not names:
+            raise ValueError("Select datasets to transfer")
+        self.transfers.start(str(body.get("action", "")), list(dict.fromkeys(names)))
+        return jsonify({"ok": True, **self.transfers.snapshot()})
 
     def export_qc(self, batch: str) -> Any:
         rows = self.catalog.qc_rows(batch)
