@@ -16,6 +16,16 @@ const DEVICE_STATE_LABELS = {
   Stopped: "device.state.stopped",
 };
 
+const DEVICE_CATALOG_LABELS = {
+  None: "device.none",
+  "Robot camera stream": "device.robotCameraStream",
+};
+
+function catalogLabel(value) {
+  const key = DEVICE_CATALOG_LABELS[String(value)] || "";
+  return key ? t(key) : value;
+}
+
 class DevicePanel {
   constructor() {
     this.data = null;
@@ -60,8 +70,8 @@ class DevicePanel {
         if (kind === "camera" && spec.hidden) continue;
         const transport = S.CFG?.transport_type;
         const label = kind === "camera" && id === "external"
-          ? ({ros1: "ROS 1", ros2: "ROS 2", zmq: "ZMQ"}[transport] || spec.label)
-          : spec.label;
+          ? ({ros1: "ROS 1", ros2: "ROS 2", zmq: "ZMQ"}[transport] || catalogLabel(spec.label))
+          : catalogLabel(spec.label);
         select.add(new Option(label, id));
       }
       select.value = selected[kind];
@@ -69,7 +79,7 @@ class DevicePanel {
         select.add(new Option(t("device.real"), "real"));
         select.add(new Option(t("device.fake"), "fake"));
         select.value = this.data.values.robot.mode || "real";
-        select.title = catalog.robot[selected.robot].label;
+        select.title = catalogLabel(catalog.robot[selected.robot].label);
       }
       select.onchange = () => this.select(kind, select.value);
       const actions = document.createElement("div");

@@ -59,6 +59,32 @@ const GLOSSARY = {
   "dashboard.trialLog": ["试次日志", "TRIAL LOG"],
   "dashboard.evalActivity": ["评测活动", "Eval activity"],
   "dashboard.noTrials": ["未找到原始评测回合", "No raw eval trials found"],
+  "dashboard.rawEpisodeTime": ["原始回合时长", "raw episode time"],
+  "dashboard.rawFrames": ["原始帧数", "raw frames"],
+  "dashboard.perEpisode": ["每个回合", "per episode"],
+  "dashboard.validRecordingWindow": ["有效录制时长 / 采集窗口", "valid recording / collection window"],
+  "dashboard.rawConfirmedUploads": ["已确认上传的原始回合数", "raw episodes in confirmed uploads"],
+  "dashboard.rawWithoutUpload": ["未收到上传回执的原始回合数", "raw episodes without upload receipt"],
+  "dashboard.collectionByDay": ["按日采集", "Collection by day"],
+  "dashboard.collectionWindow": ["采集窗口（首次至末次）", "Collection window (first to last)"],
+  "dashboard.rawDatasets": ["原始数据集", "Raw datasets"],
+  "dashboard.localAccepted": ["本地已接受数据", "LOCAL ACCEPTED"],
+  "dashboard.remoteDataset": ["远端数据集", "REMOTE DATASET"],
+  "dashboard.exactAccepted": ["完整接受内容", "exact accepted contents"],
+  "dashboard.collectedAgainstTarget": ["相对于目标的已采集量", "Collected against target"],
+  "dashboard.episodeLog": ["回合日志", "EPISODE LOG"],
+  "dashboard.collectionActivity": ["采集活动", "Collection activity"],
+  "dashboard.exactLocalTimestamps": ["精确本地时间戳", "Exact local timestamps"],
+  "dashboard.trialTime": ["试次时长", "TRIAL TIME"],
+  "dashboard.rawTrialTime": ["原始试次时长", "raw trial time"],
+  "dashboard.rawTrialFrames": ["原始试次帧数", "raw trial frames"],
+  "dashboard.perTrial": ["每个试次", "per trial"],
+  "dashboard.validTrialWindow": ["有效试次时长 / 评测窗口", "valid trial time / evaluation window"],
+  "dashboard.completedEvalResults": ["已完成评测结果", "completed eval results"],
+  "dashboard.evalByDay": ["按日评测", "Eval by day"],
+  "dashboard.evalHealth": ["评测健康度", "EVAL HEALTH"],
+  "dashboard.trialCompletion": ["试次完成度", "Trial completion"],
+  "dashboard.evaluationWindow": ["评测窗口（首次至末次）", "Evaluation window (first to last)"],
   "debug.prompt": ["提示词", "PROMPT"],
   "debug.config": ["配置", "CONFIG"],
   "debug.mode": ["模式", "MODE"],
@@ -79,6 +105,10 @@ const GLOSSARY = {
   "debug.real": ["真实 ▶", "REAL ▶"],
   "debug.stop": ["停止 ■", "STOP ■"],
   "debug.apply": ["应用 ⤓", "APPLY ⤓"],
+  "debug.rates": ["频率", "RATES"],
+  "debug.inferenceRate": ["推理频率 Hz", "inference rate Hz"],
+  "debug.forceLock": ["强制锁定", "force lock"],
+  "debug.overridePolicy": ["运行期间覆盖策略", "override policy during run"],
   "collect.dataset": ["数据集", "DATASET"],
   "collect.datasetName": ["数据集名称", "DATASET NAME"],
   "collect.record": ["录制", "RECORD"],
@@ -126,6 +156,39 @@ const GLOSSARY = {
   "collect.guide.convertingHint": ["请选择绿色项目，然后按回放", "Select a green item, then press REPLAY"],
   "collect.guide.ready": ["准备就绪 — 点击<b>开始录制</b>", "Ready — click <b>START RECORD</b>"],
   "collect.guide.readyHint": ["队列默认折叠；展开查看详情", "Queue is collapsed by default; expand for details"],
+  "collect.endSave": ["结束 / 保存", "END / SAVE"],
+  "collect.allScenes": ["全部场景", "ALL SCENES"],
+  "collect.allTasks": ["全部任务", "ALL TASKS"],
+  "collect.noMatchingSlots": ["没有匹配的采集槽位", "NO MATCHING SLOTS"],
+  "collect.filterOff": ["筛选未启用", "FILTER OFF"],
+  "collect.round": ["轮次", "ROUND"],
+  "collect.slot": ["槽位", "SLOT"],
+  "collect.episodeLabel": ["回合", "EPISODE"],
+  "collect.qcLabel": ["质量检查", "QC"],
+  "collect.convertingLabel": ["转换中", "CONVERTING"],
+  "collect.noSavedRollouts": ["无已保存回放", "no saved rollouts"],
+  "collect.noRolloutSelected": ["未选择回放", "no rollout selected"],
+  "collect.remaining": ["还剩 {count} 项", "{count} REMAINING"],
+  "collect.requirementComplete": ["已完成", "COMPLETE"],
+  "collect.controlUnavailable": ["不可用", "UNAVAILABLE"],
+  "collect.controlDisabled": ["未启用", "DISABLED"],
+  "collect.controlActive": ["活动", "ACTIVE"],
+  "collect.controlReady": ["就绪", "READY"],
+  "collect.completeCount": ["已完成", "complete"],
+  "collect.eta": ["预计剩余时间", "eta"],
+  "collect.progress": ["进度", "progress"],
+  "collect.episodes": ["回合", "episodes"],
+  "collect.files": ["文件", "files"],
+  "collect.upload": ["上传", "upload"],
+  "collect.remove": ["移除", "remove"],
+  "collect.same": ["相同", "same"],
+  "collect.collapse": ["收起", "COLLAPSE"],
+  "collect.expand": ["展开", "EXPAND"],
+  "collect.selectSet": ["选择数据集", "SELECT SET"],
+  "collect.fixedPlanGreen": ["固定计划 · 仅绿色数据", "FIXED PLAN · GREEN ONLY"],
+  "collect.fixedPlanPassed": ["固定计划 · 仅通过数据", "FIXED PLAN · QC PASSED"],
+  "collect.roundValue": ["第 {round} 轮 / 共 {total} 轮", "ROUND {round} / {total}"],
+  "collect.recordingUnavailable": ["采集记录不可用", "collection recording is unavailable"],
   "teleop.vr.linked": ["VR 已连接", "VR LINKED"],
   "teleop.vr.down": ["VR 未连接", "VR DOWN"],
   "teleop.vr.error": ["VR 错误", "VR ERROR"],
@@ -133,9 +196,11 @@ const GLOSSARY = {
   "teleop.arm.left.enabled": ["左臂已启用", "LEFT ARM ENABLED"],
   "teleop.arm.left.disabled": ["左臂未启用", "LEFT ARM DISABLED"],
   "teleop.arm.left.unavailable": ["左臂不可用", "LEFT ARM UNAVAILABLE"],
+  "teleop.arm.left.label": ["左臂", "LEFT ARM"],
   "teleop.arm.right.enabled": ["右臂已启用", "RIGHT ARM ENABLED"],
   "teleop.arm.right.disabled": ["右臂未启用", "RIGHT ARM DISABLED"],
   "teleop.arm.right.unavailable": ["右臂不可用", "RIGHT ARM UNAVAILABLE"],
+  "teleop.arm.right.label": ["右臂", "RIGHT ARM"],
   "guide.robotReady": ["机器人就绪", "ROBOT READY"],
   "guide.paused": ["已暂停 — 点击继续", "PAUSED — CLICK RESUME"],
   "guide.setupFailed": ["设置失败", "SETUP FAILED"],
@@ -159,11 +224,14 @@ const GLOSSARY = {
   "guide.controlEnabled": ["控制已启用", "CONTROL ENABLED"],
   "guide.controlLocked": ["控制已锁定", "CONTROL LOCKED"],
   "guide.follow": ["按左侧步骤 1 → 4 执行", "Follow steps 1 → 4 on the left to run"],
+  "guide.selectTaskStep": ["第 1 步 — 请在左侧选择<b>任务</b>", "Step 1 — select a <b>TASK</b> on the left"],
+  "guide.selectEpisodeStep": ["第 1 步 — 请在左侧选择<b>回合</b>", "Step 1 — select an <b>EPISODE</b> on the left"],
   "guide.selectMode": ["第 2 步 — 在配置中选择<b>模式</b>", "Step 2 — pick a <b>MODE</b> under CONFIG"],
   "guide.selectStrategy": ["第 2 步 — 在配置中选择<b>策略</b>", "Step 2 — pick a <b>STRATEGY</b> under CONFIG"],
   "guide.setupFailedStep": ["第 3 步 — <b>设置失败</b>", "Step 3 — <b>setup failed</b>"],
   "guide.setupFailedHint": ["检查错误，然后点击设置面板中的重试", "Check the error, then click RETRY under SETUP"],
   "guide.setupStage": ["第 3 步 — <b>{stage}</b>…", "Step 3 — <b>{stage}</b>…"],
+  "guide.autoStage": ["自动 · {stage}", "AUTO · {stage}"],
   "guide.preparingStep": ["第 3 步 — 正在<b>准备机器人</b>…", "Step 3 — <b>preparing the robot</b>…"],
   "guide.autoSetupHint": ["正在自动设置，可能需要几秒钟", "Setting up automatically — this can take a few seconds"],
   "guide.readyRun": ["准备就绪 — 点击<b>运行 ▶</b>开始", "Ready — click <b>RUN ▶</b> to start"],
@@ -180,9 +248,17 @@ const GLOSSARY = {
   "run.hilOff": ["人在回路已关闭", "HIL OFF"],
   "run.hilUnavailable": ["人在回路不可用", "HIL N/A"],
   "run.hilTitle": ["启用演练中的人在回路干预", "Enable rollout HIL intervention"],
+  "setup.waitingFeedback": ["等待关节反馈", "waiting for joint feedback"],
+  "setup.publishingReset": ["正在发布复位轨迹", "publishing reset trajectory"],
+  "setup.movingTrajectory": ["正在移动到轨迹起点", "moving to trajectory start"],
+  "setup.rewindingEpisode": ["正在回退回合", "rewinding episode"],
+  "setup.resettingHome": ["正在回到零点", "resetting to home position"],
+  "setup.validatingPolicy": ["正在验证策略（推理）", "validating policy (inference)"],
+  "setup.movingInit": ["正在移动到初始姿态", "moving to init pose"],
+  "setup.warmingUp": ["预热中 {progress}", "warming up {progress}"],
   "device.devices": ["设备", "DEVICES"],
   "device.kind.robot": ["机器人", "Robot"],
-  "device.kind.teleop": ["遥操作", "Operation"],
+  "device.kind.teleop": ["遥操作", "Teleop"],
   "device.kind.camera": ["相机", "Camera"],
   "device.real": ["真实", "Real"],
   "device.fake": ["仿真", "Fake"],
@@ -207,6 +283,8 @@ const GLOSSARY = {
   "device.button.cancel": ["取消", "Cancel"],
   "device.button.starting": ["启动中…", "Starting..."],
   "device.button.start": ["启动", "Start"],
+  "device.none": ["无", "None"],
+  "device.robotCameraStream": ["机器人相机流", "Robot camera stream"],
   "manual.connectReal": ["连接真实设备", "CONNECT REAL"],
   "manual.disconnect": ["断开连接", "DISCONNECT"],
   "manual.cancel": ["取消", "CANCEL"],
@@ -219,6 +297,8 @@ const GLOSSARY = {
   "manual.targetCurrentQpos": ["目标 / 当前 QPOS", "TARGET / CURRENT QPOS"],
   "manual.targetCurrent": ["目标 / 当前", "target / current"],
   "manual.enableTeleop": ["启用遥操作运动", "Enable teleop motion"],
+  "scene.unavailable": ["三维不可用", "3D UNAVAILABLE"],
+  "scene.urdfMissing": ["服务器上未找到 URDF", "URDF not found on server"],
   "replay.episode": ["回合", "EPISODE"],
   "replay.joint": ["关节", "joint"],
   "replay.eef": ["末端", "eef"],
@@ -248,6 +328,11 @@ const GLOSSARY = {
   "rl.stopIntervene": ["停止 / 干预", "STOP / INTERVENE"],
   "rl.accept": ["接受", "ACCEPT"],
   "rl.abandon": ["放弃", "ABANDON"],
+  "rl.interventionContinue": ["请继续或放弃干预", "continue or abandon intervention"],
+  "rl.interventionActive": ["当前", "active"],
+  "rl.interventionAccepted": ["已接受", "accepted"],
+  "rl.readyAfter": ["停止后就绪：", "ready after"],
+  "rl.savingDisabled": ["回放保存已禁用", "rollout saving is disabled"],
   "rl.savedData": ["已保存数据", "SAVED DATA"],
   "rl.saveRollout": ["保存回放", "SAVE ROLLOUT"],
   "rl.replay": ["回放 ▶", "REPLAY ▶"],
@@ -336,15 +421,12 @@ const GLOSSARY = {
 
 const locale = globalThis.document?.documentElement?.dataset?.evaLanguage === "zh" ? "zh" : "en";
 const index = new Map();
-const phrases = [];
 const templates = [];
 for (const [key, values] of Object.entries(GLOSSARY)) {
-  index.set(values[0], key);
-  index.set(values[1], key);
+  index.set(values[0].toLocaleLowerCase(), key);
+  index.set(values[1].toLocaleLowerCase(), key);
   if (values[1].includes("{")) templates.push(values);
-  else phrases.push(values);
 }
-phrases.sort((left, right) => right[1].length - left[1].length);
 
 export function t(key, variables = {}) {
   const values = GLOSSARY[key];
@@ -356,9 +438,9 @@ export function t(key, variables = {}) {
   return text;
 }
 
-function translateText(value) {
+export function translateText(value) {
   const trimmed = value.trim();
-  const key = index.get(trimmed);
+  const key = index.get(trimmed.toLocaleLowerCase());
   if (key) {
     const translated = t(key);
     return value === trimmed ? translated : value.replace(trimmed, translated);
@@ -375,12 +457,6 @@ function translateText(value) {
       names.forEach((name, index) => { output = output.replace(`{${name}}`, matches[index + 1]); });
       return output;
     });
-  }
-  for (const values of phrases) {
-    const source = locale === "zh" ? values[1] : values[0];
-    const target = locale === "zh" ? values[0] : values[1];
-    if (!source || source === target || !translated.toLocaleLowerCase().includes(source.toLocaleLowerCase())) continue;
-    translated = translated.replace(new RegExp(source.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"), target);
   }
   return translated;
 }

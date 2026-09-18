@@ -354,6 +354,24 @@ function renderSetupCtl() {
 
 const TELEOP_CLIENT_LABELS = { vr_webxr: "VR" };
 
+const SETUP_STAGE_KEYS = {
+  "waiting for joint feedback": "setup.waitingFeedback",
+  "publishing reset trajectory": "setup.publishingReset",
+  "moving to trajectory start": "setup.movingTrajectory",
+  "rewinding episode": "setup.rewindingEpisode",
+  "resetting to home position": "setup.resettingHome",
+  "validating policy (inference)": "setup.validatingPolicy",
+  "moving to init pose": "setup.movingInit",
+};
+
+function localizeSetupStage(stage) {
+  const value = String(stage || "");
+  const warmup = value.match(/^warming up (.+)$/i);
+  if (warmup) return t("setup.warmingUp", {progress: warmup[1]});
+  const key = SETUP_STAGE_KEYS[value.toLowerCase()];
+  return key ? t(key) : value.toUpperCase();
+}
+
 function collectInputSourceSuffix(status) {
     const teleopCfg = S.CFG && S.CFG.collection && S.CFG.collection.teleop;
     if (!teleopCfg || teleopCfg.control_source !== "client" || !teleopCfg.client_type) return "";
@@ -398,11 +416,13 @@ function autoSetup(ready, done, errored) {
       return;
     }
     if (!ready) { S._setupFired = false; if (msg) msg.textContent = t("guide.awaitingConfig"); return; }
-    if (stage) { if (msg) msg.textContent = `AUTO · ${stage.toUpperCase()}`; return; }
+    if (stage) { if (msg) msg.textContent = t("guide.autoStage", {stage: localizeSetupStage(stage)}); return; }
     if (!S._setupFired) { S._setupFired = true; apiPost("/api/setup"); }
     // Show the live setup sub-stage (connecting / resetting / warming up…) so the
     // user can see what setup is doing instead of an opaque spinner.
-    if (msg) msg.textContent = stage ? ("AUTO · " + stage.toUpperCase()) : t("guide.preparing");
+    if (msg) msg.textContent = stage
+      ? t("guide.autoStage", {stage: localizeSetupStage(stage)})
+      : t("guide.preparing");
   }
 
 function updateGuide() {
@@ -558,11 +578,10 @@ function updateGuide() {
     autoSetup(hasPrompt && hasRealMode && hasStrategy, setupDone, setupErrored);
 
     // top guide bar message for the current step
-    const pick = isReplay ? "an <b>EPISODE</b>" : "a <b>TASK</b>";
     const setupStage = s.setup_stage ? String(s.setup_stage) : "";
-    let step = 1, msg = `Step 1 — select ${pick}`, hint = t("guide.follow");
+    let step = 1, msg = isReplay ? t("guide.selectEpisodeStep") : t("guide.selectTaskStep"), hint = t("guide.follow");
     let done = false;
-    if (!hasPrompt) { step = 1; msg = `Step 1 — select ${pick} on the left`; }
+    if (!hasPrompt) { step = 1; msg = isReplay ? t("guide.selectEpisodeStep") : t("guide.selectTaskStep"); }
     else if (!hasMode) { step = 2; msg = t("guide.selectMode"); }
     else if (!hasStrategy) { step = 2; msg = t("guide.selectStrategy"); }
     else if (setupErrored) { step = 3; msg = t("guide.setupFailedStep"); hint = t("guide.setupFailedHint"); }
@@ -571,7 +590,7 @@ function updateGuide() {
       // straight in the banner so the operator sees what setup is doing, not an opaque spinner.
       step = 3;
       msg = setupStage
-        ? t("guide.setupStage", {stage: setupStage})
+        ? t("guide.setupStage", {stage: localizeSetupStage(setupStage)})
         : t("guide.preparingStep");
       hint = t("guide.autoSetupHint");
     }
@@ -795,7 +814,7 @@ function renderCollectTaskButtons() {
     const placeholder = document.createElement("option");
     placeholder.value = "";
     placeholder.disabled = true;
-    placeholder.textContent = "SELECT SET";
+    placeholder.textContent = t("collect.selectSet");
     setHost.appendChild(placeholder);
     collectTaskSets().forEach((set) => {
       const option = document.createElement("option");

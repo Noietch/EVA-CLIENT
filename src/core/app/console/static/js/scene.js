@@ -3,6 +3,7 @@
 // (not ES-imported); each exposes itself on window for the rest of the app.
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { t } from "./i18n.js";
 
 // Self-rendered URDF canvas — mirrors viser's "geometry once + transform stream":
 // load each geometry payload once into a mesh per arm, then each frame apply the
@@ -120,8 +121,8 @@ const Scene3D = (() => {
   async function load() {
     const meta = await (await fetch("/api/meshes")).json();
     if (!meta.available) {
-      document.getElementById("canvas-empty").querySelector(".big").textContent = "3D UNAVAILABLE";
-      document.getElementById("canvas-empty").querySelector("div:last-child").textContent = "URDF not found on server";
+      document.getElementById("canvas-empty").querySelector(".big").textContent = t("scene.unavailable");
+      document.getElementById("canvas-empty").querySelector("div:last-child").textContent = t("scene.urdfMissing");
       return;
     }
     armNames = (meta.arms && meta.arms.length) ? meta.arms : ["arm"];
@@ -208,7 +209,7 @@ const Scene3D = (() => {
     console.error("3D scene unavailable", error);
     const empty = document.getElementById("canvas-empty");
     empty.style.display = "flex";
-    empty.querySelector(".big").textContent = "3D UNAVAILABLE";
+    empty.querySelector(".big").textContent = t("scene.unavailable");
     const message = error && error.message ? error.message : String(error || "unknown error");
     empty.querySelector("div:last-child").textContent = message;
   }

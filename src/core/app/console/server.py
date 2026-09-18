@@ -2457,9 +2457,10 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
 
     def _dashboard_roots(self, config: ConfigDict | None = None) -> tuple[Path, ...]:
         active_config = config or self.ctx.runtime.active_config or self.ctx.config
-        work_root = Path(_resolve_dataset_dir(str(active_config.get("work_dir") or "work_dirs")))
-        roots = [work_root]
         dashboard = active_config.get("dashboard") or {}
+        raw_roots_only = bool(dashboard.get("raw_roots_only", False))
+        work_root = Path(_resolve_dataset_dir(str(active_config.get("work_dir") or "work_dirs")))
+        roots = [] if raw_roots_only else [work_root]
         raw_roots = dashboard.get("raw_roots") or []
         if isinstance(raw_roots, (str, Path)):
             raw_roots = [raw_roots]
@@ -2470,7 +2471,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             resolved = Path(_resolve_dataset_dir(value))
             if resolved not in roots:
                 roots.append(resolved)
-        if self.ctx.output_dir:
+        if self.ctx.output_dir and not raw_roots_only:
             roots.append(Path(self.ctx.output_dir))
         return tuple(roots)
 

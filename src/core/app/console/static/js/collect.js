@@ -145,7 +145,8 @@ function applyCollectionSlotsPayload(payload) {
 
 function setCollectError(message = "") {
   const node = $("collect-err");
-  if (node) node.textContent = message;
+  if (node) node.textContent = message === "collection recording is unavailable"
+    ? t("collect.recordingUnavailable") : message;
 }
 
 async function activateCollectionSlot(slot, { manual = false } = {}) {
@@ -871,7 +872,11 @@ function buildControlGroups(groups) {
     row.dataset.group = String(group.id || "");
     const name = document.createElement("span");
     name.className = "collect-state-name";
-    name.textContent = String(group.label || group.id || "ARM").toUpperCase();
+    const id = String(group.id || "").trim().toLowerCase();
+    const label = String(group.label || group.id || "ARM").trim();
+    const key = id === "left_arm" || id === "left" ? "teleop.arm.left.label"
+      : id === "right_arm" || id === "right" ? "teleop.arm.right.label" : "";
+    name.textContent = key ? t(key) : label.toUpperCase();
     const value = document.createElement("span");
     value.className = "collect-state-value";
     value.textContent = "UNAVAILABLE";
@@ -906,7 +911,12 @@ function renderCollectControls() {
     else if (armEnabled && engaged.has(group.id)) state = "active";
     else if (armEnabled && authorized.has(group.id)) state = "ready";
     const value = row.querySelector(".collect-state-value");
-    if (value) value.textContent = state.toUpperCase();
+    if (value) value.textContent = t({
+      unavailable: "collect.controlUnavailable",
+      disabled: "collect.controlDisabled",
+      active: "collect.controlActive",
+      ready: "collect.controlReady",
+    }[state] || "collect.controlDisabled");
     row.dataset.state = state;
     const armBinding = controlBinding(group.binding) || {};
     updateControlHint(row.querySelector(".control-hint"), {
@@ -1408,7 +1418,7 @@ function renderCollectionSlotFilters() {
     const sceneKey = JSON.stringify(sceneIds);
     const taskKey = JSON.stringify(taskIds);
     if (scene.dataset.options !== sceneKey) {
-      scene.innerHTML = '<option value="">ALL SCENES</option>';
+      scene.replaceChildren(new Option(t("collect.allScenes"), ""));
       sceneIds.forEach((id) => {
         const option = document.createElement("option");
         option.value = id;
@@ -1418,7 +1428,7 @@ function renderCollectionSlotFilters() {
       scene.dataset.options = sceneKey;
     }
     if (task.dataset.options !== taskKey) {
-      task.innerHTML = '<option value="">ALL TASKS</option>';
+      task.replaceChildren(new Option(t("collect.allTasks"), ""));
       taskIds.forEach((id) => {
         const option = document.createElement("option");
         option.value = id;
@@ -1441,7 +1451,7 @@ function renderCollectTiles(items) {
     if (!items.length) {
       const empty = document.createElement("span");
       empty.className = "collect-empty";
-      empty.textContent = S.collectionSlots.viewerActive ? "NO MATCHING SLOTS" : "FILTER OFF";
+      empty.textContent = S.collectionSlots.viewerActive ? t("collect.noMatchingSlots") : t("collect.filterOff");
       host.appendChild(empty);
       return;
     }
@@ -1450,11 +1460,11 @@ function renderCollectTiles(items) {
       tile.type = "button";
       tile.dataset.slotId = slot.slot_id;
       tile.title = `${slot.scene_id} · ${slot.task} · ` +
-        `round ${Number(slot.round_index) + 1}/${slot.round_total}`;
+        `${t("collect.round")} ${Number(slot.round_index) + 1}/${slot.round_total}`;
       const episode = savedEpisodeId(slot.episode);
-      tile.title = `SLOT ${Number(slot.ordinal) + 1} · ${tile.title}`;
+      tile.title = `${t("collect.slot")} ${Number(slot.ordinal) + 1} · ${tile.title}`;
       if (episode != null) {
-        tile.title += ` · EPISODE ${episode} · ${collectResultLabel(slot.episode)}`;
+        tile.title += ` · ${t("collect.episodeLabel")} ${episode} · ${collectResultLabel(slot.episode)}`;
       }
       const saving = slot.state === "saving";
       tile.textContent = String(Number(slot.ordinal) + 1);
@@ -1517,7 +1527,7 @@ function renderRolloutSaveTiles(items) {
     if (!items.length) {
       const empty = document.createElement("span");
       empty.className = "collect-empty";
-      empty.textContent = "no saved rollouts";
+      empty.textContent = t("collect.noSavedRollouts");
       host.appendChild(empty);
       return;
     }
@@ -1539,7 +1549,8 @@ function renderRolloutSaveList(items) {
     const host = $("rollout-save-queue-list");
     if (!host) return;
     host.style.display = S.rolloutSaveQueueExpanded ? "block" : "none";
-    $("rollout-save-queue-toggle").textContent = S.rolloutSaveQueueExpanded ? "COLLAPSE" : "EXPAND";
+    $("rollout-save-queue-toggle").textContent = S.rolloutSaveQueueExpanded
+      ? t("collect.collapse") : t("collect.expand");
     host.innerHTML = "";
     if (!items.length) return;
     items.slice().reverse().forEach((item) => {
@@ -1582,7 +1593,8 @@ function renderRolloutSave() {
 
     pipeBadge($("rollout-save-pipeline"), enabled ? (rollout.pipeline_state || "IDLE") : "DISABLED");
     $("rollout-save-dir").style.display = savedComplete ? "block" : "none";
-    $("rollout-save-dir").textContent = savedComplete ? `saved to ${rollout.dataset_dir || "—"}` : "";
+    $("rollout-save-dir").textContent = savedComplete
+      ? `${t("word.saved")}：${rollout.dataset_dir || "—"}` : "";
     $("rollout-save-count").textContent = `${episodes.length}/${totalItems}`;
     $("rollout-save-progress-fill").style.width = `${progress * 100}%`;
     $("rollout-save-eta").textContent = fmtEta(rollout.eta_sec);
@@ -1592,7 +1604,7 @@ function renderRolloutSave() {
       ? (saveBlocked
           ? `continue or abandon intervention · active ${activeInterventionFrames}f · accepted ${acceptedInterventions}`
           : (saveReady ? `ready after ${rollout.reason || "stop"}` : ""))
-      : "rollout saving is disabled";
+      : t("rl.savingDisabled");
     const hasFrames = Number(rollout.current_episode_frames || 0) > 0;
     $("b-rollout-save").disabled = !enabled || (!saveReady && !running) || !hasFrames || saveBlocked;
     $("b-rollout-qc-pass").disabled = !enabled || S.rolloutSaveEpisode == null;
@@ -1612,7 +1624,7 @@ function renderRolloutSave() {
     }
 
     if (S.rolloutSaveEpisode == null) {
-      $("rollout-review-title").textContent = "no rollout selected";
+      $("rollout-review-title").textContent = t("collect.noRolloutSelected");
     }
   }
 
@@ -1849,7 +1861,8 @@ function renderCollect() {
     $("collect-pending-count").textContent = threeDigitCount(pendingCount);
     $("collect-requirement-count").textContent = `${usableCount} / ${totalSlots || "--"}`;
     $("collect-requirement-status").textContent = requirementComplete
-      ? "COMPLETE" : `${Math.max(0, totalSlots - usableCount)} REMAINING`;
+      ? t("collect.requirementComplete")
+      : t("collect.remaining", {count: Math.max(0, totalSlots - usableCount)});
     $("collect-requirement").classList.toggle("complete", requirementComplete);
     $("collect-requirement").classList.toggle("unset", totalSlots === 0);
     $("collect-progress-label").textContent = `${Math.round(progress * 100)}%`;
@@ -1864,7 +1877,10 @@ function renderCollect() {
     $("collect-current-task-en").textContent = displaySlot && displaySlot.task_zh
       ? (scenePlanTask()?.prompt_en || displaySlot.task || "") : "";
     $("collect-current-round").textContent = displaySlot
-      ? `ROUND ${Number(displaySlot.round_index) + 1} / ${displaySlot.round_total}` : "ROUND -- / --";
+      ? t("collect.roundValue", {
+        round: Number(displaySlot.round_index) + 1,
+        total: displaySlot.round_total,
+      }) : "ROUND -- / --";
     renderCollectionSlotFilters();
     if ($("collect-vr-review-hint")) {
       $("collect-vr-review-hint").hidden = collectControlsConfig().mode !== "vr";
@@ -1888,14 +1904,14 @@ function renderCollect() {
       }
     }
     const armLabel = $("collect-arm-label");
-    if (armLabel) armLabel.textContent = S.collectArmEnabled ? "ENABLED" : "LOCKED";
+    if (armLabel) armLabel.textContent = S.collectArmEnabled ? t("state.enabled") : t("state.locked");
 
     const toggle = $("b-collect-toggle");
     toggle.disabled = toggleBusy || S.collectTaskSelectionPending ||
       (collecting ? false : (!enabled || !hasPrompt || queueFull || !S.collectArmEnabled));
     toggle.classList.toggle("recording", collecting);
     toggle.classList.toggle("primary", !collecting);
-    toggle.querySelector(".rec-label").textContent = collecting ? "END / SAVE" : "START RECORD";
+    toggle.querySelector(".rec-label").textContent = collecting ? t("collect.endSave") : t("collect.startRecord");
     $("b-collect-cancel").disabled = !collecting;
     const home = $("b-collect-home");
     if (home) {
