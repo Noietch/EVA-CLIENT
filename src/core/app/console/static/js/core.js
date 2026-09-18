@@ -92,7 +92,7 @@ export const S = {
     loaded: false, dataset: "", datasetDir: "", active: null, counts: {},
     scenes: [], tasks: [], slots: [], page: 1, pageCount: 1, filteredTotal: 0,
     sceneFilter: "", taskFilter: "", showAll: true, selectedSlotId: "",
-    followActivePage: true, lastAttemptAt: 0,
+    cursorPinned: false, followActivePage: true, lastAttemptAt: 0,
   },
   collectArmEnabled: false,
   collectToggleBusy: null,

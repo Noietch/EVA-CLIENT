@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urlencode
 
+import imageio.v2 as imageio
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -557,6 +558,78 @@ def test_review_transforms_are_addressed_by_episode_without_runtime_mount(tmp_pa
         assert chunk.headers["x-eva-transform-count"] == "1"
         assert chunk.headers["x-eva-transform-total"] == "2"
         assert scene.calls[-1].shape[0] == 1
+
+
+def test_a_retake_replaces_what_the_console_shows_for_its_slot(tmp_path, monkeypatch):
+    """A retake overwrites its slot's episode at the same index, path and URL.
+
+    The console must project the new take and stop trusting a cached copy of the
+    one it replaced, or the retake looks like it never saved.
+    """
+    repo_root = tmp_path / "repo"
+    dataset_dir = repo_root / "work_dirs" / "review"
+    data_dir = dataset_dir / "data" / "chunk-000"
+    meta_dir = dataset_dir / "meta"
+    data_dir.mkdir(parents=True)
+    meta_dir.mkdir(parents=True)
+    monkeypatch.setattr(handlers_utils, "_REPO_ROOT", repo_root)
+
+    with serve_console(console_config(robot_type="ur5e")) as h:
+        dim = h.runtime.robot.total_action_dim
+        camera = h.runtime.robot.observation_schema.cameras[0].observation_key
+
+        def write_take(frames: int) -> None:
+            (meta_dir / "info.json").write_text(
+                json.dumps(
+                    {
+                        "total_episodes": 1,
+                        "fps": 10,
+                        "features": {
+                            "observation.state": {"dtype": "float32", "shape": [dim]},
+                            "action": {"dtype": "float32", "shape": [dim]},
+                            camera: {"dtype": "video", "shape": [16, 16, 3]},
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (meta_dir / "episodes.jsonl").write_text(
+                json.dumps({"episode_index": 0, "length": frames, "tasks": ["review"]}) + "\n",
+                encoding="utf-8",
+            )
+            values = [np.full(dim, index, dtype=np.float32).tolist() for index in range(frames)]
+            pq.write_table(
+                pa.table(
+                    {
+                        "observation.state": values,
+                        "action": values,
+                        "timestamp": [index / 10 for index in range(frames)],
+                        "frame_index": list(range(frames)),
+                        "episode_index": [0] * frames,
+                        "index": list(range(frames)),
+                        "task_index": [0] * frames,
+                    }
+                ),
+                data_dir / "episode_000000.parquet",
+            )
+            video = dataset_dir / "videos" / "chunk-000" / camera / "episode_000000.mp4"
+            video.parent.mkdir(parents=True, exist_ok=True)
+            with imageio.get_writer(str(video), fps=10, codec="libx264", macro_block_size=1) as out:
+                for index in range(frames):
+                    out.append_data(np.full((16, 16, 3), index * 20, dtype=np.uint8))
+
+        write_take(2)
+        episode_body = {"dataset_dir": "work_dirs/review", "episode": 0}
+        first = h.post("/api/review_episode", episode_body)
+        assert first.status == 200
+        assert first.json["frames"] == 2
+        video_query = urlencode({"dataset_dir": "work_dirs/review", "episode": 0, "cam": camera})
+        assert h.get(f"/api/replay_video?{video_query}").headers["cache-control"] == "no-cache"
+
+        write_take(3)
+        second = h.post("/api/review_episode", episode_body)
+        assert second.status == 200
+        assert second.json["frames"] == 3
 
 
 def test_collect_start_api_requires_activation_and_preserves_scene_metadata():

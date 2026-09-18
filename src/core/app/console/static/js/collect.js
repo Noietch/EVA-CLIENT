@@ -138,9 +138,7 @@ function applyCollectionSlotsPayload(payload) {
   state.filteredTotal = Number(payload.filtered_total) || 0;
   state.viewerActive = !!payload.viewer_active;
   if (state.active) adoptCollectionSlot(state.active);
-  if (!state.slots.some((slot) => slot.slot_id === state.selectedSlotId)) {
-    state.selectedSlotId = "";
-  }
+  syncCollectionSlotCursor();
 }
 
 function setCollectError(message = "") {
@@ -154,7 +152,6 @@ async function activateCollectionSlot(slot, { manual = false } = {}) {
   const state = S.collectionSlots;
   if (manual) state.followActivePage = false;
   const previousActive = state.active;
-  const previousSelectedSlotId = state.selectedSlotId;
   const previousStatus = {
     task: S.STATUS.selected_collect_task,
     dataset: S.STATUS.selected_collect_set,
@@ -165,7 +162,7 @@ async function activateCollectionSlot(slot, { manual = false } = {}) {
   setCollectError();
   S.collectTaskSelectionPending = true;
   if (slot.task) state.active = { ...slot, state: "active" };
-  if (manual) state.selectedSlotId = slot.slot_id;
+  if (manual) pinCollectionSlotCursor(slot.slot_id);
   adoptCollectionSlot(state.active);
   renderCollect();
   try {
@@ -178,16 +175,14 @@ async function activateCollectionSlot(slot, { manual = false } = {}) {
       setCollectError(response.error || "Unable to select this slot");
       return false;
     }
-    const taskApplied = applyCollectTaskSelection(
+    // The console owns slot validity; the local task picker may lag a task-set
+    // edit, and that lag must not undo a switch the console already accepted.
+    applyCollectTaskSelection(
       response.active.task,
       response.active.dataset,
       Number(response.active.task_index),
       response.active.scene_id
     );
-    if (!taskApplied) {
-      setCollectError("The selected slot is not present in this dataset");
-      return false;
-    }
     state.active = response.active;
     state.counts = response.counts || state.counts;
     S.STATUS.collection_slot_id = response.active.slot_id;
@@ -200,7 +195,6 @@ async function activateCollectionSlot(slot, { manual = false } = {}) {
   } finally {
     if (S.STATUS.collection_slot_id !== slot.slot_id) {
       state.active = previousActive;
-      state.selectedSlotId = previousSelectedSlotId;
       S.STATUS.selected_collect_task = previousStatus.task;
       S.STATUS.selected_collect_set = previousStatus.dataset;
       S.STATUS.selected_collect_task_index = previousStatus.taskIndex;
@@ -208,8 +202,17 @@ async function activateCollectionSlot(slot, { manual = false } = {}) {
       S.STATUS.collection_task_id = previousStatus.taskId;
       if (previousActive) adoptCollectionSlot(previousActive);
     }
+    // Either way the cursor lands on the slot that is really armed, so the grid
+    // never frames a tile the next recording would not use.
     S.collectTaskSelectionPending = false;
-    renderCollect();
+    const queued = queuedCollectionSlotSwitch;
+    queuedCollectionSlotSwitch = null;
+    if (queued && queued.slot_id !== S.STATUS.collection_slot_id) {
+      switchCollectionSlotCursor(queued);
+    } else {
+      syncCollectionSlotCursor();
+      renderCollect();
+    }
   }
 }
 
@@ -267,7 +270,7 @@ async function selectCollectionDataset(dataset) {
   state.sceneFilter = "";
   state.taskFilter = "";
   state.showAll = true;
-  state.selectedSlotId = "";
+  clearCollectionSlotCursor();
   state.followActivePage = true;
   const select = $("collect-set-list");
   if (select) select.value = value;
@@ -281,7 +284,7 @@ function changeCollectionSlotFilter(kind, value) {
   if (kind === "task") state.taskFilter = String(value || "");
   state.showAll = !state.sceneFilter && !state.taskFilter;
   state.page = 1;
-  state.selectedSlotId = "";
+  clearCollectionSlotCursor();
   state.followActivePage = false;
   pollCollectionSlots(true);
   renderCollect();
@@ -292,7 +295,7 @@ function toggleCollectionSlotAll() {
   state.showAll = !state.showAll;
   state.sceneFilter = "";
   state.taskFilter = "";
-  state.selectedSlotId = "";
+  clearCollectionSlotCursor();
   state.followActivePage = false;
   state.page = state.showAll && state.active
     ? Math.floor(Number(state.active.ordinal) / 50) + 1 : 1;
@@ -305,7 +308,7 @@ function changeCollectionSlotPage(delta) {
   const page = Math.max(1, Math.min(state.pageCount, Number(state.page) + delta));
   if (page === state.page) return;
   state.page = page;
-  state.selectedSlotId = "";
+  clearCollectionSlotCursor();
   state.followActivePage = false;
   pollCollectionSlots(true);
   renderCollect();
@@ -1045,14 +1048,20 @@ async function startCollectFromTab() {
     const task = collectTaskValue();
     const collectionSet = collectSetValue();
     const taskIndex = collectTaskIndexValue();
-    const slot = S.collectionSlots && S.collectionSlots.active;
+    // A fully collected dataset has no next unresolved slot, so the retake target is
+    // whatever the operator selected, down to the grid's first tile; recording into
+    // anything else would leave the reviewed slot's old take in place.
+    const state = S.collectionSlots || {};
+    const slots = state.slots || [];
+    const slot = state.active || slots.find((row) => row.slot_id === state.selectedSlotId)
+      || slots[0];
     if (!task || !slot || S.collectTaskSelectionPending) {
       S.collectToggleBusy = null;
       renderCollect();
       return;
     }
     const confirmed = S.STATUS.collection_slot_id === slot.slot_id ||
-      await activateCollectionSlot(slot);
+      await activateCollectionSlot(slot, { manual: state.active !== slot });
     if (!confirmed) {
       S.collectToggleBusy = null;
       renderCollect();
@@ -1230,11 +1239,52 @@ function cancelCollectionReviewClick() {
   collectionReviewClick = null;
 }
 
+// One cursor drives the slot grid: the stick or the mouse pins it where the
+// operator put it, and the console records into that slot as soon as it moves.
+let queuedCollectionSlotSwitch = null;
+
+function pinCollectionSlotCursor(slotId) {
+  S.collectionSlots.selectedSlotId = String(slotId || "");
+  S.collectionSlots.cursorPinned = true;
+}
+
+function clearCollectionSlotCursor() {
+  S.collectionSlots.selectedSlotId = "";
+  S.collectionSlots.cursorPinned = false;
+}
+
+function syncCollectionSlotCursor() {
+  const state = S.collectionSlots;
+  const onPage = (slotId) => !!slotId &&
+    (state.slots || []).some((slot) => slot.slot_id === slotId);
+  if (state.cursorPinned && onPage(state.selectedSlotId)) return;
+  const activeId = String((state.active && state.active.slot_id) || "");
+  state.selectedSlotId = onPage(activeId) ? activeId : "";
+  state.cursorPinned = false;
+}
+
+// The cursor is the capture slot: a move switches the console over at once, and
+// a sweep only has to deliver the step it ends on.
+function switchCollectionSlotCursor(slot) {
+  pinCollectionSlotCursor(slot.slot_id);
+  selectCollectionQcTarget(slot.episode);
+  renderCollect();
+  const host = $("collect-queue-tiles");
+  Array.from(host?.querySelectorAll("[data-slot-id]") || [])
+    .find((tile) => tile.dataset.slotId === slot.slot_id)
+    ?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  if (S.collectTaskSelectionPending) {
+    queuedCollectionSlotSwitch = slot;
+    return;
+  }
+  activateCollectionSlot(slot, { manual: true });
+}
+
 function previewCollectionSlot(slot) {
   if (!slot || savedEpisodeId(slot.episode) == null || slot.state === "saving" ||
-      slot.dataset !== S.collectionSlots.dataset || S.collectTaskSelectionPending ||
+      slot.dataset !== S.collectionSlots.dataset ||
       S.STATUS.collect?.collecting) return;
-  S.collectionSlots.selectedSlotId = slot.slot_id;
+  pinCollectionSlotCursor(slot.slot_id);
   S.collectionSlots.followActivePage = false;
   selectCollectEpisode(slot.episode);
 }
@@ -1257,17 +1307,9 @@ function clickCollectionReviewSlot(slot) {
       const current = (state.slots || []).find((item) => item.slot_id === slot.slot_id);
       if (S.ACTIVE_TAB !== "collect" || state.dataset !== slot.dataset ||
           state.selectedSlotId !== slot.slot_id || !current || current.state === "saving" ||
-          S.STATUS.collect?.collecting || S.collectTaskSelectionPending || collectionReviewBusy) return;
-      collectionReviewBusy = true;
-      selectCollectionQcTarget(current.episode);
-      activateCollectionSlot(current, { manual: true }).then((selected) => {
-        if (selected && state.dataset === slot.dataset) {
-          state.selectedSlotId = slot.slot_id;
-          renderCollect();
-        }
-      }).catch((error) => {
-        setCollectError(`Failed to select capture slot: ${error.message || error}`);
-      }).finally(() => { collectionReviewBusy = false; });
+          S.STATUS.collect?.collecting || collectionReviewBusy) return;
+      // The cursor already armed this slot; a press only re-asserts it.
+      switchCollectionSlotCursor(current);
     }, 300),
   };
 }
@@ -1298,7 +1340,11 @@ function handleCollectionReviewInput(feedback) {
       returnReviewToLive();
       continue;
     }
-    if (collectionReviewBusy || S.collectTaskSelectionPending || collectionSlotClickTimer !== null) continue;
+    // A move is local and coalesced, and a press only re-asserts the slot the
+    // cursor armed, so neither waits for a switch; a verdict acts on data and
+    // needs the page to settle first.
+    if (collectionReviewBusy || collectionSlotClickTimer !== null) continue;
+    if (!direction && event.action !== "select" && S.collectTaskSelectionPending) continue;
     if (event.action === "select") {
       const state = S.collectionSlots;
       const slot = (state.slots || []).find((item) => item.slot_id === state.selectedSlotId);
@@ -1319,6 +1365,8 @@ function handleCollectionReviewInput(feedback) {
         if ($("collect-qc-status")) $("collect-qc-status").textContent = "Select a saved episode first";
         continue;
       }
+      // A verdict must not move the tile the operator is judging.
+      pinCollectionSlotCursor(S.collectionSlots.selectedSlotId);
       collectionReviewBusy = true;
       const verdict = event.action === "mark_red"
         ? "fail"
@@ -1338,6 +1386,10 @@ function handleCollectionReviewInput(feedback) {
 
 function moveCollectionReviewCursor(direction) {
   if (!["left", "right", "up", "down"].includes(direction)) return;
+  // The visible tiles are the page being loaded; stepping on stale ones jumps.
+  if (collectionSlotsPolling) return;
+  // A move selects, and the console locks the target while it records.
+  if (S.STATUS.collect && S.STATUS.collect.collecting) return;
   const host = $("collect-queue-tiles");
   const tiles = Array.from(host?.querySelectorAll("[data-slot-id]") || []);
   if (!tiles.length) return;
@@ -1353,7 +1405,6 @@ function moveCollectionReviewCursor(direction) {
     if (nextIndex >= 0 && nextIndex < tiles.length) {
       target = tiles[nextIndex];
     } else {
-      if (collectionSlotsPolling) return;
       const delta = offset < 0 ? -1 : 1;
       const page = Math.max(1, Math.min(state.pageCount, Number(state.page) + delta));
       if (page === state.page) return;
@@ -1361,7 +1412,7 @@ function moveCollectionReviewCursor(direction) {
       const column = index % columns;
       collectionReviewBusy = true;
       state.page = page;
-      state.selectedSlotId = "";
+      clearCollectionSlotCursor();
       state.followActivePage = false;
       selectCollectionQcTarget(null);
       pollCollectionSlots(true).then(() => {
@@ -1372,14 +1423,8 @@ function moveCollectionReviewCursor(direction) {
           : direction === "down" ? column
           : delta > 0 ? 0 : slots.length - 1;
         const slot = slots[Math.min(slots.length - 1, destination)];
-        if (slot) {
-          state.selectedSlotId = slot.slot_id;
-          selectCollectionQcTarget(slot.episode);
-        }
-        renderCollect();
-        Array.from(host.querySelectorAll("[data-slot-id]"))
-          .find((tile) => tile.dataset.slotId === state.selectedSlotId)
-          ?.scrollIntoView({ block: "nearest", inline: "nearest" });
+        if (slot) switchCollectionSlotCursor(slot);
+        else renderCollect();
       }).catch((error) => {
         setCollectError(`Failed to change page: ${error.message || error}`);
       }).finally(() => { collectionReviewBusy = false; });
@@ -1388,13 +1433,8 @@ function moveCollectionReviewCursor(direction) {
   }
   const slot = (state.slots || []).find((item) => item.slot_id === target.dataset.slotId);
   if (!slot) return;
-  state.selectedSlotId = slot.slot_id;
   state.followActivePage = false;
-  selectCollectionQcTarget(slot.episode);
-  renderCollect();
-  const selected = Array.from(host.querySelectorAll("[data-slot-id]"))
-    .find((tile) => tile.dataset.slotId === slot.slot_id);
-  selected?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  switchCollectionSlotCursor(slot);
 }
 
 function renderCollectionSlotFilters() {
@@ -1467,10 +1507,10 @@ function renderCollectTiles(items) {
       tile.setAttribute("aria-label", tile.title);
       tile.setAttribute("aria-busy", String(saving));
       tile.className = `collect-tile slot-${visibleState}` +
-        `${saving ? " slot-saving" : ""}` +
-        `${current ? " slot-current" : ""}`;
+        `${saving ? " slot-saving" : ""}`;
+      // One cursor: the armed slot is framed only while it is where the operator is.
       if (slot.slot_id === S.collectionSlots.selectedSlotId) tile.classList.add("selected");
-      const locked = slot.state === "saving" || S.collectTaskSelectionPending ||
+      const locked = slot.state === "saving" ||
         !!(S.STATUS.collect && S.STATUS.collect.collecting);
       tile.disabled = locked || (current && !saved);
       tile.classList.toggle("actionable", !tile.disabled);
@@ -1478,13 +1518,17 @@ function renderCollectTiles(items) {
         cancelCollectionReviewClick();
         clearTimeout(collectionSlotClickTimer);
         if (event.detail > 1) return;
-        // Delay selection so a double click can preview without changing the capture target.
+        // The cursor lands at once; only the switch waits out the double click,
+        // and it stays cancelled when the stick has moved on since.
+        pinCollectionSlotCursor(slot.slot_id);
+        selectCollectionQcTarget(slot.episode);
+        renderCollect();
         collectionSlotClickTimer = setTimeout(() => {
           collectionSlotClickTimer = null;
           if (slot.dataset !== S.collectionSlots.dataset ||
+              S.collectionSlots.selectedSlotId !== slot.slot_id ||
               S.collectTaskSelectionPending || (S.STATUS.collect && S.STATUS.collect.collecting)) return;
-          selectCollectionQcTarget(slot.episode);
-          activateCollectionSlot(slot, { manual: true });
+          switchCollectionSlotCursor(slot);
         }, 300);
       };
       tile.ondblclick = (event) => {
@@ -1820,13 +1864,15 @@ function renderCollect() {
     }
     const toggleBusy = S.collectToggleBusy !== null;
     const activeSlot = slotPlan.active;
-    const selectedSlot = (slotPlan.slots || []).find(
-      (slot) => slot.slot_id === slotPlan.selectedSlotId && savedEpisodeId(slot.episode) != null
+    const cursorSlot = (slotPlan.slots || []).find(
+      (slot) => slot.slot_id === slotPlan.selectedSlotId
     );
-    const displaySlot = selectedSlot || activeSlot;
+    // The cursor is the selection: panels and readouts describe the framed tile,
+    // and the first slot stands in until the operator picks one.
+    const displaySlot = cursorSlot || activeSlot || (slotPlan.slots || [])[0];
     const prompt = activeSlot ? activeSlot.task : collectTaskValue();
     const collectionSet = slotPlan.dataset || collectSetValue();
-    const hasPrompt = !!activeSlot;
+    const hasPrompt = !!displaySlot;
     const queueFull = collect.pipeline_state === "QUEUE_FULL";
     const episodes = history.episodes;
     const queue = history.queue;
@@ -1856,8 +1902,8 @@ function renderCollect() {
     $("collect-progress-fill").style.width = `${progress * 100}%`;
     $("collect-eta").textContent = fmtEta(collect.eta_sec);
 
-    $("collect-current-position").textContent = activeSlot
-      ? `${Number(activeSlot.ordinal) + 1} / ${totalSlots}` : `${totalSlots} / ${totalSlots}`;
+    $("collect-current-position").textContent = displaySlot
+      ? `${Number(displaySlot.ordinal) + 1} / ${totalSlots}` : `${totalSlots} / ${totalSlots}`;
     renderCurrentSceneGrid(scenePlanScene());
     $("collect-current-task").textContent = displaySlot
       ? (displaySlot.task_zh || displaySlot.task || displaySlot.episode?.task || displaySlot.episode?.prompt || "--") : "--";
@@ -1880,7 +1926,8 @@ function renderCollect() {
     const armSwitch = $("collect-arm-enable");
     if (armSwitch) {
       armSwitch.checked = S.collectArmEnabled;
-      armSwitch.disabled = !enabled || (!hasPrompt && !S.collectArmEnabled);
+      // Arming never waits on a slot: the plan's first slot is the default target.
+      armSwitch.disabled = !enabled;
       const gate = armSwitch.closest(".collect-arm-gate");
       if (gate) {
         gate.classList.toggle("on", S.collectArmEnabled);
