@@ -494,7 +494,9 @@ class CollectionEpisodeWriter:
         dataset_dir = self._logger._collection_dataset_dir(
             task, self._logger._active_collection_dataset
         )
-        episode_index = self._logger._next_collection_episode_index(dataset_dir)
+        episode_index = self._logger._next_collection_episode_index(
+            dataset_dir, self._logger._episode_meta
+        )
         task_index, task_to_index = self._logger._resolve_collection_task(dataset_dir, task)
         package_done = time.perf_counter()
 

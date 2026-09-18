@@ -1689,6 +1689,9 @@ class EpisodeLogger:
             raise ValueError("collection save job missing columns or episode row")
         dataset_dir = job.dataset_dir or self._log_dir
         path = self._parquet_path(job.episode_index, dataset_dir)
+        # An existing parquet means this take replaced the slot's previous episode,
+        # whose verdict must not carry over to the new recording.
+        replaces_existing = path.exists()
         path.parent.mkdir(parents=True, exist_ok=True)
         pq.write_table(pa.table(columns), str(path))
         self._write_videos(job.episode_index, job.videos, job.video_fps, dataset_dir)
@@ -1697,9 +1700,11 @@ class EpisodeLogger:
             for video_key, frames in job.videos.items():
                 episode_stats[video_key] = _image_episode_stats(frames)
         with self._lock:
-            self._append_episode_dict_row_locked(row, dataset_dir)
-            self._append_episode_stats_locked(job.episode_index, episode_stats, dataset_dir)
+            self._upsert_episode_dict_row_locked(row, dataset_dir)
+            self._upsert_episode_stats_locked(job.episode_index, episode_stats, dataset_dir)
             self._write_tasks_jsonl_from(job.task_to_index, dataset_dir)
+        if replaces_existing:
+            LeRobotDatasetIO(dataset_dir).drop_qc(job.episode_index)
         if self._collection_writer is not None:
             self._collection_writer.finalize(dataset_dir)
 
@@ -2118,9 +2123,12 @@ class EpisodeLogger:
             for r in rows:
                 f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
-    def _upsert_episode_dict_row_locked(self, row: dict[str, Any]) -> None:
+    def _upsert_episode_dict_row_locked(
+        self, row: dict[str, Any], dataset_dir: Path | None = None
+    ) -> None:
+        """Write one episode row, replacing the row of the same episode index."""
         episode_index = int(row["episode_index"])
-        path = self._meta_path("episodes.jsonl")
+        path = self._meta_path("episodes.jsonl", dataset_dir)
         rows = _read_jsonl(path)
         replaced = False
         for index, existing in enumerate(rows):
@@ -2129,7 +2137,7 @@ class EpisodeLogger:
                 replaced = True
                 break
         if not replaced:
-            self._append_episode_dict_row_locked(row)
+            self._append_episode_dict_row_locked(row, dataset_dir)
             return
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("w") as f:
@@ -2154,6 +2162,24 @@ class EpisodeLogger:
                 json.dumps({"episode_index": episode_index, "stats": stats}, ensure_ascii=False)
                 + "\n"
             )
+
+    def _upsert_episode_stats_locked(
+        self, episode_index: int, stats: dict[str, Any], dataset_dir: Path | None = None
+    ) -> None:
+        """Write one episode's stats, replacing the stats of the same episode index."""
+        path = self._meta_path("episodes_stats.jsonl", dataset_dir)
+        rows = _read_jsonl(path)
+        row = {"episode_index": episode_index, "stats": stats}
+        for index, existing in enumerate(rows):
+            if int(existing.get("episode_index", -1)) == episode_index:
+                rows[index] = row
+                break
+        else:
+            rows.append(row)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w") as f:
+            for existing in rows:
+                f.write(json.dumps(existing, ensure_ascii=False) + "\n")
 
     def _write_tasks_jsonl_from(
         self, task_to_index: dict[str, int], dataset_dir: Path | None = None
@@ -2453,8 +2479,31 @@ class EpisodeLogger:
             self._task_to_index[task] = len(self._task_to_index)
         return self._task_to_index[task]
 
-    def _next_collection_episode_index(self, dataset_dir: Path) -> int:
+    def _existing_collection_episode_index(
+        self, dataset_dir: Path, episode_meta: dict[str, Any]
+    ) -> int | None:
+        """Episode index of the take already recorded for this slot, or None.
+
+        A re-take replaces its slot's previous recording in place, the way an eval
+        re-run replaces its trial, instead of appending a second take per slot.
+        """
+        slot_id = str(episode_meta.get("slot_id") or "")
+        if not slot_id:
+            return None
+        for row in _read_jsonl(self._meta_path("episodes.jsonl", dataset_dir)):
+            if str(row.get("slot_id") or "") == slot_id:
+                index = row.get("episode_index")
+                if index is not None:
+                    return int(index)
+        return None
+
+    def _next_collection_episode_index(
+        self, dataset_dir: Path, episode_meta: dict[str, Any] | None = None
+    ) -> int:
         with self._lock:
+            existing = self._existing_collection_episode_index(dataset_dir, episode_meta or {})
+            if existing is not None:
+                return existing
             if dataset_dir not in self._collection_next_index:
                 self._collection_next_index[dataset_dir] = self._discover_next_episode_index(
                     dataset_dir

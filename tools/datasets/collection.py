@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import re
 import sqlite3
 import threading
@@ -30,14 +31,19 @@ from tools.datasets.assets import ObjectCatalog
 from tools.datasets.store import ConflictError, RecordNotFoundError, TaskSetStore
 
 ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+logger = logging.getLogger(__name__)
 PLAN_CACHE_SECONDS = 60.0
 SERIES_CACHE_MAX = 8
 TRANSFORM_CACHE_MAX = 32
 UNMATCHED_CACHE_SECONDS = 300.0
 PLAN_PAYLOAD_KEYS = ("batch_id", "info", "layout", "dataset_dir", "collection")
-STATE_CACHE_VERSION = 7
+# Bump when the state payload shape changes so cached pages are ignored.
+STATE_CACHE_VERSION = 8
 # Bump when the derived-row shape changes so existing database caches are ignored.
 DATA_CACHE_VERSION = 3
+# Derived rows stay useful while their source token holds; stale tokens are dead weight.
+DATA_CACHE_TTL_SECONDS = 3 * 24 * 3600.0
+CACHE_EVICTION_SECONDS = 3600.0
 STATIC_FRAMES_REASON = "static_frames_excessive"
 CAMERA_OFFLINE_REASON = "camera_offline"
 SHORT_EPISODE_REASON = "trajectory_too_short"
@@ -93,31 +99,92 @@ class PlanCatalog:
             tuple[str, int, int, int, int], tuple[bytes, int, int]
         ] = OrderedDict()
         self._db_path = self.collection_root / ".dataset_cache.sqlite3"
-        self._db = sqlite3.connect(self._db_path, check_same_thread=False)
         self._db_lock = threading.RLock()
         self._db_cache_disabled = False
-        self._db.execute(
+        self._db_evicted_at = 0.0
+        self._db = self._open_cache_db()
+
+    def _open_cache_db(self) -> sqlite3.Connection:
+        """Open the derived-data cache, rebuilding the image when it is unreadable."""
+        db = self._connect_cache_db()
+        try:
+            db.execute("SELECT cache_key FROM data_cache LIMIT 1").fetchone()
+            db.execute("SELECT cache_key FROM state_cache LIMIT 1").fetchone()
+        except sqlite3.DatabaseError as error:
+            logger.warning("dataset cache is unreadable (%s); rebuilding %s", error, self._db_path)
+            db.close()
+            self._discard_cache_db()
+            db = self._connect_cache_db()
+        return db
+
+    def _connect_cache_db(self) -> sqlite3.Connection:
+        """Connect with the pragmas two dataset services sharing one file need."""
+        db = sqlite3.connect(self._db_path, check_same_thread=False, timeout=15.0)
+        db.execute("PRAGMA busy_timeout=15000")
+        db.execute("PRAGMA journal_mode=WAL")
+        db.execute("PRAGMA synchronous=NORMAL")
+        db.execute(
             "CREATE TABLE IF NOT EXISTS state_cache ("
             "cache_key TEXT PRIMARY KEY, updated REAL NOT NULL, payload TEXT NOT NULL, "
             "cache_version INTEGER NOT NULL DEFAULT 1, source_token TEXT NOT NULL DEFAULT ''"
             ")"
         )
-        columns = {row[1] for row in self._db.execute("PRAGMA table_info(state_cache)").fetchall()}
+        columns = {row[1] for row in db.execute("PRAGMA table_info(state_cache)").fetchall()}
         if "cache_version" not in columns:
-            self._db.execute(
+            db.execute(
                 "ALTER TABLE state_cache ADD COLUMN cache_version INTEGER NOT NULL DEFAULT 1"
             )
         if "source_token" not in columns:
-            self._db.execute(
-                "ALTER TABLE state_cache ADD COLUMN source_token TEXT NOT NULL DEFAULT ''"
-            )
-        self._db.execute(
+            db.execute("ALTER TABLE state_cache ADD COLUMN source_token TEXT NOT NULL DEFAULT ''")
+        db.execute(
             "CREATE TABLE IF NOT EXISTS data_cache ("
             "cache_key TEXT PRIMARY KEY, updated REAL NOT NULL, payload TEXT NOT NULL, "
             "cache_version INTEGER NOT NULL DEFAULT 1, source_token TEXT NOT NULL DEFAULT ''"
             ")"
         )
-        self._db.commit()
+        db.commit()
+        return db
+
+    def _discard_cache_db(self) -> None:
+        """Drop a cache image; everything in it is recomputable."""
+        for suffix in ("", "-wal", "-shm"):
+            path = self._db_path.with_name(self._db_path.name + suffix)
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as error:
+                logger.warning("cannot remove cache file %s: %s", path, error)
+
+    def _cache_failed(self, error: sqlite3.Error) -> None:
+        """Caching is optional: a broken cache costs a recompute, never an answer."""
+        if isinstance(error, sqlite3.DatabaseError) and not isinstance(
+            error, sqlite3.OperationalError
+        ):
+            logger.warning("dataset cache is corrupt (%s); rebuilding %s", error, self._db_path)
+            with self._db_lock:
+                try:
+                    self._db.close()
+                except sqlite3.Error:
+                    pass
+                self._discard_cache_db()
+                try:
+                    self._db = self._connect_cache_db()
+                except sqlite3.Error as retry_error:
+                    error = retry_error
+                else:
+                    return
+        logger.warning("dataset cache disabled: %s", error)
+        self._db_cache_disabled = True
+
+    def _evict_stale_cache_rows(self) -> None:
+        """Keep the cache file from growing without bound as tokens change."""
+        now = time.time()
+        if now - self._db_evicted_at < CACHE_EVICTION_SECONDS:
+            return
+        self._db_evicted_at = now
+        self._db.execute(
+            "DELETE FROM data_cache WHERE updated < ?", (now - DATA_CACHE_TTL_SECONDS,)
+        )
+        self._db.execute("DELETE FROM state_cache WHERE updated < ?", (now - STATE_CACHE_SECONDS,))
 
     def _db_cache_get(self, key: str, source_token: str, ttl: float = 300.0) -> Any | None:
         if self._db_cache_disabled:
@@ -131,8 +198,10 @@ class PlanCatalog:
                 ).fetchone()
             if row and time.time() - float(row[0]) < ttl:
                 return json.loads(row[1])
-        except (sqlite3.Error, json.JSONDecodeError):
-            self._db_cache_disabled = True
+        except sqlite3.Error as error:
+            self._cache_failed(error)
+        except json.JSONDecodeError:
+            return None
         return None
 
     def _db_cache_put(self, key: str, source_token: str, payload: Any) -> None:
@@ -147,9 +216,12 @@ class PlanCatalog:
                     "VALUES (?, ?, ?, ?, ?)",
                     (key, time.time(), encoded, DATA_CACHE_VERSION, source_token),
                 )
+                self._evict_stale_cache_rows()
                 self._db.commit()
-        except (sqlite3.Error, TypeError, ValueError):
-            self._db_cache_disabled = True
+        except sqlite3.Error as error:
+            self._cache_failed(error)
+        except (TypeError, ValueError):
+            return
 
     def state(self, batch: str = "", robot_type: str = "") -> dict[str, Any]:
         batches = self.batch_ids()
@@ -165,8 +237,8 @@ class PlanCatalog:
                         "WHERE cache_key = ? AND cache_version = ?",
                         (cache_key, STATE_CACHE_VERSION),
                     ).fetchone()
-            except sqlite3.Error:
-                self._db_cache_disabled = True
+            except sqlite3.Error as error:
+                self._cache_failed(error)
         if cached and time.time() - float(cached[0]) < STATE_CACHE_SECONDS:
             return json.loads(cached[1])
 
@@ -235,15 +307,8 @@ class PlanCatalog:
         plans = [{key: plan[key] for key in PLAN_PAYLOAD_KEYS} for plan in plan_states]
         result = {
             "batch_filter": batch,
-            # Dashboard consumers must always have an unfiltered view.  The
-            # legacy ``batches`` field remains scoped to the robot selector so
-            # QC batch controls do not change their meaning.
+            # Every consumer filters this list by the selected robot itself.
             "all_batches": summaries,
-            "batches": [
-                summary
-                for summary in summaries
-                if not robot_type or summary["robot_type"] == robot_type
-            ],
             "robot_types": robot_types,
             "plans": plans,
             "tasks": tasks,
@@ -278,8 +343,8 @@ class PlanCatalog:
                         (now - STATE_CACHE_SECONDS,),
                     )
                     self._db.commit()
-            except sqlite3.Error:
-                self._db_cache_disabled = True
+            except sqlite3.Error as error:
+                self._cache_failed(error)
         return result
 
     def batch_ids(self) -> list[str]:
@@ -443,7 +508,7 @@ class PlanCatalog:
                     "total_epsiodes_count": 1,
                     "batch_id": batch,
                     "slots": [slot],
-                    "counts": {"complete": 1, "pending": 0, "repair": 0},
+                    "counts": self._slot_counts([slot]),
                 }
             )
         info = {
@@ -453,12 +518,12 @@ class PlanCatalog:
             "target_episodes": len(records),
             "read_only": True,
         }
+        slot_counts = self._slot_counts([slot for task in tasks for slot in task["slots"]])
         collection = {
             "dataset_dir": str(self.collection_root),
             "available": bool(records),
             "robot_type": robot_type,
-            "counts": {"complete": len(records), "pending": 0, "repair": 0, "total": len(records)},
-            "qc_counts": {"pending": 0, "unreviewed": len(records), "passed": 0, "failed": 0},
+            "counts": {**slot_counts, "total": len(records)},
             "duplicates": [],
             "orphaned": [],
             "tasks": tasks,
@@ -703,7 +768,7 @@ class PlanCatalog:
         rows: list[dict[str, Any]] = []
         for task in plan["tasks"]:
             for slot in task["slots"]:
-                if slot.get("qc_state", slot["state"]) not in {"pending", "failed"}:
+                if slot["qc_state"] not in {"pending", "failed"}:
                     continue
                 rows.append(
                     {
@@ -714,7 +779,7 @@ class PlanCatalog:
                         "slot_id": slot["slot_id"],
                         "round_index": slot["round_index"],
                         "round_total": slot["round_total"],
-                        "status": slot.get("qc_state", slot["state"]),
+                        "status": slot["qc_state"],
                         "episode_index": ""
                         if slot.get("episode") is None
                         else slot["episode"].get("episode_index", ""),
@@ -739,7 +804,7 @@ class PlanCatalog:
         for task in plan["tasks"]:
             slots_by_scene: dict[str, list[dict[str, Any]]] = defaultdict(list)
             for slot in task["slots"]:
-                if slot.get("qc_state", slot["state"]) in {"pending", "failed"}:
+                if slot["qc_state"] in {"pending", "failed"}:
                     slots_by_scene[str(slot["scene_id"])].append(slot)
             if not slots_by_scene:
                 continue
@@ -1186,8 +1251,7 @@ class PlanCatalog:
         # Expand task counts into exact collection slots
         tasks = []
         matched: set[int] = set()
-        counts = {"complete": 0, "pending": 0, "repair": 0, "total": 0}
-        qc_counts = {"pending": 0, "unreviewed": 0, "passed": 0, "failed": 0}
+        counts = {"pending": 0, "unreviewed": 0, "passed": 0, "failed": 0, "total": 0}
         duplicates = []
         for task in state["tasks"]:
             decorated = {**task, "batch_id": batch, "slots": []}
@@ -1207,29 +1271,9 @@ class PlanCatalog:
                     episode = candidates[-1] if candidates else None
                     slot = self._slot(slot_id, scene_id, round_index, total, episode)
                     decorated["slots"].append(slot)
-                    qc_state = slot.get("qc_state", slot["state"])
-                    legacy_state = (
-                        "repair"
-                        if qc_state == "failed"
-                        else "pending"
-                        if qc_state == "pending"
-                        else "complete"
-                    )
-                    counts[legacy_state] += 1
-                    qc_counts[qc_state] += 1
+                    counts[slot["qc_state"]] += 1
                     counts["total"] += 1
-            decorated["counts"] = {
-                "complete": sum(
-                    slot.get("qc_state", slot["state"]) in {"unreviewed", "passed"}
-                    for slot in decorated["slots"]
-                ),
-                "pending": sum(
-                    slot.get("qc_state", slot["state"]) == "pending" for slot in decorated["slots"]
-                ),
-                "repair": sum(
-                    slot.get("qc_state", slot["state"]) == "failed" for slot in decorated["slots"]
-                ),
-            }
+            decorated["counts"] = self._slot_counts(decorated["slots"])
             tasks.append(decorated)
         info = self._dataset_info(dataset_dir)
         return {
@@ -1237,7 +1281,6 @@ class PlanCatalog:
             "available": (dataset_dir / "meta" / "episodes.jsonl").is_file(),
             "robot_type": str(info.get("robot_type", "")),
             "counts": counts,
-            "qc_counts": qc_counts,
             "duplicates": duplicates,
             "orphaned": [self._episode_summary(row) for row in episodes if id(row) not in matched],
             "tasks": tasks,
@@ -1578,33 +1621,25 @@ class PlanCatalog:
         episode: dict[str, Any] | None,
     ) -> dict[str, Any]:
         summary = PlanCatalog._episode_summary(episode) if episode else None
-        state = "pending"
-        if summary is not None:
-            verdict = summary["qc_verdict"].lower()
-            rejected = summary["quality"].lower() == "red" or verdict == "fail"
-            state = (
-                "unreviewed"
-                if verdict == "unreviewed"
-                else "failed"
-                if rejected
-                else "passed"
-                if verdict == "pass"
-                else "unreviewed"
-            )
-        legacy_state = (
-            "repair" if state == "failed" else "pending" if state == "pending" else "complete"
+        state = (
+            "pending" if summary is None else qc_state(summary["qc_verdict"], summary["quality"])
         )
         return {
             "slot_id": slot_id,
             "scene_id": scene_id,
             "round_index": round_index,
             "round_total": round_total,
-            # Keep the legacy state field for existing API consumers while
-            # exposing the four-state QC model to the reviewer UI.
-            "state": legacy_state,
             "qc_state": state,
             "episode": summary,
         }
+
+    @staticmethod
+    def _slot_counts(slots: list[dict[str, Any]]) -> dict[str, int]:
+        """How many of these slots sit in each QC state."""
+        counts = {"pending": 0, "unreviewed": 0, "passed": 0, "failed": 0}
+        for slot in slots:
+            counts[slot["qc_state"]] += 1
+        return counts
 
     @staticmethod
     def _episode_summary(row: dict[str, Any]) -> dict[str, Any]:

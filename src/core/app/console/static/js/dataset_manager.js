@@ -43,7 +43,7 @@ function sortValue(row) {
   return row[sortKey] ?? null;
 }
 function acceptSnapshot(data) {
-  jobs = data.jobs || (data.job ? [data.job] : []);
+  jobs = data.jobs || [];
   job = jobs.at(-1) || null;
   remote = data.remote;
 }
@@ -119,7 +119,7 @@ function render() {
   all.textContent = `${allSelected ? "取消全选" : "全选筛选结果"} (${rows.length})`;
   all.disabled = !rows.length;
   document.querySelectorAll("[data-dm-action]").forEach((button) => { button.disabled = busy() || !selected.size; });
-  $("dm-refresh").disabled = busy() || !datasets.length;
+  $("dm-refresh").disabled = busy() || !selected.size;
   const activeJobs = jobs.filter((item) => item.state === "running");
   const jobList = $("dm-jobs");
   const expandedJobs = new Set([...jobList.querySelectorAll("details[open]")]
@@ -133,13 +133,13 @@ function render() {
     const failures = task.results.filter((item) => !item.ok).length;
     const active = task.state === "running";
     const eta = active ? task.waiting ? "等待中" : task.eta == null ? "估算中" : `约 ${Math.ceil(task.eta / 60)} 分钟` : "0";
-    return `<div class="dm-job" data-dm-job="${escape(task.id || "legacy")}">
+    return `<div class="dm-job" data-dm-job="${escape(task.id)}">
       <strong>${labels[task.action]} · ${task.completed}/${task.total}</strong>
       <span class="dm-job-detail">${escape(active ? `${task.waiting ? `等待冲突文件：${(task.waiting_resources || []).map((name) => resourceLabels[name] || name).join("、")} · ` : ""}${task.current}${task.detail ? ` · ${task.detail}` : ""}` : task.state === "stopped" ? "已停止" : "完成")}${failures ? ` · ${failures} 失败` : ""}</span>
       <span>ETA ${eta}</span>
       ${active ? `<button class="btn" data-dm-stop="${escape(task.id)}" ${task.stopping || task.stop_requested ? "disabled" : ""}>${task.stopping || task.stop_requested ? "停止中" : "停止后续任务"}</button>` : ""}
       <progress max="${task.total || 1}" value="${task.completed}" aria-label="${labels[task.action]}进度"></progress>
-      ${failures ? `<details${expandedJobs.has(task.id || "legacy") ? " open" : ""}><summary>失败详情 (${failures})</summary>${task.results.filter((item) => !item.ok).map((item) => `<div>${escape(item.dataset)}：${escape(item.error)}</div>`).join("")}</details>` : ""}
+      ${failures ? `<details${expandedJobs.has(task.id) ? " open" : ""}><summary>失败详情 (${failures})</summary>${task.results.filter((item) => !item.ok).map((item) => `<div>${escape(item.dataset)}：${escape(item.error)}</div>`).join("")}</details>` : ""}
     </div>`;
   }).join("");
   jobList.scrollTop = jobScrollTop;
@@ -191,7 +191,8 @@ function schedulePoll() {
   }, 1000);
 }
 
-async function start(action, names = [...selected]) {
+async function start(action) {
+  const names = [...selected];
   if (busy() || !names.length) return;
   requesting = true;
   render();
@@ -206,7 +207,7 @@ async function start(action, names = [...selected]) {
   } finally {
     requesting = false;
     document.querySelectorAll("[data-dm-action]").forEach((b) => { b.disabled = busy() || !selected.size; });
-    $("dm-refresh").disabled = busy() || !datasets.length;
+    $("dm-refresh").disabled = busy() || !selected.size;
   }
 }
 
@@ -261,7 +262,7 @@ export function initDatasetManager() {
     render();
   });
   document.querySelectorAll("[data-dm-action]").forEach((b) => b.addEventListener("click", () => start(b.dataset.dmAction)));
-  $("dm-refresh").addEventListener("click", () => start("refresh", datasets.map((row) => row.name)));
+  $("dm-refresh").addEventListener("click", () => start("refresh"));
   $("dm-jobs").addEventListener("click", async (event) => {
     const button = event.target.closest("[data-dm-stop]");
     if (!button) return;

@@ -40,11 +40,14 @@ function objectMeasurementsText(object) {
 }
 
 function qcState(slot) {
-  if (slot && slot.qc_state) return slot.qc_state;
-  if (!slot) return "pending";
-  if (slot.state === "repair") return "failed";
-  if (slot.state === "pending") return "pending";
-  return slot.episode && slot.episode.qc_verdict === "pass" ? "passed" : "unreviewed";
+  return slot && slot.qc_state ? slot.qc_state : "pending";
+}
+
+// The service reports every batch; each view scopes the list to its robot.
+export function visibleBatches() {
+  return (app.state.all_batches || []).filter(
+    (batch) => !app.robot || batch.robot_type === app.robot,
+  );
 }
 
 function localized(zh, en, fallback = "") {
@@ -212,12 +215,8 @@ function buildTaskAccordion(task) {
   const key = recordKey(task, "task_id");
   const total = task.slots.length;
   const counts = task.counts || {};
-  const passed = Number.isFinite(counts.passed)
-    ? counts.passed
-    : task.slots.filter((slot) => qcState(slot) === "passed").length;
-  const failed = Number.isFinite(counts.failed)
-    ? counts.failed
-    : task.slots.filter((slot) => qcState(slot) === "failed").length;
+  const passed = Number(counts.passed || 0);
+  const failed = Number(counts.failed || 0);
   const collected = task.slots.filter((slot) => qcState(slot) !== "pending").length;
   const status = total > 0 && passed === total
     ? "complete"
@@ -619,7 +618,7 @@ function renderSceneEditor() {
 
 function buildCameraPositionLegend(batch) {
   const section = node("div", "camera-position-list");
-  const cameras = (app.state.batches.find((item) => item.batch_id === batch) || {}).cameras || [];
+  const cameras = (visibleBatches().find((item) => item.batch_id === batch) || {}).cameras || [];
   section.append(node("span", "field-label", translate("entity.cameraPosition")));
   if (!cameras.length) {
     section.append(node("span", "camera-position", translate("entity.notConfigured")));
@@ -971,9 +970,7 @@ function setDashboardText(id, value) {
 }
 
 function dashboardSummary(plan) {
-  const counts = plan && plan.collection
-    ? plan.collection.qc_counts || plan.collection.counts || {}
-    : {};
+  const counts = plan && plan.collection ? plan.collection.counts || {} : {};
   if (plan) {
     const tasks = app.state.tasks.filter((task) => task.batch_id === plan.batch_id);
     const episodes = tasks.flatMap((task) => task.slots.map((slot) => slot.episode).filter(Boolean));
@@ -989,7 +986,7 @@ function dashboardSummary(plan) {
       duration: frames / 30,
     };
   }
-  const batches = (app.state.all_batches || app.state.batches || []).filter(
+  const batches = (app.state.all_batches || []).filter(
     (batch) => dashboardBatchCount(batch) > 0,
   );
   return batches.reduce(
@@ -1011,7 +1008,7 @@ function renderInfo() {
   if (!app.state) return;
   // Dashboard is always a global overview, independent of the QC selection.
   const summary = dashboardSummary(null);
-  const batches = app.state.all_batches || app.state.batches || [];
+  const batches = app.state.all_batches || [];
   const robotBatches = new Map();
   for (const batch of batches) {
     const robot = String(batch.robot_type || translate("dashboard.unknownRobot"));

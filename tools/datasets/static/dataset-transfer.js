@@ -30,14 +30,13 @@ const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g,
   (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char]));
 const busy = () => requesting;
 const running = () => jobs.some((item) => item.state === "running");
-// Automatic QC sweeps every dataset when nothing is selected; the other
-// actions only ever run on the selection.
-const sweepAll = (action) => action === "auto_qc" && !selected.size;
+// Every action, automatic QC and the cloud refresh included, runs on the
+// selection alone; no button sweeps all datasets on its own.
 const syncActionButtons = () => {
   document.querySelectorAll("[data-dm-action]").forEach((button) => {
-    button.disabled = busy() || (!selected.size && button.dataset.dmAction !== "auto_qc");
+    button.disabled = busy() || !selected.size;
   });
-  $("dm-refresh").disabled = busy() || !datasets.length;
+  $("dm-refresh").disabled = busy() || !selected.size;
 };
 const sortOption = (key, ascending) => key === "name" ? (ascending ? "name" : "name-desc")
   : `${key}${ascending ? "-asc" : ""}`;
@@ -67,7 +66,7 @@ function sortValue(row) {
 }
 
 function acceptSnapshot(data) {
-  jobs = data.jobs || (data.job ? [data.job] : []);
+  jobs = data.jobs || [];
   job = jobs.at(-1) || null;
   remote = data.remote || {};
 }
@@ -151,13 +150,13 @@ function jobMarkup(task, expandedJobs) {
   const detail = active
     ? `${waiting}${task.current}${task.detail ? ` · ${task.detail}` : ""}`
     : task.state === "stopped" ? t("dm.halted") : t("dm.done");
-  return `<div class="dm-job" data-dm-job="${escapeHtml(task.id || "legacy")}">
+  return `<div class="dm-job" data-dm-job="${escapeHtml(task.id)}">
       <strong>${t(`dm.action.${task.action}`)} · ${task.completed}/${task.total}</strong>
       <span class="dm-job-detail">${escapeHtml(detail)}${failures ? ` · ${failures} ${t("dm.failedCount")}` : ""}</span>
       <span>ETA ${eta}</span>
       ${active ? `<button class="btn" data-dm-stop="${escapeHtml(task.id)}" ${stopping ? "disabled" : ""}>${stopping ? t("dm.stopping") : t("dm.stopNext")}</button>` : ""}
       <progress max="${task.total || 1}" value="${task.completed}" aria-label="${t(`dm.action.${task.action}`)}"></progress>
-      ${failures ? `<details${expandedJobs.has(task.id || "legacy") ? " open" : ""}><summary>${t("dm.failureDetail")} (${failures})</summary>${task.results.filter((item) => !item.ok).map((item) => `<div>${escapeHtml(item.dataset)}：${escapeHtml(item.error)}</div>`).join("")}</details>` : ""}
+      ${failures ? `<details${expandedJobs.has(task.id) ? " open" : ""}><summary>${t("dm.failureDetail")} (${failures})</summary>${task.results.filter((item) => !item.ok).map((item) => `<div>${escapeHtml(item.dataset)}：${escapeHtml(item.error)}</div>`).join("")}</details>` : ""}
     </div>`;
 }
 
@@ -303,8 +302,8 @@ function schedulePoll() {
   }, 1000);
 }
 
-async function start(action, names) {
-  names = names || (sweepAll(action) ? datasets.map((row) => row.name) : [...selected]);
+async function start(action) {
+  const names = [...selected];
   if (busy() || !names.length) return;
   requesting = true;
   renderTransfers();
@@ -391,7 +390,7 @@ export function initDatasetTransfer() {
   document.querySelectorAll("[data-dm-action]").forEach((button) => {
     button.addEventListener("click", () => start(button.dataset.dmAction));
   });
-  $("dm-refresh").addEventListener("click", () => start("refresh", datasets.map((row) => row.name)));
+  $("dm-refresh").addEventListener("click", () => start("refresh"));
   $("dm-jobs").addEventListener("click", async (event) => {
     const button = event.target.closest("[data-dm-stop]");
     if (!button) return;

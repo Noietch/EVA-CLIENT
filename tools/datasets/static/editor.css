@@ -874,7 +874,7 @@ dialog::backdrop { background: rgba(31, 30, 28, .38); backdrop-filter: blur(2px)
 .collection-panel-head { display: flex; align-items: center; gap: 8px; min-height: 32px; color: var(--ink); font: 700 10px/1 var(--mono); letter-spacing: .06em; text-transform: uppercase; }
 .collection-panel-head .step-badge { flex: 0 0 auto; }
 .step-badge { width: 26px; height: 26px; display: grid; place-items: center; border: 1px solid var(--rule-strong); border-radius: 50%; background: var(--paper); color: var(--ink-dim); font: 700 10px/1 var(--mono); }
-.collection-panel-card, .dataset-sync-card { min-width: 0; padding: 12px; border-radius: var(--radius); background: var(--paper); box-shadow: var(--shadow); }
+.collection-panel-card { min-width: 0; padding: 12px; border-radius: var(--radius); background: var(--paper); box-shadow: var(--shadow); }
 .collection-panel-card .batch-field:first-child { margin-top: 0; }
 .collection-panel-card .batch-field + .batch-field { margin-top: 10px; }
 .collection-batch-nav { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 10px; }
@@ -1143,18 +1143,6 @@ dialog::backdrop { background: rgba(31, 30, 28, .38); backdrop-filter: blur(2px)
 .dashboard-panel-total { flex: 0 0 auto; color: var(--ink-dim); font: 700 12px/1 var(--mono); white-space: nowrap; }
 /* Collection queue tiles: square cells with 50-slot paging. */
 .collection-slot-grid .slot-tile { aspect-ratio: 1; }
-.dataset-sync-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
-.dataset-sync-actions .button { min-width: 0; white-space: normal; }
-.dataset-sync-card { flex: 0 0 auto; margin-top: 13px; }
-.dataset-sync-card .dataset-sync-actions { margin-top: 10px; }
-.dataset-sync-content .dataset-sync-actions { margin-top: 0; }
-.dataset-sync-card .button { min-height: 44px; padding: 6px; }
-.dataset-sync-card .collect-progress { height: 6px; margin-top: 12px; background: #e4e8ec; overflow: hidden; }
-.dataset-sync-card .collect-progress i { display: block; width: 0; height: 100%; background: #27856a; }
-.dataset-sync-card .kv { display: flex; gap: 12px; justify-content: space-between; margin-top: 8px; }
-.dataset-sync-card .v { min-width: 0; overflow-wrap: anywhere; }
-.dataset-sync-card .collect-progress.indeterminate i { width: 35% !important; animation: hf-sync-progress 1.4s linear infinite; }
-@keyframes hf-sync-progress { from { transform: translateX(-100%); } to { transform: translateX(300%); } }
 
 /* Dataset transfer card: same rules and values as the EVA-CLIENT console card. */
 .dm-panel { --shadow-sm: 0 1px 2px rgba(28,25,23,0.06); min-width: 0; margin-top: 18px; overflow: hidden; background: var(--paper); border: 1px solid var(--rule); border-radius: 8px; box-shadow: var(--shadow-sm); }
@@ -1215,6 +1203,11 @@ dialog::backdrop { background: rgba(31, 30, 28, .38); backdrop-filter: blur(2px)
 .dm-panel .dashboard-table th { padding: 10px 14px; border-bottom: 1px solid var(--rule); color: var(--ink-faint); text-align: left; font: 700 11px/1.2 var(--mono); letter-spacing: 0; }
 .dm-panel .dashboard-table.dm-table thead th:nth-child(n) { width: auto; padding: 7px 6px; }
 .dm-panel .dashboard-table.dm-table thead tr:first-child th:nth-child(-n+2) { text-align: center; vertical-align: middle; padding-left: 6px; padding-right: 6px; }
+.dm-panel .dashboard-table.dm-table thead tr:nth-child(2) th,
+.dm-panel .dashboard-table.dm-table th:first-child,
+.dm-panel .dashboard-table.dm-table td:first-child,
+.dm-panel .dashboard-table.dm-table th:nth-child(n+3),
+.dm-panel .dashboard-table.dm-table td:nth-child(n+3) { text-align: center; }
 .dm-panel .dashboard-table.dm-table th[scope="colgroup"] { text-align: center; border-left: 1px solid var(--rule); background: #f7f8f7; color: var(--ink-dim); font-size: 12px; line-height: 1.5; letter-spacing: 0; }
 .dm-panel .dashboard-table.dm-table td:nth-child(n+3):nth-child(-n+13) { padding-left: 6px; padding-right: 6px; }
 .dm-panel .dashboard-table td { padding: 11px 14px; border-bottom: 1px solid var(--rule); font-size: 13px; }

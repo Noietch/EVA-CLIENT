@@ -1,6 +1,5 @@
 """Check QC sync paths without contacting Hugging Face."""
 
-import importlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -103,31 +102,3 @@ def test_merge_qc_uses_newest_complete_row_and_keeps_unmatched_rows() -> None:
     assert [row["qc_verdict"] for row in rows] == ["fail", "fail", "pass", "fail"]
     assert rows[2]["qc_updated_at"] == LEGACY_QC_UPDATED_AT
     assert rows[3]["qc_updated_at"] == LEGACY_QC_UPDATED_AT
-
-
-def test_qc_routes_pass_nested_collection_path(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    dataset_app = importlib.import_module("tools.datasets.app")
-    plans = tmp_path / "task_sets"
-    batch = plans / "set_a"
-    batch.mkdir(parents=True)
-    (batch / "info.yaml").write_text(
-        "collection_dir: datasets/real_robot/dual_yam/set_a\n", encoding="utf-8"
-    )
-    app = dataset_app.create_app(plans, tmp_path / "assets", tmp_path / "collection")
-    app.config["TESTING"] = True
-    client = app.test_client()
-    client.environ_base["HTTP_X_EVA_DATASET_EDITOR"] = "1"
-    client.environ_base["HTTP_X_EVA_EDIT_MODE"] = "1"
-    calls = []
-
-    def fake_sync(*args, **kwargs):
-        calls.append(kwargs["expected_path"])
-        return {"repo_id": "owner/data"}
-
-    monkeypatch.setattr(dataset_app, "publish_qc", fake_sync)
-    monkeypatch.setattr(dataset_app, "fetch_qc", fake_sync)
-    assert client.post("/api/batches/set_a/hf/qc/upload").status_code == 200
-    assert client.post("/api/batches/set_a/hf/qc/download").status_code == 200
-    assert calls == ["datasets/real_robot/dual_yam/set_a"] * 2
