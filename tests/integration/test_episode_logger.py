@@ -345,6 +345,36 @@ def test_collection_qc_lands_in_the_ledger_next_to_a_save(tmp_path):
     assert [(row["episode_index"], row["qc_verdict"]) for row in ledger] == [(0, "pass")]
 
 
+def test_a_retake_replaces_the_slots_previous_episode(tmp_path):
+    """A second take for one slot overwrites that episode instead of appending."""
+    logger = _collection_logger(tmp_path)
+    dataset_dir = _collection_task_dir(tmp_path)
+    qpos = np.zeros(_DIM, dtype=np.float32)
+    slot = "TASK-1:SC-1:0"
+
+    logger.start_episode("t")
+    logger.set_episode_meta(slot_id=slot)
+    logger.ingest_collection_snapshot(_collection_raw_snapshot(0.0, state=qpos))
+    assert logger.end_episode()
+    assert logger.mark_collection_qc("t", 0, "fail", "first take")
+
+    logger.start_episode("t")
+    logger.set_episode_meta(slot_id=slot)
+    for timestamp in (0.1, 0.2, 0.3):
+        logger.ingest_collection_snapshot(_collection_raw_snapshot(timestamp, state=qpos))
+    assert logger.end_episode()
+
+    episodes = _read_jsonl(dataset_dir / "meta" / "episodes.jsonl")
+    assert [(row["episode_index"], row["slot_id"]) for row in episodes] == [(0, slot)]
+    assert episodes[0]["length"] == 3
+    stats = _read_jsonl(dataset_dir / "meta" / "episodes_stats.jsonl")
+    assert [row["episode_index"] for row in stats] == [0]
+    saved = pq.read_table(dataset_dir / "data/chunk-000/episode_000000.parquet")
+    assert saved.num_rows == 3
+    # The replaced take's verdict dies with it: the new recording is unreviewed.
+    assert _read_jsonl(dataset_dir / "meta" / "qc.jsonl") == []
+
+
 def test_collection_qc_failure_leaves_the_ledger_intact(tmp_path, monkeypatch):
     logger = _collection_logger(tmp_path)
     qpos = np.zeros(_DIM, dtype=np.float32)

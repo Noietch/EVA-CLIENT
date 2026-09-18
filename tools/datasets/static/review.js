@@ -3,11 +3,7 @@ import { loadThree, RobotViewer } from "./robot-viewer.js";
 const COLORS = ["#e8590c", "#1f1e1c", "#2563eb", "#2f9e44", "#d6336c", "#0b7285"];
 const $ = (id) => document.getElementById(id);
 function qcState(slot) {
-  if (slot && slot.qc_state) return slot.qc_state;
-  if (!slot) return "pending";
-  if (slot.state === "repair") return "failed";
-  if (slot.state === "pending") return "pending";
-  return slot.episode && slot.episode.qc_verdict === "pass" ? "passed" : "unreviewed";
+  return slot && slot.qc_state ? slot.qc_state : "pending";
 }
 
 let app;
@@ -661,7 +657,6 @@ async function saveQc(task, slot, verdict, control) {
     note: localEpisode && localEpisode.qc_note,
     reason: localEpisode && localEpisode.qc_reason,
     qcState: slot.qc_state,
-    state: slot.state,
   };
   const effectiveVerdict = verdict || (localEpisode && localEpisode.qc_verdict) || "";
   if (localEpisode) {
@@ -670,7 +665,6 @@ async function saveQc(task, slot, verdict, control) {
     localEpisode.qc_reason = verdict === "fail" || !verdict ? reasonValue : "";
   }
   slot.qc_state = effectiveVerdict === "pass" ? "passed" : effectiveVerdict === "fail" ? "failed" : "unreviewed";
-  slot.state = slot.qc_state === "failed" ? "repair" : slot.qc_state === "pending" ? "pending" : "complete";
   if (control && verdict) {
     control.classList.add("selected");
     const sibling = control.parentElement && [...control.parentElement.children].find((item) => item !== control);
@@ -696,7 +690,6 @@ async function saveQc(task, slot, verdict, control) {
       localEpisode.qc_reason = previous.reason;
     }
     slot.qc_state = previous.qcState;
-    slot.state = previous.state;
     renderTaskList();
   }
 }

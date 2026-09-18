@@ -59,19 +59,7 @@ def test_fetch_qc_selects_configured_path_when_remote_cache_duplicates_set(tmp_p
     )
 
 
-def test_fetch_qc_falls_back_to_episode_quality_without_erasing_local_verdict(
-    tmp_path,
-    monkeypatch,
-):
-    source = tmp_path / "remote_episodes.jsonl"
-    source.write_text('{"episode_index": 1, "quality": "yellow", "quality_issues": ["skew"]}\n')
-    target = tmp_path / "local" / "set_a" / "raw" / "meta" / "episodes.jsonl"
-    target.parent.mkdir(parents=True)
-    target.write_text(
-        '{"episode_index": 1, "quality": "green", "qc_verdict": "fail", "qc_note": "retake"}\n'
-        '{"episode_index": 2, "quality": "green"}\n'
-    )
-
+def test_fetch_qc_reports_a_dataset_without_a_published_ledger(tmp_path, monkeypatch):
     class FakeApi:
         def __init__(self, token):
             pass
@@ -85,21 +73,15 @@ def test_fetch_qc_falls_back_to_episode_quality_without_erasing_local_verdict(
     monkeypatch.setitem(
         sys.modules,
         "huggingface_hub",
-        SimpleNamespace(HfApi=FakeApi, hf_hub_download=lambda **kwargs: str(source)),
+        SimpleNamespace(HfApi=FakeApi, hf_hub_download=lambda **kwargs: ""),
     )
-    result = hf_task_sets.fetch_qc(
-        tmp_path, "set_a", target.parent.parent, {"huggingface": {"repo_id": "team/data"}}
-    )
-    import json
-
-    rows = [json.loads(line) for line in target.read_text().splitlines()]
-    assert rows[0]["quality"] == "yellow"
-    assert rows[0]["quality_issues"] == ["skew"]
-    assert rows[0]["qc_verdict"] == "fail"
-    assert rows[0]["qc_note"] == "retake"
-    assert rows[1]["quality"] == "green"
-    assert result["source"] == "episodes.jsonl"
-    assert result["episodes"] == "1"
+    with pytest.raises(FileNotFoundError, match="set_a"):
+        hf_task_sets.fetch_qc(
+            tmp_path,
+            "set_a",
+            tmp_path / "local" / "set_a",
+            {"huggingface": {"repo_id": "team/data"}},
+        )
 
 
 def test_fetch_assets_copies_only_selected_set_photos(tmp_path, monkeypatch):
@@ -254,7 +236,7 @@ def test_publish_dataset_merges_qc_after_data_upload(tmp_path, monkeypatch):
     # Local-only files are reported instead of silently uploading them.
     assert result["not_uploaded"] == ["meta/qc.jsonl"]
 
-    # Task sets and assets are allow-listed the same way: plans and photos only.
+    # Task sets are allow-listed the same way: plan files only.
     plan = tmp_path / "task_sets" / "set_a"
     plan.mkdir(parents=True)
     for name in ("info.yaml", "layout.yaml", "scene.csv", "tasks.csv"):
@@ -263,12 +245,70 @@ def test_publish_dataset_merges_qc_after_data_upload(tmp_path, monkeypatch):
     hf_task_sets.publish_task_set(tmp_path, plan)
     assert uploaded["allow_patterns"] == ["info.yaml", "layout.yaml", "scene.csv", "tasks.csv"]
 
-    assets = tmp_path / "assets"
-    (assets / "object_photos").mkdir(parents=True)
-    (assets / "objects.csv").write_text("object_id\n")
-    (assets / ".preview_cache").mkdir()
-    hf_task_sets.publish_assets(tmp_path, assets)
-    assert uploaded["allow_patterns"] == ["objects.csv", "object_photos/**"]
+
+def test_mirror_dataset_drops_replaced_files_and_replaces_the_ledger(tmp_path, monkeypatch):
+    name = "set_a"
+    remote = f"datasets/real_robot/dual_yam/{name}"
+    dataset = tmp_path / "datasets/real_robot/dual_yam" / name
+    (dataset / "meta").mkdir(parents=True)
+    (dataset / "data/chunk-000").mkdir(parents=True)
+    (dataset / "meta/episodes.jsonl").write_text('{"episode_index": 0}\n', encoding="utf-8")
+    (dataset / "meta/qc.jsonl").write_text(
+        '{"episode_index": 0, "qc_verdict": "pass"}\n', encoding="utf-8"
+    )
+    (dataset / "data/chunk-000/episode_000000.parquet").write_bytes(b"take")
+    uploaded, deleted, added = [], [], []
+
+    class Delete:
+        def __init__(self, path_in_repo):
+            self.path_in_repo = path_in_repo
+
+    class Add:
+        def __init__(self, path_in_repo, path_or_fileobj):
+            self.path_in_repo = path_in_repo
+
+    class FakeApi:
+        def __init__(self, token):
+            pass
+
+        def repo_info(self, repo_id, repo_type, revision):
+            return SimpleNamespace(sha="revision-sha")
+
+        def upload_folder(self, **kwargs):
+            uploaded.append(kwargs["allow_patterns"])
+            return SimpleNamespace(oid="upload-sha")
+
+        def list_repo_files(self, repo_id, repo_type, revision):
+            return [
+                f"{remote}/meta/episodes.jsonl",
+                f"{remote}/meta/qc.jsonl",
+                f"{remote}/data/chunk-000/episode_000000.parquet",
+                f"{remote}/data/chunk-000/episode_000009.parquet",
+            ]
+
+        def create_commit(self, **kwargs):
+            for operation in kwargs["operations"]:
+                if isinstance(operation, Delete):
+                    deleted.append(operation.path_in_repo)
+                else:
+                    added.append(operation.path_in_repo)
+            return SimpleNamespace(oid="commit-sha")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        SimpleNamespace(HfApi=FakeApi, CommitOperationDelete=Delete, CommitOperationAdd=Add),
+    )
+    result = hf_task_sets.mirror_dataset(
+        tmp_path, dataset, name, {"huggingface": {"repo_id": "team/data"}}, replace_qc=True
+    )
+
+    assert uploaded == [hf_task_sets.DATASET_ALLOW_PATTERNS]
+    # The replaced take goes, the shared ledger is never deleted, and it is
+    # overwritten rather than merged because the numbering changed.
+    assert deleted == [f"{remote}/data/chunk-000/episode_000009.parquet"]
+    assert added == [f"{remote}/meta/qc.jsonl"]
+    assert result["deleted"] == "1"
 
 
 def test_dataset_download_replaces_content_and_merges_the_qc_ledger(tmp_path, monkeypatch):

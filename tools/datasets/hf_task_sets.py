@@ -13,6 +13,7 @@ from typing import Any
 
 import yaml
 
+from tools.datasets.hf_compare import is_dataset_content
 from tools.datasets.hf_qc import merge_qc, write_qc
 
 TASK_FILES = ("info.yaml", "layout.yaml", "scene.csv", "tasks.csv")
@@ -27,7 +28,6 @@ DATASET_ALLOW_PATTERNS = [
     "meta/tasks.jsonl",
     "meta/stats.json",
 ]
-ASSET_ALLOW_PATTERNS = ["objects.csv", "object_photos/**"]
 
 
 def skipped_upload_files(local_dir: Path, patterns: list[str]) -> list[str]:
@@ -68,12 +68,23 @@ def dataset_repo_path(
     return matches[0]
 
 
-def qc_repo_path(remote_files: set[str], dataset_name: str, dataset_path: str) -> str | None:
-    """Find QC at the dataset path or the older top-level set path."""
-    for candidate in (dataset_path, f"datasets/{dataset_name}"):
-        if f"{candidate}/meta/qc.jsonl" in remote_files:
-            return candidate
-    return None
+def default_remote_path(dataset_dir: Path, dataset_name: str) -> str:
+    """Where a dataset belongs remotely: its own path below the datasets root.
+
+    A local collection lives at ``<root>/datasets/<robot group>/<robot>/<name>``
+    and the remote mirrors that layout, so an unpublished dataset keeps its place
+    instead of landing at the repository's top level.
+    """
+    parts = dataset_dir.resolve().parts
+    for index in range(len(parts) - 1, -1, -1):
+        if parts[index] == "datasets":
+            return "/".join(parts[index:])
+    return f"datasets/{dataset_name}"
+
+
+def qc_repo_path(remote_files: set[str], dataset_path: str) -> str | None:
+    """The dataset's own published QC ledger, when the remote holds one."""
+    return dataset_path if f"{dataset_path}/meta/qc.jsonl" in remote_files else None
 
 
 def _config(project_root: Path, storage: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -189,31 +200,6 @@ def fetch_task_sets(
     return {"fetched": fetched, "missing": missing}
 
 
-def publish_assets(project_root: Path, assets_dir: Path) -> dict[str, str]:
-    from huggingface_hub import HfApi
-
-    cfg = _config(project_root)
-    _apply_proxy(cfg)
-    token = str(cfg.get("token", "")).strip() or None
-    repo_id = str(cfg.get("repo_id", "")).strip()
-    if not repo_id or not assets_dir.is_dir():
-        raise ValueError("Hugging Face config or assets directory is invalid")
-    commit = HfApi(token=token).upload_folder(
-        repo_id=repo_id,
-        repo_type="dataset",
-        folder_path=str(assets_dir.resolve()),
-        path_in_repo="assets",
-        commit_message="Update dataset assets",
-        token=token,
-        allow_patterns=ASSET_ALLOW_PATTERNS,
-    )
-    return {
-        "repo_id": repo_id,
-        "revision": commit.oid,
-        "files": str(sum(1 for _ in assets_dir.rglob("*"))),
-    }
-
-
 def fetch_assets(
     project_root: Path, task_set_dir: Path, assets_dir: Path, storage: dict[str, Any] | None = None
 ) -> dict[str, str]:
@@ -311,7 +297,7 @@ def publish_dataset(
     try:
         remote_path = dataset_repo_path(api, repo_id, dataset_name, revision, new_remote_path)
     except FileNotFoundError:
-        remote_path = new_remote_path or f"datasets/{dataset_name}"
+        remote_path = new_remote_path or default_remote_path(dataset_dir, dataset_name)
     qc_path = dataset_dir / "meta/qc.jsonl"
     # Only recorded content travels; the QC ledger merges on its own so that
     # verdicts written on both sides survive.
@@ -338,6 +324,103 @@ def publish_dataset(
             publish_qc(project_root, dataset_dir, dataset_name, storage, expected_path=remote_path)
         )
     return result
+
+
+def mirror_dataset(
+    project_root: Path,
+    dataset_dir: Path,
+    dataset_name: str,
+    storage: dict[str, Any] | None = None,
+    *,
+    expected_path: str | None = None,
+    replace_qc: bool = False,
+) -> dict[str, str]:
+    """Make one remote dataset hold exactly what the local directory holds.
+
+    Uploads the allow-listed content, deletes remote files the local directory no
+    longer has, and with ``replace_qc`` overwrites the remote QC ledger instead
+    of merging it — what a renumbered dataset needs, since its old ledger rows
+    describe recordings the renumbering replaced.
+    """
+    from huggingface_hub import CommitOperationAdd, CommitOperationDelete, HfApi
+
+    cfg = _config(project_root, storage)
+    _apply_proxy(cfg)
+    token, repo_id = str(cfg.get("token", "")).strip() or None, str(cfg.get("repo_id", "")).strip()
+    if not repo_id or not dataset_dir.is_dir() or Path(dataset_name).name != dataset_name:
+        raise ValueError("invalid Hugging Face dataset configuration")
+    if not (dataset_dir / "meta/episodes.jsonl").is_file():
+        raise FileNotFoundError("Dataset has no saved episodes")
+    api = HfApi(token=token)
+    branch = str(cfg.get("revision", "main")).strip() or "main"
+    revision = api.repo_info(repo_id, repo_type="dataset", revision=branch).sha
+    try:
+        remote_path = dataset_repo_path(api, repo_id, dataset_name, revision, expected_path)
+    except FileNotFoundError:
+        remote_path = expected_path or default_remote_path(dataset_dir, dataset_name)
+    commit = api.upload_folder(
+        repo_id=repo_id,
+        repo_type="dataset",
+        folder_path=str(dataset_dir.resolve()),
+        path_in_repo=remote_path,
+        commit_message=f"Sync dataset {dataset_name}",
+        token=token,
+        revision=branch,
+        allow_patterns=DATASET_ALLOW_PATTERNS,
+    )
+    revision = commit.oid
+    local: set[str] = set()
+    for path in dataset_dir.rglob("*"):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(dataset_dir).as_posix()
+        if any(fnmatch.fnmatch(relative, pattern) for pattern in DATASET_ALLOW_PATTERNS):
+            local.add(relative)
+    prefix = f"{remote_path}/"
+    stale = sorted(
+        path
+        for path in api.list_repo_files(repo_id, repo_type="dataset", revision=revision)
+        if path.startswith(prefix)
+        and is_dataset_content(path[len(prefix) :])
+        and path[len(prefix) :] not in local
+    )
+    if stale:
+        revision = api.create_commit(
+            repo_id=repo_id,
+            repo_type="dataset",
+            revision=branch,
+            parent_commit=revision,
+            operations=[CommitOperationDelete(path_in_repo=path) for path in stale],
+            commit_message=f"Drop {len(stale)} replaced files from {dataset_name}",
+            token=token,
+        ).oid
+    qc_path = dataset_dir / "meta/qc.jsonl"
+    if replace_qc and qc_path.is_file():
+        revision = api.create_commit(
+            repo_id=repo_id,
+            repo_type="dataset",
+            revision=branch,
+            parent_commit=revision,
+            operations=[
+                CommitOperationAdd(
+                    path_in_repo=f"{remote_path}/meta/qc.jsonl",
+                    path_or_fileobj=qc_path.read_bytes(),
+                )
+            ],
+            commit_message=f"Replace QC ledger {dataset_name}",
+            token=token,
+        ).oid
+    elif qc_path.is_file():
+        revision = publish_qc(
+            project_root, dataset_dir, dataset_name, storage, expected_path=remote_path
+        )["revision"]
+    return {
+        "repo_id": repo_id,
+        "dataset": dataset_name,
+        "revision": revision,
+        "path": remote_path,
+        "deleted": str(len(stale)),
+    }
 
 
 def fetch_dataset(
@@ -408,7 +491,7 @@ def publish_qc(
         raise ValueError("Hugging Face config requires repo_id")
     if not qc_path.is_file():
         raise FileNotFoundError(f"QC file is missing: {qc_path}")
-    remote_path = expected_path or f"datasets/{dataset_name}"
+    remote_path = expected_path or default_remote_path(dataset_dir, dataset_name)
     if (
         not remote_path.startswith("datasets/")
         or Path(remote_path).name != dataset_name
@@ -419,7 +502,7 @@ def publish_qc(
     branch = str(cfg.get("revision", "main")).strip() or "main"
     revision = api.repo_info(repo_id, repo_type="dataset", revision=branch).sha
     remote_files = set(api.list_repo_files(repo_id, repo_type="dataset", revision=revision))
-    published_path = qc_repo_path(remote_files, dataset_name, remote_path)
+    published_path = qc_repo_path(remote_files, remote_path)
     path_in_repo = f"{remote_path}/meta/qc.jsonl"
     remote = b""
     if published_path:
@@ -476,82 +559,24 @@ def fetch_qc(
     revision = api.repo_info(repo_id, repo_type="dataset", revision=revision).sha
     remote_path = dataset_repo_path(api, repo_id, dataset_name, revision, expected_path)
     remote_files = set(api.list_repo_files(repo_id, repo_type="dataset", revision=revision))
-    qc_path = qc_repo_path(remote_files, dataset_name, remote_path)
-    if qc_path is not None:
-        qc_filename = f"{qc_path}/meta/qc.jsonl"
-        path = hf_hub_download(
-            repo_id=repo_id,
-            repo_type="dataset",
-            filename=qc_filename,
-            revision=revision,
-            token=token,
-        )
-        target = dataset_dir / "meta" / "qc.jsonl"
-        local = target.read_bytes() if target.is_file() else b""
-        merged = merge_qc(local, Path(path).read_bytes())
-        if merged != local:
-            write_qc(target, merged)
-        return {
-            "repo_id": repo_id,
-            "dataset": dataset_name,
-            "path": str(target),
-            "source": "qc.jsonl",
-        }
-
-    # Older datasets keep quality metadata in episodes.jsonl instead of qc.jsonl.
-    episodes_filename = f"{remote_path}/meta/episodes.jsonl"
-    target = dataset_dir / "meta" / "episodes.jsonl"
-    if not target.is_file():
-        return {
-            "repo_id": repo_id,
-            "dataset": dataset_name,
-            "source": "none",
-            "message": f"QC is not published for {dataset_name}",
-        }
+    qc_path = qc_repo_path(remote_files, remote_path)
+    if qc_path is None:
+        raise FileNotFoundError(f"QC is not published for {dataset_name}")
     path = hf_hub_download(
         repo_id=repo_id,
         repo_type="dataset",
-        filename=episodes_filename,
+        filename=f"{qc_path}/meta/qc.jsonl",
         revision=revision,
         token=token,
     )
-    remote_rows = [
-        json.loads(line)
-        for line in Path(path).read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
-    remote_by_episode = {int(row["episode_index"]): row for row in remote_rows}
-    local_rows = [
-        json.loads(line) for line in target.read_text(encoding="utf-8").splitlines() if line.strip()
-    ]
-    fields = ("quality", "quality_issues", "qc_verdict", "qc_note", "qc_reason")
-    updated = 0
-    for row in local_rows:
-        remote = remote_by_episode.get(int(row.get("episode_index", -1)))
-        if remote is None:
-            continue
-        available = {key: remote[key] for key in fields if key in remote}
-        if available:
-            row.update(available)
-            updated += 1
-    if not updated:
-        return {
-            "repo_id": repo_id,
-            "dataset": dataset_name,
-            "source": "none",
-            "message": f"No matching QC metadata is published for {dataset_name}",
-        }
-    with tempfile.NamedTemporaryFile(
-        "w", encoding="utf-8", dir=target.parent, prefix=".episodes-qc-", delete=False
-    ) as handle:
-        temporary = Path(handle.name)
-        for row in local_rows:
-            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
-    temporary.replace(target)
+    target = dataset_dir / "meta" / "qc.jsonl"
+    local = target.read_bytes() if target.is_file() else b""
+    merged = merge_qc(local, Path(path).read_bytes())
+    if merged != local:
+        write_qc(target, merged)
     return {
         "repo_id": repo_id,
         "dataset": dataset_name,
         "path": str(target),
-        "source": "episodes.jsonl",
-        "episodes": str(updated),
+        "source": "qc.jsonl",
     }

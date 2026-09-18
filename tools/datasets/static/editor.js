@@ -15,6 +15,7 @@ import {
   navigateQcSlot,
   requireBatch,
   validateDraft,
+  visibleBatches,
 } from "./entity-ui.js";
 import {
   configureDatasetTransfer,
@@ -41,18 +42,7 @@ const LOCALE_TABLE = {
   "actions.importObjects": ["批量导入物体 CSV（可同时选择照片）", "Import objects CSV (photos optional)"],
   "actions.exportPlan": ["导出计划压缩包", "Export plan ZIP"],
   "actions.publishTaskSet": ["发布全部任务集到 HF", "Publish all task sets to HF"],
-  "sync.title": ["数据传输", "Data transfer"],
-  "sync.taskSet": ["下载任务集", "Download task set"],
-  "sync.assets": ["上传资源", "Upload assets"],
-  "sync.dataset": ["下载数据集", "Download dataset"],
-  "sync.uploadQc": ["上传质检结果", "Upload QC"],
-  "sync.downloadQc": ["下载质检结果", "Download QC"],
   "sync.tasksPublished": ["已发布 {n} 个任务集", "Published {n} task sets"],
-  "sync.status": ["状态", "Status"],
-  "sync.idle": ["就绪", "Ready"],
-  "sync.running": ["正在处理", "In progress"],
-  "sync.done": ["已完成", "Completed"],
-  "sync.failed": ["同步失败", "Sync failed"],
   "tabs.aria": ["数据管理", "Data management"],
   "tabs.dashboard": ["看板", "Dashboard"],
   "tabs.qc": ["质检", "QC"],
@@ -186,7 +176,7 @@ const LOCALE_TABLE = {
   "dm.action.refresh": ["刷新云端并校验", "Refresh cloud and verify"],
   "dm.action.verify": ["校验", "Verify"],
   "dm.action.auto_qc": ["自动质检", "Automatic QC"],
-  "dm.autoQcTitle": ["对选中的数据集检查静止帧与相机离线并写入质检结论；未选择时检查全部数据集", "Check static frames and offline cameras on the selected datasets and write the verdicts; checks every dataset when nothing is selected"],
+  "dm.autoQcTitle": ["对选中的数据集检查静止帧与相机离线并写入质检结论", "Check static frames and offline cameras on the selected datasets and write the verdicts"],
   "dm.action.upload_data": ["上传数据", "Upload data"],
   "dm.action.download_data": ["下载数据", "Download data"],
   "dm.downloadDataTitle": ["把选中的数据从云端下载到本地；本地已有的质检记录按更新时间合并，不会被覆盖", "Download the selected datasets into the local directories; existing local QC records are merged by update time instead of being overwritten"],
@@ -194,7 +184,7 @@ const LOCALE_TABLE = {
   "dm.action.download_qc": ["下载 QC", "Download QC"],
   "dm.action.upload_task": ["上传任务", "Upload task"],
   "dm.action.download_task": ["下载任务", "Download task"],
-  "dm.refreshTitle": ["刷新所有数据集的云端信息并校验数据、任务和 QC", "Refresh every dataset from the cloud and verify data, tasks, and QC"],
+  "dm.refreshTitle": ["刷新选中数据集的云端信息并校验数据、任务和 QC", "Refresh the selected datasets from the cloud and verify data, tasks, and QC"],
   "dm.search": ["搜索数据集", "Search datasets"],
   "dm.robotFilter": ["按机器人过滤", "Filter by robot"],
   "dm.allRobots": ["全部机器人", "All robots"],
@@ -433,10 +423,7 @@ function t(key) {
 }
 
 function qcState(slot) {
-  if (slot && slot.qc_state) return slot.qc_state;
-  if (!slot || slot.state === "pending") return "pending";
-  if (slot.state === "repair") return "failed";
-  return slot.episode && slot.episode.qc_verdict === "pass" ? "passed" : "unreviewed";
+  return slot && slot.qc_state ? slot.qc_state : "pending";
 }
 
 function applyLocale() {
@@ -697,7 +684,7 @@ function retainSelections() {
 function renderBatchSelect() {
   const select = $("batch-select");
   select.replaceChildren(new Option(t("filters.chooseBatch"), ""));
-  const batches = app.state.batches;
+  const batches = visibleBatches();
   for (const batch of batches) {
     const label = batch.batch_kind === "unmatched"
       ? "unmatched · " + batch.robot_type
@@ -720,35 +707,6 @@ function renderBatchSelect() {
   }
   const publish = $("publish-task-set");
   if (publish) publish.disabled = !app.batch;
-  for (const id of ["hf-publish-task-set", "hf-sync-task-set"]) {
-    const control = $(id);
-    if (control) control.disabled = !app.batch;
-  }
-  const download = $("hf-download-dataset");
-  if (download) download.disabled = !app.batch;
-  for (const id of ["hf-upload-qc", "hf-download-qc"]) {
-    const control = $(id);
-    if (control) control.disabled = !app.batch;
-  }
-}
-
-async function runHfSyncAction(path, message) {
-  const status = $("hf-sync-status");
-  const fill = $("hf-sync-progress-fill");
-  const bar = $("hf-sync-progress");
-  if (status) status.textContent = `${t(message)} · ${t("sync.running")}`;
-  if (bar) { bar.classList.add("indeterminate"); bar.removeAttribute("aria-valuenow"); }
-  try {
-    const result = await api(path, { method: "POST" });
-    if (fill) fill.style.width = "100%";
-    if (bar) { bar.classList.remove("indeterminate"); bar.setAttribute("aria-valuenow", "100"); }
-    if (status) status.textContent = `${t(message)} · ${t("sync.done")}`;
-    await loadState(false, true);
-  } catch (error) {
-    if (status) status.textContent = `${t("sync.failed")}: ${error.message}`;
-    if (fill) fill.style.width = "0%";
-    if (bar) { bar.classList.remove("indeterminate"); bar.setAttribute("aria-valuenow", "0"); }
-  }
 }
 
 function renderRobotSelect() {
@@ -762,25 +720,26 @@ function renderRobotSelect() {
 
 function updateSummary() {
   const detailsLoaded = Boolean(app.batch && app.state.plans.length);
+  const batches = visibleBatches();
   const slots = detailsLoaded
     ? app.state.tasks.reduce((sum, task) => sum + task.slots.length, 0)
-    : app.state.batches.reduce((sum, batch) => sum + Number(batch.episodes || 0), 0);
+    : batches.reduce((sum, batch) => sum + Number(batch.episodes || 0), 0);
   const taskCount = detailsLoaded
     ? app.state.tasks.length
-    : app.state.batches.reduce((sum, batch) => sum + Number(batch.tasks || 0), 0);
+    : batches.reduce((sum, batch) => sum + Number(batch.tasks || 0), 0);
   const collected = detailsLoaded
     ? app.state.tasks.reduce(
       (sum, task) => sum + task.slots.filter((slot) => qcState(slot) !== "pending").length,
       0,
     )
-    : app.state.batches.reduce((sum, batch) => sum + Number(batch.collected || 0), 0);
+    : batches.reduce((sum, batch) => sum + Number(batch.collected || 0), 0);
   $("dataset-path").textContent = app.state.plans_root;
   $("dataset-dot").className = "status-dot " + (app.state.issues.length ? "warning" : "ready");
   $("task-count").textContent = taskCount;
   $("object-count").textContent = app.state.objects.length;
   $("issue-count").textContent = app.state.issues.length;
   const metricBatches = $("metric-batches");
-  if (metricBatches) metricBatches.textContent = app.state.batches.length;
+  if (metricBatches) metricBatches.textContent = batches.length;
   const metricTasks = $("metric-tasks");
   if (metricTasks) metricTasks.textContent = taskCount;
   const metricObjects = $("metric-objects");
@@ -793,7 +752,7 @@ function updateSummary() {
   }
   const pending = detailsLoaded
     ? app.state.tasks.reduce(
-      (sum, task) => sum + task.slots.filter((slot) => ["pending", "failed"].includes(slot.state)).length,
+      (sum, task) => sum + task.slots.filter((slot) => ["pending", "failed"].includes(qcState(slot))).length,
       0,
     )
     : null;
@@ -1015,7 +974,7 @@ function bindEvents() {
     await loadState();
   });
   const navigateBatch = async (offset) => {
-    const batches = app.state ? app.state.batches : [];
+    const batches = app.state ? visibleBatches() : [];
     if (!batches.length) return;
     const currentIndex = batches.findIndex((batch) => batch.batch_id === app.batch);
     const nextIndex = currentIndex < 0
@@ -1060,18 +1019,6 @@ function bindEvents() {
     } finally {
       control.disabled = false;
     }
-  });
-  $("hf-publish-task-set").addEventListener("click", () =>
-    runHfSyncAction("/api/hf/task_sets/publish", "actions.publishTaskSet"));
-  $("hf-sync-assets").addEventListener("click", () => runHfSyncAction("/api/hf/assets/publish", "sync.assets"));
-  $("hf-download-dataset").addEventListener("click", () => {
-    if (app.batch) runHfSyncAction(`/api/batches/${encodeURIComponent(app.batch)}/hf/download`, "sync.dataset");
-  });
-  $("hf-upload-qc").addEventListener("click", () => {
-    if (app.batch) runHfSyncAction(`/api/batches/${encodeURIComponent(app.batch)}/hf/qc/upload`, "sync.uploadQc");
-  });
-  $("hf-download-qc").addEventListener("click", () => {
-    if (app.batch) runHfSyncAction(`/api/batches/${encodeURIComponent(app.batch)}/hf/qc/download`, "sync.downloadQc");
   });
   $("import-trigger").addEventListener("click", () => {
     if (requireBatch()) $("import-file").click();

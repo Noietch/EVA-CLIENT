@@ -60,18 +60,6 @@
               </div>
             </div>
           </section>
-          <section class="dataset-sync-card" aria-label="Dataset synchronization">
-                <div class="collection-panel-head"><span class="step-badge">1</span><span data-i18n="sync.title">数据传输</span></div>
-                <div class="dataset-sync-actions">
-                  <button class="button" id="hf-sync-assets">上传 assets</button>
-                  <button class="button" id="hf-publish-task-set" disabled>上传 tasks</button>
-                  <button class="button" id="hf-upload-qc" disabled>上传 QC</button>
-                  <button class="button primary" id="hf-download-dataset" disabled>下载数据集</button>
-                  <button class="button" id="hf-download-qc" disabled>下载 QC</button>
-                </div>
-                <div class="collect-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="hf-sync-progress"><i id="hf-sync-progress-fill"></i></div>
-                <div class="kv"><span class="k" data-i18n="sync.status">状态</span><span class="v" id="hf-sync-status" data-i18n="sync.idle">就绪</span></div>
-          </section>
           <section class="collection-qc-panel" id="collection-qc-panel" aria-label="Quality check slot overview" data-i18n-aria-label="qc.slotOverview">
             <div class="qc-loading-indicator" id="qc-loading-indicator" aria-live="polite" hidden>
               <div class="qc-loading-card"><span class="qc-loading-spinner" aria-hidden="true"></span><strong data-i18n="qc.loadingState">正在加载质检数据</strong><small data-i18n="qc.loadingHint">正在读取批次、槽位和质检状态…</small></div>
@@ -157,14 +145,14 @@
         <section class="dm-panel" id="dm-panel">
           <div class="dm-panel-head"><h2 data-i18n="dm.title">数据集管理</h2><div class="dm-selection-summary"><span id="dm-selected" data-i18n="dm.selectedEmpty">已选 0</span><button class="btn" id="dm-clear" disabled data-i18n="dm.clear">清空选择</button></div></div>
           <div class="dm-toolbar">
-            <button class="btn" data-dm-action="auto_qc" data-i18n-title="dm.autoQcTitle" title="对选中的数据播放静止帧与相机离线检查并写入质检结论；未选择时检查全部数据集" data-i18n="dm.action.auto_qc">自动质检</button>
+            <button class="btn" data-dm-action="auto_qc" data-i18n-title="dm.autoQcTitle" title="对选中的数据播放静止帧与相机离线检查并写入质检结论" data-i18n="dm.action.auto_qc">自动质检</button>
             <button class="btn" data-dm-action="download_qc" data-i18n="dm.action.download_qc">下载 QC</button>
             <button class="btn" data-dm-action="upload_qc" data-i18n="dm.action.upload_qc">上传 QC</button>
             <button class="btn" data-dm-action="upload_data" data-i18n="dm.action.upload_data">上传数据</button>
             <button class="btn" data-dm-action="download_data" data-i18n="dm.action.download_data" data-i18n-title="dm.downloadDataTitle" title="把选中的数据从云端下载到本地；本地已有的质检记录按更新时间合并，不会被覆盖">下载数据</button>
             <button class="btn" data-dm-action="upload_task" data-i18n="dm.action.upload_task">上传任务</button>
             <button class="btn" data-dm-action="download_task" data-i18n="dm.action.download_task">下载任务</button>
-            <button class="btn" id="dm-refresh" data-i18n-title="dm.refreshTitle" title="刷新所有数据集的云端信息并校验数据、任务和 QC" data-i18n="dm.action.refresh">刷新云端并校验</button>
+            <button class="btn" id="dm-refresh" data-i18n-title="dm.refreshTitle" title="刷新选中数据集的云端信息并校验数据、任务和 QC" data-i18n="dm.action.refresh">刷新云端并校验</button>
           </div>
           <div class="dm-toolbar">
             <input id="dm-search" type="search" data-i18n-placeholder="dm.search" placeholder="搜索数据集" data-i18n-aria-label="dm.search" aria-label="搜索数据集">

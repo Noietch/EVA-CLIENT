@@ -285,6 +285,20 @@ class LeRobotDatasetIO:
         replacement.replace(qc_path)
         return True
 
+    def drop_qc(self, episode: int) -> bool:
+        """Forget one episode's QC row so a fresh take starts unreviewed."""
+        qc_path = self.root / "meta" / "qc.jsonl"
+        if not qc_path.exists():
+            return False
+        rows = [json.loads(line) for line in qc_path.read_text().splitlines() if line.strip()]
+        kept = [row for row in rows if int(row.get("episode_index", -1)) != episode]
+        if len(kept) == len(rows):
+            return False
+        replacement = qc_path.with_suffix(f"{qc_path.suffix}.qc.tmp")
+        replacement.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in kept))
+        replacement.replace(qc_path)
+        return True
+
     def read_annotation(self, episode: int) -> str:
         """Read an episode's stored language annotation from meta/episodes.jsonl.
 

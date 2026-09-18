@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import sqlite3
 import zipfile
 from pathlib import Path
 
@@ -245,12 +246,28 @@ def test_reference_conflicts_and_invalid_plan_do_not_mutate(tmp_path):
     assert (plans / BATCH / "tasks.csv").read_bytes() == before
 
 
+def test_corrupt_dataset_cache_is_rebuilt_instead_of_disabling_caching(tmp_path):
+    client, plans, assets, collection = _workspace(tmp_path)
+    assert client.get("/api/state").status_code == 200
+    cache = collection / ".dataset_cache.sqlite3"
+    assert cache.is_file()
+    cache.write_bytes(b"not a database")
+
+    rebuilt = create_app(plans, assets, collection)
+    rebuilt.config["TESTING"] = True
+    response = rebuilt.test_client().get("/api/state")
+
+    assert response.status_code == 200
+    assert response.get_json()["all_batches"]
+    assert sqlite3.connect(cache).execute("SELECT COUNT(*) FROM data_cache").fetchone()[0] >= 0
+
+
 def test_episode_matches_slot_and_review_returns_series(tmp_path):
     client, _, _, collection = _workspace(tmp_path)
     _episode_dataset(collection)
     state = client.get("/api/state?batch=" + BATCH).get_json()
     task = state["tasks"][0]
-    assert task["counts"] == {"complete": 1, "pending": 1, "repair": 0}
+    assert task["counts"] == {"pending": 1, "unreviewed": 1, "passed": 0, "failed": 0}
     assert task["slots"][0]["episode"]["episode_index"] == 7
     assert task["slots"][1]["episode"] is None
 
