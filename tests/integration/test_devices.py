@@ -19,7 +19,7 @@ from core.config import load_config
 from core.devices import REPOSITORY_ROOT, DeviceWorkspace
 from core.devices.service import DeviceProcesses, DeviceService
 from core.registry import ROBOT_REGISTRY
-from tests.integration.web._harness import console_config, serve_console
+from tests.integration._harness import console_config, serve_console
 
 pytestmark = pytest.mark.integration
 
@@ -187,6 +187,22 @@ def test_robot_hardware_defaults_and_saved_overrides_preserve_business_config(tm
     assert restored.configure(raw).robot.type == "agibot_g2"
     with pytest.raises(ValueError, match="not supported"):
         workspace.resolve(dict(robot="agibot_g2", teleop="yam_leader", camera="none"))
+
+
+def test_every_webxr_robot_exposes_native_pico_control(tmp_path):
+    workspace = DeviceWorkspace(tmp_path / "workstation.yaml")
+    for robot, options in sorted(workspace.hardware.devices.items()):
+        teleop = options["teleop"]
+        if "vr_webxr" not in teleop:
+            continue
+        assert "eva_pico" in teleop, robot
+        selected = dict(robot=robot, teleop="eva_pico", camera="none")
+        native = workspace.resolve(selected)["teleop"]["client"]
+        selected["teleop"] = "vr_webxr"
+        browser = workspace.resolve(selected)["teleop"]["client"]
+        np.testing.assert_array_equal(
+            native["base_from_xr_rotation"], browser["base_from_xr_rotation"]
+        )
 
 
 def test_disabled_cameras_use_camera_ids_independently_of_dataset_column_names(tmp_path):

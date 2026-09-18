@@ -3,17 +3,16 @@
 from __future__ import annotations
 
 import json
-import math
-import re
 import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from core.config import ConfigDict
+from core.utils.qc import qc_state
+from core.utils.scene_plan import plan_slots
 
 _STATE_LOCK = threading.RLock()
-_STATE_FILE = "collection_slots.json"
 
 
 @dataclass(frozen=True)
@@ -44,102 +43,6 @@ class CollectionSlotState:
     selected_manually: bool = False
 
 
-def _scene_label(scene: dict[str, Any]) -> str:
-    labels: list[str] = []
-    for placement in scene.get("placements") or []:
-        name = str(placement.get("name") or "").strip()
-        positions = placement.get("group_position_ids") or [placement.get("position_id")]
-        position_label = "/".join(str(value) for value in positions if value)
-        label = f"{name} · {position_label}" if name and position_label else name
-        if label and label not in labels:
-            labels.append(label)
-    return " / ".join(labels) or str(scene.get("scene_id") or "Scene")
-
-
-def _position_sort_keys(scene_plan: dict[str, Any]) -> dict[str, tuple[Any, ...]]:
-    """Build row-major layout keys without inferring spatial order from position IDs."""
-    keys: dict[str, tuple[Any, ...]] = {}
-    for index, position in enumerate(scene_plan.get("positions") or []):
-        if not isinstance(position, dict):
-            continue
-        position_id = str(position.get("position_id") or "").strip()
-        if not position_id:
-            continue
-        try:
-            x = float(position["x"])
-            y = float(position["y"])
-        except (KeyError, TypeError, ValueError):
-            x = y = math.nan
-        if math.isfinite(x) and math.isfinite(y):
-            keys[position_id] = (0, y, x, index, position_id)
-        else:
-            # An uncalibrated point still has a stable authored order, but it is
-            # deliberately ranked after points with usable coordinates.
-            keys[position_id] = (1, index, position_id)
-    return keys
-
-
-def _task_object_names(task: dict[str, Any]) -> list[str]:
-    value = task.get("operation_object") or task.get("operation_objects") or ""
-    return [item.strip() for item in str(value).split("/") if item.strip()]
-
-
-def _task_hand_priority(task: dict[str, Any]) -> int:
-    """Prefer the first-mentioned operating hand: left, then right, then unknown."""
-    text = " ".join(str(task.get(field) or "") for field in ("prompt_en", "prompt_zh"))
-    match = re.search(r"left\s+(?:arm|hand)|right\s+(?:arm|hand)|左手|左臂|右手|右臂", text, re.I)
-    if match is None:
-        return 2
-    return 0 if match.group(0).lower().startswith(("left", "左")) else 1
-
-
-def _placement_matches_reference(placement: dict[str, Any], reference: str) -> bool:
-    reference = str(reference).strip()
-    if not reference:
-        return False
-    aliases = {
-        str(placement.get(field) or "").strip()
-        for field in ("object_id", "name", "name_zh", "name_en")
-    }
-    aliases.discard("")
-    return any(reference == alias or reference in alias or alias in reference for alias in aliases)
-
-
-def _task_spatial_sort_key(
-    task: dict[str, Any],
-    scene: dict[str, Any],
-    position_keys: dict[str, tuple[Any, ...]],
-    task_index: int,
-) -> tuple[Any, ...]:
-    """Return the scene task's hand-first, then row-major object ordering key."""
-    references = [
-        str(value).strip() for value in task.get("operation_object_ids") or [] if str(value).strip()
-    ]
-    references.extend(_task_object_names(task))
-    placements = scene.get("placements") or []
-    matched_keys: list[tuple[Any, ...]] = []
-    for reference in references:
-        matching_positions: list[tuple[Any, ...]] = []
-        for placement in placements:
-            if not isinstance(placement, dict):
-                continue
-            object_id = str(placement.get("object_id") or "").strip()
-            if reference != object_id and not _placement_matches_reference(placement, reference):
-                continue
-            matching_positions.extend(
-                position_keys[position_id]
-                for position_id in placement.get("group_position_ids")
-                or placement.get("position_ids")
-                or [placement.get("position_id")]
-                if position_id in position_keys
-            )
-        if matching_positions:
-            matched_keys.append(min(matching_positions))
-    if matched_keys:
-        return (0, _task_hand_priority(task), tuple(matched_keys), task_index)
-    return (0, _task_hand_priority(task), (), task_index)
-
-
 def build_collection_slots(
     config: ConfigDict,
     scene_plan: dict[str, Any],
@@ -148,57 +51,23 @@ def build_collection_slots(
     """Expand a dataset plan into stable slots in operator workflow order."""
     entries = list(config.collection.tasks.get(dataset) or [])
     bindings = (config.collection.get("task_prompt_bindings") or {}).get(dataset) or {}
-    prompt_indices: dict[str, int] = {}
-    for index, entry in enumerate(entries):
-        if isinstance(entry, (list, tuple)) and entry:
-            prompt_indices.setdefault(str(entry[0]), index)
-
-    tasks = list(scene_plan.get("tasks") or [])
-    position_keys = _position_sort_keys(scene_plan)
-    slots: list[CollectionSlot] = []
-    for scene in scene_plan.get("scenes") or []:
-        scene_id = str(scene.get("scene_id") or "").strip()
-        if not scene_id:
-            continue
-        scene_tasks = [
-            (task_index, task)
-            for task_index, task in enumerate(tasks)
-            if scene_id in list(task.get("scene_ids") or [])
-        ]
-        scene_tasks.sort(
-            key=lambda item: _task_spatial_sort_key(item[1], scene, position_keys, item[0])
+    slots = [
+        CollectionSlot(
+            slot_id=slot.slot_id,
+            ordinal=slot.ordinal,
+            dataset=dataset,
+            task_index=slot.task_index,
+            task_id=slot.task_id,
+            task=slot.task,
+            task_zh=slot.task_zh,
+            scene_id=slot.scene_id,
+            scene_label=slot.scene_label,
+            round_index=slot.round_index,
+            round_total=slot.round_total,
         )
-        for task_index, task in scene_tasks:
-            task_id = str(task.get("task_id") or "")
-            if bindings and task_id not in bindings:
-                continue
-            prompt = str(bindings.get(task_id) or task.get("prompt_en") or "").strip()
-            task_index = prompt_indices.get(prompt)
-            if task_index is None:
-                continue
-            scene_ids = list(task.get("scene_ids") or [])
-            scene_index = scene_ids.index(scene_id)
-            counts = list(task.get("scene_epsiodes_count") or [])
-            round_total = int(counts[scene_index]) if scene_index < len(counts) else 0
-            task_id = str(task.get("task_id") or prompt).strip()
-            for round_index in range(max(0, round_total)):
-                slot_id = f"{task_id}:{scene_id}:{round_index}"
-                slots.append(
-                    CollectionSlot(
-                        slot_id=slot_id,
-                        ordinal=len(slots),
-                        dataset=dataset,
-                        task_index=task_index,
-                        task_id=task_id,
-                        task=prompt,
-                        task_zh=str(task.get("prompt_zh") or "").strip(),
-                        scene_id=scene_id,
-                        scene_label=_scene_label(scene),
-                        round_index=round_index,
-                        round_total=round_total,
-                    )
-                )
-    if slots or tasks:
+        for slot in plan_slots(scene_plan, entries, bindings)
+    ]
+    if slots or scene_plan.get("tasks"):
         return slots
 
     # Inline collection configs do not have scene.csv/tasks.csv, but they still
@@ -234,10 +103,11 @@ def build_collection_slots(
     return slots
 
 
-def load_slot_state(dataset_dir: Path | None) -> CollectionSlotState:
-    if dataset_dir is None:
+def load_slot_state(state_path: Path | None) -> CollectionSlotState:
+    """Read the console's slot selection; it stays machine-local."""
+    if state_path is None:
         return CollectionSlotState([])
-    path = dataset_dir / "meta" / _STATE_FILE
+    path = Path(state_path)
     with _STATE_LOCK:
         try:
             payload = json.loads(path.read_text())
@@ -258,8 +128,8 @@ def load_slot_state(dataset_dir: Path | None) -> CollectionSlotState:
     )
 
 
-def save_slot_state(dataset_dir: Path, state: CollectionSlotState) -> None:
-    path = dataset_dir / "meta" / _STATE_FILE
+def save_slot_state(state_path: Path, state: CollectionSlotState) -> None:
+    path = Path(state_path)
     with _STATE_LOCK:
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_suffix(f"{path.suffix}.tmp")
@@ -279,15 +149,16 @@ def save_slot_state(dataset_dir: Path, state: CollectionSlotState) -> None:
         temporary.replace(path)
 
 
-def _episode_outcome(episode: dict[str, Any]) -> str:
-    if str(episode.get("status") or "") != "saved":
+def episode_qc_state(episode: dict[str, Any] | None) -> str:
+    """Match datasets tools' four QC states, independently of capture selection."""
+    if not episode or episode.get("status") != "saved":
         return "pending"
-    if (
-        str(episode.get("quality") or "green").lower() == "red"
-        or str(episode.get("qc_verdict") or "").lower() == "fail"
-    ):
-        return "rejected"
-    return "usable"
+    return qc_state(episode.get("qc_verdict"), episode.get("quality"))
+
+
+def _episode_outcome(episode: dict[str, Any]) -> str:
+    state = episode_qc_state(episode)
+    return "rejected" if state == "failed" else "pending" if state == "pending" else "usable"
 
 
 def _episode_indices(
@@ -350,7 +221,16 @@ def collection_slot_status(
     rows: list[dict[str, Any]] = []
     unresolved_regular: list[dict[str, Any]] = []
     unresolved_deferred: dict[str, dict[str, Any]] = {}
-    counts = {"complete": 0, "rejected": 0, "deferred": 0, "pending": 0}
+    counts = {
+        "complete": 0,
+        "rejected": 0,
+        "deferred": 0,
+        "pending": 0,
+        "passed": 0,
+        "unreviewed": 0,
+        "failed": 0,
+        "qc_pending": 0,
+    }
 
     for slot in slots:
         episode = episode_by_slot.get(slot.slot_id) or legacy_episode_by_target.get(
@@ -374,7 +254,9 @@ def collection_slot_status(
         else:
             state = "pending"
             counts["pending"] += 1
-        row = {**vars(slot), "state": state, "episode": episode}
+        qc_state = episode_qc_state(episode)
+        counts["qc_pending" if qc_state == "pending" else qc_state] += 1
+        row = {**vars(slot), "state": state, "qc_state": qc_state, "episode": episode}
         rows.append(row)
         if state not in {"complete", "saving"}:
             if state == "deferred":
@@ -431,7 +313,7 @@ def collection_slot_status(
 
 
 def defer_active_slot(
-    dataset_dir: Path,
+    state_path: Path,
     active_slot_id: str,
     state: CollectionSlotState,
 ) -> CollectionSlotState:
@@ -439,12 +321,12 @@ def defer_active_slot(
     ordered = [slot_id for slot_id in state.deferred if slot_id != active_slot_id]
     ordered.append(active_slot_id)
     updated = CollectionSlotState(ordered, active_slot_id)
-    save_slot_state(dataset_dir, updated)
+    save_slot_state(state_path, updated)
     return updated
 
 
 def select_collection_slot(
-    dataset_dir: Path,
+    state_path: Path,
     slot_id: str,
     state: CollectionSlotState,
     *,
@@ -453,5 +335,5 @@ def select_collection_slot(
 ) -> CollectionSlotState:
     """Select a capture target, optionally retaining a completed episode for retake."""
     updated = CollectionSlotState(state.deferred, slot_id, episode_index, manual)
-    save_slot_state(dataset_dir, updated)
+    save_slot_state(state_path, updated)
     return updated

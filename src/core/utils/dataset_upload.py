@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import datetime as dt
 import json
+import os
 import threading
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -98,54 +99,70 @@ class DatasetUploadPlan:
         return sum(plan.files_to_delete for _, plan in self.backends)
 
 
-def _quality_split_marker(local_dir: Path) -> tuple[Path, dict[str, Any]]:
-    marker_path = local_dir / "meta" / "quality_split.json"
-    try:
-        marker = json.loads(marker_path.read_text())
-    except (OSError, ValueError) as error:
-        raise ValueError("accepted dataset is missing a valid quality split marker") from error
-    if not isinstance(marker, dict) or marker.get("subset") != "accepted":
-        raise ValueError("accepted dataset is missing a valid quality split marker")
-    return marker_path, marker
+def _episode_indices(dataset_dir: Path) -> list[int]:
+    path = dataset_dir / "meta" / "episodes.jsonl"
+    return sorted(
+        int(json.loads(line)["episode_index"])
+        for line in path.read_text().splitlines()
+        if line.strip()
+    )
 
 
-def _marker_signature(path: Path) -> dict[str, int]:
-    stat = path.stat()
+def _export_signature(local_dir: Path) -> dict[str, int]:
+    """Cheap fingerprint of an export so a receipt cannot outlive its content.
+
+    Exporting publishes a new directory, and every file the export gains or
+    loses touches the directory holding it, so directory identity plus each
+    directory's mtime and entry count identify the content without statting
+    every recorded file. ``mtime_ns`` is the sum over the export's directories.
+    """
+    if not (local_dir / "meta" / "episodes.jsonl").is_file():
+        return {}
+    inode = int(local_dir.stat().st_ino)
+    directories = 0
+    entries = 0
+    mtime_ns = 0
+    for parent, directory_names, file_names in os.walk(local_dir):
+        directories += 1
+        entries += len(directory_names) + len(file_names)
+        mtime_ns += Path(parent).stat().st_mtime_ns
     return {
-        "inode": int(stat.st_ino),
-        "mtime_ns": int(stat.st_mtime_ns),
-        "size": int(stat.st_size),
+        "inode": inode,
+        "directories": directories,
+        "entries": entries,
+        "mtime_ns": mtime_ns,
     }
+
+
+def upload_receipt_path(local_dir: Path) -> Path:
+    """Receipts sit beside the export, one per exported copy."""
+    local_root = Path(local_dir).resolve()
+    return local_root.parent / f"{local_root.name}_{_UPLOAD_RECEIPT_NAME}"
 
 
 def record_dataset_upload_receipt(
     local_dir: Path,
     *,
+    source_dir: Path,
     destination: str,
     remote_dir: str,
 ) -> Path:
-    """Persist the accepted source episodes proven present at an upload target."""
+    """Persist which source episodes an uploaded export was proven to hold."""
     local_root = Path(local_dir).resolve()
-    marker_path, marker = _quality_split_marker(local_root)
-    source_value = str(marker.get("source_dir") or "").strip()
-    source_indices = marker.get("source_episode_indices") or []
-    if (
-        not source_value
-        or not isinstance(source_indices, list)
-        or any(type(value) is not int or value < 0 for value in source_indices)
-    ):
-        raise ValueError("accepted dataset has an invalid quality split marker")
-    receipt_path = local_root.parent / _UPLOAD_RECEIPT_NAME
+    source_root = Path(source_dir).resolve()
+    if not (local_root / "meta" / "episodes.jsonl").is_file():
+        raise ValueError(f"exported dataset is missing meta/episodes.jsonl: {local_root}")
+    receipt_path = upload_receipt_path(local_root)
     temporary = receipt_path.with_suffix(f"{receipt_path.suffix}.tmp")
     temporary.write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": 3,
                 "uploaded_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
-                "source_dir": str(Path(source_value).resolve()),
-                "source_episode_indices": source_indices,
-                "dataset_format": str(marker.get("dataset_format") or local_root.parent.name),
-                "accepted_marker": _marker_signature(marker_path),
+                "source_dir": str(source_root),
+                "source_episode_indices": _episode_indices(source_root),
+                "dataset_format": local_root.name.removeprefix(f"{source_root.name}_"),
+                "export_signature": _export_signature(local_root),
                 "destination": str(destination),
                 "remote_dir": str(remote_dir),
             },
@@ -158,40 +175,40 @@ def record_dataset_upload_receipt(
     return receipt_path
 
 
-def uploaded_source_episode_indices(raw_dir: Path) -> set[int]:
-    """Return source episode indices backed by current accepted upload receipts."""
-    raw_root = Path(raw_dir).resolve()
-    export_root = raw_root.parent / "export"
+def uploaded_source_episode_indices(dataset_dir: Path) -> set[int]:
+    """Return source episode indices backed by current upload receipts."""
+    dataset_root = Path(dataset_dir).resolve()
     uploaded: set[int] = set()
-    for receipt_path in sorted(export_root.glob(f"*/{_UPLOAD_RECEIPT_NAME}")):
-        accepted_dir = receipt_path.parent / "accepted"
-        uploaded.update(uploaded_source_episode_indices_for_export(accepted_dir, raw_root))
+    for receipt_path in sorted(
+        dataset_root.parent.glob(f"{dataset_root.name}_*_{_UPLOAD_RECEIPT_NAME}")
+    ):
+        export_name = receipt_path.name.removesuffix(f"_{_UPLOAD_RECEIPT_NAME}")
+        uploaded.update(
+            uploaded_source_episode_indices_for_export(
+                receipt_path.parent / export_name, dataset_root
+            )
+        )
     return uploaded
 
 
 def uploaded_source_episode_indices_for_export(
     local_dir: Path,
-    raw_dir: Path | None = None,
+    dataset_dir: Path | None = None,
 ) -> set[int]:
-    """Return source indices proven uploaded for one current accepted export."""
+    """Return source indices proven uploaded for one current export copy."""
     local_root = Path(local_dir).resolve()
-    marker_path = local_root / "meta" / "quality_split.json"
-    receipt_path = local_root.parent / _UPLOAD_RECEIPT_NAME
+    receipt_path = upload_receipt_path(local_root)
     try:
         receipt = json.loads(receipt_path.read_text())
         if not isinstance(receipt, dict):
             return set()
-        _, marker = _quality_split_marker(local_root)
         receipt_indices = receipt.get("source_episode_indices")
-        marker_indices = marker.get("source_episode_indices") or []
-        marker_source = Path(str(marker.get("source_dir") or "")).resolve()
-        expected_source = Path(raw_dir).resolve() if raw_dir is not None else marker_source
+        receipt_source = Path(str(receipt.get("source_dir") or "")).resolve()
+        expected_source = Path(dataset_dir).resolve() if dataset_dir is not None else receipt_source
         if (
-            int(receipt.get("schema_version", 0)) != 1
-            or marker_source != expected_source
-            or Path(str(receipt.get("source_dir") or "")).resolve() != expected_source
-            or receipt.get("accepted_marker") != _marker_signature(marker_path)
-            or receipt_indices != marker_indices
+            int(receipt.get("schema_version", 0)) != 3
+            or receipt_source != expected_source
+            or receipt.get("export_signature") != _export_signature(local_root)
             or not isinstance(receipt_indices, list)
             or any(type(value) is not int or value < 0 for value in receipt_indices)
         ):

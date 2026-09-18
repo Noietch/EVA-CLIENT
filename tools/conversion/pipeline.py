@@ -1,7 +1,12 @@
+"""Convert one recorded dataset into one output dataset per format.
+
+QC verdicts are not part of the conversion: the dataset carries them in
+``meta/qc.jsonl``, so a consumer filters the exported copy itself.
+"""
+
 from __future__ import annotations
 
 import dataclasses
-import json
 import shutil
 import tempfile
 from collections.abc import Callable
@@ -9,17 +14,14 @@ from importlib import import_module
 from pathlib import Path
 from typing import Any
 
-from ._publish import publish_output_pair
-from .native import QualityExportProgress as DatasetExportProgress
-from .native import QualitySplitSummary, split_dataset_by_quality
+from ._publish import publish_outputs
 
 DatasetExporter = Callable[
     [Path, Path, Callable[[int, dict[str, Any]], None] | None],
     None,
 ]
 
-_EXPORTER_IMPORTS: dict[str, tuple[str, str] | None] = {
-    "lerobot_v21": None,
+_EXPORTER_IMPORTS: dict[str, tuple[str, str]] = {
     "lerobot_v3": ("tools.conversion.lerobot_v3", "export_lerobot_v3"),
     "hdf5": ("tools.conversion.hdf5", "export_hdf5"),
     "mcap": ("tools.conversion.mcap", "export_mcap"),
@@ -28,191 +30,77 @@ DATASET_EXPORT_FORMATS = tuple(_EXPORTER_IMPORTS)
 
 
 @dataclasses.dataclass(frozen=True)
+class DatasetExportProgress:
+    episodes_completed: int
+    episodes_total: int
+    source_episode_index: int | None
+
+
+@dataclasses.dataclass(frozen=True)
 class DatasetExportSummary:
     source_dir: str
-    accepted_dir: str
-    rejected_dir: str
+    output_dir: str
     dataset_format: str
-    source_episodes: int
-    accepted_episodes: int
-    rejected_episodes: int
-    accepted_frames: int
-    rejected_frames: int
-    rejected_source_indices: tuple[int, ...]
+    episodes: int
 
 
-def export_dataset_by_quality(
+def export_dataset(
     source_dir: Path,
-    accepted_dir: Path,
-    rejected_dir: Path,
+    output_dir: Path,
     *,
     dataset_format: str,
     replace_existing: bool = False,
     progress_callback: Callable[[DatasetExportProgress], None] | None = None,
-    source_episode_indices: set[int] | None = None,
 ) -> DatasetExportSummary:
+    """Convert ``source_dir`` into ``output_dir`` in ``dataset_format``."""
     if dataset_format not in DATASET_EXPORT_FORMATS:
         expected = ", ".join(DATASET_EXPORT_FORMATS)
         raise ValueError(f"unsupported dataset format {dataset_format!r}; expected {expected}")
     source_dir = Path(source_dir).resolve()
-    accepted_dir = Path(accepted_dir).resolve()
-    rejected_dir = Path(rejected_dir).resolve()
-    if accepted_dir == rejected_dir or source_dir in {accepted_dir, rejected_dir}:
-        raise ValueError("source, accepted, and rejected directories must be distinct")
-    if dataset_format == "lerobot_v21":
-        summary = split_dataset_by_quality(
-            source_dir,
-            accepted_dir,
-            rejected_dir,
-            replace_existing=replace_existing,
-            progress_callback=_native_progress_callback(progress_callback),
-            source_episode_indices=source_episode_indices,
-        )
-        return _summary(summary, dataset_format)
+    output_dir = Path(output_dir).resolve()
+    if source_dir == output_dir or source_dir in output_dir.parents:
+        raise ValueError("the output directory must not hold the source dataset")
+    if output_dir.exists() and not replace_existing:
+        raise FileExistsError(f"output directory already exists: {output_dir}")
+    if output_dir.exists() and not output_dir.is_dir():
+        raise NotADirectoryError(f"output path is not a directory: {output_dir}")
 
-    # Prepare same-filesystem staging roots for atomic publication
-    for output in (accepted_dir, rejected_dir):
-        if output.exists() and not replace_existing:
-            raise FileExistsError(f"output directory already exists: {output}")
-        if output.exists() and not output.is_dir():
-            raise NotADirectoryError(f"output path is not a directory: {output}")
-        output.parent.mkdir(parents=True, exist_ok=True)
-    native_root = Path(tempfile.mkdtemp(prefix=".conversion.native.", dir=accepted_dir.parent))
-    accepted_stage_root = Path(
-        tempfile.mkdtemp(prefix=".conversion.accepted.", dir=accepted_dir.parent)
+    episodes = sum(
+        1
+        for line in (source_dir / "meta" / "episodes.jsonl").read_text().splitlines()
+        if line.strip()
     )
-    rejected_stage_root = Path(
-        tempfile.mkdtemp(prefix=".conversion.rejected.", dir=rejected_dir.parent)
-    )
-    native_accepted = native_root / "accepted"
-    native_rejected = native_root / "rejected"
-    stage_accepted = accepted_stage_root / "dataset"
-    stage_rejected = rejected_stage_root / "dataset"
-
-    # Split once, convert both subsets, and publish them as one result
+    output_dir.parent.mkdir(parents=True, exist_ok=True)
+    stage_root = Path(tempfile.mkdtemp(prefix=f".{output_dir.name}.", dir=output_dir.parent))
+    stage = stage_root / "dataset"
     try:
-        native_summary = split_dataset_by_quality(
-            source_dir,
-            native_accepted,
-            native_rejected,
-            normalize_videos=False,
-            source_episode_indices=source_episode_indices,
-            progress_callback=None,
-        )
-        if progress_callback is not None:
-            progress_callback(DatasetExportProgress(0, native_summary.source_episodes, "", None))
-        _convert_subset(
-            native_accepted,
-            stage_accepted,
-            dataset_format,
-            subset="accepted",
-            offset=0,
-            total=native_summary.source_episodes,
-            progress_callback=progress_callback,
-        )
-        _convert_subset(
-            native_rejected,
-            stage_rejected,
-            dataset_format,
-            subset="rejected",
-            offset=native_summary.accepted_episodes,
-            total=native_summary.source_episodes,
-            progress_callback=progress_callback,
-        )
-        publish_output_pair(
-            ((accepted_dir, stage_accepted), (rejected_dir, stage_rejected)),
-            replace_existing=replace_existing,
-        )
-        return _summary(native_summary, dataset_format, accepted_dir, rejected_dir)
+        _load_exporter(dataset_format)(source_dir, stage, _progress(progress_callback, episodes))
+        publish_outputs(((output_dir, stage),), replace_existing=replace_existing)
     finally:
-        shutil.rmtree(native_root, ignore_errors=True)
-        shutil.rmtree(accepted_stage_root, ignore_errors=True)
-        shutil.rmtree(rejected_stage_root, ignore_errors=True)
+        shutil.rmtree(stage_root, ignore_errors=True)
+    return DatasetExportSummary(str(source_dir), str(output_dir), dataset_format, episodes)
 
 
-def _convert_subset(
-    source_dir: Path,
-    output_dir: Path,
-    dataset_format: str,
-    *,
-    subset: str,
-    offset: int,
-    total: int,
-    progress_callback: Callable[[DatasetExportProgress], None] | None,
-) -> None:
-    output_dir.mkdir(parents=True)
-    source_indices = json.loads((source_dir / "meta" / "quality_split.json").read_text())[
-        "source_episode_indices"
-    ]
-    exporter = _load_exporter(dataset_format)
-
-    def update(completed: int, row: dict[str, Any]) -> None:
-        if progress_callback is None:
-            return
-        local_index = int(row["episode_index"])
-        progress_callback(
-            DatasetExportProgress(
-                episodes_completed=offset + completed,
-                episodes_total=total,
-                subset=subset,
-                source_episode_index=int(source_indices[local_index]),
-            )
-        )
-
-    # Convert the subset with the format-specific writer selected above.
-    exporter(source_dir, output_dir, update)
-
-
-def _summary(
-    value: QualitySplitSummary,
-    dataset_format: str,
-    accepted_dir: Path | None = None,
-    rejected_dir: Path | None = None,
-) -> DatasetExportSummary:
-    return DatasetExportSummary(
-        source_dir=value.source_dir,
-        accepted_dir=str(accepted_dir or value.accepted_dir),
-        rejected_dir=str(rejected_dir or value.rejected_dir),
-        dataset_format=dataset_format,
-        source_episodes=value.source_episodes,
-        accepted_episodes=value.accepted_episodes,
-        rejected_episodes=value.rejected_episodes,
-        accepted_frames=value.accepted_frames,
-        rejected_frames=value.rejected_frames,
-        rejected_source_indices=value.rejected_source_indices,
-    )
-
-
-def _native_progress_callback(
-    progress_callback: Callable[[DatasetExportProgress], None] | None,
-) -> Callable[[Any], None] | None:
+def _progress(
+    progress_callback: Callable[[DatasetExportProgress], None] | None, total: int
+) -> Callable[[int, dict[str, Any]], None] | None:
     if progress_callback is None:
         return None
 
-    def update(progress: Any) -> None:
+    def update(completed: int, row: dict[str, Any]) -> None:
         progress_callback(
             DatasetExportProgress(
-                episodes_completed=int(progress.episodes_completed),
-                episodes_total=int(progress.episodes_total),
-                subset=str(progress.subset),
-                source_episode_index=(
-                    None
-                    if progress.source_episode_index is None
-                    else int(progress.source_episode_index)
-                ),
+                episodes_completed=completed,
+                episodes_total=total,
+                source_episode_index=row.get("episode_index"),
             )
         )
 
     return update
 
 
-def _load_exporter(
-    dataset_format: str,
-) -> DatasetExporter:
-    exporter_import = _EXPORTER_IMPORTS[dataset_format]
-    if exporter_import is None:
-        raise ValueError(f"no exporter for dataset format {dataset_format!r}")
-    module_name, function_name = exporter_import
+def _load_exporter(dataset_format: str) -> DatasetExporter:
+    module_name, function_name = _EXPORTER_IMPORTS[dataset_format]
     return getattr(import_module(module_name), function_name)
 
 
@@ -220,5 +108,5 @@ __all__ = [
     "DATASET_EXPORT_FORMATS",
     "DatasetExportProgress",
     "DatasetExportSummary",
-    "export_dataset_by_quality",
+    "export_dataset",
 ]

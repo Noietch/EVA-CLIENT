@@ -4,7 +4,7 @@ import { $, LIVE, S, apiGet, apiPost, setCommandMetadata } from "./core.js";
 import { initLocale } from "./i18n.js";
 import { closeChartModal, drawLiveCharts, liveDimsAll, onScrubInput, openChartModal, resetLiveSeries } from "./charts.js";
 import { applyTune, applyManualTune, renderConfig, manualConnect, manualDisconnect, manualDispatchToggle, enterManualSim, applyStatus, pauseSetup, replayIsLocalMode, resumeSetup, retrySetup, startRunFromDebug, updateGuide } from "./run.js";
-import { handleCollectionReviewInput, resetCollectionReviewInput, changeCollectionExportFormat, changeCollectionSlotFilter, changeCollectionSlotPage, clearReviewPlayback, collectConfigured, exportCollectionQuality, installCollectKeyboardControls, pollEpisodeHistory, renderCollect, renderCollectControls, renderRolloutSave, returnReviewToLive, reviewActiveInCurrentTab, saveAnnotation, startCollectFromTab, submitEpisodeNote, submitEpisodeQc, submitQc, toggleCollectionSlotAll, uploadCollectionQuality } from "./collect.js";
+import { handleCollectionReviewInput, resetCollectionReviewInput, changeCollectionExportFormat, changeCollectionSlotFilter, changeCollectionSlotPage, clearReviewPlayback, collectConfigured, downloadCollectionAssetsFromHf, downloadCollectionTaskSetFromHf, exportCollectionQuality, installCollectKeyboardControls, pollEpisodeHistory, renderCollect, renderCollectControls, renderRolloutSave, returnReviewToLive, reviewActiveInCurrentTab, saveAnnotation, startCollectFromTab, submitEpisodeNote, submitEpisodeQc, submitQc, toggleCollectionSlotAll, uploadCollectionDatasetToHf, uploadCollectionQuality } from "./collect.js";
 import { evalReset, evalSetup, evalRunToggle, evalResumeOnEnter, submitEvalScore, loadEvalResults, renderEvalSelectors, loadResultsAll, tpSeek, tpToggle, trialPopClose } from "./eval.js";
 import { handleVisibilityChange, replayPlay, replayStop, replayToggle, seekReplay, loop, pollFrame, pollScene, refreshCameraStreams, exitReplayMode } from "./replay.js";
 import { pollRlSeries, renderRlConfig, renderRlStatus } from "./rl.js";
@@ -202,6 +202,8 @@ function setActiveTab(tab) {
     const viewTab = tab === "collect" ? "debug" : tab;
     $("view-" + viewTab).classList.add("active");
     $("guidebar").style.display = tab === "dashboard" ? "none" : "";
+    const transferInfo = $("collect-transfer-info");
+    transferInfo.style.display = tab === "collect" && transferInfo.textContent ? "" : "none";
     if (viewTab === "debug") {
       $("view-debug").classList.toggle("collect-mode", tab === "collect");
     }
@@ -259,11 +261,24 @@ async function openCollectRobotReplay() {
 
 "use strict";
 
+async function waitForBootApi(path) {
+    for (;;) {
+      try {
+        return await apiGet(path, { timeoutMs: 2000 });
+      } catch (error) {
+        // The browser can be opened a moment before EVA finishes binding the
+        // console port, or while the process is restarting. Keep boot pending
+        // and recover automatically instead of leaving a permanent spinner.
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+    }
+  }
+
 // Expose handlers referenced by inline on* attributes in index.html.
 Object.assign(window, { tpToggle, tpSeek, trialPopClose, replayToggle });
 
 async function boot() {
-    S.CFG = await apiGet("/api/config");
+    S.CFG = await waitForBootApi("/api/config");
     try {
       S.SCENE_PLAN = await apiGet("/api/scene_plan");
     } catch {
@@ -276,7 +291,7 @@ async function boot() {
     // EVAL/RESULT use inline onclick handlers; expose them.
     window.tpToggle = tpToggle; window.tpSeek = tpSeek;
     window.trialPopClose = trialPopClose;
-    const s = await apiGet("/api/status");
+    const s = await waitForBootApi("/api/status");
     applyStatus(s);
     renderRlStatus(s);
     if (!collectConfigured()) {
@@ -445,25 +460,23 @@ $("b-collect-home").onclick = () => {
     });
   };
 $("b-collect-qc-pass").onclick = () => submitEpisodeQc("collect", "pass");
+$("b-collect-qc-unreviewed").onclick = () => submitEpisodeQc("collect", "unreviewed");
 $("b-goto-qc").onclick = () => submitEpisodeQc("collect", "fail");
 $("b-collect-note-save").onclick = () => submitEpisodeNote("collect");
 $("collect-slot-scene-filter").onchange = (event) => {
   changeCollectionSlotFilter("scene", event.target.value);
 };
 
-$("control-arm-enable").onchange = async () => {
-    const toggle = $("control-arm-enable");
-    toggle.disabled = true;
-    await apiPost("/api/control_arm", { enabled: toggle.checked });
-};
 $("collect-slot-task-filter").onchange = (event) => {
   changeCollectionSlotFilter("task", event.target.value);
 };
 $("b-collect-slot-prev").onclick = () => changeCollectionSlotPage(-1);
 $("b-collect-slot-next").onclick = () => changeCollectionSlotPage(1);
 $("b-collect-quality-export").onclick = exportCollectionQuality;
-$("b-collect-quality-upload").onclick = uploadCollectionQuality;
 $("collect-export-format").onchange = changeCollectionExportFormat;
+$("b-collect-dataset-upload").onclick = uploadCollectionDatasetToHf;
+$("b-collect-assets-download").onclick = downloadCollectionAssetsFromHf;
+$("b-collect-task-set-download").onclick = downloadCollectionTaskSetFromHf;
 $("review-return-live").onclick = returnReviewToLive;
 $("review-robot-replay").onclick = openCollectRobotReplay;
 $("replay-b-qc-pass").onclick = () => submitQc("pass");

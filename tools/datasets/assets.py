@@ -34,6 +34,35 @@ IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
 ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 MAX_PHOTOS_PER_UPLOAD = 16
 MAX_PHOTO_BYTES = 16 * 1024 * 1024
+CSV_PHOTO_COLUMNS = ("photos", "photo", "photo_files", "photo_filenames", "photo_paths")
+COLOR_TRANSLATIONS = {
+    "white": "白色",
+    "black": "黑色",
+    "red": "红色",
+    "orange": "橙色",
+    "yellow": "黄色",
+    "green": "绿色",
+    "blue": "蓝色",
+    "purple": "紫色",
+    "pink": "粉色",
+    "brown": "棕色",
+    "gray": "灰色",
+    "grey": "灰色",
+}
+CSV_FIELD_ALIASES = {
+    "物体编号": "object_id",
+    "编号": "object_id",
+    "英文名称": "object_name",
+    "物体名称": "object_name",
+    "中文名称": "object_name_zh",
+    "颜色": "color",
+    "长": "length_cm",
+    "宽": "width_cm",
+    "高": "height_cm",
+    "质量": "mass_g",
+    "照片": "photos",
+    "照片文件": "photos",
+}
 OBJECT_CACHE_SECONDS = 2.0
 PREVIEW_SPECS = {
     "thumb": (192, 68),
@@ -84,6 +113,13 @@ class ObjectCatalog:
             return [dict(row, photos=list(row["photos"])) for row in rows]
 
     def upsert(self, current_id: str | None, payload: Any) -> dict[str, Any]:
+        if (
+            current_id is None
+            and isinstance(payload, dict)
+            and not str(payload.get("object_id", "")).strip()
+        ):
+            payload = dict(payload)
+            payload["object_id"] = self._next_object_id()
         record = self._normalize(payload)
         if current_id is not None and current_id != record["object_id"]:
             raise ValueError("object_id cannot be changed")
@@ -104,6 +140,89 @@ class ObjectCatalog:
             self._write(documents)
         return next(row for row in self.records() if row["object_id"] == record["object_id"])
 
+    def import_csv(self, content: bytes, uploads: list[tuple[str, bytes]]) -> dict[str, int]:
+        if not content:
+            raise ValueError("Choose a non-empty CSV file")
+        try:
+            text = content.decode("utf-8-sig")
+        except UnicodeDecodeError as error:
+            raise ValueError("CSV must be UTF-8 encoded") from error
+        reader = csv.DictReader(io.StringIO(text))
+        if not reader.fieldnames:
+            raise ValueError("CSV must contain a header row")
+        rows = list(reader)
+        if not rows:
+            raise ValueError("CSV must contain at least one object row")
+        files = {Path(name).name: (name, data) for name, data in uploads if name}
+        if len(files) != len(uploads):
+            raise ValueError("Uploaded photo filenames must be unique")
+        existing = self.records()
+        existing_ids = {row["object_id"] for row in existing}
+        seen_ids: set[str] = set()
+        prepared: list[tuple[dict[str, str], list[tuple[str, bytes]]]] = []
+        next_id = self._next_object_id(existing_ids)
+        for row in rows:
+            payload = {
+                CSV_FIELD_ALIASES.get(str(key).strip(), str(key).strip()): ""
+                if value is None
+                else str(value)
+                for key, value in row.items()
+                if key
+            }
+            object_id = str(payload.get("object_id", "")).strip()
+            if object_id and object_id in existing_ids:
+                existing_row = next(item for item in existing if item["object_id"] == object_id)
+                payload["photo_dir"] = existing_row.get("photo_dir", "")
+            else:
+                payload.pop("photo_dir", None)
+            payload["scan_status"] = ""
+            if not any(
+                str(payload.get(key, "")).strip() for key in ("object_name", "object_name_zh")
+            ):
+                raise ValueError("Each CSV row needs object_name or object_name_zh")
+            if not object_id:
+                object_id = next_id
+                next_id = self._next_object_id(existing_ids | seen_ids | {object_id}, next_id)
+            payload["object_id"] = object_id
+            record = self._normalize(payload)
+            if record["object_id"] in seen_ids:
+                raise ConflictError(f"{record['object_id']} appears more than once in CSV")
+            seen_ids.add(record["object_id"])
+            photo_value = next(
+                (payload.get(key, "") for key in CSV_PHOTO_COLUMNS if payload.get(key)),
+                "",
+            )
+            photo_names = [
+                name.strip() for name in re.split(r"[;|\n]", str(photo_value)) if name.strip()
+            ]
+            photo_uploads = []
+            for name in photo_names:
+                file_entry = files.get(Path(name).name)
+                if file_entry is None:
+                    raise ValueError(f"CSV photo file not uploaded: {name}")
+                photo_uploads.append(file_entry)
+            self._validate_uploads(photo_uploads)
+            prepared.append((record, photo_uploads))
+
+        with self.lock:
+            documents = [{key: row.get(key, "") for key in FIELDS} for row in existing]
+            positions = {row["object_id"]: index for index, row in enumerate(documents)}
+            for record, _ in prepared:
+                index = positions.get(record["object_id"])
+                if index is None:
+                    positions[record["object_id"]] = len(documents)
+                    documents.append(record)
+                else:
+                    documents[index] = record
+            self._write(documents)
+            for record, photo_uploads in prepared:
+                if photo_uploads:
+                    self.save_photos(record["object_id"], photo_uploads)
+        return {
+            "objects": len(prepared),
+            "photos": sum(len(photo_uploads) for _, photo_uploads in prepared),
+        }
+
     def delete(self, object_id: str) -> None:
         with self.lock:
             rows = self.records()
@@ -121,19 +240,7 @@ class ObjectCatalog:
         asset = self._record(object_id)
         if not uploads or len(uploads) > MAX_PHOTOS_PER_UPLOAD:
             raise ValueError(f"Choose between 1 and {MAX_PHOTOS_PER_UPLOAD} photos")
-        validated = []
-        for original_name, content in uploads:
-            suffix = Path(original_name).suffix.lower()
-            if suffix not in IMAGE_SUFFIXES or not content or len(content) > MAX_PHOTO_BYTES:
-                raise ValueError("Photos must be non-empty JPG, PNG, or WebP files under 16 MiB")
-            try:
-                Image.open(io.BytesIO(content)).verify()
-            except (OSError, ValueError) as error:
-                raise ValueError(f"Invalid image: {original_name}") from error
-
-            # Keep a readable Unicode filename while blocking path traversal
-            stem = re.sub(r"[^\w.-]+", "_", Path(original_name).stem, flags=re.UNICODE).strip("._")
-            validated.append((f"{stem or 'photo'}{suffix}", content))
+        validated = self._validate_uploads(uploads)
 
         directory = self.photo_root / asset["photo_dir"]
         directory.mkdir(parents=True, exist_ok=True)
@@ -152,6 +259,30 @@ class ObjectCatalog:
         with self.lock:
             self._records_cache = None
         return self._record(object_id)
+
+    def _validate_uploads(self, uploads: list[tuple[str, bytes]]) -> list[tuple[str, bytes]]:
+        if len(uploads) > MAX_PHOTOS_PER_UPLOAD:
+            raise ValueError(f"Choose at most {MAX_PHOTOS_PER_UPLOAD} photos per object")
+        validated = []
+        for original_name, content in uploads:
+            suffix = Path(original_name).suffix.lower()
+            if suffix not in IMAGE_SUFFIXES or not content or len(content) > MAX_PHOTO_BYTES:
+                raise ValueError("Photos must be non-empty JPG, PNG, or WebP files under 16 MiB")
+            try:
+                Image.open(io.BytesIO(content)).verify()
+            except (OSError, ValueError) as error:
+                raise ValueError(f"Invalid image: {original_name}") from error
+            stem = re.sub(r"[^\w.-]+", "_", Path(original_name).stem, flags=re.UNICODE).strip("._")
+            validated.append((f"{stem or 'photo'}{suffix}", content))
+        return validated
+
+    def _next_object_id(self, used: set[str] | None = None, start: str | None = None) -> str:
+        used = used or {row["object_id"] for row in self.records()}
+        match = re.search(r"(\d+)$", start or "")
+        number = int(match.group(1)) if match else 1
+        while f"AST-{number:04d}" in used:
+            number += 1
+        return f"AST-{number:04d}"
 
     def photo_path(self, object_id: str, filename: str) -> Path:
         asset = self._record(object_id)
@@ -275,7 +406,10 @@ class ObjectCatalog:
             "object_name": name_en,
             "object_name_zh": name_zh,
             "scan_status": str(payload.get("scan_status", "")).strip(),
-            "color": str(payload.get("color", "")).strip(),
+            "color": COLOR_TRANSLATIONS.get(
+                str(payload.get("color", "")).strip().lower(),
+                str(payload.get("color", "")).strip(),
+            ),
             "photo_dir": photo_dir,
         }
 

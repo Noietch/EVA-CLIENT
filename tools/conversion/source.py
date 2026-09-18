@@ -26,6 +26,18 @@ class LeRobotV21Source:
         self.meta_dir = self.root / "meta"
         self.info = json.loads((self.meta_dir / "info.json").read_text())
         self.episode_rows = _read_jsonl(self.meta_dir / "episodes.jsonl")
+        qc_path = self.meta_dir / "qc.jsonl"
+        if qc_path.is_file():
+            qc_rows = _read_jsonl(qc_path)
+            qc_by_episode = {int(row["episode_index"]): row for row in qc_rows}
+            for row in self.episode_rows:
+                row.update(
+                    {
+                        key: value
+                        for key, value in qc_by_episode.get(int(row["episode_index"]), {}).items()
+                        if key != "episode_index"
+                    }
+                )
         self.fps = float(self.info["fps"])
         self.chunk_size = int(self.info.get("chunks_size", 1000))
         self.data_path = str(
@@ -127,10 +139,8 @@ def write_common_metadata(source: LeRobotV21Source, output: Path, data_format: s
     (meta_dir / "info.json").write_text(json.dumps(info, indent=2) + "\n")
     _copy_optional(source.meta_dir / "stats.json", meta_dir / "stats.json")
     _copy_optional(source.meta_dir / "tasks.jsonl", meta_dir / "tasks.jsonl")
+    _copy_optional(source.meta_dir / "qc.jsonl", meta_dir / "qc.jsonl")
     _write_episode_rows(source.episode_rows, meta_dir / "episodes.jsonl", data_format)
-    marker = json.loads((source.meta_dir / "quality_split.json").read_text())
-    marker["dataset_format"] = data_format
-    (meta_dir / "quality_split.json").write_text(json.dumps(marker, indent=2) + "\n")
 
 
 def _converted_info(source_info: dict[str, Any], data_format: str) -> dict[str, Any]:

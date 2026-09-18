@@ -15,7 +15,7 @@ import time
 import numpy as np
 
 from core.app.cli import maybe_start_inference_cli
-from core.app.console.server import build_console_context, start_console_server
+from core.app.console.server import build_console_context, start_console_server, stop_console_server
 from core.app.control_channel import maybe_start_control_channel
 from core.app.handlers import (
     ROLLOUT_STEP_MAX_RAW_SNAPSHOTS,
@@ -1723,6 +1723,7 @@ def run(
 
             loop_rate.sleep()
     finally:
+        stop_console_server(runtime)
         gc.callbacks.remove(log_gc_timing)
         close_teleop(runtime)
         stop_collection_capture(runtime)

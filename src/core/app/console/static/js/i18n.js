@@ -47,7 +47,7 @@ const GLOSSARY = {
   "dashboard.changed": ["已变更", "CHANGED"],
   "dashboard.same": ["未变", "SAME"],
   "dashboard.remove": ["移除", "REMOVE"],
-  "dashboard.noExport": ["未找到可用导出", "No accepted export found"],
+  "dashboard.noExport": ["未找到可用导出", "No dataset export found"],
   "dashboard.taskDemand": ["任务需求", "TASK DEMAND"],
   "dashboard.requirements": ["采集要求", "Collection requirements"],
   "dashboard.progress": ["进度", "PROGRESS"],
@@ -321,7 +321,6 @@ const GLOSSARY = {
   "word.note": ["说明", "note"],
   "word.valid": ["有效", "valid"],
   "word.frames": ["帧", "frames"],
-  "word.accepted": ["已接受", "accepted"],
   "word.uploaded": ["已上传", "uploaded"],
   "word.scanning": ["扫描中", "scanning"],
   "word.syncing": ["同步中", "syncing"],
@@ -391,7 +390,7 @@ function translateNode(root) {
   const nodes = [];
   while (walker.nextNode()) nodes.push(walker.currentNode);
   for (const node of nodes) {
-    if (node.parentElement?.closest("script, style")) continue;
+    if (node.parentElement?.closest('script, style, [translate="no"]')) continue;
     const translated = translateText(node.nodeValue || "");
     if (translated !== node.nodeValue) node.nodeValue = translated;
   }
@@ -404,6 +403,7 @@ function translateAttributes(root) {
   }
   if (root.querySelectorAll) elements.push(...root.querySelectorAll("*"));
   for (const element of elements) {
+    if (element.closest('[translate="no"]')) continue;
     for (const attribute of ["title", "aria-label", "placeholder"]) {
       const value = element.getAttribute(attribute);
       if (!value) continue;
@@ -449,6 +449,8 @@ export function initLocale() {
   applyLocale(document);
   const observer = new MutationObserver((records) => {
     for (const record of records) {
+      const parent = record.target.nodeType === Node.ELEMENT_NODE ? record.target : record.target.parentElement;
+      if (parent?.closest('[translate="no"]')) continue;
       if (record.type === "characterData") {
         const translated = translateText(record.target.nodeValue || "");
         if (translated !== record.target.nodeValue) record.target.nodeValue = translated;

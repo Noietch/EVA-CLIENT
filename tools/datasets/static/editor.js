@@ -1,3 +1,4 @@
+import { loadThree } from "./robot-viewer.js";
 import {
   configureEntityUi,
   newEntity,
@@ -16,6 +17,11 @@ import {
   validateDraft,
 } from "./entity-ui.js";
 import {
+  configureDatasetTransfer,
+  initDatasetTransfer,
+  renderTransfers,
+} from "./dataset-transfer.js";
+import {
   configureReview,
   drawReviewCharts,
   openSlot,
@@ -32,7 +38,21 @@ const LOCALE_TABLE = {
   "actions.retry": ["重试", "Retry"],
   "actions.exportQc": ["导出补采清单", "Export reshoot list"],
   "actions.importPlan": ["导入计划压缩包", "Import plan ZIP"],
+  "actions.importObjects": ["批量导入物体 CSV（可同时选择照片）", "Import objects CSV (photos optional)"],
   "actions.exportPlan": ["导出计划压缩包", "Export plan ZIP"],
+  "actions.publishTaskSet": ["发布全部任务集到 HF", "Publish all task sets to HF"],
+  "sync.title": ["数据传输", "Data transfer"],
+  "sync.taskSet": ["下载任务集", "Download task set"],
+  "sync.assets": ["上传资源", "Upload assets"],
+  "sync.dataset": ["下载数据集", "Download dataset"],
+  "sync.uploadQc": ["上传质检结果", "Upload QC"],
+  "sync.downloadQc": ["下载质检结果", "Download QC"],
+  "sync.tasksPublished": ["已发布 {n} 个任务集", "Published {n} task sets"],
+  "sync.status": ["状态", "Status"],
+  "sync.idle": ["就绪", "Ready"],
+  "sync.running": ["正在处理", "In progress"],
+  "sync.done": ["已完成", "Completed"],
+  "sync.failed": ["同步失败", "Sync failed"],
   "tabs.aria": ["数据管理", "Data management"],
   "tabs.dashboard": ["看板", "Dashboard"],
   "tabs.qc": ["质检", "QC"],
@@ -62,6 +82,10 @@ const LOCALE_TABLE = {
   "qc.emptySlot": ["空槽位 · 等待采集", "EMPTY SLOT · WAITING FOR COLLECTION"],
   "qc.review": ["复核", "REVIEW"],
   "qc.pendingState": ["待采集", "PENDING"],
+  "qc.frameLabels": ["帧标签", "FRAME LABELS"],
+  "qc.staticFrames": ["静止帧", "STATIC FRAMES"],
+  "qc.nonStaticFrames": ["非静止帧", "NON-STATIC FRAMES"],
+  "qc.noFrameLabels": ["暂无帧标签", "NO FRAME LABELS"],
   "qc.qualityControl": ["质量控制", "Quality control"],
   "qc.notePlaceholder": ["质检备注（可选）", "QC note (optional)"],
   "qc.reasonPlaceholder": ["选择主要原因", "Select primary reason"],
@@ -69,6 +93,22 @@ const LOCALE_TABLE = {
   "qc.imageReason": ["图像质量问题", "Image quality"],
   "qc.trajectoryReason": ["轨迹质量问题", "Trajectory quality"],
   "qc.taskReason": ["任务完成不符合要求", "Task does not meet requirements"],
+  "qc.staticFramesExcessive": ["中间静止帧过多", "Too many middle static frames"],
+  "qc.cameraOffline": ["相机离线/画面不动", "Camera offline / frozen frames"],
+  "qc.shortEpisode": ["轨迹过短", "Trajectory too short"],
+  "qc.needsReview": ["待人工审核", "Needs manual review"],
+  "qc.machineOpinion": ["机器复核意见（不改变人工判定）", "Machine finding (human verdict stands)"],
+  "qc.staticFramesHint": ["机器识别：中间存在静止段，请人工复核", "Machine flag: middle static segment needs review"],
+  "qc.trimRange": ["保留帧范围", "Keep frame range"],
+  "qc.trimApply": ["截取并保存", "Trim and save"],
+  "qc.trimSaved": ["已按选定帧范围截取数据", "Episode trimmed to the selected frame range"],
+  "qc.trimNoChange": ["当前范围未改变，无需截取", "The selected range is unchanged"],
+  "qc.trimStart": ["起始边界", "Start boundary"],
+  "qc.trimEnd": ["结束边界", "End boundary"],
+  "qc.trimTag": ["帧范围调整", "FRAME RANGE"],
+  "qc.moveLeft": ["左移", "Move left"],
+  "qc.moveRight": ["右移", "Move right"],
+  "qc.frameBoundary": ["边界", "Boundary"],
   "qc.pass": ["通过", "Pass"],
   "qc.fail": ["未通过", "Fail"],
   "qc.save": ["保存", "Save"],
@@ -129,20 +169,120 @@ const LOCALE_TABLE = {
   "dashboard.collectionTitle": ["按机器人统计", "Collection by robot"],
   "dashboard.healthEyebrow": ["流程健康度", "Pipeline health"],
   "dashboard.healthTitle": ["质检健康度", "QC health"],
-  "dashboard.qcEyebrow": ["质量控制", "Quality control"],
-  "dashboard.qcTitle": ["质检报告", "QC reports"],
-  "dashboard.qcSubtitle": ["只有质检报告可以打开任务数据进行复核。", "Only QC reports open task data for review."],
   "dashboard.plans": ["个计划", "plans"],
   "dashboard.episodes": ["条片段", "episodes"],
   "dashboard.frames": ["帧", "frames"],
   "dashboard.robots": ["个机器人", "robots"],
-  "dashboard.pending": ["待处理", "pending"],
   "dashboard.remaining": ["还差", "remaining"],
+  "dashboard.repair": ["需返修", "to repair"],
   "dashboard.unknownRobot": ["未知机器人", "Unknown robot"],
   "dashboard.noRobotPlans": ["暂无机器人计划", "No robot plans"],
-  "dashboard.openQc": ["查看质检", "Open QC"],
-  "dashboard.noReports": ["暂无质检报告", "No QC reports"],
   "dashboard.pendingSummary": ["待处理 0", "0 pending"],
+  "dm.title": ["数据集管理", "Dataset management"],
+  "dm.selected": ["已选", "Selected"],
+  "dm.selectedEmpty": ["已选 0", "0 selected"],
+  "dm.shown": ["显示", "shown"],
+  "dm.clear": ["清空选择", "Clear selection"],
+  "dm.action.refresh": ["刷新云端并校验", "Refresh cloud and verify"],
+  "dm.action.verify": ["校验", "Verify"],
+  "dm.action.auto_qc": ["自动质检", "Automatic QC"],
+  "dm.autoQcTitle": ["对选中的数据集检查静止帧与相机离线并写入质检结论；未选择时检查全部数据集", "Check static frames and offline cameras on the selected datasets and write the verdicts; checks every dataset when nothing is selected"],
+  "dm.action.upload_data": ["上传数据", "Upload data"],
+  "dm.action.download_data": ["下载数据", "Download data"],
+  "dm.downloadDataTitle": ["把选中的数据从云端下载到本地；本地已有的质检记录按更新时间合并，不会被覆盖", "Download the selected datasets into the local directories; existing local QC records are merged by update time instead of being overwritten"],
+  "dm.action.upload_qc": ["上传 QC", "Upload QC"],
+  "dm.action.download_qc": ["下载 QC", "Download QC"],
+  "dm.action.upload_task": ["上传任务", "Upload task"],
+  "dm.action.download_task": ["下载任务", "Download task"],
+  "dm.refreshTitle": ["刷新所有数据集的云端信息并校验数据、任务和 QC", "Refresh every dataset from the cloud and verify data, tasks, and QC"],
+  "dm.search": ["搜索数据集", "Search datasets"],
+  "dm.robotFilter": ["按机器人过滤", "Filter by robot"],
+  "dm.allRobots": ["全部机器人", "All robots"],
+  "dm.sortLabel": ["数据集排序", "Dataset sorting"],
+  "dm.selectAll": ["全选筛选结果", "Select filtered rows"],
+  "dm.deselectAll": ["取消全选", "Deselect filtered rows"],
+  "dm.notRefreshed": ["尚未刷新云端", "Cloud not refreshed yet"],
+  "dm.diff": ["差异", "diff"],
+  "dm.progress": ["数据集操作进度", "Dataset operation progress"],
+  "dm.empty": ["没有匹配的数据集", "No matching dataset"],
+  "dm.status.error": ["有问题", "Problems"],
+  "dm.status.warn": ["待处理", "Pending"],
+  "dm.status.ok": ["正常", "Clear"],
+  "dm.status.unknown": ["未校验", "Unchecked"],
+  "dm.issue.cloud": ["云端读取失败", "Cloud read failed"],
+  "dm.issue.verify": ["云端不一致", "Cloud mismatch"],
+  "dm.issue.stale": ["待刷新", "Refresh pending"],
+  "dm.issue.none": ["无异常", "No issues"],
+  "dm.openHint": ["打开质检：", "Open QC: "],
+  "dm.selectPrefix": ["选择 ", "Select "],
+  "dm.col.select": ["选择", "Select"],
+  "dm.col.dataset": ["数据集", "Dataset"],
+  "dm.col.collected": ["已采", "Collected"],
+  "dm.col.target": ["目标", "Target"],
+  "dm.col.ratio": ["比例", "Ratio"],
+  "dm.col.accept": ["通过", "Passed"],
+  "dm.col.fail": ["失败", "Failed"],
+  "dm.col.unreviewed": ["未标注", "Unreviewed"],
+  "dm.col.cloudEpisodes": ["条数", "Episodes"],
+  "dm.col.cloudTasks": ["任务数", "Tasks"],
+  "dm.col.data": ["数据", "Data"],
+  "dm.col.task": ["任务", "Task"],
+  "dm.col.state": ["状态 · 最近刷新", "Status · last refresh"],
+  "dm.group.localCollection": ["本地采集", "Local collection"],
+  "dm.group.localQc": ["本地 QC", "Local QC"],
+  "dm.group.cloudData": ["云端数据", "Cloud data"],
+  "dm.group.cloudQc": ["云端 QC", "Cloud QC"],
+  "dm.group.verify": ["一致性校验", "Consistency check"],
+  "dm.sort.status": ["状态", "Status"],
+  "dm.sort.name": ["名称", "Name"],
+  "dm.sort.collected": ["已采条数", "Collected"],
+  "dm.sort.total": ["目标条数", "Target"],
+  "dm.sort.progress": ["采集比例", "Collection ratio"],
+  "dm.sort.pending": ["待采集", "Pending"],
+  "dm.sort.accept": ["本地通过", "Local passed"],
+  "dm.sort.fail": ["本地失败", "Local failed"],
+  "dm.sort.unreviewed": ["本地未标注", "Local unreviewed"],
+  "dm.sort.cloud_episodes": ["云端条数", "Cloud episodes"],
+  "dm.sort.cloud_tasks": ["云端任务数", "Cloud tasks"],
+  "dm.sort.cloud_accept": ["云端通过", "Cloud passed"],
+  "dm.sort.cloud_fail": ["云端失败", "Cloud failed"],
+  "dm.sort.cloud_unreviewed": ["云端未标注", "Cloud unreviewed"],
+  "dm.sort.verify_data": ["数据校验", "Data check"],
+  "dm.sort.verify_task": ["任务校验", "Task check"],
+  "dm.sort.verify_qc": ["QC 校验", "QC check"],
+  "dm.sortPrefix": ["按", "Sort by "],
+  "dm.sortSuffix": ["排列", ""],
+  "dm.asc": ["升序", " ascending"],
+  "dm.desc": ["降序", " descending"],
+  "dm.verify.same": ["一致", "Same"],
+  "dm.verify.different": ["不一致", "Different"],
+  "dm.verify.unknown": ["无法确认", "Unconfirmed"],
+  "dm.verifyUnchecked": ["未校验", "Unchecked"],
+  "dm.missingLocal": ["本地缺失", "Missing locally"],
+  "dm.localOnly": ["仅本地", "Local only"],
+  "dm.changed": ["内容不同", "Changed"],
+  "dm.unknown": ["无法确认", "Unconfirmed"],
+  "dm.waiting": ["等待中", "Waiting"],
+  "dm.estimating": ["估算中", "Estimating"],
+  "dm.aboutMinutes": ["约 {n} 分钟", "about {n} min"],
+  "dm.waitingResources": ["等待冲突文件：", "Waiting for conflicting files: "],
+  "dm.halted": ["已停止", "Stopped"],
+  "dm.done": ["完成", "Done"],
+  "dm.doneSuffix": ["完成", " done"],
+  "dm.stopping": ["停止中", "Stopping"],
+  "dm.stopNext": ["停止后续任务", "Stop remaining"],
+  "dm.failedCount": ["失败", "failed"],
+  "dm.failureDetail": ["失败详情", "Failure details"],
+  "dm.activeJobs": ["{n} 个批次处理中", "{n} batches in progress"],
+  "dm.pollFailed": ["状态刷新失败：{error}", "Status refresh failed: {error}"],
+  "dm.actionFailed": ["操作失败", "Operation failed"],
+  "dm.stopFailed": ["停止失败", "Stop failed"],
+  "dm.resource.local_data": ["本地数据", "Local data"],
+  "dm.resource.local_qc": ["本地 QC", "Local QC"],
+  "dm.resource.local_task": ["本地任务文件", "Local task files"],
+  "dm.resource.remote_data": ["云端数据", "Cloud data"],
+  "dm.resource.remote_qc": ["云端 QC", "Cloud QC"],
+  "dm.resource.remote_task": ["云端任务文件", "Cloud task files"],
   "ui.requestFailed": ["请求失败", "Request failed"],
   "ui.chooseBatchExport": ["选择批次后可导出", "Choose a batch to export"],
   "ui.saved": ["已保存", "saved"],
@@ -156,6 +296,7 @@ const LOCALE_TABLE = {
   "ui.import": ["导入", "Import"],
   "ui.planImported": ["计划压缩包已导入", "Plan ZIP imported"],
   "ui.photosUploaded": ["物体照片已上传", "Object photos uploaded"],
+  "ui.objectsImported": ["物体和照片已批量导入", "Objects and photos imported"],
   "actions.cancel": ["取消", "Cancel"],
   "actions.confirm": ["确认", "Confirm"],
   "actions.close": ["关闭", "Close"],
@@ -212,7 +353,7 @@ const LOCALE_TABLE = {
   "entity.placementRequired": ["每个物体组都需要物体和至少一个位置", "Each object group needs an object and at least one position"],
   "entity.promptRequired": ["任务编号和英文提示词不能为空", "Task ID and English prompt cannot be empty"],
   "entity.sceneRequired": ["任务至少需要一个场景", "A task needs at least one scene"],
-  "entity.objectNameRequired": ["物体编号和至少一种名称不能为空", "Object ID and at least one name cannot be empty"],
+  "entity.objectNameRequired": ["至少填写一种物体名称", "At least one object name is required"],
   "entity.sceneId": ["场景编号", "Scene ID"],
   "entity.taskId": ["任务编号", "Task ID"],
   "entity.action": ["动作", "Action"],
@@ -235,6 +376,14 @@ const LOCALE_TABLE = {
   "review.loading3d": ["正在载入三维模型", "Loading 3D"],
   "review.fetchingMeshes": ["正在读取机器人模型", "Fetching robot meshes"],
   "review.taskDescription": ["任务描述", "Task description"],
+  "review.compareRobots": ["机器人对比", "Compare robots"],
+  "review.compareTitle": ["机器人视频对比", "Robot video comparison"],
+  "review.compareLoading": ["正在准备机器人视频", "Preparing robot videos"],
+  "review.compareEmpty": ["暂无可对比的视频数据", "No video data available for comparison"],
+  "review.compareHint": ["按任务、场景和轮次对齐播放时间", "Playback is aligned by task, scene, and round"],
+  "review.comparePlayAll": ["全部播放", "Play all"],
+  "review.comparePauseAll": ["全部暂停", "Pause all"],
+  "review.robot": ["机器人", "Robot"],
   "review.scene": ["场景", "Scene"],
   "review.action": ["动作", "Action"],
   "review.state": ["状态", "State"],
@@ -273,6 +422,7 @@ const app = {
   toastTimer: 0,
   objectThumbObserver: null,
   stateCache: new Map(),
+  stateRequests: new Map(),
   reviewCache: new Map(),
   qcLoadingToken: 0,
 };
@@ -409,6 +559,32 @@ async function api(path, options = {}) {
   return payload;
 }
 
+const STATE_STORAGE_PREFIX = "eva-dataset-state::";
+
+function readStoredState(cacheKey) {
+  const storageKey = STATE_STORAGE_PREFIX + cacheKey;
+  try {
+    const raw = localStorage.getItem(storageKey);
+    if (!raw) return null;
+    const stored = JSON.parse(raw);
+    return stored && stored.state ? stored.state : null;
+  } catch (error) {
+    localStorage.removeItem(storageKey);
+    return null;
+  }
+}
+
+function storeState(cacheKey, state) {
+  try {
+    localStorage.setItem(STATE_STORAGE_PREFIX + cacheKey, JSON.stringify({
+      timestamp: Date.now(),
+      state,
+    }));
+  } catch (error) {
+    // Browser storage is an optional acceleration layer.
+  }
+}
+
 function writeJson(path, method, payload) {
   return api(path, {
     method,
@@ -418,7 +594,7 @@ function writeJson(path, method, payload) {
 }
 
 async function runWrite(control, operation, successMessage) {
-  if (app.writeBusy || (control && control.disabled)) return;
+  if (app.writeBusy || (control && control.disabled)) return false;
   app.writeBusy = true;
   app.stateCache.clear();
   app.reviewCache.clear();
@@ -426,8 +602,10 @@ async function runWrite(control, operation, successMessage) {
   try {
     await operation();
     showToast(successMessage);
+    return true;
   } catch (error) {
     showToast(error.message || String(error), true);
+    return false;
   } finally {
     app.writeBusy = false;
     if (control) control.disabled = false;
@@ -441,29 +619,42 @@ async function loadState(preserveReview = false, force = false) {
   const params = new URLSearchParams();
   if (app.batch) params.set("batch", app.batch);
   if (app.robot) params.set("robot_type", app.robot);
-  const query = params.toString() ? "?" + params.toString() : "";
+  const query = params.toString() ? "?" + params : "";
+  const cacheKey = (app.robot || "*") + "::" + (app.batch || "*");
+  const memory = app.stateCache.get(cacheKey);
+  const cached = memory || {
+    timestamp: 0,
+    state: readStoredState(cacheKey),
+  };
+  const hasCachedState = Boolean(cached.state);
+  if (!force && hasCachedState) {
+    app.stateCache.set(cacheKey, cached);
+    applyState(cached.state, preserveReview);
+    setQcLoading(false, loadingToken);
+    $("loading-state").hidden = true;
+    $("app").hidden = false;
+    requestAnimationFrame(moveTabThumb);
+  }
+  let request = app.stateRequests.get(cacheKey);
+  if (!request || force) {
+    request = api("/api/state" + query);
+    app.stateRequests.set(cacheKey, request);
+  }
   try {
-    const cacheKey = (app.robot || "*") + "::" + (app.batch || "*");
-    const cached = app.stateCache.get(cacheKey);
-    if (!force && cached && Date.now() - cached.timestamp < 300000) {
-      applyState(cached.state, preserveReview);
-      setQcLoading(false, loadingToken);
-      $("loading-state").hidden = true;
-      $("app").hidden = false;
-      requestAnimationFrame(moveTabThumb);
-      return;
-    }
-    const state = await api("/api/state" + query);
+    const state = await request;
+    if (app.stateRequests.get(cacheKey) === request) app.stateRequests.delete(cacheKey);
     app.stateCache.set(cacheKey, { timestamp: Date.now(), state });
+    storeState(cacheKey, state);
     applyState(state, preserveReview);
     setQcLoading(false, loadingToken);
     $("loading-state").hidden = true;
     $("app").hidden = false;
     requestAnimationFrame(moveTabThumb);
   } catch (error) {
+    if (app.stateRequests.get(cacheKey) === request) app.stateRequests.delete(cacheKey);
     setQcLoading(false, loadingToken);
     $("loading-state").hidden = true;
-    showGlobalError(error.message || String(error));
+    if (!hasCachedState) showGlobalError(error.message || String(error));
   }
 }
 
@@ -482,6 +673,7 @@ function applyState(state, preserveReview = false) {
   } else {
     renderInfo();
     renderIssues();
+    renderTransfers();
   }
   if (!preserveReview || !app.selectedSlot) renderCurrentEditor();
 }
@@ -507,7 +699,10 @@ function renderBatchSelect() {
   select.replaceChildren(new Option(t("filters.chooseBatch"), ""));
   const batches = app.state.batches;
   for (const batch of batches) {
-    select.add(new Option(batch.batch_id + " · " + batch.robot_type, batch.batch_id));
+    const label = batch.batch_kind === "unmatched"
+      ? "unmatched · " + batch.robot_type
+      : batch.batch_id + " · " + batch.robot_type;
+    select.add(new Option(label, batch.batch_id));
   }
   select.value = app.batch;
   const currentIndex = batches.findIndex((batch) => batch.batch_id === app.batch);
@@ -522,6 +717,37 @@ function renderBatchSelect() {
     link.href = url || "#";
     link.classList.toggle("disabled", !url);
     link.setAttribute("aria-disabled", String(!url));
+  }
+  const publish = $("publish-task-set");
+  if (publish) publish.disabled = !app.batch;
+  for (const id of ["hf-publish-task-set", "hf-sync-task-set"]) {
+    const control = $(id);
+    if (control) control.disabled = !app.batch;
+  }
+  const download = $("hf-download-dataset");
+  if (download) download.disabled = !app.batch;
+  for (const id of ["hf-upload-qc", "hf-download-qc"]) {
+    const control = $(id);
+    if (control) control.disabled = !app.batch;
+  }
+}
+
+async function runHfSyncAction(path, message) {
+  const status = $("hf-sync-status");
+  const fill = $("hf-sync-progress-fill");
+  const bar = $("hf-sync-progress");
+  if (status) status.textContent = `${t(message)} · ${t("sync.running")}`;
+  if (bar) { bar.classList.add("indeterminate"); bar.removeAttribute("aria-valuenow"); }
+  try {
+    const result = await api(path, { method: "POST" });
+    if (fill) fill.style.width = "100%";
+    if (bar) { bar.classList.remove("indeterminate"); bar.setAttribute("aria-valuenow", "100"); }
+    if (status) status.textContent = `${t(message)} · ${t("sync.done")}`;
+    await loadState(false, true);
+  } catch (error) {
+    if (status) status.textContent = `${t("sync.failed")}: ${error.message}`;
+    if (fill) fill.style.width = "0%";
+    if (bar) { bar.classList.remove("indeterminate"); bar.setAttribute("aria-valuenow", "0"); }
   }
 }
 
@@ -610,6 +836,7 @@ function switchTab(tab) {
   } else {
     renderInfo();
     renderIssues();
+    renderTransfers();
   }
   renderCurrentEditor();
 }
@@ -618,7 +845,7 @@ function emptyList(host, message) {
   host.replaceChildren(node("div", "inline-empty", message));
 }
 
-function saveEntity(kind, control) {
+async function saveEntity(kind, control) {
   const draft = validateDraft(kind);
   const idField = kind === "scenes" ? "scene_id" : kind === "tasks" ? "task_id" : "object_id";
   const id = draft[idField];
@@ -632,10 +859,10 @@ function saveEntity(kind, control) {
     path = "/api/batches/" + encodeURIComponent(batch) + "/" + kind
       + (current ? "/" + encodeURIComponent(current) : "");
   }
-  runWrite(control, async () => {
+  return runWrite(control, async () => {
     await writeJson(path, current ? "PUT" : "POST", draft);
     app.original[kind] = id;
-    app.selected[kind] = (batch || "") + "::" + id;
+    app.selected[kind] = kind === "objects" ? "::" + id : (batch || "") + "::" + id;
     await loadState();
     const saved = app.state[kind].find((item) => recordKey(item, idField) === app.selected[kind]);
     app.draft[kind] = clone(saved);
@@ -703,7 +930,11 @@ async function importPlan(file, control) {
 }
 
 async function uploadPhotos(files) {
-  if (!files.length || !app.original.objects) return;
+  if (!files.length) return;
+  if (!app.original.objects) {
+    await saveEntity("objects", null);
+    if (!app.original.objects) return;
+  }
   const form = new FormData();
   [...files].forEach((file) => form.append("photos", file));
   await runWrite(null, async () => {
@@ -717,6 +948,29 @@ async function uploadPhotos(files) {
     renderObjectEditor();
   }, t("ui.photosUploaded"));
   $("photo-file").value = "";
+}
+
+function openPhotoPicker() {
+  if (!app.draft.objects) return;
+  $("photo-file").click();
+}
+
+async function importObjects(files, control) {
+  const selected = [...files];
+  const csvFiles = selected.filter((file) => file.name.toLowerCase().endsWith(".csv"));
+  const csv = csvFiles[0];
+  if (csvFiles.length !== 1) {
+    showToast("请选择对象 CSV 文件", true);
+    return;
+  }
+  const form = new FormData();
+  form.append("file", csv);
+  selected.filter((file) => file !== csv).forEach((file) => form.append("photos", file));
+  await runWrite(control, async () => {
+    await api("/api/objects/import", { method: "POST", body: form });
+    await loadState();
+  }, t("ui.objectsImported"));
+  $("object-import-file").value = "";
 }
 
 function clearEditors() {
@@ -795,6 +1049,30 @@ function bindEvents() {
   $("object-modeling-filter").addEventListener("change", renderObjectList);
   $("retry-button").addEventListener("click", () => loadState());
   $("refresh-button").addEventListener("click", () => loadState(false, true));
+  $("publish-task-set").addEventListener("click", async () => {
+    const control = $("publish-task-set");
+    control.disabled = true;
+    try {
+      const result = await api("/api/hf/task_sets/publish", {method: "POST"});
+      showToast(t("sync.tasksPublished").replace("{n}", result.published.length));
+    } catch (error) {
+      showToast(error.message, true);
+    } finally {
+      control.disabled = false;
+    }
+  });
+  $("hf-publish-task-set").addEventListener("click", () =>
+    runHfSyncAction("/api/hf/task_sets/publish", "actions.publishTaskSet"));
+  $("hf-sync-assets").addEventListener("click", () => runHfSyncAction("/api/hf/assets/publish", "sync.assets"));
+  $("hf-download-dataset").addEventListener("click", () => {
+    if (app.batch) runHfSyncAction(`/api/batches/${encodeURIComponent(app.batch)}/hf/download`, "sync.dataset");
+  });
+  $("hf-upload-qc").addEventListener("click", () => {
+    if (app.batch) runHfSyncAction(`/api/batches/${encodeURIComponent(app.batch)}/hf/qc/upload`, "sync.uploadQc");
+  });
+  $("hf-download-qc").addEventListener("click", () => {
+    if (app.batch) runHfSyncAction(`/api/batches/${encodeURIComponent(app.batch)}/hf/qc/download`, "sync.downloadQc");
+  });
   $("import-trigger").addEventListener("click", () => {
     if (requireBatch()) $("import-file").click();
   });
@@ -802,8 +1080,14 @@ function bindEvents() {
     importPlan(event.target.files[0], $("import-trigger"));
   });
   $("photo-file").addEventListener("change", (event) => uploadPhotos(event.target.files));
+  document.addEventListener("object-photo-upload", () => openPhotoPicker());
+  $("object-import-trigger").addEventListener("click", () => $("object-import-file").click());
+  $("object-import-file").addEventListener("change", (event) => importObjects(event.target.files, $("object-import-trigger")));
   document.querySelector("[data-close-object]").addEventListener("click", () => {
     $("object-dialog").close();
+  });
+  document.querySelector("[data-close-robot-compare]").addEventListener("click", () => {
+    $("robot-compare-dialog").close();
   });
   for (const link of [$('export-trigger'), $("qc-export")].filter(Boolean)) {
     link.addEventListener("click", (event) => {
@@ -819,6 +1103,13 @@ function bindEvents() {
   });
 }
 
+configureDatasetTransfer({
+  app,
+  api,
+  loadState,
+  switchTab,
+  translate: t,
+});
 configureEntityUi({
   app,
   node,
@@ -860,10 +1151,15 @@ configureReview({
   sceneFor,
   renderGridCells,
   navigateQcSlot,
+  showToast,
   translate: t,
 });
 
 applyLocale();
 bindEvents();
 switchTab(app.tab);
+initDatasetTransfer();
+// Warm the shared 3D module while the initial catalog request is in flight.
+// Review clicks then only wait for the selected episode data.
+loadThree().catch(() => {});
 loadState();

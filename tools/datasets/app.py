@@ -16,10 +16,20 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
+import yaml
 from flask import Flask, jsonify, render_template, request, send_file, send_from_directory
 from werkzeug.exceptions import Forbidden, HTTPException
 
 from tools.datasets.collection import PlanCatalog
+from tools.datasets.dataset_transfer import CatalogTransfer
+from tools.datasets.hf_task_sets import (
+    fetch_dataset,
+    fetch_qc,
+    fetch_task_set,
+    publish_assets,
+    publish_qc,
+    publish_task_sets,
+)
 from tools.datasets.store import ConflictError, RecordNotFoundError
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -42,6 +52,7 @@ class DatasetService:
         app.config["DATASET_READ_ONLY"] = read_only
         app.config["DATASET_LOCALE"] = locale
         self.catalog = PlanCatalog(plans_root, assets_root, collection_root)
+        self.transfers = CatalogTransfer(PROJECT_ROOT, self.catalog)
 
         # Register the catalog and review endpoints
         app.after_request(self.compress_json)
@@ -63,17 +74,32 @@ class DatasetService:
         app.get("/api/batches/<batch>/validate")(self.validate)
         app.post("/api/batches/<batch>/import")(self.import_plan)
         app.get("/api/batches/<batch>/export")(self.export_plan)
+        app.post("/api/hf/task_sets/publish")(self.publish_hf_task_sets)
+        app.post("/api/batches/<batch>/hf/sync")(self.sync_hf_task_set)
+        app.post("/api/hf/assets/publish")(self.publish_hf_assets)
+        app.post("/api/batches/<batch>/hf/download")(self.download_hf_dataset)
+        app.post("/api/batches/<batch>/hf/qc/upload")(self.publish_hf_qc)
+        app.post("/api/batches/<batch>/hf/qc/download")(self.download_hf_qc)
+        app.get("/api/transfers")(self.transfers_state)
+        app.get("/api/transfers/job")(self.transfers_job)
+        app.post("/api/transfers")(self.start_transfer)
         app.get("/api/batches/<batch>/qc/export")(self.export_qc)
         app.post("/api/objects")(self.create_object)
         app.put("/api/objects/<object_id>")(self.update_object)
         app.delete("/api/objects/<object_id>")(self.delete_object)
         app.post("/api/objects/<object_id>/photos")(self.upload_photos)
+        app.post("/api/objects/import")(self.import_objects)
         app.get("/api/objects/<object_id>/photos/<path:filename>")(self.object_photo)
         app.get("/api/objects/<object_id>/previews/<any(thumb,display):variant>/<path:filename>")(
             self.object_preview
         )
         app.get("/api/review")(self.review)
+        app.get("/api/compare")(self.compare)
         app.put("/api/batches/<batch>/episodes/<int:episode_index>/qc")(self.mark_qc)
+        app.route(
+            "/api/batches/<batch>/episodes/<int:episode_index>/trim",
+            methods=["POST", "PUT"],
+        )(self.trim_episode)
         app.get("/api/batches/<batch>/episodes/<int:episode_index>/video/<path:key>")(
             self.episode_video
         )
@@ -175,6 +201,62 @@ class DatasetService:
             download_name=f"{name}.zip",
         )
 
+    def publish_hf_task_sets(self) -> Any:
+        """Publish every task set: task sets always sync as a whole."""
+        task_sets = {
+            path.name: path
+            for path in sorted(self.catalog.plans_root.iterdir())
+            if path.is_dir() and (path / "tasks.csv").is_file()
+        }
+        return jsonify({"ok": True, **publish_task_sets(PROJECT_ROOT, task_sets)})
+
+    def publish_hf_assets(self) -> Any:
+        return jsonify(publish_assets(PROJECT_ROOT, self.catalog.assets.path))
+
+    def sync_hf_task_set(self, batch: str) -> Any:
+        return jsonify(fetch_task_set(PROJECT_ROOT, batch, self.catalog.plans_root))
+
+    def download_hf_dataset(self, batch: str) -> Any:
+        info = yaml.safe_load((self.catalog._batch_root(batch) / "info.yaml").read_text())
+        destination = self.catalog._source_dataset_dir(batch, info)
+        return jsonify(fetch_dataset(PROJECT_ROOT, destination.name, destination.parent))
+
+    def publish_hf_qc(self, batch: str) -> Any:
+        info = yaml.safe_load((self.catalog._batch_root(batch) / "info.yaml").read_text())
+        dataset_dir = self.catalog._source_dataset_dir(batch, info)
+        relative = dataset_dir.relative_to(self.catalog.collection_root).as_posix()
+        remote_path = relative if relative.startswith("datasets/") else None
+        return jsonify(
+            publish_qc(PROJECT_ROOT, dataset_dir, dataset_dir.name, expected_path=remote_path)
+        )
+
+    def download_hf_qc(self, batch: str) -> Any:
+        info = yaml.safe_load((self.catalog._batch_root(batch) / "info.yaml").read_text())
+        dataset_dir = self.catalog._source_dataset_dir(batch, info)
+        relative = dataset_dir.relative_to(self.catalog.collection_root).as_posix()
+        remote_path = relative if relative.startswith("datasets/") else None
+        return jsonify(
+            fetch_qc(PROJECT_ROOT, dataset_dir.name, dataset_dir, expected_path=remote_path)
+        )
+
+    def transfers_state(self) -> Any:
+        return jsonify({"ok": True, "datasets": self.transfers.rows(), **self.transfers.snapshot()})
+
+    def transfers_job(self) -> Any:
+        return jsonify({"ok": True, **self.transfers.snapshot()})
+
+    def start_transfer(self) -> Any:
+        body = request.get_json(silent=True) or {}
+        if body.get("action") == "stop":
+            self.transfers.stop(str(body.get("job_id", "")))
+            return jsonify({"ok": True})
+        names = body.get("datasets")
+        if not isinstance(names, list) or not names:
+            raise ValueError("Select datasets to transfer")
+        targets = self.transfers.targets(list(dict.fromkeys(names)))
+        self.transfers.start(str(body.get("action", "")), targets)
+        return jsonify({"ok": True, **self.transfers.snapshot()})
+
     def export_qc(self, batch: str) -> Any:
         rows = self.catalog.qc_rows(batch)
         stream = io.StringIO(newline="")
@@ -235,6 +317,15 @@ class DatasetService:
         ]
         return jsonify(self.catalog.upload_photos(object_id, uploads))
 
+    def import_objects(self) -> Any:
+        uploaded = request.files.get("file") or request.files.get("csv")
+        if uploaded is None:
+            raise ValueError("Choose an object CSV file")
+        photos = [
+            (photo.filename or "photo", photo.read()) for photo in request.files.getlist("photos")
+        ]
+        return jsonify(self.catalog.import_assets_csv(uploaded.read(), photos))
+
     def object_photo(self, object_id: str, filename: str) -> Any:
         return send_file(
             self.catalog.assets.photo_path(object_id, filename),
@@ -255,6 +346,16 @@ class DatasetService:
             self.catalog.review(request.args.get("batch", ""), request.args.get("slot_id", ""))
         )
 
+    def compare(self) -> Any:
+        return jsonify(
+            self.catalog.compare(
+                request.args.get("task_id", ""),
+                request.args.get("scene_id", ""),
+                request.args.get("round_index", 0),
+                request.args.get("current_batch", ""),
+            )
+        )
+
     def mark_qc(self, batch: str, episode_index: int) -> Any:
         payload = request.get_json(silent=True) or {}
         return jsonify(
@@ -267,8 +368,28 @@ class DatasetService:
             )
         )
 
+    def trim_episode(self, batch: str, episode_index: int) -> Any:
+        payload = request.get_json(silent=True) or {}
+        try:
+            start_frame = int(payload["start_frame"])
+            end_frame = int(payload["end_frame"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError("start_frame and end_frame must be integers") from error
+        return jsonify(
+            self.catalog.trim_episode(
+                batch,
+                episode_index,
+                start_frame,
+                end_frame,
+            )
+        )
+
     def episode_video(self, batch: str, episode_index: int, key: str) -> Any:
-        return send_file(self.catalog.video_path(batch, episode_index, key), conditional=True)
+        return send_file(
+            self.catalog.video_path(batch, episode_index, key),
+            conditional=True,
+            max_age=30,
+        )
 
     def robot_meshes(self, robot_type: str) -> Any:
         return jsonify(self.catalog.robot_meta(robot_type))

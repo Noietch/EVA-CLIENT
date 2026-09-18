@@ -64,7 +64,7 @@ _EPISODE_HISTORY_CACHE_LOCK = threading.RLock()
 
 @dataclass
 class _EpisodeHistoryCacheEntry:
-    signature: tuple[int, int, int]
+    signature: tuple[int, ...]
     version: str
     rows: list[dict[str, Any]]
     views: dict[str | tuple[str, str | None] | None, tuple[list[dict[str, Any]], list[str]]]
@@ -82,7 +82,7 @@ def _episode_history_signature(path: Path) -> tuple[int, int, int]:
     return (int(stat.st_ino), int(stat.st_mtime_ns), int(stat.st_size))
 
 
-def _episode_history_version(signature: tuple[int, int, int]) -> str:
+def _episode_history_version(signature: tuple[int, ...]) -> str:
     return "-".join(f"{value:x}" for value in signature)
 
 
@@ -109,9 +109,52 @@ def _iter_json_objects(path: Path):
                 yield row
 
 
-def _read_episode_history_rows(path: Path) -> list[dict[str, Any]]:
+def _read_episode_history_rows(path: Path, qc_path: Path | None = None) -> list[dict[str, Any]]:
     """Read and project one dataset history, tolerating a partial append line."""
-    return [history_row(row, index) for index, row in enumerate(_iter_json_objects(path))]
+    source_rows = list(_iter_json_objects(path))
+    rows = [history_row(row, index) for index, row in enumerate(source_rows)]
+    if qc_path is None:
+        return rows
+    qc_by_episode = {
+        int(row["episode_index"]): row
+        for row in _iter_json_objects(qc_path)
+        if type(row.get("episode_index")) is int
+    }
+    canonical_episodes = qc_path.parent / "episodes.jsonl"
+    using_canonical_rows = (
+        canonical_episodes.is_file() and canonical_episodes.resolve() != path.resolve()
+    )
+    qc_by_capture = {}
+    if using_canonical_rows:
+        for canonical in _iter_json_objects(canonical_episodes):
+            if type(canonical.get("episode_index")) is not int:
+                continue
+            qc = qc_by_episode.get(canonical["episode_index"])
+            identity = _capture_identity(canonical)
+            if qc is not None and identity is not None:
+                qc_by_capture[identity] = qc
+    for episode, source in zip(rows, source_rows, strict=True):
+        qc = (
+            qc_by_capture.get(_capture_identity(source))
+            if using_canonical_rows
+            else qc_by_episode.get(episode["episode_index"])
+        )
+        if qc is None or (
+            qc.get("slot_id") and episode.get("slot_id") and qc["slot_id"] != episode["slot_id"]
+        ):
+            # A new take has no QC row yet; its capture quality is authoritative.
+            episode.pop("qc_verdict", None)
+            continue
+        episode["qc_verdict"] = str(qc.get("qc_verdict") or "").lower()
+        episode["qc_note"] = str(qc.get("qc_note") or "")
+    return rows
+
+
+def _capture_identity(row: dict[str, Any]) -> tuple[str, str, str, str] | None:
+    fields = tuple(
+        str(row.get(key) or "") for key in ("session_id", "started_at", "ended_at", "slot_id")
+    )
+    return fields if all(fields) else None
 
 
 def _episode_history_cursors(rows: list[dict[str, Any]]) -> list[str]:
@@ -151,6 +194,7 @@ def _count_episode_history(dataset_dir: Path) -> tuple[int, str]:
 def load_episode_history(
     dataset_dir: Path,
     *,
+    qc_path: Path | None = None,
     task: str | None = None,
     task_id: str | None = None,
     since: int = 0,
@@ -169,7 +213,13 @@ def load_episode_history(
     """
     resolved = Path(dataset_dir).resolve()
     path = resolved / "meta" / "episodes.jsonl"
+    qc_path = Path(qc_path).resolve() if qc_path is not None else None
     signature = _episode_history_signature(path)
+    if qc_path is not None:
+        signature += _episode_history_signature(qc_path)
+        canonical_episodes = qc_path.parent / "episodes.jsonl"
+        if canonical_episodes.resolve() != path.resolve():
+            signature += _episode_history_signature(canonical_episodes)
     if limit == 0 and task is None and not task_id and not cursor and not exclude_episode_indices:
         total, version = _count_episode_history(resolved)
         offset = min(max(0, int(since)), total)
@@ -186,7 +236,7 @@ def load_episode_history(
     with _EPISODE_HISTORY_CACHE_LOCK:
         cached = _EPISODE_HISTORY_CACHE.get(resolved)
         if cached is None or cached.signature != signature:
-            rows = _read_episode_history_rows(path)
+            rows = _read_episode_history_rows(path, qc_path)
             cached = _EpisodeHistoryCacheEntry(
                 signature,
                 _episode_history_version(signature),

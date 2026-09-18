@@ -3,7 +3,7 @@
 import { $, LIVE, S, apiGet, apiPost, clientTrace } from "./core.js";
 import { updateScrub } from "./charts.js";
 import {
-  applyCollectTaskSelection, collectTaskIndexValue, collectSetValue, collectTaskValue,
+  applyCollectTaskSelection, collectTaskIndexValue, collectSetValue, selectCollectSet, collectTaskValue,
   setPanel, applyStatus, uiMode,
 } from "./run.js";
 import {
@@ -21,7 +21,7 @@ const qualityTransfer = {
   episodesCompleted: 0,
   episodesTotal: 0,
   uploading: false,
-  acceptedDir: "",
+  outputDir: "",
   uploadJobId: "",
   uploadPlanId: "",
   uploadState: "idle",
@@ -165,7 +165,7 @@ async function activateCollectionSlot(slot, { manual = false } = {}) {
   setCollectError();
   S.collectTaskSelectionPending = true;
   if (slot.task) state.active = { ...slot, state: "active" };
-  state.selectedSlotId = "";
+  if (manual) state.selectedSlotId = slot.slot_id;
   adoptCollectionSlot(state.active);
   renderCollect();
   try {
@@ -239,7 +239,7 @@ async function pollCollectionSlots(force = false) {
     renderCollect();
     const active = state.active;
     const collecting = !!(S.STATUS.collect && S.STATUS.collect.collecting);
-    if (active && !collecting && !S.collectTaskSelectionPending &&
+    if (active && state.followActivePage && !collecting && !S.collectTaskSelectionPending &&
         S.STATUS.collection_slot_id !== active.slot_id) {
       queueMicrotask(() => activateCollectionSlot(active));
     }
@@ -253,7 +253,9 @@ async function pollCollectionSlots(force = false) {
 async function selectCollectionDataset(dataset) {
   const value = String(dataset || "").trim();
   if (!value || (S.STATUS.collect && S.STATUS.collect.collecting)) return false;
+  if (!selectCollectSet(value)) return false;
   const state = S.collectionSlots;
+  if (state.dataset !== value) setCollectTransferInfo("");
   state.dataset = value;
   state.loaded = false;
   state.active = null;
@@ -442,7 +444,7 @@ function renderCurrentSceneGrid(scene) {
   });
   host.querySelectorAll(".collect-scene-cell").forEach((cell) => {
     const placements = byPosition.get(cell.dataset.positionId) || [];
-    const names = [...new Set(placements.map((placement) => String(placement.name || "")))]
+    const names = [...new Set(placements.map((placement) => String(placement.name_en || (/[^\x00-\x7F]/.test(placement.name || "") ? placement.object_id : placement.name) || "")))]
       .filter(Boolean);
     cell.classList.toggle("empty", placements.length === 0);
     cell.classList.toggle("fixed", placements.length > 0);
@@ -685,12 +687,12 @@ function qualityTransferFormatLabel(value) {
 function changeCollectionExportFormat() {
   const select = $("collect-export-format");
   if (!select || qualityTransfer.exporting || qualityTransfer.uploading) return;
-  if (qualityTransfer.datasetFormat === select.value && !qualityTransfer.acceptedDir) return;
+  if (qualityTransfer.datasetFormat === select.value && !qualityTransfer.outputDir) return;
 
   qualityTransfer.phase = "export";
   qualityTransfer.exportState = "idle";
   qualityTransfer.uploadState = "idle";
-  qualityTransfer.acceptedDir = "";
+  qualityTransfer.outputDir = "";
   qualityTransfer.exportJobId = "";
   qualityTransfer.uploadJobId = "";
   qualityTransfer.uploadPlanId = "";
@@ -1086,13 +1088,30 @@ function collectEnabled() {
     return !!(collectConfigured() && S.STATUS.collect);
   }
 
+function collectQcState(item) {
+    if (savedEpisodeId(item) == null) return "pending";
+    const verdict = String(item.qc_verdict || "").toLowerCase();
+    if (verdict === "unreviewed") return "unreviewed";
+    if (verdict === "pass") return "passed";
+    if (verdict === "fail") return "failed";
+    return String(item.quality || "").toLowerCase() === "red" ? "failed" : "unreviewed";
+}
+
+function collectQcLabel(state) {
+    return {pending: "TO COLLECT", unreviewed: "UNREVIEWED", passed: "PASSED", failed: "FAILED"}[state];
+  }
+
 function collectOutcome(item) {
-    if (item.status === "failed") return "rejected";
-    if (item.qc_verdict === "pass") return "usable";
-    if (item.qc_verdict === "fail") return "rejected";
-    if (item.quality === "red") return "rejected";
-    if (savedEpisodeId(item) != null && item.quality === "green") return "usable";
-    return "pending";
+    if (item && item.status === "failed") return "rejected";
+    const state = collectQcState(item);
+    return state === "failed" ? "rejected" : state === "pending" ? "pending" : "usable";
+  }
+
+function collectResultLabel(item) {
+    if (!item) return "UNKNOWN";
+    return item.qc_verdict
+      ? `QC ${String(item.qc_verdict).toUpperCase()}`
+      : String(item.quality || "unknown").toUpperCase();
   }
 
 function collectTone(item) {
@@ -1175,7 +1194,15 @@ function selectCollectionQcTarget(item) {
       dataset_dir: reviewDatasetFor("collect"),
       task: String(item.task || item.prompt || collectTaskValue()),
     };
-    if ($("collect-qc-note")) $("collect-qc-note").value = item ? item.qc_note || "" : "";
+    if ($("collect-qc-note")) {
+      const note = item && item.qc_note || "";
+      const issues = item && collectQcState(item) === "failed"
+        ? (item.quality_issues || []).map((issue) => {
+          const detail = issue.detail || issue.message || issue.code || "";
+          return `${detail}${Number(issue.count || 1) > 1 ? ` ×${issue.count}` : ""}`;
+        }).filter(Boolean).join("\n") : "";
+      $("collect-qc-note").value = note || issues || (item && item.error) || "";
+    }
     if ($("collect-qc-status")) $("collect-qc-status").textContent = "";
   }
 
@@ -1208,6 +1235,7 @@ function previewCollectionSlot(slot) {
       slot.dataset !== S.collectionSlots.dataset || S.collectTaskSelectionPending ||
       S.STATUS.collect?.collecting) return;
   S.collectionSlots.selectedSlotId = slot.slot_id;
+  S.collectionSlots.followActivePage = false;
   selectCollectEpisode(slot.episode);
 }
 
@@ -1238,7 +1266,7 @@ function clickCollectionReviewSlot(slot) {
           renderCollect();
         }
       }).catch((error) => {
-        setCollectError(`选择采集位置失败：${error.message || error}`);
+        setCollectError(`Failed to select capture slot: ${error.message || error}`);
       }).finally(() => { collectionReviewBusy = false; });
     }, 300),
   };
@@ -1275,11 +1303,11 @@ function handleCollectionReviewInput(feedback) {
       const state = S.collectionSlots;
       const slot = (state.slots || []).find((item) => item.slot_id === state.selectedSlotId);
       if (!slot) {
-        setCollectError("请先用左摇杆选择采集位置");
+        setCollectError("Select a capture slot with the left stick first");
         continue;
       }
       if (S.STATUS.collect?.collecting || slot.state === "saving") {
-        setCollectError("请等待当前采集或保存完成后再选择采集位置");
+        setCollectError("Wait for recording or saving to finish before selecting a slot");
         continue;
       }
       clickCollectionReviewSlot(slot);
@@ -1288,14 +1316,18 @@ function handleCollectionReviewInput(feedback) {
     if (event.action === "toggle_qc" || event.action === "mark_red") {
       const selected = selectedCollectEpisodeItem();
       if (!selected) {
-        if ($("collect-qc-status")) $("collect-qc-status").textContent = "先选择已保存的数据";
+        if ($("collect-qc-status")) $("collect-qc-status").textContent = "Select a saved episode first";
         continue;
       }
       collectionReviewBusy = true;
-      const verdict = collectOutcome(selected) === "rejected" ? "pass" : "fail";
+      const verdict = event.action === "mark_red"
+        ? "fail"
+        : ({ passed: "fail", failed: "unreviewed", unreviewed: "pass" }[
+          collectQcState(selected)
+        ] || "pass");
       submitEpisodeQc("collect", verdict)
         .catch((error) => {
-          if ($("collect-qc-status")) $("collect-qc-status").textContent = `状态切换失败：${error.message || error}`;
+          if ($("collect-qc-status")) $("collect-qc-status").textContent = `Failed to change status: ${error.message || error}`;
         })
         .finally(() => { collectionReviewBusy = false; });
       continue;
@@ -1349,7 +1381,7 @@ function moveCollectionReviewCursor(direction) {
           .find((tile) => tile.dataset.slotId === state.selectedSlotId)
           ?.scrollIntoView({ block: "nearest", inline: "nearest" });
       }).catch((error) => {
-        setCollectError(`翻页失败：${error.message || error}`);
+        setCollectError(`Failed to change page: ${error.message || error}`);
       }).finally(() => { collectionReviewBusy = false; });
       return;
     }
@@ -1369,24 +1401,28 @@ function renderCollectionSlotFilters() {
     const state = S.collectionSlots;
     const scene = $("collect-slot-scene-filter");
     const task = $("collect-slot-task-filter");
-    const sceneKey = JSON.stringify(state.scenes || []);
-    const taskKey = JSON.stringify(state.tasks || []);
+    const sceneIds = [...new Set((state.scenes || []).map((entry) => entry.id).filter(Boolean))].sort();
+    const taskIds = [...new Set((state.tasks || []).map((entry) => entry.id).filter(Boolean))].sort(
+      (left, right) => String(left).localeCompare(String(right), "en", { numeric: true, sensitivity: "base" })
+    );
+    const sceneKey = JSON.stringify(sceneIds);
+    const taskKey = JSON.stringify(taskIds);
     if (scene.dataset.options !== sceneKey) {
       scene.innerHTML = '<option value="">ALL SCENES</option>';
-      (state.scenes || []).forEach((entry) => {
+      sceneIds.forEach((id) => {
         const option = document.createElement("option");
-        option.value = entry.id;
-        option.textContent = entry.label;
+        option.value = id;
+        option.textContent = id;
         scene.appendChild(option);
       });
       scene.dataset.options = sceneKey;
     }
     if (task.dataset.options !== taskKey) {
       task.innerHTML = '<option value="">ALL TASKS</option>';
-      (state.tasks || []).forEach((entry) => {
+      taskIds.forEach((id) => {
         const option = document.createElement("option");
-        option.value = entry.id;
-        option.textContent = entry.label;
+        option.value = id;
+        option.textContent = id;
         task.appendChild(option);
       });
       task.dataset.options = taskKey;
@@ -1399,6 +1435,8 @@ function renderCollectionSlotFilters() {
 
 function renderCollectTiles(items) {
     const host = $("collect-queue-tiles");
+    const focusedSlotId = host.contains(document.activeElement)
+      ? document.activeElement.dataset.slotId : null;
     host.innerHTML = "";
     if (!items.length) {
       const empty = document.createElement("span");
@@ -1411,27 +1449,25 @@ function renderCollectTiles(items) {
       const tile = document.createElement("button");
       tile.type = "button";
       tile.dataset.slotId = slot.slot_id;
-      tile.title = `${slot.scene_label} · ${slot.task_zh || slot.task} · ` +
+      tile.title = `${slot.scene_id} · ${slot.task} · ` +
         `round ${Number(slot.round_index) + 1}/${slot.round_total}`;
       const episode = savedEpisodeId(slot.episode);
       tile.title = `SLOT ${Number(slot.ordinal) + 1} · ${tile.title}`;
       if (episode != null) {
-        tile.title += ` · EPISODE ${episode} · ${String(slot.episode.quality || "unknown").toUpperCase()}`;
-        if (slot.episode.qc_verdict) tile.title += ` · QC ${slot.episode.qc_verdict.toUpperCase()}`;
+        tile.title += ` · EPISODE ${episode} · ${collectResultLabel(slot.episode)}`;
       }
-      if (slot.state === "saving") tile.title += " · CONVERTING";
+      const saving = slot.state === "saving";
       tile.textContent = String(Number(slot.ordinal) + 1);
       tile.setAttribute("aria-label", tile.title);
       const saved = savedEpisodeId(slot.episode) != null;
       const current = S.collectionSlots.active &&
         S.collectionSlots.active.slot_id === slot.slot_id;
-      const outcome = saved ? collectOutcome(slot.episode) : "pending";
-      const rejected = outcome === "rejected";
-      const visibleState = slot.state === "saving" ? "saving"
-        : rejected ? "rejected"
-        : outcome === "usable" ? "complete"
-        : current ? "active" : (slot.state === "active" ? "pending" : slot.state);
+      const visibleState = slot.qc_state || collectQcState(slot.episode);
+      tile.title += saving ? " · SAVING" : ` · ${collectQcLabel(visibleState)}`;
+      tile.setAttribute("aria-label", tile.title);
+      tile.setAttribute("aria-busy", String(saving));
       tile.className = `collect-tile slot-${visibleState}` +
+        `${saving ? " slot-saving" : ""}` +
         `${current ? " slot-current" : ""}`;
       if (slot.slot_id === S.collectionSlots.selectedSlotId) tile.classList.add("selected");
       const locked = slot.state === "saving" || S.collectTaskSelectionPending ||
@@ -1460,6 +1496,11 @@ function renderCollectTiles(items) {
       };
       host.appendChild(tile);
     });
+    if (focusedSlotId) {
+      Array.from(host.querySelectorAll("[data-slot-id]"))
+        .find((tile) => tile.dataset.slotId === focusedSlotId && !tile.disabled)
+        ?.focus({ preventScroll: true });
+    }
   }
 
 function pipeBadge(el, text) {
@@ -1580,18 +1621,18 @@ function renderCollectionTransfer(enabled, usableCount, rejectedCount) {
   const uploadButton = $("b-collect-quality-upload");
   const exportFormat = $("collect-export-format");
   const selectedFormat = exportFormat ? exportFormat.value : "";
-  const selectedExportReady = !!qualityTransfer.acceptedDir &&
+  const selectedExportReady = !!qualityTransfer.outputDir &&
     qualityTransfer.datasetFormat === selectedFormat;
   const upload = (S.CFG && S.CFG.collection && S.CFG.collection.upload) || {};
   if (exportButton) {
     exportButton.disabled = !enabled || usableCount + rejectedCount === 0 ||
-      qualityTransfer.exporting || qualityTransfer.uploading;
+      qualityTransfer.exporting || qualityTransfer.uploading || datasetSyncBusy;
   }
   if (uploadButton) {
     const uploadPlanReady = qualityTransfer.uploadState === "ready" &&
       !!qualityTransfer.uploadPlanId;
     uploadButton.disabled = !upload.configured || !selectedExportReady ||
-      qualityTransfer.exporting || qualityTransfer.uploading;
+      qualityTransfer.exporting || qualityTransfer.uploading || datasetSyncBusy;
     const backendLabel = (upload.backends || []).map((value) => String(value).toUpperCase());
     const targetLabel = backendLabel.length ? backendLabel.join(" + ") : "TARGET";
     const operationCount = qualityTransfer.filesTotal + qualityTransfer.filesToDelete;
@@ -1600,11 +1641,15 @@ function renderCollectionTransfer(enabled, usableCount, rejectedCount) {
       : `SCAN ${targetLabel}`;
   }
   if (exportFormat) {
-    exportFormat.disabled = qualityTransfer.exporting || qualityTransfer.uploading;
+    exportFormat.disabled = qualityTransfer.exporting || qualityTransfer.uploading || datasetSyncBusy;
   }
-  const transferProgressBar = $("collect-quality-progress-bar");
-  const transferProgressFill = $("collect-quality-progress-fill");
-  const transferProgressLabel = $("collect-quality-progress-label");
+  datasetSyncButtons.forEach((id) => {
+    $(id).disabled = datasetSyncBusy || qualityTransfer.exporting || qualityTransfer.uploading;
+  });
+  if (processProgressOwner === "sync") return;
+  const transferProgressBar = $("collect-dataset-sync-progress");
+  const transferProgressFill = $("collect-dataset-sync-progress-fill");
+  const transferProgressLabel = $("collect-dataset-sync-progress-label");
   const transferProgressDetail = $("collect-quality-progress-detail");
   const showingExport = qualityTransfer.phase !== "upload";
   const formatLabel = qualityTransferFormatLabel(
@@ -1621,6 +1666,8 @@ function renderCollectionTransfer(enabled, usableCount, rejectedCount) {
             : (qualityTransfer.uploadState === "completed" ? 1 : 0)));
   const transferPercent = Math.round(Math.max(0, Math.min(1, transferFraction)) * 100);
   if (transferProgressBar) {
+    transferProgressBar.classList.remove("in-progress");
+    transferProgressBar.removeAttribute("aria-valuetext");
     transferProgressBar.setAttribute("aria-valuenow", String(transferPercent));
     transferProgressBar.setAttribute(
       "aria-label", `${formatLabel} ${showingExport ? "export" : "upload"} progress`
@@ -1641,11 +1688,110 @@ function renderCollectionTransfer(enabled, usableCount, rejectedCount) {
   }
 }
 
+const datasetSyncButtons = [
+  "b-collect-dataset-upload", "b-collect-assets-download",
+  "b-collect-task-set-download",
+];
+let datasetSyncBusy = false;
+let processProgressOwner = "convert";
+
+function setCollectTransferInfo(message, tone = "") {
+  const info = $("collect-transfer-info");
+  info.textContent = message;
+  info.title = message;
+  info.classList.toggle("ok", tone === "ok");
+  info.classList.toggle("err", tone === "err");
+  info.style.display = S.ACTIVE_TAB === "collect" && message ? "" : "none";
+}
+
+function setDatasetSyncProgress(state, label) {
+  const bar = $("collect-dataset-sync-progress");
+  const fill = $("collect-dataset-sync-progress-fill");
+  const text = $("collect-dataset-sync-progress-label");
+  $("collect-quality-progress-detail").textContent = label;
+  bar.classList.toggle("in-progress", state === "running");
+  if (state === "running") {
+    bar.removeAttribute("aria-valuenow");
+    bar.setAttribute("aria-valuetext", `${label} in progress`);
+    fill.style.width = "35%";
+    text.textContent = `${label}…`;
+  } else {
+    const percent = state === "done" ? 100 : 0;
+    bar.setAttribute("aria-valuenow", String(percent));
+    bar.setAttribute("aria-valuetext", state === "done" ? `${label} complete` : `${label} failed`);
+    fill.style.width = `${percent}%`;
+    text.textContent = state === "done" ? "100%" : "ERROR";
+  }
+}
+
+async function runDatasetSync(label, request, onSuccess) {
+  if (datasetSyncBusy || qualityTransfer.exporting || qualityTransfer.uploading) return;
+  processProgressOwner = "sync";
+  datasetSyncBusy = true;
+  renderCollect();
+  datasetSyncButtons.forEach((id) => { $(id).disabled = true; });
+  const status = $("collect-quality-status");
+  status.textContent = `${label}…`;
+  setCollectTransferInfo(`${label}…`);
+  setDatasetSyncProgress("running", label);
+  let succeeded = false;
+  try {
+    const result = await request();
+    if (!result.ok) throw new Error(result.error || `${label} failed`);
+    await onSuccess(result, status);
+    setCollectTransferInfo(status.textContent, "ok");
+    succeeded = true;
+  } catch (error) {
+    status.textContent = error.message || String(error);
+    setCollectTransferInfo(`${label}: ${status.textContent}`, "err");
+  } finally {
+    setDatasetSyncProgress(succeeded ? "done" : "failed", label);
+    datasetSyncButtons.forEach((id) => { $(id).disabled = false; });
+    datasetSyncBusy = false;
+    renderCollect();
+  }
+}
+
+async function downloadCollectionTaskSetFromHf() {
+  // Task sets always sync as a whole: every set this machine is configured with.
+  const status = $("collect-quality-status");
+  await runDatasetSync("下载任务集",
+    () => apiPost("/api/hf/task_set/sync", {}, {timeoutMs: 0, concurrent: true}),
+    async (result, output) => {
+      const missing = result.missing?.length ? `, ${result.missing.length} not published` : "";
+      output.textContent = `task sets: ${result.fetched?.length || 0} updated${missing}`;
+      await pollCollectionSlots(true);
+    });
+  if (!status.textContent) status.textContent = "task sets synced";
+}
+
+async function downloadCollectionAssetsFromHf() {
+  const dataset = collectSetValue();
+  const status = $("collect-quality-status");
+  if (!dataset) { status.textContent = "Select a set"; return; }
+  await runDatasetSync("DOWNLOAD ASSETS",
+    () => apiPost("/api/hf/assets/download", {dataset}, {timeoutMs: 0, concurrent: true}),
+    async (result, output) => {
+      output.textContent = `assets downloaded for ${dataset}: ${result.files || 0} files`;
+    });
+}
+
+async function uploadCollectionDatasetToHf() {
+  const dataset = collectSetValue();
+  const status = $("collect-quality-status");
+  if (!dataset) { status.textContent = "Select a dataset"; return; }
+  await runDatasetSync("UPLOAD DATA",
+    () => apiPost("/api/hf/dataset/upload", {dataset}, {timeoutMs: 0, concurrent: true}),
+    async (result, output) => {
+      output.textContent = `${dataset} uploaded: ${result.revision || "done"}`;
+    });
+}
+
 function renderCollectionReplayStatus(selectedEpisodeSaved) {
   const replayStatus = $("collect-replay-status");
   const history = historyFor("collect", S.STATUS.collect || {});
   const item = history.episodes.find((entry) => savedEpisodeId(entry) === S.collectReplayEpisode);
-  const label = `episode ${S.collectReplayEpisode} · ${String((item && item.quality) || "unknown").toUpperCase()}`;
+  const label = `episode ${S.collectReplayEpisode} · ${collectResultLabel(item)}`;
   if (S.reviewKind === "collect" && LIVE.replayOwner === "collect") {
     replayStatus.textContent = LIVE.replayError
       ? `${label} · error · ${LIVE.replayError}`
@@ -1674,6 +1820,10 @@ function renderCollect() {
     }
     const toggleBusy = S.collectToggleBusy !== null;
     const activeSlot = slotPlan.active;
+    const selectedSlot = (slotPlan.slots || []).find(
+      (slot) => slot.slot_id === slotPlan.selectedSlotId && savedEpisodeId(slot.episode) != null
+    );
+    const displaySlot = selectedSlot || activeSlot;
     const prompt = activeSlot ? activeSlot.task : collectTaskValue();
     const collectionSet = slotPlan.dataset || collectSetValue();
     const hasPrompt = !!activeSlot;
@@ -1682,9 +1832,10 @@ function renderCollect() {
     const queue = history.queue;
     const counts = slotPlan.counts || {};
     const totalSlots = Number(counts.total) || 0;
-    const usableCount = Number(counts.complete) || 0;
-    const rejectedCount = (Number(counts.rejected) || 0) + (Number(counts.deferred) || 0);
-    const pendingCount = Math.max(0, totalSlots - usableCount - rejectedCount);
+    const usableCount = Number(counts.passed) || 0;
+    const unreviewedCount = Number(counts.unreviewed) || 0;
+    const rejectedCount = Number(counts.failed) || 0;
+    const pendingCount = Math.max(0, totalSlots - usableCount - unreviewedCount - rejectedCount);
     const progress = totalSlots > 0 ? usableCount / totalSlots : 0;
     const requirementComplete = totalSlots > 0 && usableCount >= totalSlots;
 
@@ -1693,6 +1844,7 @@ function renderCollect() {
     $("collect-fps").textContent = collectFps ? `${collectFps} FPS` : "";
     $("collect-count").textContent = `${usableCount}/${totalSlots}`;
     $("collect-usable-count").textContent = threeDigitCount(usableCount);
+    $("collect-unreviewed-count").textContent = threeDigitCount(unreviewedCount);
     $("collect-rejected-count").textContent = threeDigitCount(rejectedCount);
     $("collect-pending-count").textContent = threeDigitCount(pendingCount);
     $("collect-requirement-count").textContent = `${usableCount} / ${totalSlots || "--"}`;
@@ -1707,12 +1859,12 @@ function renderCollect() {
     $("collect-current-position").textContent = activeSlot
       ? `${Number(activeSlot.ordinal) + 1} / ${totalSlots}` : `${totalSlots} / ${totalSlots}`;
     renderCurrentSceneGrid(scenePlanScene());
-    $("collect-current-task").textContent = activeSlot
-      ? (activeSlot.task_zh || activeSlot.task) : "--";
-    $("collect-current-task-en").textContent = activeSlot && activeSlot.task_zh
-      ? (scenePlanTask()?.prompt_en || activeSlot.task) : "";
-    $("collect-current-round").textContent = activeSlot
-      ? `ROUND ${Number(activeSlot.round_index) + 1} / ${activeSlot.round_total}` : "ROUND -- / --";
+    $("collect-current-task").textContent = displaySlot
+      ? (displaySlot.task_zh || displaySlot.task || displaySlot.episode?.task || displaySlot.episode?.prompt || "--") : "--";
+    $("collect-current-task-en").textContent = displaySlot && displaySlot.task_zh
+      ? (scenePlanTask()?.prompt_en || displaySlot.task || "") : "";
+    $("collect-current-round").textContent = displaySlot
+      ? `ROUND ${Number(displaySlot.round_index) + 1} / ${displaySlot.round_total}` : "ROUND -- / --";
     renderCollectionSlotFilters();
     if ($("collect-vr-review-hint")) {
       $("collect-vr-review-hint").hidden = collectControlsConfig().mode !== "vr";
@@ -1753,11 +1905,12 @@ function renderCollect() {
     const selectedEpisodeSaved = savedEpisodeId(selectedEpisode) != null;
     const qcPending = S.collectTaskSelectionPending || collectionSlotClickTimer !== null;
     $("collect-qc-target").textContent = selectedEpisodeSaved
-      ? `EPISODE ${selectedEpisode.episode_index} · ${String(selectedEpisode.qc_verdict || selectedEpisode.quality || "unknown").toUpperCase()}` : "--";
+      ? `EPISODE ${selectedEpisode.episode_index} · ${collectResultLabel(selectedEpisode)}` : "--";
     $("b-collect-qc-pass").disabled = !enabled || !selectedEpisodeSaved || qcPending;
+    $("b-collect-qc-unreviewed").disabled = !enabled || !selectedEpisodeSaved || qcPending;
     $("b-goto-qc").disabled = !enabled || !selectedEpisodeSaved || qcPending;
     $("b-collect-note-save").disabled = !selectedEpisodeSaved || qcPending;
-    renderCollectionTransfer(enabled, usableCount, rejectedCount);
+    renderCollectionTransfer(enabled, usableCount + unreviewedCount, rejectedCount);
 
     const recordState = collecting || (hasPrompt && !S.collectArmEnabled)
       ? "active"
@@ -1791,7 +1944,8 @@ function renderCollect() {
   }
 
 async function exportCollectionQuality() {
-    if (qualityTransfer.exporting || qualityTransfer.uploading) return;
+    if (qualityTransfer.exporting || qualityTransfer.uploading || datasetSyncBusy) return;
+    processProgressOwner = "convert";
     const status = $("collect-quality-status");
     const datasetFormat = $("collect-export-format").value;
     const formatLabel = qualityTransferFormatLabel(datasetFormat);
@@ -1801,7 +1955,7 @@ async function exportCollectionQuality() {
     qualityTransfer.exportState = "queued";
     qualityTransfer.episodesCompleted = 0;
     qualityTransfer.episodesTotal = 0;
-    qualityTransfer.acceptedDir = "";
+    qualityTransfer.outputDir = "";
     qualityTransfer.uploadPlanId = "";
     qualityTransfer.datasetFormat = datasetFormat;
     if (status) status.textContent = `exporting ${formatLabel}…`;
@@ -1828,12 +1982,12 @@ async function exportCollectionQuality() {
         qualityTransfer.episodesTotal = Number(job.episodes_total || 0);
         renderCollect();
         if (job.state === "completed") {
-          qualityTransfer.acceptedDir = job.accepted_dir || "";
+          qualityTransfer.outputDir = job.output_dir || "";
           qualityTransfer.datasetFormat = job.dataset_format || datasetFormat;
           if (status) {
             const completedFormat = qualityTransferFormatLabel(qualityTransfer.datasetFormat);
             status.textContent = `${completedFormat} export complete · ` +
-              `${job.accepted_episodes || 0} accepted · ${job.rejected_episodes || 0} rejected`;
+              `${job.episodes || 0} episodes`;
           }
           return;
         }
@@ -1854,11 +2008,12 @@ async function exportCollectionQuality() {
   }
 
 async function uploadCollectionQuality() {
-    if (qualityTransfer.exporting || qualityTransfer.uploading) return;
+    if (qualityTransfer.exporting || qualityTransfer.uploading || datasetSyncBusy) return;
+    processProgressOwner = "convert";
     const status = $("collect-quality-status");
     const selectedFormat = $("collect-export-format").value;
     const datasetFormat = qualityTransfer.datasetFormat;
-    if (!qualityTransfer.acceptedDir || datasetFormat !== selectedFormat) {
+    if (!qualityTransfer.outputDir || datasetFormat !== selectedFormat) {
       if (status) {
         status.textContent = `${qualityTransferFormatLabel(selectedFormat)} export required before upload`;
       }
@@ -2078,7 +2233,7 @@ async function reviewCollectEpisode(item) {
     LIVE.replayError = "";
     updateScrub();
     const title = reviewTitleFor("collect");
-    const qualityLabel = String(item.quality || "unknown").toUpperCase();
+    const qualityLabel = collectResultLabel(item);
     if (title) title.textContent = `episode ${episode} · ${qualityLabel} · loading`;
     const err = reviewErrorFor("collect");
     if (err) err.textContent = "";
@@ -2267,6 +2422,8 @@ export {
   installCollectKeyboardControls, renderCollectControls, uploadCollectionQuality,
   handleCollectionReviewInput, resetCollectionReviewInput,
   changeCollectionExportFormat, invalidateEpisodeHistory, pollEpisodeHistory,
+  downloadCollectionTaskSetFromHf, downloadCollectionAssetsFromHf,
+  uploadCollectionDatasetToHf,
   pollCollectionSlots, selectCollectionDataset,
   changeCollectionSlotFilter, changeCollectionSlotPage, toggleCollectionSlotAll,
 };

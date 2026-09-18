@@ -15,9 +15,12 @@ Mirrors the ``operator_control`` bridge pattern (external event -> command_queue
 from __future__ import annotations
 
 import logging
+import math
 import threading
+from typing import cast
 
 from core.app.command_catalog import WEB_COMMAND_VERBS
+from core.app.handlers.teleop import send_teleop_haptic
 from core.app.state import RuntimeState
 from core.config import ConfigDict
 
@@ -29,6 +32,9 @@ logger = logging.getLogger(__name__)
 _ALLOWED_VERBS = WEB_COMMAND_VERBS
 
 _READ_ONLY_QUERIES = frozenset({"status", "config", "frame"})
+_HAPTIC_HANDS = frozenset({"left", "right", "both", "all"})
+_HAPTIC_DEFAULT_INTENSITY = 0.6
+_HAPTIC_DEFAULT_DURATION_MS = 80.0
 
 
 def _reject(reason: str) -> dict:
@@ -55,14 +61,83 @@ def _handle_query(runtime: RuntimeState, query: str) -> dict:
     return _reject(f"unknown query: {query!r}")
 
 
+def _finite_haptic_number(value: object, field: str) -> float:
+    if isinstance(value, bool):
+        raise ValueError(f"{field} must be numeric")
+    try:
+        result = float(cast(float, value))
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"{field} must be numeric") from error
+    if not math.isfinite(result):
+        raise ValueError(f"{field} must be finite")
+    return result
+
+
+def _haptic_request(message: dict, arg: str) -> tuple[tuple[str, ...], float, float]:
+    """Parse JSON fields or ``web:haptic:hand:intensity:duration_ms`` arguments."""
+    positional = [part.strip() for part in arg.split(":")] if arg else []
+    if len(positional) > 3 or any(not part for part in positional):
+        raise ValueError("haptic format is web:haptic[:hand[:intensity[:duration_ms]]]")
+
+    hand = str(message.get("hand", positional[0] if positional else "both")).strip().lower()
+    if hand == "all":
+        hand = "both"
+    if hand not in _HAPTIC_HANDS:
+        raise ValueError("haptic hand must be 'left', 'right', or 'both'")
+
+    intensity_value = message.get(
+        "intensity",
+        positional[1] if len(positional) >= 2 else _HAPTIC_DEFAULT_INTENSITY,
+    )
+    duration_value = message.get(
+        "duration_ms",
+        positional[2] if len(positional) >= 3 else _HAPTIC_DEFAULT_DURATION_MS,
+    )
+    intensity = max(0.0, min(1.0, _finite_haptic_number(intensity_value, "intensity")))
+    duration_ms = max(
+        1.0,
+        min(1000.0, _finite_haptic_number(duration_value, "duration_ms")),
+    )
+    hands = ("left", "right") if hand == "both" else (hand,)
+    return hands, intensity, duration_ms
+
+
+def _handle_haptic(runtime: RuntimeState, message: dict, arg: str) -> dict:
+    try:
+        hands, intensity, duration_ms = _haptic_request(message, arg)
+    except ValueError as error:
+        return _reject(str(error))
+
+    sent = [
+        hand
+        for hand in hands
+        if send_teleop_haptic(
+            runtime,
+            hand=hand,
+            intensity=intensity,
+            duration_ms=duration_ms,
+        )
+    ]
+    if not sent:
+        return _reject("VR headset is not connected")
+    return {
+        "ok": True,
+        "cmd": "web:haptic",
+        "hands": sent,
+        "intensity": intensity,
+        "duration_ms": duration_ms,
+    }
+
+
 def _handle_command(runtime: RuntimeState, message: dict) -> dict:
-    """Validate and dispatch one ``web:*`` command onto the command queue.
+    """Validate and dispatch one ``web:*`` command or immediate haptic request.
 
     Two verbs need the console-context mutations the HTTP layer applies before
     enqueueing (they don't reach through the queue otherwise):
       - select_collect_task: sets session.selected_collect_task (no enqueue).
       - tab_switch: updates the active Console tab.
-    Everything else is a straight passthrough onto command_queue.
+    Haptic requests are sent directly to the VR client; everything else is a
+    straight passthrough onto command_queue.
     """
     command = str(message.get("cmd", "")).strip()
     if not command.startswith("web:"):
@@ -76,6 +151,11 @@ def _handle_command(runtime: RuntimeState, message: dict) -> dict:
     ctx = runtime.console_ctx
     if ctx is None:
         return _reject("console context not ready")
+
+    # Haptics are latency-sensitive and do not need the main command queue. Send
+    # directly to the VR client's bounded outbound queue from this ZMQ worker.
+    if verb == "haptic":
+        return _handle_haptic(runtime, message, arg)
 
     # select_collect_task: pure session mutation, mirror console/server.py exactly.
     if verb == "select_collect_task":

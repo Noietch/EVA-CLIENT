@@ -63,5 +63,6 @@ example/r5_orbbec/thirdparty/
 # Machine-local deploy, collection, and RL configuration overrides.
 configs/01_deploy/*/*.local.py
 configs/02_collection/*.local.py
+configs/local/
 configs/04_rl/*.local.py
 /configs/02_collection/dual_yam_tasks_set.py

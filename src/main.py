@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
-import os
-import sys
-
-sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
-
 import argparse
 import logging
+import os
+import sys
+from pathlib import Path
 
-from core.app.run import run
-from core.config import ConfigDict, load_config
-from core.devices import REPOSITORY_ROOT, DeviceWorkspace
+_SRC_ROOT = Path(__file__).resolve().parent
+_REPOSITORY_ROOT = _SRC_ROOT.parent
+for _path in (_REPOSITORY_ROOT, _SRC_ROOT):
+    if str(_path) not in sys.path:
+        sys.path.insert(0, str(_path))
+
+from core.app.run import run  # noqa: E402
+from core.config import ConfigDict, load_config  # noqa: E402
+from core.devices import REPOSITORY_ROOT, DeviceWorkspace  # noqa: E402
 
 
 def parse_args() -> tuple[ConfigDict, int, str | None, bool]:

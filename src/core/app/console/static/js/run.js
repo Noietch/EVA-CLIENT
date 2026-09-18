@@ -359,8 +359,10 @@ function collectInputSourceSuffix(status) {
     if (!teleopCfg || teleopCfg.control_source !== "client" || !teleopCfg.client_type) return "";
     const label = TELEOP_CLIENT_LABELS[teleopCfg.client_type] || t("teleop.input");
     const teleop = status && status.teleop;
-    const faulted = !!(teleop && (teleop.last_fault || teleop.source_error));
-    const state = faulted ? "ERROR" : (teleop && teleop.connected ? "LINKED" : "DOWN");
+    // Keep transport health separate from execution faults. An IK rejection can
+    // stop one robot tick while the VR socket and input stream remain healthy.
+    const sourceFaulted = !!(teleop && teleop.source_error);
+    const state = sourceFaulted ? "ERROR" : (teleop && teleop.connected ? "LINKED" : "DOWN");
     const stateClass = state === "LINKED" ? "linked" : (state === "DOWN" ? "down" : "error");
     const stateKey = state === "LINKED" ? "teleop.vr.linked" :
       (state === "DOWN" ? "teleop.vr.down" : "teleop.vr.error");
@@ -647,6 +649,16 @@ function collectTaskValue() {
 
 function collectSetValue() {
     return collectSet || "";
+  }
+
+function selectCollectSet(setName) {
+    const set = collectTaskSets().find((item) => item.name === setName);
+    if (!set) return false;
+    collectSet = set.name;
+    collectTask = set.tasks[0].prompt;
+    collectTaskIndex = 0;
+    syncCollectTaskNavigation();
+    return true;
   }
 
 function collectTaskIndexValue() {
@@ -1268,7 +1280,6 @@ function renderControl() {
     const source = config.collection.teleop;
     const teleop = config.device_selection.teleop !== "joint";
     const name = source.client_type === "vr_webxr" ? "VR" : source.client_type || "LEADER";
-    $("control-teleop-controls").hidden = !teleop;
     document.querySelectorAll(".control-joints").forEach(panel => { panel.hidden = false; });
     const motionOwnedByTeleop = !!S.STATUS.collection_teleop_armed;
     S.manualActive = !motionOwnedByTeleop;
@@ -1476,7 +1487,7 @@ function renderManualTarget(qpos) {
 export {
   applyRunControlStatus, applyStatus, mark, pauseSetup, replayIsLocalMode, resumeSetup,
   retrySetup, setPanel, startRunFromDebug, syncChip, uiMode, updateGuide,
-  applyTune, applyManualTune, collectSetValue, collectTaskIndexValue,
+  applyTune, applyManualTune, collectSetValue, selectCollectSet, collectTaskIndexValue,
   collectTaskValue, renderConfig, applyCollectTaskSelection,
   renderEvalGripper,
   renderRlGripper,

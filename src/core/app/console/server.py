@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import concurrent.futures
 import copy
-import csv
 import dataclasses
 import datetime as _dt
 import gzip
@@ -70,6 +69,7 @@ from core.app.state import (
 )
 from core.config import ConfigDict
 from core.devices.service import DeviceSettings
+from core.utils.collection_paths import dataset_location, slot_state_path
 from core.utils.dataset_upload import (
     DatasetUploadPlan,
     DatasetUploadSpec,
@@ -79,16 +79,34 @@ from core.utils.dataset_upload import (
     upload_dataset_directory,
 )
 from core.utils.lerobot import LeRobotDatasetIO
+from core.utils.scene_plan import read_plan_csv, read_plan_yaml, scene_plan_from_dir
 from core.utils.upload_plan import UploadProgress
 from tools.conversion import (
     DATASET_EXPORT_FORMATS,
     DatasetExportProgress,
-    export_dataset_by_quality,
+    export_dataset,
+)
+from tools.datasets.dataset_transfer import DatasetTransfer
+from tools.datasets.hf_task_sets import (
+    fetch_assets,
+    fetch_qc,
+    fetch_task_sets,
+    publish_dataset,
+    publish_qc,
 )
 from transport.base import ObservationSource
 from transport.dataset import DatasetTransport
 
 logger = logging.getLogger(__name__)
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[4]
+
+
+class ReusableThreadingHTTPServer(ThreadingHTTPServer):
+    """Allow the console port to be rebound during EVA's in-process restart."""
+
+    allow_reuse_address = True
+
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -138,6 +156,7 @@ _REVIEW_DATA_CACHE: OrderedDict[tuple[str, int], _CachedReviewEpisode] = Ordered
 class _QualityUploadJob:
     job_id: str
     local_dir: str
+    source_dir: str
     remote_dir: str
     backends: tuple[str, ...] = ()
     state: str = "queued"
@@ -179,18 +198,13 @@ class _QualityUploadJob:
 class _QualityExportJob:
     job_id: str
     source_dir: str
-    accepted_dir: str
-    rejected_dir: str
+    output_dir: str
     dataset_format: str
     state: str = "queued"
     episodes_completed: int = 0
     episodes_total: int = 0
-    subset: str = ""
     source_episode_index: int | None = None
-    accepted_episodes: int = 0
-    rejected_episodes: int = 0
-    accepted_frames: int = 0
-    rejected_frames: int = 0
+    episodes: int = 0
     error: str = ""
 
     def payload(self) -> dict[str, Any]:
@@ -620,6 +634,9 @@ class ConsoleContext:
     output_dir: str = ""  # results root; debug results land in <output_dir>/console/
     preview: Any = None  # EpisodePreview for RESULT-tab playback (lazily set)
     quality_upload_lock: threading.RLock = dataclasses.field(default_factory=threading.RLock)
+    dataset_manager: DatasetTransfer = dataclasses.field(
+        default_factory=lambda: DatasetTransfer(_PROJECT_ROOT)
+    )
     quality_upload_jobs: OrderedDict[str, _QualityUploadJob] = dataclasses.field(
         default_factory=OrderedDict
     )
@@ -644,6 +661,7 @@ def _run_quality_upload_scan(
     ctx: ConsoleContext,
     job_id: str,
     local_dir: Path,
+    source_dir: Path,
     upload_specs: tuple[DatasetUploadSpec, ...],
 ) -> None:
     with ctx.quality_upload_lock:
@@ -655,6 +673,7 @@ def _run_quality_upload_scan(
         if plan.files_to_upload == 0 and plan.files_to_delete == 0:
             record_dataset_upload_receipt(
                 local_dir,
+                source_dir=source_dir,
                 destination=", ".join(
                     backend_plan.destination for _, backend_plan in plan.backends
                 ),
@@ -717,6 +736,7 @@ def _run_quality_upload(ctx: ConsoleContext, job_id: str) -> None:
         )
         record_dataset_upload_receipt(
             local_dir,
+            source_dir=Path(job.source_dir),
             destination=result.destination,
             remote_dir=result.remote_dir,
         )
@@ -746,24 +766,17 @@ def _run_quality_upload(ctx: ConsoleContext, job_id: str) -> None:
             job.files_deleted = result.files_deleted
 
 
-def _quality_export_paths(dataset_dir: Path, dataset_format: str) -> tuple[Path, Path]:
-    export_root = (
-        dataset_dir.parent / "export"
-        if dataset_dir.name == "raw"
-        else dataset_dir.with_name(f"{dataset_dir.name}_export")
-    )
-    format_root = export_root / dataset_format
-    return format_root / "accepted", format_root / "rejected"
+def _quality_export_paths(dataset_dir: Path, dataset_format: str) -> Path:
+    """The converted dataset: a sibling of the source named ``<name>_<format>``."""
+    return dataset_dir.with_name(f"{dataset_dir.name}_{dataset_format}")
 
 
 def _run_quality_export(
     ctx: ConsoleContext,
     job_id: str,
     source_dir: Path,
-    accepted_dir: Path,
-    rejected_dir: Path,
+    output_dir: Path,
     dataset_format: str,
-    source_episode_indices: set[int] | None = None,
 ) -> None:
     with ctx.quality_upload_lock:
         job = ctx.quality_export_jobs[job_id]
@@ -776,21 +789,18 @@ def _run_quality_export(
                 return
             active_job.episodes_completed = progress.episodes_completed
             active_job.episodes_total = progress.episodes_total
-            active_job.subset = progress.subset
             active_job.source_episode_index = progress.source_episode_index
 
     try:
-        summary = export_dataset_by_quality(
+        summary = export_dataset(
             source_dir,
-            accepted_dir,
-            rejected_dir,
+            output_dir,
             dataset_format=dataset_format,
             replace_existing=True,
             progress_callback=update_progress,
-            source_episode_indices=source_episode_indices,
         )
     except Exception as error:
-        logger.exception("Failed to export collection quality split")
+        logger.exception("Failed to export collection dataset")
         with ctx.quality_upload_lock:
             job = ctx.quality_export_jobs.get(job_id)
             if job is not None:
@@ -802,14 +812,10 @@ def _run_quality_export(
         job = ctx.quality_export_jobs.get(job_id)
         if job is not None:
             job.state = "completed"
-            job.episodes_completed = summary.source_episodes
-            job.episodes_total = summary.source_episodes
-            job.subset = ""
+            job.episodes_completed = summary.episodes
+            job.episodes_total = summary.episodes
             job.source_episode_index = None
-            job.accepted_episodes = summary.accepted_episodes
-            job.rejected_episodes = summary.rejected_episodes
-            job.accepted_frames = summary.accepted_frames
-            job.rejected_frames = summary.rejected_frames
+            job.episodes = summary.episodes
 
 
 def _serialize_prompt_config(prompt: Any) -> dict:
@@ -993,70 +999,9 @@ def _scene_plan_root(config: ConfigDict | None = None, dataset: str | None = Non
     return cwd_root if has_canonical_plan else repo_root
 
 
-def _read_scene_plan_csv(root: Path, filename: str) -> list[dict[str, str]]:
-    path = root / filename
-    if not path.is_file():
-        return []
-    try:
-        with path.open("r", encoding="utf-8-sig", newline="") as handle:
-            return [dict(row) for row in csv.DictReader(handle)]
-    except (OSError, UnicodeError, csv.Error) as exc:
-        logger.warning("Unable to read scene plan %s: %s", path, exc)
-        return []
-
-
-def _read_scene_plan_yaml(root: Path, filename: str) -> dict[str, Any]:
-    path = root / filename
-    if not path.is_file():
-        return {}
-    try:
-        with path.open("r", encoding="utf-8") as handle:
-            payload = yaml.safe_load(handle)
-        return payload if isinstance(payload, dict) else {}
-    except (OSError, UnicodeError, yaml.YAMLError) as exc:
-        logger.warning("Unable to read scene plan %s: %s", path, exc)
-        return {}
-
-
-def _optional_scene_float(value: Any) -> float | None:
-    try:
-        text = "" if value is None else str(value).strip()
-        return float(text) if text else None
-    except (TypeError, ValueError):
-        return None
-
-
-def _scene_plan_placements(value: Any) -> list[dict[str, Any]]:
-    try:
-        payload = json.loads(str(value or "[]"))
-    except (TypeError, ValueError, json.JSONDecodeError) as exc:
-        logger.warning("Invalid scene placements JSON: %s", exc)
-        return []
-    if not isinstance(payload, list):
-        return []
-    placements = []
-    for item in payload:
-        if not isinstance(item, dict):
-            continue
-        object_id = str(item.get("object_id", "") or "").strip()
-        position_ids = item.get("position_ids")
-        if not object_id or not isinstance(position_ids, list):
-            continue
-        position_ids = [str(position_id or "").strip() for position_id in position_ids]
-        position_ids = [position_id for position_id in position_ids if position_id]
-        if position_ids:
-            placements.append(
-                {
-                    "position_ids": position_ids,
-                    "object_id": object_id,
-                }
-            )
-    return placements
-
-
 def _scene_plan_signature(root: Path) -> tuple[Any, ...]:
     signature: list[Any] = [str(root)]
-    info = _read_scene_plan_yaml(root, "info.yaml")
+    info = read_plan_yaml(root, "info.yaml")
     objects_file = str(info.get("objects_file", "objects.csv") or "objects.csv")
     paths = [root / name for name in ("info.yaml", "tasks.csv", "scene.csv", "layout.yaml")]
     paths.append(root / objects_file)
@@ -1069,194 +1014,16 @@ def _scene_plan_signature(root: Path) -> tuple[Any, ...]:
     return tuple(signature)
 
 
-def _scene_plan_positions(layout_doc: dict[str, Any]) -> list[dict[str, Any]]:
-    positions = []
-    unit = str(layout_doc.get("unit", "") or "")
-    frame = str(layout_doc.get("coordinate_frame", "") or "")
-    status = str(layout_doc.get("calibration_status", "unverified") or "unverified")
-    for point in layout_doc.get("sampling_points", []):
-        if not isinstance(point, dict):
-            continue
-        position_id = str(point.get("position_id", point.get("id", "")) or "").strip()
-        if not position_id:
-            continue
-        positions.append(
-            {
-                "position_id": position_id,
-                "x": _optional_scene_float(point.get("x")),
-                "y": _optional_scene_float(point.get("y")),
-                "unit": str(point.get("unit", unit) or unit),
-                "coordinate_frame": str(point.get("coordinate_frame", frame) or frame),
-                "calibration_status": str(point.get("calibration_status", status) or status),
-            }
-        )
-    return positions
-
-
-def _scene_plan_objects(root: Path) -> dict[str, dict[str, Any]]:
-    payload = {}
-    info = _read_scene_plan_yaml(root, "info.yaml")
-    objects_file = str(info.get("objects_file", "objects.csv") or "objects.csv")
-    objects_path = (root / objects_file).resolve()
-    photo_root = objects_path.parent / "object_photos"
-    for row in _read_scene_plan_csv(root, objects_file):
-        object_id = str(row.get("object_id") or row.get("物品代码") or "").strip()
-        if not object_id:
-            continue
-        photo_dir = str(
-            row.get("photo_dir") or row.get("照片目录") or row.get("名称") or ""
-        ).strip()
-        photos = sorted((photo_root / photo_dir).glob("*")) if photo_dir else []
-        photo = next(
-            (
-                path
-                for path in photos
-                if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}
-            ),
-            None,
-        )
-        payload[object_id] = {
-            "object_id": object_id,
-            "name": str(
-                row.get("object_name_zh") or row.get("名称") or row.get("object_name") or object_id
-            ),
-            "name_zh": str(row.get("object_name_zh") or row.get("名称") or ""),
-            "name_en": str(row.get("object_name") or row.get("英文名") or ""),
-            "color": str(row.get("color", "") or ""),
-            "photo_url": (
-                f"/api/scene_plan/object-photo/{quote(object_id)}/"
-                f"{quote(photo.name)}?set={quote(root.name)}"
-            )
-            if photo
-            else "",
-        }
-    return payload
-
-
-def _scene_plan_scenes(
-    rows: list[dict[str, str]],
-    objects: dict[str, dict[str, Any]],
-    calibration_status: str,
-) -> list[dict[str, Any]]:
-    scenes: dict[str, dict[str, Any]] = {}
-    for row in rows:
-        scene_id = str(row.get("scene_id", "")).strip()
-        if not scene_id:
-            continue
-        scene = scenes.setdefault(
-            scene_id,
-            {
-                "scene_id": scene_id,
-                "placements": [],
-                "placement_groups": [],
-                "calibration_status": calibration_status,
-            },
-        )
-        for group_index, placement in enumerate(_scene_plan_placements(row.get("placements"))):
-            object_id = placement["object_id"]
-            position_ids = placement["position_ids"]
-            obj = objects.get(object_id, {"name": object_id, "color": ""})
-            group_id = f"{scene_id}:{group_index}"
-            scene["placement_groups"].append(
-                {
-                    "group_id": group_id,
-                    "position_ids": position_ids,
-                    "object_id": object_id,
-                    "name": obj["name"],
-                    "name_zh": obj.get("name_zh", ""),
-                    "name_en": obj.get("name_en", ""),
-                    "color": obj.get("color", ""),
-                    "photo_url": obj.get("photo_url", ""),
-                }
-            )
-            for position_index, position_id in enumerate(position_ids):
-                scene["placements"].append(
-                    {
-                        "position_id": position_id,
-                        "object_id": object_id,
-                        "name": obj["name"],
-                        "name_zh": obj.get("name_zh", ""),
-                        "name_en": obj.get("name_en", ""),
-                        "color": obj.get("color", ""),
-                        "photo_url": obj.get("photo_url", ""),
-                        "group_id": group_id,
-                        "group_position_index": position_index,
-                        "group_size": len(position_ids),
-                        "group_position_ids": position_ids,
-                    }
-                )
-    return list(scenes.values())
-
-
-def _scene_plan_tasks(rows: list[dict[str, str]]) -> list[dict[str, Any]]:
-    tasks = []
-    for row in rows:
-        task_id = str(row.get("task_id", "")).strip()
-        scene_ids = [value for value in str(row.get("scene_ids", "")).split(";") if value]
-        if not task_id or not scene_ids:
-            continue
-        episode_counts = str(row.get("scene_epsiodes_count", "")).split(";")
-        tasks.append(
-            {
-                "task_id": task_id,
-                "action": str(row.get("action", "") or ""),
-                "category": str(row.get("category", "") or ""),
-                "operation_object": str(
-                    row.get("operation_object") or row.get("操作对象") or ""
-                ).strip(),
-                "operation_object_ids": [
-                    value.strip()
-                    for value in str(row.get("operation_object_ids", "")).split(";")
-                    if value.strip()
-                ],
-                "prompt_en": str(row.get("prompt_en", "") or ""),
-                "prompt_zh": str(row.get("prompt_zh", "") or ""),
-                "display_name": str(
-                    row.get("prompt_zh") or row.get("prompt_en") or task_id
-                ).strip(),
-                "scene_ids": scene_ids,
-                "scene_epsiodes_count": [int(value) for value in episode_counts if value.isdigit()],
-                "total_epsiodes_count": int(row.get("total_epsiodes_count", 0) or 0),
-            }
-        )
-    return tasks
-
-
 def _build_scene_plan(root: Path) -> dict[str, Any]:
-    """Parse one normalized scene catalog directory."""
-    task_rows = _read_scene_plan_csv(root, "tasks.csv")
-    layout_doc = _read_scene_plan_yaml(root, "layout.yaml")
-    layout_unit = str(layout_doc.get("unit", "") or "")
-    layout_frame = str(layout_doc.get("coordinate_frame", "") or "")
-    layout_status = str(layout_doc.get("calibration_status", "unverified") or "unverified")
-    positions = _scene_plan_positions(layout_doc)
-    objects = _scene_plan_objects(root)
-    raw_bounds = layout_doc.get("bounds")
-    bounds = raw_bounds if isinstance(raw_bounds, dict) else {}
-    return {
-        "ok": True,
-        "source": str(root / "tasks.csv") if task_rows else "",
-        "layout_id": str(layout_doc.get("layout_id", "") or ""),
-        "coordinate_frame": layout_frame,
-        "bounds": {
-            "width": _optional_scene_float(bounds.get("width")),
-            "height": _optional_scene_float(bounds.get("height")),
-            "unit": layout_unit,
-        },
-        "calibrated": bool(positions)
-        and all(
-            row["x"] is not None
-            and row["y"] is not None
-            and row["calibration_status"] == "verified"
-            for row in positions
-        ),
-        "positions": positions,
-        "objects": list(objects.values()),
-        "scenes": _scene_plan_scenes(
-            _read_scene_plan_csv(root, "scene.csv"), objects, layout_status
-        ),
-        "tasks": _scene_plan_tasks(task_rows),
-    }
+    """Parse one normalized scene catalog directory for the console UI."""
+
+    def photo_url(object_id: str, photo_name: str) -> str:
+        return (
+            f"/api/scene_plan/object-photo/{quote(object_id)}/{quote(photo_name)}"
+            f"?set={quote(root.name)}"
+        )
+
+    return scene_plan_from_dir(root, photo_url)
 
 
 def _load_scene_plan(
@@ -1450,6 +1217,11 @@ def _cached_collection_slots(
     return list(slots)
 
 
+def _collection_transfer_path(config: ConfigDict, dataset: str) -> tuple[Path, str]:
+    """The dataset's single directory and its remote path (one rule, both apps)."""
+    return dataset_location(config, dataset, plan_root=_scene_plan_root(config, dataset))
+
+
 def _collection_slots_snapshot(ctx: ConsoleContext, dataset: str) -> dict[str, Any]:
     """Resolve one dataset's fixed plan against saved and in-flight episodes."""
     config = ctx.runtime.active_config or ctx.config
@@ -1467,8 +1239,13 @@ def _collection_slots_snapshot(ctx: ConsoleContext, dataset: str) -> dict[str, A
         dataset_dir = Path(raw_dataset_dir).resolve() if raw_dataset_dir else None
         queue = list(status.get("queue") or [])
         if dataset_dir is not None:
-            episodes = list(load_episode_history(dataset_dir).get("episodes") or [])
-    slot_state = load_slot_state(dataset_dir)
+            episodes = list(
+                load_episode_history(dataset_dir, qc_path=dataset_dir / "meta" / "qc.jsonl").get(
+                    "episodes"
+                )
+                or []
+            )
+    slot_state = load_slot_state(slot_state_path(config, dataset))
     rows, active, counts = collection_slot_status(slots, episodes, queue, slot_state)
     scenes: list[dict[str, str]] = []
     tasks: list[dict[str, str]] = []
@@ -1524,10 +1301,10 @@ def _sync_collection_slot_session(ctx: ConsoleContext) -> dict[str, Any] | None:
         return None
     snapshot = _collection_slots_snapshot(ctx, dataset)
     active = snapshot["active"]
-    dataset_dir = str(snapshot["dataset_dir"] or "")
-    if active is not None and dataset_dir:
+    if active is not None:
+        config = ctx.runtime.active_config or ctx.config
         select_collection_slot(
-            Path(dataset_dir),
+            slot_state_path(config, dataset),
             active["slot_id"],
             snapshot["slot_state"],
             episode_index=(active.get("episode") or {}).get("episode_index"),
@@ -2452,12 +2229,12 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         except ValueError:
             self._send_empty(404)
             return
-        info = _read_scene_plan_yaml(root, "info.yaml")
+        info = read_plan_yaml(root, "info.yaml")
         objects_file = str(info.get("objects_file", "objects.csv") or "objects.csv")
         row = next(
             (
                 item
-                for item in _read_scene_plan_csv(root, objects_file)
+                for item in read_plan_csv(root, objects_file)
                 if str(item.get("object_id") or item.get("物品代码") or "").strip() == parts[0]
             ),
             None,
@@ -2632,6 +2409,11 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
 
         history = load_episode_history(
             Path(dataset_dir),
+            qc_path=(
+                _collection_transfer_path(config, collection_set)[0] / "meta" / "qc.jsonl"
+                if scope == "collect" and collection_set
+                else None
+            ),
             task=task_filter,
             task_id=task_id_filter,
             since=since,
@@ -3208,8 +2990,11 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                 self._send_empty(404)
                 return
             handler(self, body)
-        except Exception:
+        except Exception as error:
             logger.exception("[HTTP_POST_ERROR] trace=%s path=%s", trace_id, path)
+            if path.startswith("/api/hf/") and self._response_status is None:
+                self._send_json(500, {"ok": False, "error": str(error)})
+                return
             raise
         finally:
             if path != "/api/client_trace":
@@ -3396,6 +3181,167 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
     def _post_select_task(self, body: dict) -> None:
         self._enqueue_ok(f"web:switch_task:{body.get('task', '')}")
 
+    def _get_dataset_manager(self) -> None:
+        config = self.ctx.runtime.active_config or self.ctx.config
+        rows = []
+        for dataset in config.collection.tasks:
+            try:
+                snapshot = _collection_slots_snapshot(self.ctx, dataset)
+                counts = snapshot["counts"]
+                rows.append(
+                    {
+                        "name": dataset,
+                        "robot": config.robot.type,
+                        "total": counts["total"],
+                        "collected": counts["total"] - counts.get("qc_pending", counts["pending"]),
+                        "accept": counts.get("passed", 0),
+                        "fail": counts.get("failed", 0),
+                        "unreviewed": counts.get("unreviewed", 0),
+                    }
+                )
+            except Exception as exc:
+                rows.append({"name": dataset, "error": str(exc)})
+        self._send_json(200, {"ok": True, "datasets": rows, **self.ctx.dataset_manager.snapshot()})
+
+    def _get_dataset_manager_job(self) -> None:
+        self._send_json(200, {"ok": True, **self.ctx.dataset_manager.snapshot()})
+
+    def _post_dataset_manager(self, body: dict) -> None:
+        manager = self.ctx.dataset_manager
+        if body.get("action") == "stop":
+            try:
+                manager.stop(str(body.get("job_id", "")))
+            except ValueError as exc:
+                self._send_json(400, {"ok": False, "error": str(exc)})
+                return
+            self._send_json(200, {"ok": True})
+            return
+        config = self.ctx.runtime.active_config or self.ctx.config
+        names = body.get("datasets")
+        if (
+            not isinstance(names, list)
+            or not names
+            or any(not isinstance(n, str) or n not in config.collection.tasks for n in names)
+        ):
+            self._send_json(400, {"ok": False, "error": "Select configured datasets"})
+            return
+        try:
+            targets = []
+            for name in dict.fromkeys(names):
+                _collection_slots_snapshot(self.ctx, name)
+                entries = config.collection.tasks[name]
+                logger_obj = self.ctx.runtime.episode_logger
+                if logger_obj and entries:
+                    status = _status_snapshot_for_poll(logger_obj, str(entries[0][0]), name)
+                    if any(
+                        status.get(k)
+                        for k in ("collecting", "saving", "queued_jobs", "save_queue_size")
+                    ):
+                        raise ValueError(
+                            "Dataset is recording or saving; retry after collection finishes"
+                        )
+                dataset_dir, remote = _collection_transfer_path(config, name)
+                targets.append(
+                    {
+                        "name": name,
+                        "plan": _scene_plan_root(config, name),
+                        "dataset_dir": dataset_dir,
+                        "remote_path": remote,
+                    }
+                )
+            manager.start(str(body.get("action", "")), targets, config.collection.storage)
+        except ValueError as exc:
+            self._send_json(409, {"ok": False, "error": str(exc)})
+            return
+        self._send_json(200, {"ok": True, **manager.snapshot()})
+
+    def _post_hf_task_set_sync(self, body: dict) -> None:
+        """Sync every task set this machine is configured with, never a selection."""
+        config = self.ctx.runtime.active_config or self.ctx.config
+        names = sorted(config.collection.tasks)
+        if not names:
+            self._send_json(409, {"ok": False, "error": "no collection task sets are configured"})
+            return
+        destinations: dict[str, Path] = {}
+        for name in names:
+            try:
+                destinations[name] = _scene_plan_root(config, name).parent
+            except ValueError:
+                continue
+        result = fetch_task_sets(
+            Path(__file__).resolve().parents[4], destinations, config.collection.storage
+        )
+        self._send_json(200, {"ok": True, "total": len(names), **result})
+
+    def _post_hf_assets_download(self, body: dict) -> None:
+        config = self.ctx.runtime.active_config or self.ctx.config
+        dataset = str(body.get("dataset", "")).strip()
+        if dataset not in config.collection.tasks:
+            self._send_json(409, {"ok": False, "error": "unknown collection set"})
+            return
+        project_root = Path(__file__).resolve().parents[4]
+        plan_root = _scene_plan_root(config, dataset)
+        destination = (
+            plan_root.parent.parent / "assets"
+            if plan_root.parent.name == "task_sets"
+            else project_root / "datasets/data_collection/assets"
+        )
+        result = fetch_assets(project_root, plan_root, destination, config.collection.storage)
+        self._send_json(200, {"ok": True, **result})
+
+    def _post_hf_dataset_upload(self, body: dict) -> None:
+        dataset_name = str(body.get("dataset", "")).strip()
+        dataset_dir = self._active_collection_dataset(body)
+        if dataset_dir is None:
+            return
+        config = self.ctx.runtime.active_config or self.ctx.config
+        plan_root = _scene_plan_root(config, dataset_name)
+        info = read_plan_yaml(plan_root, "info.yaml")
+        result = publish_dataset(
+            Path(__file__).resolve().parents[4],
+            dataset_dir,
+            dataset_name,
+            config.collection.storage,
+            new_remote_path=str(info.get("collection_dir") or "").strip() or None,
+        )
+        self._send_json(200, {"ok": True, **result})
+
+    def _post_hf_qc_sync(self, body: dict) -> None:
+        config = self.ctx.runtime.active_config or self.ctx.config
+        dataset_name = str(body.get("dataset", "")).strip()
+        if (
+            not dataset_name
+            or dataset_name not in config.collection.tasks
+            or Path(dataset_name).name != dataset_name
+        ):
+            self._send_json(409, {"ok": False, "error": "unknown collection dataset"})
+            return
+        try:
+            dataset_dir, remote_path = _collection_transfer_path(config, dataset_name)
+        except ValueError as error:
+            self._send_json(409, {"ok": False, "error": str(error)})
+            return
+        if body.get("direction") == "upload":
+            result = publish_qc(
+                Path(__file__).resolve().parents[4],
+                dataset_dir,
+                dataset_name,
+                config.collection.storage,
+                expected_path=remote_path,
+            )
+        elif body.get("direction") == "download":
+            result = fetch_qc(
+                Path(__file__).resolve().parents[4],
+                dataset_name,
+                dataset_dir,
+                config.collection.storage,
+                expected_path=remote_path,
+            )
+        else:
+            self._send_json(400, {"ok": False, "error": "invalid QC direction"})
+            return
+        self._send_json(200, {"ok": True, **result})
+
     def _post_select_collect_task(self, body: dict) -> None:
         task = str(body.get("task", "")).strip()
         dataset = str(body.get("dataset", "")).strip()
@@ -3467,12 +3413,9 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         if selected["state"] == "saving":
             self._send_json(409, {"ok": False, "error": "collection slot is not selectable"})
             return
-        dataset_dir = str(snapshot["dataset_dir"] or "")
-        if not dataset_dir:
-            self._send_json(409, {"ok": False, "error": "collection recording is unavailable"})
-            return
+        config = self.ctx.runtime.active_config or self.ctx.config
         select_collection_slot(
-            Path(dataset_dir),
+            slot_state_path(config, dataset),
             slot_id,
             snapshot["slot_state"],
             episode_index=(selected.get("episode") or {}).get("episode_index"),
@@ -3503,11 +3446,8 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         if active is None or active["slot_id"] != slot_id:
             self._send_json(409, {"ok": False, "error": "collection slot is no longer active"})
             return
-        dataset_dir = str(snapshot["dataset_dir"] or "")
-        if not dataset_dir:
-            self._send_json(409, {"ok": False, "error": "collection recording is unavailable"})
-            return
-        defer_active_slot(Path(dataset_dir), slot_id, snapshot["slot_state"])
+        config = self.ctx.runtime.active_config or self.ctx.config
+        defer_active_slot(slot_state_path(config, dataset), slot_id, snapshot["slot_state"])
         updated = _collection_slots_snapshot(self.ctx, dataset)
         self._apply_collection_slot(updated["active"])
         self._send_json(
@@ -3818,7 +3758,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             )
             return
         verdict = str(body.get("verdict", ""))
-        if verdict not in {"", "pass", "fail"}:
+        if verdict not in {"", "pass", "fail", "unreviewed"}:
             self._send_json(
                 400,
                 {"ok": False, "error": f"unsupported QC verdict: {verdict}"},
@@ -3834,11 +3774,21 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         task = str(body.get("task", ""))
         collection_dataset = str(body.get("dataset", "")).strip() or None
         config = self.ctx.runtime.active_config or self.ctx.config
-        valid_target = any(
-            (collection_dataset is None or dataset_name == collection_dataset)
-            and any(str(entry[0]) == task for entry in entries)
-            for dataset_name, entries in config.collection.tasks.items()
-        )
+        if collection_dataset is not None:
+            # Saved episodes retain their original wording after task edits.
+            # Resolve the named dataset with a current configured prompt; the
+            # recorder validates the saved episode ID and pending writes there.
+            entries = config.collection.tasks.get(collection_dataset)
+            valid_target = bool(entries)
+            if valid_target:
+                task = str(entries[0][0])
+        else:
+            # Legacy requests without a dataset still need an exact prompt to
+            # select the correct dataset.
+            valid_target = any(
+                any(str(entry[0]) == task for entry in entries)
+                for entries in config.collection.tasks.values()
+            )
         if not valid_target:
             self._send_json(
                 409,
@@ -3905,22 +3855,10 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         dataset_format = self._requested_dataset_format(body)
         if dataset_format is None:
             return
-        dataset = str(body.get("dataset") or self.ctx.session.selected_collect_set or "").strip()
-        snapshot = _collection_slots_snapshot(self.ctx, dataset)
-        # Freeze the same per-slot selection shown by the collection page.
-        # Legacy datasets without a slot plan retain whole-dataset export.
-        source_episode_indices = None
-        if snapshot["rows"]:
-            source_episode_indices = {
-                int(row["episode"]["episode_index"])
-                for row in snapshot["rows"]
-                if row["state"] in {"complete", "rejected", "deferred"}
-                and row.get("episode") is not None
-            }
-        accepted_dir, rejected_dir = _quality_export_paths(dataset_dir, dataset_format)
+        output_dir = _quality_export_paths(dataset_dir, dataset_format)
         with self.ctx.quality_upload_lock:
             if any(
-                existing.local_dir == str(accepted_dir)
+                existing.local_dir == str(output_dir)
                 and existing.state in {"queued", "scanning", "running"}
                 for existing in self.ctx.quality_upload_jobs.values()
             ):
@@ -3945,23 +3883,14 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             job = _QualityExportJob(
                 job_id=job_id,
                 source_dir=str(dataset_dir),
-                accepted_dir=str(accepted_dir),
-                rejected_dir=str(rejected_dir),
+                output_dir=str(output_dir),
                 dataset_format=dataset_format,
             )
             self.ctx.quality_export_jobs[job_id] = job
 
         threading.Thread(
             target=_run_quality_export,
-            args=(
-                self.ctx,
-                job_id,
-                dataset_dir,
-                accepted_dir,
-                rejected_dir,
-                dataset_format,
-                source_episode_indices,
-            ),
+            args=(self.ctx, job_id, dataset_dir, output_dir, dataset_format),
             name=f"quality-export-{job_id[:8]}",
             daemon=True,
         ).start()
@@ -3974,7 +3903,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         dataset_format = self._requested_dataset_format(body)
         if dataset_format is None:
             return
-        local_dir, _ = _quality_export_paths(dataset_dir, dataset_format)
+        local_dir = _quality_export_paths(dataset_dir, dataset_format)
         with self.ctx.quality_upload_lock:
             exports = [
                 job
@@ -3985,16 +3914,14 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             if (
                 latest_export is None
                 or latest_export.state != "completed"
-                or latest_export.accepted_dir != str(local_dir)
+                or latest_export.output_dir != str(local_dir)
             ):
                 self._send_json(
                     409,
                     {"ok": False, "error": "export the current dataset before upload"},
                 )
                 return
-        dataset_name = self.ctx.session.selected_collect_set or (
-            dataset_dir.parent.name if dataset_dir.name == "raw" else dataset_dir.name
-        )
+        dataset_name = self.ctx.session.selected_collect_set or dataset_dir.name
         self._post_quality_upload(
             body,
             dataset_dir=dataset_dir,
@@ -4026,12 +3953,12 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             None,
         )
         if candidate is None:
-            self._send_json(404, {"ok": False, "error": "accepted export is unavailable"})
+            self._send_json(404, {"ok": False, "error": "dataset export is unavailable"})
             return
         self._post_quality_upload(
             body,
             dataset_dir=source_dir,
-            local_dir=Path(str(candidate["accepted_dir"])),
+            local_dir=Path(str(candidate["output_dir"])),
             dataset_format=dataset_format,
             dataset_name=str(candidate["dataset"]),
         )
@@ -4048,25 +3975,11 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         config = self.ctx.runtime.active_config or self.ctx.config
         dataset_dir = dataset_dir.resolve()
         local_dir = local_dir.resolve()
-        marker_path = local_dir / "meta" / "quality_split.json"
-        try:
-            marker = json.loads(marker_path.read_text())
-        except (OSError, ValueError):
-            logger.warning("Invalid accepted collection export marker", exc_info=True)
-            self._send_json(400, {"ok": False, "error": "invalid accepted export"})
+        if local_dir != _quality_export_paths(dataset_dir, dataset_format):
+            self._send_json(400, {"ok": False, "error": "export path mismatch"})
             return
-        if marker.get("subset") != "accepted":
-            self._send_json(400, {"ok": False, "error": "only accepted exports can be uploaded"})
-            return
-        if marker.get("dataset_format") != dataset_format:
-            self._send_json(400, {"ok": False, "error": "accepted export format mismatch"})
-            return
-        try:
-            marker_source = Path(str(marker.get("source_dir", ""))).resolve()
-        except (OSError, ValueError):
-            marker_source = Path()
-        if marker_source != dataset_dir:
-            self._send_json(400, {"ok": False, "error": "accepted export source mismatch"})
+        if not (local_dir / "meta" / "episodes.jsonl").is_file():
+            self._send_json(400, {"ok": False, "error": "export the dataset before upload"})
             return
 
         upload_specs = resolve_dataset_uploads(config.collection.storage, dataset_name)
@@ -4139,6 +4052,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             job = _QualityUploadJob(
                 job_id=job_id,
                 local_dir=str(local_dir),
+                source_dir=str(dataset_dir),
                 remote_dir=remote_dir,
                 backends=tuple(spec.backend for spec in upload_specs),
             )
@@ -4146,7 +4060,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
 
         threading.Thread(
             target=_run_quality_upload_scan,
-            args=(self.ctx, job_id, local_dir, upload_specs),
+            args=(self.ctx, job_id, local_dir, dataset_dir, upload_specs),
             name=f"quality-upload-scan-{job_id[:8]}",
             daemon=True,
         ).start()
@@ -4201,6 +4115,8 @@ _GET_ROUTES = {
     "/api/episodes": ConsoleRequestHandler._get_episodes,
     "/api/dashboard": ConsoleRequestHandler._get_dashboard,
     "/api/dashboard_upload": ConsoleRequestHandler._get_collect_quality_upload,
+    "/api/dataset_manager": ConsoleRequestHandler._get_dataset_manager,
+    "/api/dataset_manager/job": ConsoleRequestHandler._get_dataset_manager_job,
     "/api/collect_quality_export": ConsoleRequestHandler._get_collect_quality_export,
     "/api/collect_quality_upload": ConsoleRequestHandler._get_collect_quality_upload,
     "/api/frame": ConsoleRequestHandler._get_frame,
@@ -4276,6 +4192,10 @@ _POST_ROUTES = {
     "/api/exit_collect_replay": ConsoleRequestHandler._post_exit_collection_replay,
     "/api/review_episode": ConsoleRequestHandler._post_review_episode,
     "/api/select_task": ConsoleRequestHandler._post_select_task,
+    "/api/hf/task_set/sync": ConsoleRequestHandler._post_hf_task_set_sync,
+    "/api/hf/assets/download": ConsoleRequestHandler._post_hf_assets_download,
+    "/api/hf/dataset/upload": ConsoleRequestHandler._post_hf_dataset_upload,
+    "/api/hf/qc/sync": ConsoleRequestHandler._post_hf_qc_sync,
     "/api/select_collect_task": ConsoleRequestHandler._post_select_collect_task,
     "/api/select_collection_slot": ConsoleRequestHandler._post_select_collection_slot,
     "/api/skip_collection_slot": ConsoleRequestHandler._post_skip_collection_slot,
@@ -4291,6 +4211,7 @@ _POST_ROUTES = {
     "/api/collect_quality_export": ConsoleRequestHandler._post_collect_quality_export,
     "/api/collect_quality_upload": ConsoleRequestHandler._post_collect_quality_upload,
     "/api/dashboard_upload": ConsoleRequestHandler._post_dashboard_upload,
+    "/api/dataset_manager": ConsoleRequestHandler._post_dataset_manager,
     "/api/annotate": ConsoleRequestHandler._post_annotate,
     "/api/episode_annotation": ConsoleRequestHandler._post_episode_annotation,
     "/api/load_replay_dataset": ConsoleRequestHandler._post_load_replay_dataset,
@@ -4389,7 +4310,8 @@ def start_console_server(
     """Launch a daemon HTTP server thread bound to ``host:port``."""
     ctx = build_console_context(config, runtime, session, output_dir, language=language)
     ConsoleRequestHandler.ctx = ctx
-    server = ThreadingHTTPServer((host, port), ConsoleRequestHandler)
+    server = ReusableThreadingHTTPServer((host, port), ConsoleRequestHandler)
+    runtime.console_server = server
 
     def serve() -> None:
         """Thread body: serve requests until the server is shut down."""
@@ -4398,7 +4320,27 @@ def start_console_server(
         server.serve_forever()
 
     thread = threading.Thread(target=serve, name="eva-console-server", daemon=True)
+    runtime.console_server_thread = thread
     thread.start()
     if str(config.transport.type) in _LIVE_TRANSPORT_TYPES:
         _prewarm_transform_worker(config, runtime)
     return thread
+
+
+def stop_console_server(runtime: RuntimeState) -> None:
+    """Release the console listener before the process is restarted or exits."""
+    server = getattr(runtime, "console_server", None)
+    thread = getattr(runtime, "console_server_thread", None)
+    if server is None:
+        return
+    try:
+        # ``shutdown`` must be called outside the serve_forever thread. The application
+        # loop owns this cleanup, so it also guarantees the socket is closed before
+        # ``run()`` returns and main.py invokes os.execv for a device selection.
+        server.shutdown()
+    finally:
+        server.server_close()
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=2.0)
+        runtime.console_server = None
+        runtime.console_server_thread = None

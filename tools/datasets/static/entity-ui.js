@@ -77,13 +77,34 @@ function configureEntityUi(context) {
   } = context);
 }
 
+function qcSlotEntries() {
+  const authored = (app.state.tasks || [])
+    .filter((task) => !app.batch || task.batch_id === app.batch)
+    .sort(compareTaskIds)
+    .flatMap((task) => (task.slots || []).map((slot) => ({task, slot})));
+  const order = app.state.slot_order || [];
+  if (!order.length) return authored;
+  // The console's collect grid owns the tile order, so review follows it and
+  // appends any slot the plan no longer describes.
+  const key = (batchId, slotId) => batchId + "::" + slotId;
+  const pending = new Map(authored.map((entry) => [key(entry.task.batch_id, entry.slot.slot_id), entry]));
+  const entries = [];
+  for (const item of order) {
+    const entry = pending.get(key(item.batch_id, item.slot_id));
+    if (!entry) continue;
+    pending.delete(key(item.batch_id, item.slot_id));
+    entries.push(entry);
+  }
+  for (const entry of authored) {
+    if (pending.delete(key(entry.task.batch_id, entry.slot.slot_id))) entries.push(entry);
+  }
+  return entries;
+}
+
 function renderTaskList() {
   if (!app.state) return;
   const host = $("task-list");
-  const tasks = (app.state.tasks || [])
-    .filter((task) => !app.batch || task.batch_id === app.batch)
-    .sort(compareTaskIds);
-  const entries = tasks.flatMap((task) => (task.slots || []).map((slot) => ({task, slot})));
+  const entries = qcSlotEntries();
   const sceneSelect = $("qc-scene-select");
   const taskSelect = $("qc-task-select");
   const sceneIds = [...new Set(entries.map(({slot}) => slot.scene_id).filter(Boolean))].sort();
@@ -157,10 +178,7 @@ function renderTaskList() {
 
 function navigateQcSlot(offset) {
   if (!app.state || !app.batch) return;
-  const entries = (app.state.tasks || [])
-    .filter((task) => task.batch_id === app.batch)
-    .sort(compareTaskIds)
-    .flatMap((task) => (task.slots || []).map((slot) => ({task, slot})));
+  const entries = qcSlotEntries();
   const filtered = entries.filter(({task, slot}) => (
     (!app.qcSceneFilter || slot.scene_id === app.qcSceneFilter)
       && (!app.qcTaskFilter || task.task_id === app.qcTaskFilter)
@@ -257,7 +275,9 @@ function buildSlotTile(task, slot, index) {
   };
   tile.title = slot.slot_id + " · " + stateLabels[qcState(slot)] + (slot.episode ? " · " + translate("qc.episode") + " " + slot.episode.episode_index : "");
   tile.setAttribute("aria-label", tile.title);
-  tile.append(node("b", "", String(index + 1)));
+  // Number the square by the plan's place for the slot so it matches the same
+  // square in the console's collect grid; unplanned slots fall back to the list.
+  tile.append(node("b", "", String(Number.isFinite(slot.ordinal) ? slot.ordinal + 1 : index + 1)));
   tile.addEventListener("click", (event) => {
     event.stopPropagation();
     openSlot(task, slot);
@@ -805,17 +825,22 @@ function renderObjectEditor() {
   }
   const editor = editorShell("objects", draft.object_id || translate("entity.newObject"), translate("entity.objectAsset"));
   const form = node("form", "form-grid inset surface");
-  const idControl = input("text", "object_id", draft.object_id, "AST-0001");
-  idControl.disabled = Boolean(app.original.objects);
+  const colorControl = input("text", "color", draft.color, "例如：红色、蓝色、白色");
+  colorControl.setAttribute("list", "object-color-options");
+  if (!$("object-color-options")) {
+    const colors = node("datalist");
+    colors.id = "object-color-options";
+    for (const color of ["红色", "橙色", "黄色", "绿色", "蓝色", "紫色", "粉色", "棕色", "黑色", "白色", "灰色", "透明", "多色", "其他"]) {
+      colors.append(node("option", "", color));
+    }
+    document.body.append(colors);
+  }
   form.append(
-    field(translate("entity.objectId"), idControl),
-    field(translate("entity.color"), input("text", "color", draft.color, "white / #e8590c")),
+    field(translate("entity.color"), colorControl),
     field(translate("common.englishName"), input("text", "object_name", draft.object_name), true),
     field(translate("entity.chineseName"), input("text", "object_name_zh", draft.object_name_zh), true),
-    field(translate("entity.scanStatus"), input("text", "scan_status", draft.scan_status), true),
-    field(translate("entity.photoDirectory"), input("text", "photo_dir", draft.photo_dir), true),
   );
-  form.append(node("p", "full", "尺寸按自然放置时的外接长、宽、高填写；圆盘长宽均填直径。未知可留空。"));
+  form.append(node("p", "full", "编号和照片目录自动生成。尺寸按自然放置时的外接长、宽、高填写；圆盘长宽均填直径。未知可留空。"));
   for (const [name, label] of OBJECT_MEASUREMENTS) {
     const control = input("number", name, draft[name] || "", "未填写");
     control.min = "0";
@@ -832,12 +857,9 @@ function renderObjectEditor() {
   form.append(field("建模方法", methodControl, true));
   const updateDraft = () => {
     for (const name of [
-      "object_id",
       "object_name",
       "object_name_zh",
-      "scan_status",
       "color",
-      "photo_dir",
       ...OBJECT_MEASUREMENTS.map(([name]) => name),
       "modeling_method",
     ]) {
@@ -859,8 +881,7 @@ function buildPhotoGallery(object, editable = false) {
   heading.append(node("span", "eyebrow", translate("entity.objectPhotos")), node("h2", "", translate("entity.physicalPhotos")));
   if (editable) {
     const upload = button(translate("entity.uploadPhotos"), "", "button");
-    upload.disabled = !app.original.objects;
-    upload.addEventListener("click", () => $("photo-file").click());
+    upload.addEventListener("click", () => document.dispatchEvent(new CustomEvent("object-photo-upload")));
     head.append(heading, upload);
   } else {
     head.append(heading);
@@ -879,8 +900,14 @@ function buildPhotoGallery(object, editable = false) {
       gallery.append(figure);
     }
   } else {
-    const slot = node("div", "photo-slot");
+    const slot = node("button", "photo-slot");
+    slot.type = "button";
     slot.append(node("b", "", "+"), node("span", "", translate("common.photoSlot")));
+    if (editable) {
+      slot.addEventListener("click", () => document.dispatchEvent(new CustomEvent("object-photo-upload")));
+    } else {
+      slot.disabled = true;
+    }
     gallery.append(slot);
   }
   section.append(head, gallery);
@@ -901,9 +928,7 @@ function openObjectDialog(objectId) {
   );
   const meta = node("div", "object-modal-meta");
   meta.append(
-    node("span", "", translate("entity.scanStatus") + " · " + (object.scan_status || translate("entity.valueNotSet"))),
     node("span", "", translate("entity.color") + " · " + (object.color || translate("entity.valueUnlabeled"))),
-    node("span", "", translate("entity.photoDirectory") + " · " + (object.photo_dir || translate("entity.valueUnbound"))),
     node("span", "", translate("entity.measurements") + " · " + objectMeasurementsText(object)),
     node("span", "", translate("entity.mass") + " · " + (object.mass_g ? object.mass_g + " g" : translate("entity.valueNotSet"))),
     node("span", "", translate("entity.modelingMethod") + " · " + (object.modeling_method
@@ -937,7 +962,7 @@ function dashboardBatchTarget(batch) {
 }
 
 function dashboardBatchCount(batch) {
-  return batch.benchmark_batch ? 1 : 0;
+  return batch.batch_kind === "unmatched" || !batch.benchmark_batch ? 0 : 1;
 }
 
 function setDashboardText(id, value) {
@@ -1013,21 +1038,12 @@ function renderInfo() {
   setDashboardText("dashboard-passed", formatDashboardNumber(dashboardPassed));
   setDashboardText("dashboard-pending", formatDashboardNumber(summary.pending + summary.failed));
   setDashboardText(
-    "dashboard-range-summary",
-    formatDashboardNumber(collected) + " " + translate("dashboard.episodes") + " / " + formatDashboardNumber(summary.frames)
-      + " " + translate("dashboard.frames") + " · " + batches.reduce((count, batch) => count + dashboardBatchCount(batch), 0) + " " + translate("dashboard.plans") + " · " + robots.length + " " + translate("dashboard.robots"),
-  );
-  setDashboardText(
     "dashboard-robot-total",
     formatDashboardNumber(collected) + " / " + formatDashboardNumber(target),
   );
   setDashboardText(
     "dashboard-health-rate",
     formatDashboardPercent(qcTotal ? summary.passed / qcTotal : 0),
-  );
-  setDashboardText(
-    "dashboard-qc-summary",
-    formatDashboardNumber(summary.pending + summary.failed) + " " + translate("dashboard.pending"),
   );
 
   const robotHost = $("dashboard-robot-list");
@@ -1040,9 +1056,10 @@ function renderInfo() {
         (total, batch) => ({
           target: total.target + dashboardBatchTarget(batch),
           collected: total.collected + Number(batch.collected || 0),
-          pending: total.pending + Number(batch.pending || 0) + Number(batch.failed || 0),
+          pending: total.pending + Number(batch.pending || 0),
+          failed: total.failed + Number(batch.failed || 0),
         }),
-        { target: 0, collected: 0, pending: 0 },
+        { target: 0, collected: 0, pending: 0, failed: 0 },
       );
       const row = node("div", "dashboard-robot-row");
       const copy = node("div", "dashboard-robot-copy");
@@ -1059,7 +1076,8 @@ function renderInfo() {
       const value = node("div", "dashboard-robot-value");
       value.append(
         node("b", "", formatDashboardNumber(robotSummary.collected) + " / " + formatDashboardNumber(robotSummary.target)),
-        node("small", "", translate("dashboard.remaining") + " " + formatDashboardNumber(robotSummary.pending)),
+        node("small", "", translate("dashboard.remaining") + " " + formatDashboardNumber(robotSummary.pending)
+          + (robotSummary.failed ? " · " + translate("dashboard.repair") + " " + formatDashboardNumber(robotSummary.failed) : "")),
       );
       row.append(copy, track, value);
       return row;
@@ -1086,43 +1104,6 @@ function renderInfo() {
     }));
   }
 
-  const reportHost = $("dashboard-qc-list");
-  if (!reportHost) return;
-  const reports = [...batches].filter(
-    (batch) => Number(batch.failed || 0) > 0,
-  ).sort((left, right) => (
-    Number(right.failed || 0) - Number(left.failed || 0)
-  ));
-  reportHost.replaceChildren(...reports.map((batch) => {
-    const failed = Number(batch.failed || 0);
-    const row = node("div", "dashboard-qc-row failed");
-    const copy = node("div", "dashboard-qc-copy");
-    copy.append(
-      node("strong", "", batch.batch_id),
-      node(
-        "span",
-        "",
-        (batch.robot_type || translate("dashboard.unknownRobot")) + " · " + formatDashboardNumber(batch.collected)
-          + " / " + formatDashboardNumber(dashboardBatchTarget(batch))
-          + " · " + translate("status.failed") + " " + formatDashboardNumber(failed),
-      ),
-    );
-    const openQc = button(translate("dashboard.openQc"), "", "button primary");
-    openQc.addEventListener("click", async () => {
-      app.batch = batch.batch_id;
-      app.qcSceneFilter = "";
-      app.qcTaskFilter = "";
-      app.qcPage = 0;
-      app.selectedSlot = "";
-      app.selected.tasks = "";
-      app.review = null;
-      await loadState();
-      switchTab("tasks");
-    });
-    row.append(copy, openQc);
-    return row;
-  }));
-  if (!reportHost.childElementCount) emptyList(reportHost, translate("dashboard.noReports"));
 }
 
 function renderIssues() {
@@ -1219,9 +1200,7 @@ function newEntity(kind) {
       object_id: nextId("AST-", app.state.objects, "object_id", 4),
       object_name: "",
       object_name_zh: "",
-      scan_status: "",
       color: "",
-      photo_dir: "",
       length_cm: "",
       width_cm: "",
       height_cm: "",

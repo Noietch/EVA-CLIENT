@@ -18,6 +18,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -37,6 +38,10 @@ class DeviceProcesses:
         self.browser_url = ""
         self.commands = {}
         self.ready_pids = {}
+        self._native_link_stop = threading.Event()
+        self._native_link_thread: threading.Thread | None = None
+        self._native_link_log_lock = threading.Lock()
+        self._native_link_last_log = ""
 
     @staticmethod
     def _same_command(process: psutil.Process, command: list[str]) -> bool:
@@ -115,7 +120,15 @@ class DeviceProcesses:
         try:
             for name, command in commands.items():
                 stale_pids = self._stop_stale_teleop(command) if name == "teleop" else []
-                token = secrets.token_urlsafe(24) if "--token-stdin" in command else ""
+                token = ""
+                token_from_stdin = False
+                if "--token-stdin" in command:
+                    token = secrets.token_urlsafe(24)
+                    token_from_stdin = True
+                elif "--token" in command:
+                    token_index = command.index("--token")
+                    if token_index + 1 < len(command):
+                        token = str(command[token_index + 1])
                 with (self.log_root / f"{name}.log").open("ab") as log:
                     if stale_pids:
                         log.write(
@@ -129,7 +142,7 @@ class DeviceProcesses:
                         command,
                         cwd=REPOSITORY_ROOT,
                         env=env,
-                        stdin=subprocess.PIPE if token else subprocess.DEVNULL,
+                        stdin=subprocess.PIPE if token_from_stdin else subprocess.DEVNULL,
                         stdout=log,
                         stderr=log,
                         start_new_session=True,
@@ -138,9 +151,10 @@ class DeviceProcesses:
                 self.ready_pids.pop(name, None)
                 self.commands[name] = command
                 started.append(name)
-                if token:
+                if token_from_stdin:
                     process.stdin.write((token + "\n").encode())
                     process.stdin.close()
+                if token:
                     settings = self.workspace.resolve(self.workspace.saved["selected"])[name][
                         "settings"
                     ]
@@ -149,10 +163,84 @@ class DeviceProcesses:
                     if host in {"0.0.0.0", "::"}:
                         host = "127.0.0.1"
                     self.browser_url = f"{scheme}://{host}:{settings['port']}/?token={token}"
+            native_teleop = self.workspace.saved["selected"].get("teleop") == "eva_pico"
+            teleop = self.processes.get("teleop")
+            if native_teleop and teleop is not None and teleop.poll() is None:
+                self._start_native_pico_watcher()
         except OSError:
             for name in started:
                 self.stop(name)
             raise
+
+    def _start_native_pico_watcher(self) -> None:
+        """Keep ADB reverse ready when a PICO is plugged in after EVA starts."""
+        thread = self._native_link_thread
+        if thread is not None and thread.is_alive():
+            return
+        self._native_link_stop = threading.Event()
+        self._prepare_native_pico_link()
+        self._native_link_thread = threading.Thread(
+            target=self._native_pico_watch_loop,
+            args=(self._native_link_stop,),
+            name="eva-pico-adb-reverse",
+            daemon=True,
+        )
+        self._native_link_thread.start()
+
+    def _native_pico_watch_loop(self, stop: threading.Event) -> None:
+        while not stop.wait(1.0):
+            teleop = self.processes.get("teleop")
+            if teleop is None or teleop.poll() is not None:
+                return
+            self._prepare_native_pico_link()
+
+    def _stop_native_pico_watcher(self) -> None:
+        self._native_link_stop.set()
+        thread = self._native_link_thread
+        self._native_link_thread = None
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=2)
+
+    def _write_native_link_log(self, message: str) -> None:
+        # A disconnected host is normal while teleop is running. Avoid writing
+        # the same ADB error once per second while still recording state changes.
+        with self._native_link_log_lock:
+            if message == self._native_link_last_log:
+                return
+            self._native_link_last_log = message
+        with (self.log_root / "teleop.log").open("ab") as log:
+            log.write((f"[native] {message}\n").encode())
+
+    def _prepare_native_pico_link(self) -> None:
+        """Best-effort USB reverse forwarding for a manually opened EVA-VR APK."""
+        try:
+            selected = self.workspace.saved["selected"]
+            values = self.workspace.resolve(selected)
+            settings = values["teleop"].get("settings", {})
+            env = dict(
+                os.environ,
+                VR_PORT=str(settings.get("port", 43876)),
+                VR_TOKEN="eva",
+            )
+            launcher = REPOSITORY_ROOT / "examples/input_sources/eva-pico/start.sh"
+            result = subprocess.run(
+                ["bash", str(launcher), "--prepare-only"],
+                cwd=REPOSITORY_ROOT,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            output = (result.stdout or result.stderr or "").strip()
+            if result.returncode:
+                # The native bridge remains usable over LAN, and the PICO may be opened
+                # after the host starts, so an absent USB device must not fail teleop.
+                output = f"ADB reverse not ready: {output}" if output else "ADB reverse not ready"
+            if output:
+                self._write_native_link_log(output)
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            self._write_native_link_log(f"ADB reverse preparation skipped: {error}")
 
     def stop(self, component: str | None = None) -> None:
         names = list(self.processes) if component is None else [component]
@@ -181,10 +269,12 @@ class DeviceProcesses:
             self.commands.pop(name, None)
             self.ready_pids.pop(name, None)
         if "teleop" not in self.processes:
+            self._stop_native_pico_watcher()
             self.browser_url = ""
 
     def kill_all(self) -> None:
         """Immediately force-kill every owned device process group."""
+        self._stop_native_pico_watcher()
         processes = list(self.processes.items())
         for _, process in processes:
             if process.poll() is None:
@@ -229,8 +319,18 @@ class DeviceProcesses:
             raise ValueError("Start VR successfully before opening Pico")
         url = urlsplit(self.browser_url)
         token = parse_qs(url.query)["token"][0]
+        selected = self.workspace.saved.get("selected", {})
+        native = selected.get("teleop") == "eva_pico"
+        launcher = (
+            REPOSITORY_ROOT / "examples/input_sources/eva-pico/start.sh"
+            if native
+            else REPOSITORY_ROOT / "examples/input_sources/vr_webxr/open_pico.sh"
+        )
+        command = ["bash", str(launcher)]
+        if native:
+            command.append("--launch-only")
         result = subprocess.run(
-            ["bash", str(REPOSITORY_ROOT / "examples/input_sources/vr_webxr/open_pico.sh")],
+            command,
             env=dict(os.environ, VR_TOKEN=token, VR_PORT=str(url.port), VR_SCHEME=url.scheme),
             capture_output=True,
             text=True,

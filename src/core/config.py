@@ -179,7 +179,12 @@ def _normalize_collection_task_set(cfg: ConfigDict) -> None:
     def load_bound_task_set(root: Path, name: str | None = None):
         bindings: dict[str, str] = {}
         tasks = load_collection_task_set(root, name, task_prompts=bindings)
-        collection["task_prompt_bindings"][next(iter(tasks))] = bindings
+        dataset = next(iter(tasks))
+        prefix = str((collection.get("task_prompt_prefixes") or {}).get(dataset) or "")
+        if prefix:
+            tasks[dataset] = [(prefix + prompt, target) for prompt, target in tasks[dataset]]
+            bindings = {task_id: prefix + prompt for task_id, prompt in bindings.items()}
+        collection["task_prompt_bindings"][dataset] = bindings
         return tasks
 
     authored_tasks = collection.get("tasks") or {}
@@ -358,6 +363,13 @@ def _validate(cfg: ConfigDict) -> None:
     if "task_requirements" in coll:
         raise ValueError(
             "collection.task_requirements was removed; put each target beside its prompt"
+        )
+    storage = coll.get("storage") or {}
+    remotes = [name for name in ("huggingface", "sftp", "s3", "loopback") if storage.get(name)]
+    if len(remotes) > 1:
+        raise ValueError(
+            f"collection.storage configures multiple remotes: {', '.join(remotes)}; "
+            "sync with exactly one"
         )
     sftp = (coll.get("storage") or {}).get("sftp") or {}
     if sftp:

@@ -271,8 +271,8 @@ class OperatorEventMapper:
 
     A short press emits ``record_toggle`` on release. Holding A for the configured
     duration emits exactly one ``record_cancel`` and suppresses the later release.
-    A short B press emits ``arm_toggle`` on release. A short left X press emits
-    ``home`` on release, and a short left Y press emits ``intervention_toggle``
+    A B press emits ``arm_toggle`` immediately, once per press. A short left X
+    press emits ``home`` on release, and a short left Y press emits ``intervention_toggle``
     (collection QC outside RL). The left stick emits four-way review navigation
     with a deadzone and delayed repeat; pressing it selects the capture slot once.
     Grip is consumed here only for its
@@ -293,7 +293,6 @@ class OperatorEventMapper:
         self._previous_home = False
         self._previous_intervention = False
         self._press_started_ms: float | None = None
-        self._secondary_started_ms: float | None = None
         self._long_press_fired = False
 
     def reset(self) -> None:
@@ -306,7 +305,6 @@ class OperatorEventMapper:
         self._previous_home = False
         self._previous_intervention = False
         self._press_started_ms = None
-        self._secondary_started_ms = None
         self._long_press_fired = False
 
     def update(
@@ -352,14 +350,7 @@ class OperatorEventMapper:
             self._press_started_ms = None
             self._long_press_fired = False
         if secondary and not self._previous_secondary:
-            self._secondary_started_ms = float(client_time_ms)
-        if self._previous_secondary and not secondary:
-            if (
-                self._secondary_started_ms is not None
-                and client_time_ms - self._secondary_started_ms < self._long_press_ms
-            ):
-                intents.append("arm_toggle")
-            self._secondary_started_ms = None
+            intents.append("arm_toggle")
         if self._previous_home and not home_pressed:
             intents.append("home")
         if self._previous_intervention and not intervention_pressed:

@@ -5,11 +5,12 @@ import tempfile
 from pathlib import Path
 
 
-def publish_output_pair(
-    outputs: tuple[tuple[Path, Path], tuple[Path, Path]],
+def publish_outputs(
+    outputs: tuple[tuple[Path, Path], ...],
     *,
     replace_existing: bool,
 ) -> None:
+    """Atomically publish staged outputs, restoring previous ones on failure."""
     backups: dict[Path, tuple[Path, Path]] = {}
     published: list[Path] = []
     try:

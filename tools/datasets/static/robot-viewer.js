@@ -2,6 +2,13 @@ let THREE;
 let OrbitControls;
 let threeModules;
 const geometryCache = new Map();
+const robotMetaCache = new Map();
+const transformChunkCache = new Map();
+
+function cacheSet(cache, key, value, limit) {
+  cache.set(key, value);
+  while (cache.size > limit) cache.delete(cache.keys().next().value);
+}
 
 function encodePath(value) {
   return String(value).split("/").map(encodeURIComponent).join("/");
@@ -18,6 +25,23 @@ function loadThree() {
     });
   }
   return threeModules;
+}
+
+function loadRobotMeta(robotType) {
+  let pending = robotMetaCache.get(robotType);
+  if (!pending) {
+    pending = fetch("/api/robots/" + encodeURIComponent(robotType) + "/meshes")
+      .then(async (response) => {
+        if (!response.ok) throw new Error("robot meta HTTP " + response.status);
+        return response.json();
+      })
+      .catch((error) => {
+        robotMetaCache.delete(robotType);
+        throw error;
+      });
+    cacheSet(robotMetaCache, robotType, pending, 8);
+  }
+  return pending;
 }
 
 class RobotViewer {
@@ -79,15 +103,20 @@ class RobotViewer {
     this.renderer.setSize(Math.max(1, rect.width), Math.max(1, rect.height), false);
     this.camera.aspect = Math.max(rect.width, 1) / Math.max(rect.height, 1);
     this.camera.updateProjectionMatrix();
-    if (this.bounds) {
-      const sphere = this.bounds.getBoundingSphere(new THREE.Sphere());
-      const halfFov = Math.atan(Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2))
-        * Math.min(1, this.camera.aspect));
-      const direction = this.camera.position.clone().sub(this.controls.target).normalize();
-      this.controls.target.copy(sphere.center);
-      this.camera.position.copy(sphere.center).addScaledVector(direction, sphere.radius / Math.sin(halfFov) * 1.1);
-      this.controls.update();
-    }
+  }
+
+  fitCamera() {
+    if (this.disposed || !this.bounds) return;
+    const sphere = this.bounds.getBoundingSphere(new THREE.Sphere());
+    const halfFov = Math.atan(Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2))
+      * Math.min(1, this.camera.aspect));
+    const direction = this.camera.position.clone().sub(this.controls.target).normalize();
+    this.controls.target.copy(sphere.center);
+    this.camera.position.copy(sphere.center).addScaledVector(
+      direction,
+      sphere.radius / Math.sin(halfFov) * 1.1,
+    );
+    this.controls.update();
   }
 
   async load(robotType, review, episodeIndex) {
@@ -95,14 +124,12 @@ class RobotViewer {
       this.setEmpty("3D UNAVAILABLE", "plan meta 缺少 robot_type");
       return;
     }
-    this.batch = review.batch_id;
-    this.episodeIndex = Number.isInteger(episodeIndex) ? episodeIndex : null;
+    this.batch = review.video_batch || review.batch_id;
+    this.episodeIndex = Number.isInteger(review.video_episode_index)
+      ? review.video_episode_index
+      : Number.isInteger(episodeIndex) ? episodeIndex : null;
     try {
-      const response = await fetch(
-        "/api/robots/" + encodeURIComponent(robotType) + "/meshes",
-      );
-      if (!response.ok) throw new Error("robot meta HTTP " + response.status);
-      const meta = await response.json();
+      const meta = await loadRobotMeta(robotType);
       if (this.disposed) return;
       this.arms = meta.arms.length ? meta.arms : ["arm"];
       for (const arm of this.arms) this.meshes[arm] = {};
@@ -117,6 +144,7 @@ class RobotViewer {
       }
       this.empty.hidden = true;
       this.resize();
+      this.fitCamera();
       if (this.episodeIndex != null) await this.applyEpisodeFrame(0);
     } catch (error) {
       this.setEmpty("3D UNAVAILABLE", error.message || String(error));
@@ -139,7 +167,7 @@ class RobotViewer {
           geometryCache.delete(key);
           throw error;
         });
-        geometryCache.set(key, pending);
+        cacheSet(geometryCache, key, pending, 64);
       }
       geometry[file] = await pending;
     }));
@@ -225,16 +253,28 @@ class RobotViewer {
   }
 
   async loadTransformChunk(start) {
+    if (this.chunks.has(start)) return this.chunks.get(start);
     if (this.loads.has(start)) return this.loads.get(start);
-    const promise = fetch(
-      "/api/batches/" + encodeURIComponent(this.batch)
-        + "/episodes/" + this.episodeIndex
-        + "/transforms?start=" + start + "&count=120",
-    ).then(async (response) => {
-      if (!response.ok) throw new Error("transform HTTP " + response.status);
-      const actual = Number(response.headers.get("X-EVA-Transform-Start")) || start;
-      const chunk = this.decodeTransforms(await response.arrayBuffer(), actual);
-      this.chunks.set(actual, chunk);
+    const key = this.batch + "::" + this.episodeIndex + "::" + start;
+    let shared = transformChunkCache.get(key);
+    if (!shared) {
+      shared = fetch(
+        "/api/batches/" + encodeURIComponent(this.batch)
+          + "/episodes/" + this.episodeIndex
+          + "/transforms?start=" + start + "&count=120",
+      ).then(async (response) => {
+        if (!response.ok) throw new Error("transform HTTP " + response.status);
+        const actual = Number(response.headers.get("X-EVA-Transform-Start")) || start;
+        return { actual, buffer: await response.arrayBuffer() };
+      }).then(({ actual, buffer }) => this.decodeTransforms(buffer, actual))
+        .catch((error) => {
+          transformChunkCache.delete(key);
+          throw error;
+        });
+      cacheSet(transformChunkCache, key, shared, 32);
+    }
+    const promise = shared.then((chunk) => {
+      this.chunks.set(chunk.start, chunk);
       return chunk;
     }).catch(() => null).finally(() => this.loads.delete(start));
     this.loads.set(start, promise);

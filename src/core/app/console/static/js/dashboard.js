@@ -1,5 +1,6 @@
 // dashboard.js: stacked raw-only collection and eval operations overview.
 import { $, apiGet, apiPost } from "./core.js";
+import { initDatasetManager, loadDatasetManager } from "./dataset_manager.js";
 
 let dashboardData = null;
 let dashboardLoading = null;
@@ -97,7 +98,7 @@ function dashboardUploadHasChanges() {
 
 function dashboardUploadStatus(candidate, configured) {
   if (!configured) return "UPLOAD TARGET NOT CONFIGURED";
-  if (!candidate) return "NO ACCEPTED EXPORT FOUND";
+  if (!candidate) return "NO EXPORT FOUND";
   if (dashboardUpload.error) return dashboardUpload.error.toUpperCase();
   if (dashboardUpload.posting) return "STARTING REMOTE CHECK";
   if (["queued", "scanning"].includes(dashboardUpload.state)) return "SCANNING LOCAL AND REMOTE FILES";
@@ -112,7 +113,7 @@ function dashboardUploadStatus(candidate, configured) {
   if (dashboardUpload.state === "completed") {
     return `SYNC COMPLETE · ${dashboardUpload.filesCompleted} UPLOADED · ${dashboardUpload.filesDeleted} REMOVED`;
   }
-  return `${Number(candidate.accepted_episodes) || 0} ACCEPTED · ${Number(candidate.uploaded_episodes) || 0} UPLOADED`;
+  return `${Number(candidate.episodes) || 0} EPISODES · ${Number(candidate.uploaded_episodes) || 0} UPLOADED`;
 }
 
 function renderDashboardUpload() {
@@ -126,7 +127,7 @@ function renderDashboardUpload() {
   select.replaceChildren(...candidates.map((candidate) => {
     const option = document.createElement("option");
     option.value = uploadCandidateKey(candidate);
-    option.textContent = `${candidate.dataset} · ${candidate.dataset_format} · ${candidate.accepted_episodes} accepted · ${candidate.uploaded_episodes} uploaded`;
+    option.textContent = `${candidate.dataset} · ${candidate.dataset_format} · ${candidate.episodes} episodes · ${candidate.uploaded_episodes} uploaded`;
     return option;
   }));
   select.value = dashboardUpload.candidateKey;
@@ -136,7 +137,7 @@ function renderDashboardUpload() {
   $("dashboard-upload-config").textContent = configured
     ? (dashboardData.upload.targets || []).join(" / ")
     : "NOT CONFIGURED";
-  $("dashboard-upload-local").textContent = candidate?.accepted_dir || "--";
+  $("dashboard-upload-local").textContent = candidate?.output_dir || "--";
   $("dashboard-upload-remote").textContent = (candidate?.remote_dirs || []).join(" / ") || "--";
 
   const scanned = dashboardUpload.localFiles != null;
@@ -434,24 +435,6 @@ function renderRecent(mode, rows) {
   }).join("");
 }
 
-function renderDemand(tasks) {
-  const body = $("collection-demand");
-  $("collection-demand-empty").style.display = tasks.length ? "none" : "block";
-  body.innerHTML = tasks.map((task) => {
-    const requirement = Number(task.required_episodes) || 0;
-    const unlimited = requirement === -1;
-    const completion = requirement > 0 ? Number(task.episodes) / requirement : 0;
-    return `<tr>
-      <td><b>${escapeHtml(task.dataset)}</b><small>${escapeHtml(task.task || "No task")}</small></td>
-      <td class="tnum">${escapeHtml(task.robot_id)}</td>
-      <td class="tnum">${Number(task.episodes) || 0}</td>
-      <td class="tnum">${unlimited ? "∞" : (requirement > 0 ? requirement : "--")}</td>
-      <td class="tnum">${requirement > 0 ? Math.max(0, requirement - Number(task.episodes)) : "--"}</td>
-      <td><div class="dashboard-demand-progress"><i style="width:${Math.min(1, completion) * 100}%"></i></div><small>${unlimited ? "No limit" : (requirement > 0 ? percent(completion) : "Not set")}</small></td>
-    </tr>`;
-  }).join("");
-}
-
 function renderModeMetrics(mode) {
   const view = metricView(mode);
   $(`${mode}-duration`).textContent = duration(view.duration_seconds);
@@ -485,7 +468,6 @@ function renderMode(mode) {
   $(`${mode}-sources`).textContent = String(dashboardData.sources.filter((source) => source.mode === mode).length);
   renderTrend(mode, view.trend || [], dashboardData.filters || {});
   renderRecent(mode, view.recent || []);
-  if (mode === "collection") renderDemand(view.tasks || []);
 }
 
 function renderDashboard() {
@@ -497,6 +479,7 @@ function renderDashboard() {
 }
 
 export function initDashboard() {
+  initDatasetManager();
   $("collection-overview-scope").addEventListener("click", () => selectTrendDay("collection", ""));
   $("dash-date-apply").addEventListener("click", () => {
     selectedTrendDay.collection = "";
@@ -517,6 +500,7 @@ export function initDashboard() {
 }
 
 export async function loadDashboard(force = false) {
+  loadDatasetManager();
   if (dashboardData && !force) {
     renderDashboard();
     return dashboardData;

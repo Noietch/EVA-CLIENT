@@ -49,7 +49,7 @@ class DeviceCLI:
         payload = {"selected": selected, "values": values}
         try:
             previous = self.http("/api/device_settings")
-        except URLError:
+        except (URLError, OSError):
             self.service.request("save", payload)
             return
         self.http("/api/device_selection", payload)
@@ -58,7 +58,7 @@ class DeviceCLI:
             time.sleep(0.25)
             try:
                 status = self.http("/api/device_settings")
-            except URLError:
+            except (URLError, OSError):
                 continue
             if status["state"] == "failed":
                 raise ValueError(status["error"])

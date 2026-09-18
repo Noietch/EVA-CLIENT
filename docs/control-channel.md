@@ -43,14 +43,17 @@ JSON request → JSON reply (REQ/REP). Every reply carries `ok: true|false`.
 | `{"cmd": "web:run"}` | `{"ok": true, "cmd": "web:run"}` |
 | `{"cmd": "web:tab_switch:collect", "armed": true}` | `{"ok": true, "tab": "collect", "armed": true}` |
 | `{"cmd": "web:select_collect_task", "dataset": "pick_place", "task": "pick apple"}` | `{"ok": true, "selected_collect_dataset": "pick_place", "selected_collect_task": "pick apple"}` |
+| `{"cmd": "web:haptic", "hand": "right", "intensity": 0.6, "duration_ms": 80}` | `{"ok": true, "cmd": "web:haptic", "hands": ["right"], "intensity": 0.6, "duration_ms": 80}` |
 | `{"query": "status"}` | `{"ok": true, "data": { …status… }}` |
 | unknown / disallowed | `{"ok": false, "error": "…"}` |
 
 ## Commands (`web:*`)
 
-Each command is gated by the current `web_phase` / `session_status` — a command
-invalid in the current state is ignored (check `last_error` / logs). Preconditions
-below come from [`_handle_web_command`](../src/core/app/run.py).
+Most commands are gated by the current `web_phase` / `session_status` — a command
+invalid in the current state is ignored (check `last_error` / logs). The haptic
+request is the exception: it is a direct VR feedback request and does not change
+robot session state. Preconditions below come from
+[`_handle_web_command`](../src/core/app/run.py).
 
 ### Session / run
 | Command | Arg | Web button | Notes |
@@ -77,6 +80,33 @@ below come from [`_handle_web_command`](../src/core/app/run.py).
 | `web:gripper:<side>:<open\|close>:<0\|1>` | drive side (`l`/`r`) to state; `1` locks it during RUN |
 | `web:gripper:<side>:<value>` | lock to a numeric value |
 | `web:gripper:<side>` | toggle |
+
+### VR haptics
+
+The control channel can send an explicit vibration to the native EVA-VR app. The
+request is delivered immediately to the active VR client's outbound queue and does
+not enter the robot motion command queue:
+
+```json
+{
+  "cmd": "web:haptic",
+  "hand": "right",
+  "intensity": 0.6,
+  "duration_ms": 80
+}
+```
+
+`hand` accepts `left`, `right`, or `both` (`all` is an alias). Intensity is clamped
+to `0..1`; duration is clamped to `1..1000` milliseconds. If the EVA-VR session is
+not connected, the channel returns `{"ok": false, "error": "VR headset is not connected"}`.
+The native app receives the same `type: "haptic"` message and applies it through
+OpenXR controller haptics.
+
+The positional form is also supported:
+
+```text
+web:haptic:right:0.6:80
+```
 
 ### Collection (COLLECT) — full teleop capture
 | Command | Extra keys | Notes |
@@ -119,6 +149,7 @@ python examples/control_channel/eva_ctl.py cmd web:run
 python examples/control_channel/eva_ctl.py query status
 python examples/control_channel/eva_ctl.py wait-idle          # block until the run finishes
 python examples/control_channel/eva_ctl.py cmd web:tab_switch:collect --json '{"armed": true}'
+python examples/control_channel/eva_ctl.py haptic right --intensity 0.6 --duration-ms 80
 ```
 
 ## Automated evaluation loop

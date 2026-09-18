@@ -55,6 +55,7 @@
     <span class="timer" id="be-elapsed" style="display:none">⏱ 0.0s</span>
     <span class="gb-status" id="replay-episode-task" style="display:none">no episode selected</span>
     <span class="gb-status" id="collect-replay-status" style="display:none"></span>
+    <span class="gb-status collect-transfer-info" id="collect-transfer-info" role="status" style="display:none"></span>
     <span class="gb-status" id="manual-conn" style="display:none"></span>
     <span class="gb-msg" id="gb-msg"></span>
     <span class="gb-hint" id="gb-hint">Follow steps 1 → 4 on the left to run</span>
@@ -130,9 +131,46 @@
             <div class="dashboard-upload-progress"><i id="dashboard-upload-progress"></i></div>
             <div class="dashboard-upload-status" id="dashboard-upload-status">No accepted export found</div>
           </section>
-          <section class="dashboard-section dashboard-demand-section">
-            <div class="dashboard-section-head"><div><span class="dashboard-section-label">TASK DEMAND</span><h2>Collection requirements</h2></div><span class="dashboard-section-note">Collected against target</span></div>
-            <div class="dashboard-table-wrap"><table class="dashboard-table dashboard-demand-table"><thead><tr><th>DATASET / TASK</th><th>ROBOT</th><th>COLLECTED</th><th>REQUIRED</th><th>GAP</th><th>PROGRESS</th></tr></thead><tbody id="collection-demand"></tbody></table><div class="dashboard-empty" id="collection-demand-empty" style="display:none">No collection tasks found</div></div>
+          <section class="dashboard-section dashboard-demand-section" translate="no">
+            <div class="dashboard-section-head"><h2>数据集管理</h2><div class="dm-selection-summary"><span id="dm-selected">已选 0</span><button class="btn" id="dm-clear" disabled>清空选择</button></div></div>
+            <div class="dm-toolbar">
+              <button class="btn" data-dm-action="download_qc">下载 QC</button>
+              <button class="btn" data-dm-action="download_data">下载数据</button>
+              <button class="btn" data-dm-action="upload_qc">上传 QC</button>
+              <button class="btn" data-dm-action="upload_data">上传数据</button>
+              <button class="btn" data-dm-action="download_data" title="把选中的数据从云端下载到本地；本地已有的质检记录按更新时间合并，不会被覆盖">下载数据</button>
+              <button class="btn" data-dm-action="upload_task">上传任务</button>
+              <button class="btn" data-dm-action="download_task">下载任务</button>
+              <button class="btn" id="dm-refresh" title="刷新所有数据集的云端信息并校验数据、任务和 QC">刷新云端并校验</button>
+            </div>
+            <div class="dm-toolbar">
+              <input id="dm-search" type="search" placeholder="搜索数据集" aria-label="搜索数据集">
+              <select id="dm-sort" aria-label="数据集排序">
+                <option value="name">名称 ↑</option><option value="name-desc">名称 ↓</option>
+                <option value="progress">采集比例 ↓</option><option value="pending">待采集 ↓</option>
+                <option value="fail">QC 失败 ↓</option><option value="unreviewed">未标注 ↓</option>
+              </select>
+              <button class="btn" id="dm-select-all" aria-pressed="false">全选筛选结果</button>
+            </div>
+            <div class="dm-job" aria-live="polite">
+              <span id="dm-status">尚未刷新云端</span><span id="dm-eta">ETA --</span>
+              <progress id="dm-progress" value="0" max="1" aria-label="数据集操作进度"></progress>
+            </div>
+            <div id="dm-jobs" aria-live="polite"></div>
+            <div class="dashboard-table-wrap"><table class="dashboard-table dm-table">
+              <colgroup><col class="dm-col-select"><col class="dm-col-name"><col span="11" class="dm-col-number"><col span="3" class="dm-col-check"><col class="dm-col-result"></colgroup>
+              <thead>
+                <tr><th rowspan="2" scope="col">选择</th><th rowspan="2" scope="col"><button data-dm-sort="name">数据集</button></th><th colspan="3" scope="colgroup">本地采集</th><th colspan="3" scope="colgroup">本地 QC</th><th colspan="2" scope="colgroup">云端数据</th><th colspan="3" scope="colgroup">云端 QC</th><th colspan="3" scope="colgroup">一致性校验</th><th rowspan="2" scope="col">最近刷新 / 操作结果</th></tr>
+                <tr>
+                  <th scope="col"><button data-dm-sort="collected">已采</button></th><th scope="col"><button data-dm-sort="total">目标</button></th><th scope="col"><button data-dm-sort="progress">比例</button></th>
+                  <th scope="col"><button data-dm-sort="accept">通过</button></th><th scope="col"><button data-dm-sort="fail">失败</button></th><th scope="col"><button data-dm-sort="unreviewed">未标注</button></th>
+                  <th scope="col"><button data-dm-sort="cloud_episodes">条数</button></th><th scope="col"><button data-dm-sort="cloud_tasks">任务数</button></th>
+                  <th scope="col"><button data-dm-sort="cloud_accept">通过</button></th><th scope="col"><button data-dm-sort="cloud_fail">失败</button></th><th scope="col"><button data-dm-sort="cloud_unreviewed">未标注</button></th>
+                  <th scope="col"><button data-dm-sort="verify_data">数据</button></th><th scope="col"><button data-dm-sort="verify_task">任务</button></th><th scope="col"><button data-dm-sort="verify_qc">QC</button></th>
+                </tr>
+              </thead>
+              <tbody id="dm-rows"></tbody>
+            </table><div class="dashboard-empty" id="dm-empty" hidden>没有匹配的数据集</div></div>
           </section>
           <section class="dashboard-section dashboard-recent-section">
             <div class="dashboard-section-head"><div><span class="dashboard-section-label">EPISODE LOG</span><h2>Collection activity</h2></div><span class="dashboard-section-note">Exact local timestamps</span></div>
@@ -259,9 +297,8 @@
             </div>
           </div>
         </div>
-
         <div class="panel" id="collect-panel-record">
-          <div class="panel-h"><span class="step-badge">2</span>RECORD</div>
+          <div class="panel-h"><span class="step-badge">1</span>RECORD</div>
           <div class="card">
             <div class="collect-actions">
               <div class="collect-motion-row">
@@ -282,7 +319,7 @@
         </div>
 
         <div class="panel" id="collect-panel-queue">
-          <div class="panel-h"><span class="step-badge">3</span>COLLECTION SLOTS <span class="n" id="collect-progress-label">0%</span></div>
+          <div class="panel-h"><span class="step-badge">2</span>COLLECTION SLOTS <span class="n" id="collect-progress-label">0%</span></div>
           <div class="card">
             <div class="collect-queue-head">
               <span><span id="collect-count">0/0</span> complete</span>
@@ -293,12 +330,13 @@
               <label><small>TASK</small><select class="choice-select" id="collect-slot-task-filter" aria-label="Filter collection slots by task"><option value="">ALL TASKS</option></select></label>
             </div>
             <div class="collect-episode-summary" aria-label="Collection episode counts">
-              <span class="usable"><b id="collect-usable-count">000</b><small>COMPLETE</small></span>
-              <span class="rejected"><b id="collect-rejected-count">000</b><small>REPAIR</small></span>
-              <span class="pending"><b id="collect-pending-count">000</b><small>PENDING</small></span>
+              <span class="unreviewed"><b id="collect-unreviewed-count">000</b><small>UNREVIEWED</small></span>
+              <span class="usable"><b id="collect-usable-count">000</b><small>PASSED</small></span>
+              <span class="rejected"><b id="collect-rejected-count">000</b><small>FAILED</small></span>
+              <span class="pending"><b id="collect-pending-count">000</b><small>TO COLLECT</small></span>
             </div>
             <div class="collect-requirement" id="collect-requirement">
-              <span><small>FIXED PLAN · GREEN ONLY</small><b id="collect-requirement-count">0 / --</b></span>
+              <span><small>FIXED PLAN · QC PASSED</small><b id="collect-requirement-count">0 / --</b></span>
               <strong id="collect-requirement-status">PENDING</strong>
             </div>
             <div class="collect-progress"><i id="collect-progress-fill"></i></div>
@@ -314,12 +352,13 @@
         </div>
 
         <div class="panel" id="collect-panel-replay">
-          <div class="panel-h"><span class="step-badge">4</span>QUALITY CHECK</div>
+          <div class="panel-h"><span class="step-badge">3</span>QUALITY CHECK</div>
           <div class="card">
             <div class="kv"><span class="k">SELECTED</span><span class="v" id="collect-qc-target">--</span></div>
             <div class="review-actions">
               <button class="btn" id="b-collect-qc-pass">PASS ✓</button>
               <button class="btn danger" id="b-goto-qc">FAIL ✗</button>
+              <button class="btn full" id="b-collect-qc-unreviewed">UNREVIEWED</button>
             </div>
             <textarea class="review-note" id="collect-qc-note" rows="3" placeholder="QC note (optional)" style="margin-top:8px"></textarea>
             <button class="btn full" id="b-collect-note-save" style="margin-top:6px">SAVE NOTE</button>
@@ -327,31 +366,35 @@
           </div>
         </div>
 
-        <div class="panel" id="collect-panel-export">
-          <div class="panel-h"><span class="step-badge">5</span>QUALITY EXPORT <span class="n" id="collect-quality-progress-label">0%</span></div>
+        <div class="panel" id="collect-panel-sync">
+          <div class="panel-h"><span class="step-badge">4</span>DATA PROCESS <span class="n" id="collect-dataset-sync-progress-label">0%</span></div>
           <div class="card">
-            <div class="quality-export-actions">
-              <label class="quality-export-format">
-                <span>EXPORT FORMAT</span>
-                <select id="collect-export-format" aria-label="Dataset export format">
-                  <option value="lerobot_v21">LeRobot v2.1</option>
-                  <option value="lerobot_v3">LeRobot v3</option>
-                  <option value="hdf5">HDF5</option>
-                  <option value="mcap">MCAP</option>
-                </select>
-              </label>
-              <button class="btn full" id="b-collect-quality-export">EXPORT DATASET</button>
-              <button class="btn primary full" id="b-collect-quality-upload">SCAN TARGET</button>
+            <div class="dataset-sync-content" aria-label="Dataset synchronization">
+              <div class="dataset-sync-actions">
+                <button class="btn primary" id="b-collect-dataset-upload">UPLOAD DATA</button>
+                <button class="btn" id="b-collect-assets-download">DOWNLOAD ASSETS</button>
+                <button class="btn" id="b-collect-task-set-download">下载任务集</button>
+              </div>
             </div>
-            <div class="collect-progress" role="progressbar" aria-label="Dataset transfer progress"
-                 aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"
-                 id="collect-quality-progress-bar">
-              <i id="collect-quality-progress-fill"></i>
+
+            <div class="collect-format-process">
+              <label for="collect-export-format">FORMAT</label>
+              <select class="choice-select has-value" id="collect-export-format" aria-label="Dataset export format">
+                <option value="lerobot_v21">LeRobot v2.1</option>
+                <option value="lerobot_v3">LeRobot v3</option>
+                <option value="hdf5">HDF5</option>
+                <option value="mcap">MCAP</option>
+              </select>
+              <div class="dataset-sync-actions">
+                <button class="btn" id="b-collect-quality-export">CONVERT DATASET</button>
+              </div>
+              <div class="collect-progress" role="progressbar" aria-label="Dataset conversion progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="collect-dataset-sync-progress"><i id="collect-dataset-sync-progress-fill"></i></div>
+              <div class="kv"><span class="k">progress</span><span class="v" id="collect-quality-progress-detail">0/0 episodes</span></div>
+              <div class="qc-status" id="collect-quality-status" role="status" aria-live="polite"></div>
             </div>
-            <div class="kv"><span class="k">progress</span><span class="v tnum" id="collect-quality-progress-detail">0/0 episodes</span></div>
-            <div class="qc-status" id="collect-quality-status" role="status" aria-live="polite"></div>
           </div>
         </div>
+
       </div>
 
       <!-- ============ stage (shared, reparented between tabs) ============

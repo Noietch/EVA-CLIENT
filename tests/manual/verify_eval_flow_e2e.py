@@ -33,7 +33,7 @@ _av.logging = _log  # type: ignore[reportAttributeAccessIssue]
 sys.modules["av"] = _av
 sys.modules["av.logging"] = _log
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integration" / "web"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "integration"))
 
 from _harness import WebHarness, build_runtime, free_port
 
