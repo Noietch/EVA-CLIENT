@@ -1,7 +1,9 @@
 robot:
   agilex_piper:
     label: Dual AgileX Piper
-    defaults: {teleop: vr_webxr, camera: external}
+    defaults: {teleop: piper_leader, camera: external}
+    launch:
+      script: examples/hardware/agilex_piper/run_agilex_ros.sh
     settings: {}
     config:
       robot:
@@ -30,13 +32,13 @@ robot:
               command_topic: /puppet/master_joint_left
               eef_state_topic: /puppet/end_pose_left
               sim_command_topic: /sim_joint_left
-              hil_input_topic: /eva/hil/input_joint_state_arm_left
+              hil_input_topic: /master/joint_left
             right_arm:
               state_topic: /puppet/joint_right
               command_topic: /puppet/master_joint_right
               eef_state_topic: /puppet/end_pose_right
               sim_command_topic: /sim_joint_right
-              hil_input_topic: /eva/hil/input_joint_state_arm_right
+              hil_input_topic: /master/joint_right
         ssh:
           host: <remote-host>
           user: <remote-user>
@@ -59,12 +61,12 @@ robot:
               left_arm:
                 qpos_topic: /puppet/joint_left
                 eef_topic: /puppet/end_pose_left
-                action_qpos_topic: /puppet/master_joint_left
+                action_qpos_topic: /master/joint_left
                 action_eef_topic: /puppet/end_pose_left
               right_arm:
                 qpos_topic: /puppet/joint_right
                 eef_topic: /puppet/end_pose_right
-                action_qpos_topic: /puppet/master_joint_right
+                action_qpos_topic: /master/joint_right
                 action_eef_topic: /puppet/end_pose_right
           ros2:
             primary_camera: ''
@@ -74,6 +76,12 @@ robot:
         enabled: false
         action_topic: /eva/operator_action
 teleop:
+  piper_leader:
+    label: Piper Leader
+    operation: leader
+    robots:
+    - agilex_piper
+    settings: {}
   vr_webxr:
     client:
       squeeze_threshold: 0.5

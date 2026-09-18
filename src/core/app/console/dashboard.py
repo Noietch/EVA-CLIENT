@@ -17,6 +17,7 @@ from core.utils.dataset_upload import (
 
 _DATASET_CACHE_MAX = 32
 _DATASET_CACHE_LOCK = threading.RLock()
+_COLLECTION_ROOT_NAMES = frozenset({"collection", "data_collection"})
 _DATASET_CACHE: OrderedDict[
     tuple[str, str, tuple[tuple[str, int, int, int], ...]],
     tuple[dict[str, Any], dict[str, int], list[dict[str, Any]]],
@@ -105,7 +106,7 @@ def _local_date(value: dt.datetime | None) -> dt.date | None:
 def _dataset_mode(raw_dir: Path) -> str | None:
     if raw_dir.parent.name == "episodes":
         return "eval"
-    if "collection" in raw_dir.parts:
+    if any(part in _COLLECTION_ROOT_NAMES for part in raw_dir.parts):
         return "collection"
     return None
 

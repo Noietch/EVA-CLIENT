@@ -175,3 +175,48 @@ def test_ros1_hil_relative_relay_reorders_named_input(monkeypatch):
     np.testing.assert_allclose(messages[0].position, [10.0, 20.0])
     np.testing.assert_allclose(messages[1].position, [10.5, 21.0])
     assert transport.stop_hil_control().active is False
+
+
+def test_ros1_transport_collection_relay_forwards_absolute_leader_input(monkeypatch):
+    config = ConfigDict(
+        transport=ConfigDict(
+            node_name="test_ros1_leader",
+            topics=ConfigDict(
+                camera_topics={},
+                group_topics={
+                    "arm": {
+                        "state_topic": "/puppet/joint",
+                        "command_topic": "/puppet/master_joint",
+                        "hil_input_topic": "/master/joint",
+                    }
+                },
+            ),
+        ),
+        inference_cfg=ConfigDict(obs_space=types.SimpleNamespace(is_eef=lambda: False)),
+        collection=ConfigDict(
+            schema=ConfigDict(columns={}),
+            transport=ConfigDict(ros1=ConfigDict(groups={})),
+        ),
+        rollout=ConfigDict(intervention=ConfigDict(control_mode="absolute")),
+    )
+    robot = Robot(
+        name="fake",
+        actuator_groups=(ActuatorGroup("arm", 2, ("j0", "j1")),),
+        initial_qpos=np.zeros(2, dtype=np.float32),
+        observation_schema=ObservationSchema(cameras=(), state_composition=("arm",)),
+    )
+    fake_rospy, transport = _build_ros1_transport(monkeypatch, config, robot)
+    transport._group_state_deques["arm"].append(types.SimpleNamespace(position=[10.0, 20.0]))
+    callback = _subscription_callback(fake_rospy, "/master/joint")
+
+    transport.set_hil_relay_enabled(True)
+    callback(types.SimpleNamespace(name=["j0", "j1"], position=[1.0, 2.0]))
+
+    messages = fake_rospy.publishers["/puppet/master_joint"].messages
+    np.testing.assert_allclose(messages[0].position, [1.0, 2.0])
+    assert transport.hil_control_mode == "absolute"
+    assert transport.hil_status().active is True
+
+    transport.set_hil_relay_enabled(False)
+    callback(types.SimpleNamespace(name=["j0", "j1"], position=[3.0, 4.0]))
+    assert len(messages) == 1

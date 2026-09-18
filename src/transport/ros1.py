@@ -9,11 +9,15 @@ import collections
 import importlib.util
 import logging
 import os
+import signal
+import subprocess
 import threading
+import time
 from typing import TYPE_CHECKING, Any
 from urllib import parse
 
 import numpy as np
+import psutil
 
 from core.config import ConfigDict
 from core.registry import TRANSPORT_REGISTRY
@@ -32,6 +36,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _ROS_RUNTIME: _RosRuntime | None = None
+_ROSCORE_PROCESS: subprocess.Popen | None = None
+_ROSCORE_LOCK = threading.Lock()
 _HIL_CONTROL_MODES = frozenset({"absolute", "relative"})
 _LOCAL_ROS_MASTER_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
@@ -66,9 +72,7 @@ class _RosRuntime:
 
 
 def _uses_local_ros_master() -> bool:
-    master_uri = os.environ.get("ROS_MASTER_URI", "").strip()
-    if master_uri == "":
-        return False
+    master_uri = os.environ.get("ROS_MASTER_URI", "http://localhost:11311").strip()
     hostname = parse.urlparse(master_uri).hostname
     return hostname in _LOCAL_ROS_MASTER_HOSTS
 
@@ -101,6 +105,83 @@ def _patch_ros_logging_find_caller() -> bool:
     return True
 
 
+def _ros_master_online() -> bool:
+    import rosgraph
+
+    try:
+        rosgraph.Master("/eva_master_probe").getPid()
+    except Exception:
+        return False
+    return True
+
+
+def _ensure_local_ros_master() -> None:
+    """Start a local ROS master when EVA is the first ROS1 process.
+
+    The Piper launcher starts roscore together with the hardware, but EVA must
+    initialize its ROS transport before the DEVICE page can be opened. Starting
+    only the lightweight master here keeps hardware initialization behind the
+    DEVICE Start button while avoiding the rospy startup deadlock.
+    """
+    global _ROSCORE_PROCESS
+    if not _uses_local_ros_master() or _ros_master_online():
+        return
+    with _ROSCORE_LOCK:
+        if _ros_master_online():
+            return
+        if _ROSCORE_PROCESS is None or _ROSCORE_PROCESS.poll() is not None:
+            logger.info("ROS master is unavailable; starting local roscore for EVA")
+            _ROSCORE_PROCESS = subprocess.Popen(
+                ["roscore"],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline:
+            if _ros_master_online():
+                return
+            if _ROSCORE_PROCESS.poll() is not None:
+                break
+            time.sleep(0.1)
+    raise RuntimeError("ROS master is not available; roscore failed to start")
+
+
+def _stop_owned_ros_master() -> None:
+    global _ROSCORE_PROCESS
+    process = _ROSCORE_PROCESS
+    _ROSCORE_PROCESS = None
+    if process is None:
+        return
+    try:
+        root = psutil.Process(process.pid)
+        descendants = root.children(recursive=True)
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        descendants = []
+        root = None
+    targets = ([root] if root is not None else []) + descendants
+    if not targets:
+        return
+    try:
+        for target in targets:
+            target.send_signal(signal.SIGINT)
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        pass
+    _, alive = psutil.wait_procs(targets, timeout=5)
+    for target in alive:
+        try:
+            target.send_signal(signal.SIGTERM)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+    _, alive = psutil.wait_procs(alive, timeout=2)
+    for target in alive:
+        try:
+            target.kill()
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+
+
 def get_ros_runtime(node_name: str) -> _RosRuntime:
     """Return the process-wide rospy runtime, initializing it on first call.
 
@@ -131,7 +212,12 @@ def get_ros_runtime(node_name: str) -> _RosRuntime:
     from geometry_msgs.msg import PoseStamped
     from sensor_msgs.msg import Image, JointState
 
-    rospy.init_node(node_name, anonymous=True)
+    try:
+        _ensure_local_ros_master()
+        rospy.init_node(node_name, anonymous=True)
+    except Exception:
+        _stop_owned_ros_master()
+        raise
     _ROS_RUNTIME = _RosRuntime(
         rospy=rospy,
         cv_bridge=CvBridge(),
@@ -199,6 +285,7 @@ class Ros1Transport(_RosTransportBase):
         self._camera_deques: dict[str, collections.deque] = {}
         self._collection_camera_deques: dict[str, collections.deque] = {}
         self._group_state_deques: dict[str, collections.deque] = {}
+        self._group_state_received_at: dict[str, float] = {}
         self._group_eef_deques: dict[str, collections.deque] = {}
 
         # Collection deques (populated only when collection is enabled)
@@ -212,7 +299,7 @@ class Ros1Transport(_RosTransportBase):
         self._group_sim_cmd_publishers: dict[str, Any] = {}
         self._hil_supported_groups: set[str] = set()
         self._hil_relay_enabled = False
-        self._hil_control_mode = "relative"
+        self._hil_control_mode = "absolute"
         self._hil_input_anchors: dict[str, np.ndarray] = {}
         self._hil_robot_anchors: dict[str, np.ndarray] = {}
         self._last_hil_commands: dict[str, np.ndarray] = {}
@@ -226,7 +313,35 @@ class Ros1Transport(_RosTransportBase):
         self._last_acquire_stamp: float | None = None
         self._collection_capture_active = False
 
+        self.set_hil_control_mode(self._configured_hil_control_mode())
         self._init_ros()
+
+    def _configured_hil_control_mode(self) -> str:
+        rollout = self._config.get("rollout") or {}
+        intervention = rollout.get("intervention") or {}
+        return str(intervention.get("control_mode", "absolute"))
+
+    @property
+    def hil_control_mode(self) -> str:
+        return self._hil_control_mode
+
+    def set_hil_control_mode(self, mode: str) -> None:
+        if mode not in _HIL_CONTROL_MODES:
+            allowed = ", ".join(sorted(_HIL_CONTROL_MODES))
+            raise ValueError(f"Unsupported HIL control mode {mode!r}; expected: {allowed}")
+        self._hil_control_mode = mode
+        self.reset_hil_control()
+
+    def reset_hil_control(self) -> None:
+        self._hil_input_anchors.clear()
+        self._hil_robot_anchors.clear()
+        self._last_hil_commands.clear()
+
+    def set_hil_relay_enabled(self, enabled: bool) -> None:
+        if self._hil_relay_enabled == enabled:
+            return
+        self._hil_relay_enabled = enabled
+        self.reset_hil_control()
 
     def create_rate(self, hz: float) -> Any:
         """Return a rospy.Rate for precise ROS-clock-driven loop timing."""
@@ -277,7 +392,7 @@ class Ros1Transport(_RosTransportBase):
             self._register_subscriber(
                 group_cfg.state_topic,
                 self._JointState,
-                lambda msg, d=state_deque: self._append_msg(d, msg),
+                lambda msg, g=group.name, d=state_deque: self._append_group_state(g, d, msg),
             )
 
             # EEF state (for EEF control mode)
@@ -356,6 +471,20 @@ class Ros1Transport(_RosTransportBase):
             lambda msg, d=deque: self._append_collection_msg(d, msg),
         )
 
+    def _append_group_state(self, group_name: str, deque: collections.deque, msg: Any) -> None:
+        self._append_msg(deque, msg)
+        with self._deque_guard():
+            self._group_state_received_at[group_name] = time.monotonic()
+
+    def seconds_since_last_qpos_recv(self) -> float | None:
+        """Age of the stalest latest actuator-group state message."""
+        expected = tuple(self._group_state_deques)
+        with self._deque_guard():
+            if not expected or any(name not in self._group_state_received_at for name in expected):
+                return None
+            oldest = min(self._group_state_received_at[name] for name in expected)
+        return time.monotonic() - oldest
+
     def start_collection(self) -> None:
         with self._deque_guard():
             self._collection_capture_active = True
@@ -391,6 +520,7 @@ class Ros1Transport(_RosTransportBase):
         self._publishers.clear()
         self._group_cmd_publishers.clear()
         self._group_sim_cmd_publishers.clear()
+        _stop_owned_ros_master()
 
     def get_frame(self) -> Observation | None:
         """Build a time-synchronized observation from the per-topic message deques.
@@ -495,22 +625,18 @@ class Ros1Transport(_RosTransportBase):
         )
 
     def start_hil_control(self, mode: str) -> HilStatus:
-        if mode not in _HIL_CONTROL_MODES:
-            return HilStatus(supported=True, error=f"Unsupported HIL control mode: {mode}")
         status = self.hil_status()
         if not status.supported:
             return status
-        self._hil_control_mode = mode
-        self._hil_input_anchors.clear()
-        self._hil_robot_anchors.clear()
-        self._last_hil_commands.clear()
-        self._hil_relay_enabled = True
+        try:
+            self.set_hil_control_mode(mode)
+        except ValueError as error:
+            return HilStatus(supported=True, error=str(error))
+        self.set_hil_relay_enabled(True)
         return self.hil_status()
 
     def stop_hil_control(self) -> HilStatus:
-        self._hil_relay_enabled = False
-        self._hil_input_anchors.clear()
-        self._hil_robot_anchors.clear()
+        self.set_hil_relay_enabled(False)
         return self.hil_status()
 
     def get_hil_frame(self) -> Observation | None:

@@ -7,6 +7,7 @@ import pytest
 
 from core.app.console.dashboard import (
     build_dashboard,
+    discover_raw_datasets,
 )
 from core.utils.dataset_upload import record_dataset_upload_receipt
 
@@ -127,3 +128,32 @@ def test_dashboard_reports_uploaded_episodes_for_all_data_and_each_day(tmp_path:
     assert by_date["2026-08-03"]["not_uploaded_episodes"] == 1
     assert by_date["2026-08-04"]["uploaded_episodes"] == 1
     assert by_date["2026-08-04"]["frames"] == 60
+
+
+def test_dashboard_discovers_raw_collection_under_data_collection(tmp_path: Path):
+    raw = (
+        tmp_path
+        / "datasets"
+        / "data_collection"
+        / "datasets"
+        / "real_robot"
+        / "agilex_piper"
+        / "larybench2_agilex_press"
+        / "raw"
+    )
+    _dataset(
+        raw,
+        [
+            {
+                "episode_index": 0,
+                "tasks": ["press"],
+                "length": 45,
+                "started_at": "2026-09-15T10:00:00+08:00",
+            }
+        ],
+        robot="agilex_piper",
+    )
+
+    discovered = discover_raw_datasets([tmp_path])
+    assert discovered == [(raw.resolve(), "collection")]
+    assert build_dashboard([tmp_path])["views"]["collection"]["episodes"] == 1

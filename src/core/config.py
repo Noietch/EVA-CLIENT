@@ -309,6 +309,7 @@ def _validate(cfg: ConfigDict) -> None:
     if not isinstance(tasks, dict):
         raise ValueError("collection.tasks must map dataset names to (prompt, target) lists")
     prompt_datasets: dict[str, str] = {}
+    mounted_task_sets = bool(coll.get("task_prompt_bindings"))
     for dataset_name, prompts in tasks.items():
         normalized_name = str(dataset_name).strip()
         if not _is_safe_dataset_name_component(normalized_name):
@@ -336,7 +337,10 @@ def _validate(cfg: ConfigDict) -> None:
                     and previous_scene.group("base") == current_scene.group("base")
                     and previous_dataset != normalized_name
                 )
-                if not same_scene_family:
+                # Mounted task sets keep dataset and task identity in the
+                # runtime bindings, so the same prompt may intentionally occur
+                # in multiple task-plan datasets.
+                if not same_scene_family and not mounted_task_sets:
                     raise ValueError(
                         f"collection prompt must belong to one dataset: {normalized_prompt!r}"
                     )

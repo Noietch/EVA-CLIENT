@@ -261,12 +261,18 @@ class DeviceWorkspace:
             else:
                 client = values["teleop"]["client"]
                 settings.update(endpoint=client["endpoint"], ack_endpoint=client["ack_endpoint"])
-            command = [
-                str(REPOSITORY_ROOT / launch["python"]),
-                "-m",
-                launch["module"],
-                *(launch.get("fixed", []) if kind != "camera" else []),
-            ]
+            if "script" in launch:
+                command = [
+                    str(REPOSITORY_ROOT / launch["script"]),
+                    *(launch.get("fixed", []) if kind != "camera" else []),
+                ]
+            else:
+                command = [
+                    str(REPOSITORY_ROOT / launch["python"]),
+                    "-m",
+                    launch["module"],
+                    *(launch.get("fixed", []) if kind != "camera" else []),
+                ]
             repeated = set(spec.get("repeat", []))
             if kind == "robot":
                 repeated.update(options["teleop"][selected["teleop"]].get("repeat", []))

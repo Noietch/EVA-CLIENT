@@ -12,6 +12,13 @@ from core.devices.camera import CameraSource
 _CAMERA_STARTUP_FRAME_WINDOW_S = 2.0
 
 
+def _qpos_feedback_age(transport):
+    reader = getattr(transport, "seconds_since_last_qpos_recv", None)
+    if callable(reader):
+        return reader()
+    return transport.seconds_since_last_recv()
+
+
 def resolve_pose(config, robot, name):
     """Resolve configured initial or safe qpos and validate its shape."""
     robot_config = config.robot
@@ -37,7 +44,7 @@ def park_robot(config, runtime, session):
 
     def feedback():
         qpos = runtime.transport.get_latest_qpos()
-        age = runtime.transport.seconds_since_last_recv()
+        age = _qpos_feedback_age(runtime.transport)
         if qpos is None or age is None or age > 0.5:
             raise ValueError("Safe stop aborted: missing or stale feedback; power-off withheld")
         qpos = np.asarray(qpos, dtype=np.float32)
@@ -63,7 +70,7 @@ def park_robot(config, runtime, session):
             if poll_motion_commands(config, runtime, session):
                 raise ValueError("Safe stop interrupted; power-off withheld")
             actual = feedback()
-            age = runtime.transport.seconds_since_last_recv()
+            age = _qpos_feedback_age(runtime.transport)
             stamp = time.monotonic() - age
             if previous_stamp is None or stamp > previous_stamp + 0.0001:
                 slow = (
@@ -162,7 +169,7 @@ def prepare_device(config, runtime, session, service, component, pid, *, timeout
                     # not need real-hardware homing or a freshness-gated command.
                     if robot_mode == "fake":
                         break
-                    feedback_age = runtime.transport.seconds_since_last_recv()
+                    feedback_age = _qpos_feedback_age(runtime.transport)
                     if feedback_age is not None and feedback_age <= 0.5:
                         if _robot_is_at_startup_pose(config, runtime, qpos):
                             live = np.asarray(qpos, dtype=np.float32).copy()
@@ -226,7 +233,7 @@ def _home_robot(config, runtime, session, qpos):
 
         def check_feedback():
             current = runtime.transport.get_latest_qpos()
-            age = runtime.transport.seconds_since_last_recv()
+            age = _qpos_feedback_age(runtime.transport)
             if current is None or age is None or age > 0.5:
                 raise ValueError("Robot homing aborted: missing or stale joint feedback")
             current = np.asarray(current, dtype=np.float32)

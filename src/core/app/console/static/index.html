@@ -656,8 +656,8 @@
 
         <div class="panel" id="device-workspace">
           <div class="panel-h">
-            <span>DEVICES</span>
-            <button class="btn danger" id="device-kill-all" title="Stop every device process and clear device state">KILL ALL</button>
+            <span data-i18n="device.devices">DEVICES</span>
+            <button class="btn danger" id="device-kill-all" title="Stop every device process and clear device state" data-i18n="manual.killAll" data-i18n-title="device.killTitle">KILL ALL</button>
           </div>
           <div class="card" id="device-selections"></div>
         </div>
@@ -675,8 +675,8 @@
               <button class="btn full" id="bm-home">HOME ⌂</button>
             </div>
             <div id="control-teleop-controls" hidden>
-              <label class="collect-arm-gate" title="Enable teleop motion">
-                <input type="checkbox" id="control-arm-enable" aria-label="Enable teleop motion">
+              <label class="collect-arm-gate" title="Enable teleop motion" data-i18n-title="manual.enableTeleop">
+                <input type="checkbox" id="control-arm-enable" aria-label="Enable teleop motion" data-i18n-aria-label="manual.enableTeleop">
                 <span class="ios-sw" aria-hidden="true"></span>
               </label>
             </div>
@@ -686,16 +686,16 @@
         <div class="panel control-joints" id="manual-panel-tune">
           <div class="panel-h">TUNING</div>
           <div class="card">
-            <div class="tune-row"><span>publish rate Hz</span><input type="number" id="manual-tune-publish-rate" min="1" step="1" /></div>
+            <div class="tune-row"><span data-i18n="manual.publishRate">publish rate Hz</span><input type="number" id="manual-tune-publish-rate" min="1" step="1" /></div>
             <button class="btn primary full" id="b-manual-tune-apply" style="margin-top:6px">APPLY ⤓</button>
             <div class="tune-status" id="manual-tune-status"></div>
           </div>
         </div>
 
         <div class="panel control-joints">
-          <div class="panel-h">TARGET / CURRENT QPOS</div>
+          <div class="panel-h" data-i18n="manual.targetCurrentQpos">TARGET / CURRENT QPOS</div>
           <div class="card">
-            <div class="manual-pose-legend">target / current</div>
+            <div class="manual-pose-legend" data-i18n="manual.targetCurrent">target / current</div>
             <div class="manual-sliders" id="manual-sliders-m"></div>
           </div>
         </div>

@@ -37,9 +37,16 @@ async function check(ack, statuses, expectedError = null) {
       return statuses[polls++];
     });
   }, {context});
+  const i18n = new vm.SyntheticModule(["t"], function () {
+    this.setExport("t", key => ({
+      "device.serverOutOfDate": "Device server is out of date. The command may already have been sent.",
+      "device.selectionTimedOut": "Device selection timed out",
+      "device.commandTimedOut": "Device command timed out",
+    }[key] || key));
+  }, {context});
   const source = fs.readFileSync("src/core/app/console/static/js/device.js", "utf8");
   const module = new vm.SourceTextModule(source + "\nexport { panel };", {context});
-  await module.link(() => core);
+  await module.link(specifier => specifier === "./core.js" ? core : i18n);
   await module.evaluate();
   const panel = module.namespace.panel;
   await panel.command("robot");

@@ -6,6 +6,7 @@ DEFAULT_PIPER_ROOT="/home/agilex/cobot_magic/Piper_ros_private-ros-noetic"
 DEFAULT_CAMERA_ROOT="/home/agilex/cobot_magic/camera_ws"
 PIPER_ROOT="${PIPER_ROOT:-${DEFAULT_PIPER_ROOT}}"
 CAMERA_ROOT="${CAMERA_ROOT:-${DEFAULT_CAMERA_ROOT}}"
+PIPER_PYTHON_ENV="${PIPER_PYTHON_ENV:-/home/agilex/miniconda3/envs/aloha}"
 CAMERA_LAUNCH_PKG="${CAMERA_LAUNCH_PKG:-astra_camera}"
 CAMERA_LAUNCH_FILE="${CAMERA_LAUNCH_FILE:-multi_camera.launch}"
 MODE="1"
@@ -17,6 +18,7 @@ START_CAMERA="true"
 ROSCORE_LOG="${PIPER_ROOT}/roscore.log"
 CAMERA_PID=""
 ROSCORE_PID=""
+PIPER_LAUNCH_PID=""
 
 usage() {
     cat <<'EOF'
@@ -34,6 +36,7 @@ Options:
 Env:
   PIPER_ROOT             Override Piper workspace path
   CAMERA_ROOT            Override camera workspace path
+  PIPER_PYTHON_ENV       Python environment containing piper_sdk
   CAMERA_LAUNCH_PKG      Override camera launch package
   CAMERA_LAUNCH_FILE     Override camera launch file
 EOF
@@ -45,18 +48,83 @@ log() {
 
 cleanup() {
     local exit_code=$?
-    if [[ -n "${CAMERA_PID}" ]] && kill -0 "${CAMERA_PID}" >/dev/null 2>&1; then
-        kill "${CAMERA_PID}" >/dev/null 2>&1 || true
-    fi
-    if [[ -n "${ROSCORE_PID}" ]] && kill -0 "${ROSCORE_PID}" >/dev/null 2>&1; then
-        kill "${ROSCORE_PID}" >/dev/null 2>&1 || true
-    fi
+    trap - EXIT INT TERM
+    stop_process_tree "${PIPER_LAUNCH_PID}"
+    cleanup_piper_processes
+    stop_process_tree "${CAMERA_PID}"
+    cleanup_camera_processes
+    stop_process_tree "${ROSCORE_PID}"
     exit "${exit_code}"
 }
 
+stop_process_tree() {
+    local root_pid="$1"
+    [[ -n "${root_pid}" && "${root_pid}" =~ ^[0-9]+$ ]] || return
+    kill -0 "${root_pid}" >/dev/null 2>&1 || return
+
+    local -a tree_pids=()
+    collect_process_tree "${root_pid}" tree_pids
+    local pid
+    for pid in "${tree_pids[@]}"; do
+        kill -INT "${pid}" >/dev/null 2>&1 || true
+    done
+    for _ in {1..20}; do
+        local alive="false"
+        for pid in "${tree_pids[@]}"; do
+            if kill -0 "${pid}" >/dev/null 2>&1; then
+                alive="true"
+                break
+            fi
+        done
+        [[ "${alive}" == "true" ]] || return
+        sleep 0.1
+    done
+    for pid in "${tree_pids[@]}"; do
+        kill -TERM "${pid}" >/dev/null 2>&1 || true
+    done
+    sleep 0.2
+    for pid in "${tree_pids[@]}"; do
+        kill -KILL "${pid}" >/dev/null 2>&1 || true
+    done
+}
+
+collect_process_tree() {
+    local root_pid="$1"
+    local -n output="$2"
+    output+=("${root_pid}")
+    local child_pid
+    while read -r child_pid; do
+        [[ -n "${child_pid}" ]] || continue
+        collect_process_tree "${child_pid}" "$2"
+    done < <(pgrep -P "${root_pid}" 2>/dev/null || true)
+}
+
 cleanup_camera_processes() {
-    pkill -f "roslaunch ${CAMERA_LAUNCH_PKG} ${CAMERA_LAUNCH_FILE}" >/dev/null 2>&1 || true
-    pkill -f astra_camera_node >/dev/null 2>&1 || true
+    stop_matching_processes \
+        "roslaunch ${CAMERA_LAUNCH_PKG} ${CAMERA_LAUNCH_FILE}" \
+        "${CAMERA_ROOT}/devel/lib/${CAMERA_LAUNCH_PKG}/astra_camera_node"
+}
+
+cleanup_piper_processes() {
+    stop_matching_processes \
+        "roslaunch piper start_ms_piper.launch" \
+        "${PIPER_ROOT}/src/piper/scripts/piper_start_ms_node.py"
+}
+
+stop_matching_processes() {
+    local pattern pid
+    local -a pids=()
+    for pattern in "$@"; do
+        while read -r pid; do
+            [[ -n "${pid}" && "${pid}" != "$$" && "${pid}" != "${PPID}" ]] || continue
+            if [[ ! " ${pids[*]} " =~ " ${pid} " ]]; then
+                pids+=("${pid}")
+            fi
+        done < <(pgrep -f -- "${pattern}" 2>/dev/null || true)
+    done
+    for pid in "${pids[@]}"; do
+        stop_process_tree "${pid}"
+    done
 }
 
 wait_for_roscore() {
@@ -183,6 +251,19 @@ fi
 
 source "${PIPER_ROOT}/devel/setup.bash"
 
+# The upstream Piper ROS node uses /usr/bin/env python3. Device starts inherit
+# EVA's Python 3.11 environment, while the verified Piper SDK is installed in
+# the ROS workspace's Python 3.8 runtime. Put that runtime first for roslaunch
+# child nodes without changing EVA's own environment.
+if [[ -x "${PIPER_PYTHON_ENV}/bin/python3" ]]; then
+    export PATH="${PIPER_PYTHON_ENV}/bin:${PATH}"
+fi
+if ! python3 -c 'import piper_sdk' >/dev/null 2>&1; then
+    echo "Piper Python environment cannot import piper_sdk: ${PIPER_PYTHON_ENV}" >&2
+    echo "Set PIPER_PYTHON_ENV to the environment that contains piper_sdk." >&2
+    exit 1
+fi
+
 if [[ "${START_ROSCORE}" == "true" ]]; then
     if rostopic list >/dev/null 2>&1; then
         log "roscore is already running"
@@ -213,12 +294,30 @@ fi
 
 if [[ "${RUN_CAN_CONFIG}" == "true" ]]; then
     log "Running CAN configuration"
-    (
+    if ! (
         cd "${PIPER_ROOT}"
-        bash ./can_config.sh
-    )
+        sudo -n bash ./can_config.sh
+    ); then
+        if ! command -v pkexec >/dev/null 2>&1; then
+            echo "Cannot configure Piper CAN: no PolicyKit authorization dialog is available. Configure CAN locally before retrying." >&2
+            exit 1
+        fi
+        pkexec --disable-internal-agent bash -c 'cd "$1" && exec bash ./can_config.sh' _ "${PIPER_ROOT}"
+    fi
 fi
 
 log "Launching piper: puppet_mode=${MODE}, master_mode=0, auto_enable=${AUTO_ENABLE}"
 cd "${PIPER_ROOT}"
-roslaunch piper start_ms_piper.launch puppet_mode:="${MODE}" master_mode:="0" auto_enable:="${AUTO_ENABLE}"
+cleanup_piper_processes
+roslaunch piper start_ms_piper.launch puppet_mode:="${MODE}" master_mode:="0" auto_enable:="${AUTO_ENABLE}" &
+PIPER_LAUNCH_PID=$!
+if ! wait_for_topics \
+    "/master/joint_left" \
+    "/master/joint_right" \
+    "/puppet/joint_left" \
+    "/puppet/joint_right"; then
+    echo "Failed to detect Piper leader/follower topics. Check terminal output above." >&2
+    exit 1
+fi
+log "Piper leader/follower topics are ready"
+wait "${PIPER_LAUNCH_PID}"

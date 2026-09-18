@@ -3,6 +3,7 @@
 import { $, LIVE, RUN_CONTROLS, S, apiPost, setCommandMetadata } from "./core.js";
 import { updateScrub } from "./charts.js";
 import { renderDeviceSettings } from "./device.js";
+import { t } from "./i18n.js";
 import {
   collectEnabled, dotClass, loadAnnotation, renderCollect, renderRolloutSave,
   selectCollectionDataset,
@@ -39,7 +40,7 @@ function applyRunControlStatus(ids, s) {
       $(ids.runGroup).style.display = "grid";
       if (stepGroup) stepGroup.style.display = "none";
       if (replayIsLocalMode()) {
-        run.textContent = LIVE.playing ? "STOP ■" : (resumable ? "CONTINUE ▶▶" : "REPLAY ▶");
+        run.textContent = LIVE.playing ? t("debug.stop") : (resumable ? t("run.continue") : t("run.replay"));
         run.classList.toggle("primary", !LIVE.playing);
         run.classList.toggle("danger", LIVE.playing);
         run.disabled = !loaded || !ready;
@@ -48,7 +49,7 @@ function applyRunControlStatus(ids, s) {
       }
       const running = s.session_status === "running";
       const continueRun = !running && (s.step_index || 0) > 0;
-      run.textContent = running ? "STOP ■" : (continueRun ? "CONTINUE ▶▶" : "REPLAY ▶");
+      run.textContent = running ? t("debug.stop") : (continueRun ? t("run.continue") : t("run.replay"));
       run.classList.toggle("primary", !running);
       run.classList.toggle("danger", running);
       run.disabled = !loaded || (!running && !ready);
@@ -65,13 +66,13 @@ function applyRunControlStatus(ids, s) {
     const ss = $(ids.stepState);
     ss.classList.remove("armed", "ok");
     if (armed) {
-      ss.textContent = "SIM preview done · " + (s.pending_chunk || "?") + " actions · press REAL ▶ to dispatch";
+      ss.textContent = t("run.simPreviewDone", {count: s.pending_chunk || "?"});
       ss.classList.add("armed");
     } else if (s.is_setup_done) {
-      ss.textContent = "READY · press SIM ↻ to infer one chunk";
+      ss.textContent = t("run.stepReady");
       ss.classList.add("ok");
     } else {
-      ss.textContent = "IDLE · SETUP FIRST";
+      ss.textContent = t("run.stepIdle");
     }
 
     const ready = s.is_setup_done;
@@ -86,8 +87,8 @@ function applyRunControlStatus(ids, s) {
       const busy = S.runToggleBusy !== null;
       const run = $(ids.run);
       run.querySelector(".rec-label").textContent = running
-        ? "STOP ■"
-        : (intervention ? "RESUME ▶" : (continueRun ? "CONTINUE ▶▶" : "RUN ▶"));
+        ? t("debug.stop")
+        : (intervention ? t("run.resume") : (continueRun ? t("run.continue") : t("debug.run")));
       run.classList.toggle("recording", running);
       run.classList.toggle("primary", !running);
       run.disabled = busy || (!running && !ready);
@@ -102,7 +103,7 @@ function applyRunControlStatus(ids, s) {
       $(ids.stepReset).disabled = false;
       return;
     }
-    $(ids.run).textContent = continueRun ? "CONTINUE ▶▶" : "RUN ▶";
+    $(ids.run).textContent = continueRun ? t("run.continue") : t("debug.run");
     $(ids.run).disabled = !ready || running;
     $(ids.run).classList.toggle("live", running);
     $(ids.halt).disabled = !running;
@@ -120,8 +121,8 @@ function syncHilInterventionEnabled(status) {
     const supported = !!status.hil_supported;
     toggle.checked = enabled;
     toggle.disabled = !supported || !!status.rollout_intervention_active;
-    label.textContent = supported ? (enabled ? "HIL ON" : "HIL OFF") : "HIL N/A";
-    toggle.title = status.hil_error || "Enable rollout HIL intervention";
+    label.textContent = supported ? (enabled ? t("run.hilOn") : t("run.hilOff")) : t("run.hilUnavailable");
+    toggle.title = status.hil_error || t("run.hilTitle");
     const gate = toggle.closest(".collect-arm-gate");
     if (gate) {
       gate.classList.toggle("on", enabled);
@@ -356,12 +357,14 @@ const TELEOP_CLIENT_LABELS = { vr_webxr: "VR" };
 function collectInputSourceSuffix(status) {
     const teleopCfg = S.CFG && S.CFG.collection && S.CFG.collection.teleop;
     if (!teleopCfg || teleopCfg.control_source !== "client" || !teleopCfg.client_type) return "";
-    const label = TELEOP_CLIENT_LABELS[teleopCfg.client_type] || "INPUT";
+    const label = TELEOP_CLIENT_LABELS[teleopCfg.client_type] || t("teleop.input");
     const teleop = status && status.teleop;
     const faulted = !!(teleop && (teleop.last_fault || teleop.source_error));
     const state = faulted ? "ERROR" : (teleop && teleop.connected ? "LINKED" : "DOWN");
     const stateClass = state === "LINKED" ? "linked" : (state === "DOWN" ? "down" : "error");
-    let suffix = ` | <span class="vr-input-status ${stateClass}">${label} ${state}</span>`;
+    const stateKey = state === "LINKED" ? "teleop.vr.linked" :
+      (state === "DOWN" ? "teleop.vr.down" : "teleop.vr.error");
+    let suffix = ` | <span class="vr-input-status ${stateClass}">${teleopCfg.client_type === "vr_webxr" ? t(stateKey) : `${label} ${state}`}</span>`;
     if (teleopCfg.client_type === "vr_webxr") {
       const groups = (S.CFG.collection.controls || {}).groups || [];
       const authorized = new Set((teleop && teleop.authorized_groups) || []);
@@ -372,7 +375,8 @@ function collectInputSourceSuffix(status) {
         const enabled = available && S.collectArmEnabled &&
           (authorized.has(group.id) || engaged.has(group.id));
         const armState = !available ? "UNAVAILABLE" : (enabled ? "ENABLED" : "DISABLED");
-        suffix += ` | <span class="vr-input-status ${enabled ? "linked" : "down"}">${hand.toUpperCase()} ARM ${armState}</span>`;
+        const armKey = `teleop.arm.${hand}.${armState.toLowerCase()}`;
+        suffix += ` | <span class="vr-input-status ${enabled ? "linked" : "down"}">${t(armKey)}</span>`;
       });
     }
     return suffix;
@@ -383,20 +387,20 @@ function autoSetup(ready, done, errored) {
     const stage = (S.STATUS && S.STATUS.setup_stage) ? String(S.STATUS.setup_stage) : "";
     if (_prevSetupDone && !done) S._setupFired = false;
     _prevSetupDone = done;
-    if (done) { S._setupFired = true; S._setupPaused = false; renderSetupCtl(); if (msg) msg.textContent = "ROBOT READY"; return; }
+    if (done) { S._setupFired = true; S._setupPaused = false; renderSetupCtl(); if (msg) msg.textContent = t("guide.robotReady"); return; }
     renderSetupCtl();
-    if (S._setupPaused) { if (msg) msg.textContent = "PAUSED — CLICK RESUME"; return; }
+    if (S._setupPaused) { if (msg) msg.textContent = t("guide.paused"); return; }
     if (errored) {
       // Failed: stop spinning, surface the error (full text shows in #err); RETRY button offers a re-run.
-      if (msg) msg.textContent = "SETUP FAILED";
+      if (msg) msg.textContent = t("guide.setupFailed");
       return;
     }
-    if (!ready) { S._setupFired = false; if (msg) msg.textContent = "AWAITING CONFIG…"; return; }
-    if (stage) { if (msg) msg.textContent = "AUTO · " + stage.toUpperCase(); return; }
+    if (!ready) { S._setupFired = false; if (msg) msg.textContent = t("guide.awaitingConfig"); return; }
+    if (stage) { if (msg) msg.textContent = `AUTO · ${stage.toUpperCase()}`; return; }
     if (!S._setupFired) { S._setupFired = true; apiPost("/api/setup"); }
     // Show the live setup sub-stage (connecting / resetting / warming up…) so the
     // user can see what setup is doing instead of an opaque spinner.
-    if (msg) msg.textContent = stage ? ("AUTO · " + stage.toUpperCase()) : "AUTO · PREPARING ROBOT…";
+    if (msg) msg.textContent = stage ? ("AUTO · " + stage.toUpperCase()) : t("guide.preparing");
   }
 
 function updateGuide() {
@@ -434,24 +438,24 @@ function updateGuide() {
       const bar = $("guidebar");
       if (bar) bar.classList.toggle("done", saved && !running && !intervention);
       const guideStep = !hasTask || !hasPolicy ? 1 : (!setup ? 2 : (running || intervention ? 4 : 3));
-      $("gb-step").textContent = `STEP ${guideStep}/4`;
+      $("gb-step").textContent = t("guide.step", {step: guideStep});
       if (!hasTask || !hasPolicy) {
-        $("gb-msg").innerHTML = "Select <b>task and Policy</b>";
-        $("gb-hint").textContent = "Critic is optional and adds value telemetry when available";
+        $("gb-msg").innerHTML = t("guide.rlSelect");
+        $("gb-hint").textContent = t("guide.rlCriticHint");
       } else if (!setup) {
         $("gb-msg").innerHTML = s.setup_stage
-          ? `SETUP · <b>${String(s.setup_stage).toUpperCase()}</b>`
-          : "SETUP starts <b>automatically</b>";
-        $("gb-hint").textContent = s.last_error || "Critic is optional";
+          ? t("guide.rlSetup", {stage: String(s.setup_stage).toUpperCase()})
+          : t("guide.rlAutoSetup");
+        $("gb-hint").textContent = s.last_error || t("guide.rlCriticOptional");
       } else if (intervention) {
-        $("gb-msg").innerHTML = "HIL intervention is <b>recording</b>";
-        $("gb-hint").textContent = "ACCEPT resumes rollout; ABANDON rolls the segment back";
+        $("gb-msg").innerHTML = t("guide.rlHilRecording");
+        $("gb-hint").textContent = t("guide.rlHilHint");
       } else if (running) {
-        $("gb-msg").innerHTML = "Rollout is <b>running</b>";
-        $("gb-hint").textContent = "The Critic curve and rollout/intervention track update live";
+        $("gb-msg").innerHTML = t("guide.rlRunning");
+        $("gb-hint").textContent = t("guide.rlLiveHint");
       } else {
-        $("gb-msg").innerHTML = saved ? "Saved episode is ready for <b>REPLAY</b>" : "Ready to <b>RUN</b>";
-        $("gb-hint").textContent = "Stop, save, then select an episode to replay";
+        $("gb-msg").innerHTML = saved ? t("guide.rlSavedReady") : t("guide.rlReadyRun");
+        $("gb-hint").textContent = t("guide.rlReplayHint");
       }
       return;
     }
@@ -469,25 +473,25 @@ function updateGuide() {
         !collecting && activeQueue.length === 0;
       const bar = $("guidebar");
       if (bar) bar.classList.toggle("done", done);
-      if ($("gb-step")) $("gb-step").textContent = collectReplayActive ? "QUALITY CHECK" : "COLLECT";
+      if ($("gb-step")) $("gb-step").textContent = collectReplayActive ? t("collect.qc") : t("tabs.collect");
       if (!enabled) {
-        message = "Collection disabled in <b>config</b>";
-        hint = "Enable collection + logging before recording";
+        message = t("collect.guide.disabled");
+        hint = t("collect.guide.enable");
       } else if (!hasPrompt) {
-        message = "Select a <b>TASK</b> before recording";
-        hint = "Choose a task before recording";
+        message = t("collect.guide.selectTask");
+        hint = t("collect.guide.chooseTask");
       } else if (!S.collectArmEnabled) {
-        message = "Collection motion is <b>locked</b>";
-        hint = "Switch ARM on before START RECORD";
+        message = t("collect.guide.motionLocked");
+        hint = t("collect.guide.switchArm");
       } else if (collecting) {
-        message = `Recording — <b>${collect.current_episode_frames || 0}</b> frames`;
-        hint = "END/SAVE queues the episode · CANCEL discards it";
+        message = t("collect.guide.recording", {frames: collect.current_episode_frames || 0});
+        hint = t("collect.guide.recordingHint");
       } else if (activeQueue.length) {
-        message = `Converting — <b>${activeQueue.length}</b> item(s) in queue`;
-        hint = "Select a green item, then press REPLAY";
+        message = t("collect.guide.converting", {count: activeQueue.length});
+        hint = t("collect.guide.convertingHint");
       } else {
-        message = "Ready — click <b>START RECORD</b>";
-        hint = "Queue is collapsed by default; expand for details";
+        message = t("collect.guide.ready");
+        hint = t("collect.guide.readyHint");
       }
       if ($("gb-msg")) $("gb-msg").innerHTML = message + collectInputSourceSuffix(s);
       if ($("gb-hint")) $("gb-hint").textContent = hint;
@@ -523,9 +527,9 @@ function updateGuide() {
       setPanel(ids.control, "active");
       const bar = $("guidebar");
       if (bar) bar.classList.toggle("done", !!s.transport_connected);
-      if ($("gb-step")) $("gb-step").textContent = "DEVICE";
-      if ($("gb-msg")) $("gb-msg").textContent = s.transport_connected ? "ROBOT CONNECTED" : "ROBOT DISCONNECTED";
-      if ($("gb-hint")) $("gb-hint").textContent = s.collection_teleop_armed || s.manual_publish_active ? "CONTROL ENABLED" : "CONTROL LOCKED";
+      if ($("gb-step")) $("gb-step").textContent = t("guide.device");
+      if ($("gb-msg")) $("gb-msg").textContent = s.transport_connected ? t("guide.robotConnected") : t("guide.robotDisconnected");
+      if ($("gb-hint")) $("gb-hint").textContent = s.collection_teleop_armed || s.manual_publish_active ? t("guide.controlEnabled") : t("guide.controlLocked");
       return;
     }
 
@@ -554,27 +558,27 @@ function updateGuide() {
     // top guide bar message for the current step
     const pick = isReplay ? "an <b>EPISODE</b>" : "a <b>TASK</b>";
     const setupStage = s.setup_stage ? String(s.setup_stage) : "";
-    let step = 1, msg = `Step 1 — select ${pick}`, hint = "Follow steps 1 → 4 on the left to run";
+    let step = 1, msg = `Step 1 — select ${pick}`, hint = t("guide.follow");
     let done = false;
     if (!hasPrompt) { step = 1; msg = `Step 1 — select ${pick} on the left`; }
-    else if (!hasMode) { step = 2; msg = "Step 2 — pick a <b>MODE</b> under CONFIG"; }
-    else if (!hasStrategy) { step = 2; msg = "Step 2 — pick a <b>STRATEGY</b> under CONFIG"; }
-    else if (setupErrored) { step = 3; msg = "Step 3 — <b>setup failed</b>"; hint = "Check the error, then click RETRY under SETUP"; }
+    else if (!hasMode) { step = 2; msg = t("guide.selectMode"); }
+    else if (!hasStrategy) { step = 2; msg = t("guide.selectStrategy"); }
+    else if (setupErrored) { step = 3; msg = t("guide.setupFailedStep"); hint = t("guide.setupFailedHint"); }
     else if (!setupDone) {
       // Surface the live setup sub-stage (resetting / validating policy / warming up…)
       // straight in the banner so the operator sees what setup is doing, not an opaque spinner.
       step = 3;
       msg = setupStage
-        ? `Step 3 — <b>${setupStage}</b>…`
-        : "Step 3 — <b>preparing the robot</b>…";
-      hint = "Setting up automatically — this can take a few seconds";
+        ? t("guide.setupStage", {stage: setupStage})
+        : t("guide.preparingStep");
+      hint = t("guide.autoSetupHint");
     }
-    else if (!running) { step = 4; msg = "Ready — click <b>RUN ▶</b> to start"; hint = "STOP to halt · RESET to home"; done = true; }
-    else { step = 4; msg = "Running — click <b>STOP ■</b> to halt"; hint = "Live observation on the right"; done = true; }
+    else if (!running) { step = 4; msg = t("guide.readyRun"); hint = t("guide.readyRunHint"); done = true; }
+    else { step = 4; msg = t("guide.running"); hint = t("guide.runningHint"); done = true; }
 
     const bar = $("guidebar");
     if (bar) bar.classList.toggle("done", done);
-    if ($("gb-step")) $("gb-step").textContent = `STEP ${step}/4`;
+    if ($("gb-step")) $("gb-step").textContent = t("guide.step", {step});
     if ($("gb-msg")) $("gb-msg").innerHTML = msg;
     if ($("gb-hint")) $("gb-hint").textContent = hint;
   }
@@ -1283,7 +1287,7 @@ function renderControl() {
     const armed = !!status.collection_teleop_armed;
     $("control-arm-enable").checked = armed;
     $("control-arm-enable").disabled = !armed && !status.transport_connected;
-    $("manual-conn").textContent = `${name} · ${armed ? "ENABLED" : "LOCKED"}`;
+    $("manual-conn").textContent = `${name} · ${armed ? t("state.enabled") : t("state.locked")}`;
     return true;
   }
 
@@ -1300,33 +1304,33 @@ function renderManualConn() {
     if (!capable) {
       S.manualDispatching = false;
       // No real-robot transport at all: SIM debug still works, REAL is unavailable.
-      conn.textContent = "SIM DEBUG · no real robot (transport not zmq/ros)";
-      btn.textContent = "CONNECT REAL";
+      conn.textContent = t("manual.simNoRobot");
+      btn.textContent = t("manual.connectReal");
       btn.disabled = true;
       btn.classList.add("primary");
     } else if (S.realRequested && S.realConnected) {
-      conn.textContent = "REAL ROBOT · LIVE";
+      conn.textContent = t("manual.realLive");
       conn.classList.add("ok");
-      btn.textContent = "DISCONNECT";
+      btn.textContent = t("manual.disconnect");
       btn.disabled = false;
       btn.classList.remove("primary");
     } else if (S.realRequested && !S.realConnected) {
-      conn.textContent = "WAITING FOR ROBOT… (no live data)";
+      conn.textContent = t("manual.waitingRobot");
       conn.classList.add("armed");
-      btn.textContent = "CANCEL";
+      btn.textContent = t("manual.cancel");
       btn.disabled = false;
       btn.classList.remove("primary");
     } else {
       S.manualDispatching = false;
-      conn.textContent = "SIM DEBUG · press CONNECT REAL to drive hardware";
-      btn.textContent = "CONNECT REAL";
+      conn.textContent = t("manual.simConnectHint");
+      btn.textContent = t("manual.connectReal");
       btn.disabled = false;
       btn.classList.add("primary");
     }
     // HOME drives the sim preview — available in SIM debug. SEND TO REAL
     // needs a live hardware link.
     $("bm-home").disabled = !S.manualActive;
-    send.textContent = S.manualDispatching ? "STOP ■" : "SEND TO REAL ▶";
+    send.textContent = S.manualDispatching ? t("manual.stop") : t("manual.sendReal");
     send.classList.toggle("primary", !S.manualDispatching);
     send.classList.toggle("danger", S.manualDispatching);
     send.disabled = S.manualDispatching ? !S.realRequested : !(S.realRequested && S.realConnected);

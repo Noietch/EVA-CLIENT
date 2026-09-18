@@ -80,6 +80,10 @@ def test_device_catalog_composes_and_restores_each_robot(tmp_path, monkeypatch):
         assert "collection_teleop_armed" not in restored.saved
         for kind, command in restored.commands().items():
             spec = restored.hardware.options(name)[kind][selected[kind]]["launch"]
+            if "script" in spec:
+                assert command[0] == str(REPOSITORY_ROOT / spec["script"])
+                assert command[1:] == spec.get("fixed", [])
+                continue
             module = importlib.import_module(spec["module"])
             parser = getattr(module, spec.get("parser", "build_arg_parser"))()
             parsed = parser.parse_args(command[3:])
@@ -149,6 +153,15 @@ def test_device_catalog_composes_and_restores_each_robot(tmp_path, monkeypatch):
 
 def test_robot_hardware_defaults_and_saved_overrides_preserve_business_config(tmp_path):
     workspace = DeviceWorkspace(tmp_path / "workstation.yaml")
+    default_config = Config.fromfile(
+        str(REPOSITORY_ROOT / "configs/02_collection/dual_agilex_piper.py")
+    )._cfg_dict
+    assert workspace.initial_selection(default_config)["teleop"] == "piper_leader"
+    leader_values = workspace.resolve(
+        dict(robot="agilex_piper", teleop="piper_leader", camera="external")
+    )
+    assert "client" not in leader_values["teleop"]
+
     selected = dict(robot="agilex_piper", teleop="vr_webxr", camera="external")
     values = workspace.resolve(selected)
     client = values["teleop"]["client"]

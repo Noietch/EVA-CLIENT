@@ -72,6 +72,15 @@ bash examples/hardware/agilex_piper/run_agilex_ros.sh
 eva --config configs/01_deploy/dual_agilex_piper/openpi_qpos.py --web-port 8080
 ```
 
+When the EVA DEVICE page has `agilex_piper` selected in `Real` mode, its Robot
+Start button launches the same script. CAN setup follows the YAM launcher: it
+first tries non-interactive `sudo` (for an existing authorization), then falls
+back to `pkexec` so the desktop PolicyKit agent can show the system password
+dialog. The EVA page does not collect or store a separate Piper password.
+For a local ROS1 config, EVA starts a lightweight `roscore` automatically when
+the ROS master is absent; the Piper hardware and cameras still start only after
+Robot Start is pressed in DEVICE.
+
 `run_agilex_ros.sh` starts `roscore` (unless `--no-roscore`), launches the camera
 stack and waits for the three color topics (`/camera_f|l|r/color/image_raw`),
 runs `can_config.sh` (unless `--skip-can`), then launches the Piper node. On exit
@@ -94,6 +103,7 @@ Environment overrides:
 ```text
 PIPER_ROOT           Piper workspace path
 CAMERA_ROOT          Camera workspace path
+PIPER_PYTHON_ENV     Python environment containing `piper_sdk` (default: `/home/agilex/miniconda3/envs/aloha`)
 CAMERA_LAUNCH_PKG    Camera launch package (default: astra_camera)
 CAMERA_LAUNCH_FILE   Camera launch file   (default: multi_camera.launch)
 ```
@@ -148,24 +158,28 @@ from the master/puppet ROS topics declared in
 ## Teleop Collection
 
 Teleop is the upstream Agilex master/puppet (leader/follower) scheme over ROS 1,
-not an EVA process: the operator moves the master arms and EVA's `ros1` collection
-transport records both the puppet state and the master command directly from the
-ROS topics. There is nothing extra to launch here beyond `run_agilex_ros.sh`.
+not a separate EVA process. Select `Piper Leader` under Operation. The operator
+moves the master arms on `/master/joint_{left,right}`; while Collection control is
+enabled, EVA relays those messages to `/puppet/master_joint_{left,right}` and
+records the raw master positions as the action. Disabling Collection control stops
+the relay. There is nothing extra to launch beyond `run_agilex_ros.sh`.
 
-For rollout HIL, direct master-to-follower publication must be disabled. Route the
-raw master streams to `/eva/hil/input_joint_state_arm_left` and
-`/eva/hil/input_joint_state_arm_right`; EVA relays them to the follower command
-topics only while takeover is active. Collection-only operation may continue using
-the original upstream master/puppet path.
+EVA already subscribes to `/master/joint_left` and `/master/joint_right` as the
+gated leader input. Do not run a separate unconditional master-to-follower relay:
+EVA forwards those messages to `/puppet/master_joint_left` and
+`/puppet/master_joint_right` only while Collection control or HIL takeover is
+active.
 
 `configs/02_collection/dual_agilex_piper.py` maps the topics per arm:
 
 ```text
 left_arm   qpos        /puppet/joint_left          (follower state)
-           action_qpos /puppet/master_joint_left   (leader command)
+           action_qpos /master/joint_left          (leader state/action)
+           command     /puppet/master_joint_left   (follower command)
            eef         /puppet/end_pose_left
 right_arm  qpos        /puppet/joint_right
-           action_qpos /puppet/master_joint_right
+           action_qpos /master/joint_right
+           command     /puppet/master_joint_right
            eef         /puppet/end_pose_right
 ```
 

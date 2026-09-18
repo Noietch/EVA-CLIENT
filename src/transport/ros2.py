@@ -102,7 +102,9 @@ def get_ros2_runtime(node_name: str) -> _Ros2Runtime:
     from sensor_msgs.msg import CompressedImage, Image, JointState
 
     if not rclpy.ok():
-        rclpy.init()
+        # EVA owns command-line parsing; do not let rclpy reinterpret flags such
+        # as --config or --web-port when ROS2 is initialized from the console.
+        rclpy.init(args=[])
     node = Node(node_name)
 
     executor = rclpy.executors.SingleThreadedExecutor()

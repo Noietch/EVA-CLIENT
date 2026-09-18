@@ -1307,8 +1307,11 @@ def _serialize_config(ctx: ConsoleContext) -> dict:
     teleop_config = config.collection.get("teleop") or {}
     teleop_client_config = teleop_config.get("client") or {}
     controls_config = config.collection.get("controls") or {}
+    device_selection = ctx.device_settings.workspace.initial_selection(config)
+    teleop_options = ctx.device_settings.workspace.hardware.options(config.robot.type)["teleop"]
+    teleop_operation = str(teleop_options.get(device_selection["teleop"], {}).get("operation", ""))
     is_vr = str(teleop_client_config.get("type", "")) == "vr_webxr"
-    control_mode = "vr" if is_vr else "keyboard"
+    control_mode = "vr" if is_vr else "leader" if teleop_operation == "leader" else "keyboard"
     controls = {
         str(action): dict(binding)
         for action, binding in (controls_config.get(control_mode) or {}).items()
@@ -1334,7 +1337,7 @@ def _serialize_config(ctx: ConsoleContext) -> dict:
     return {
         "initial_tab": _resolve_initial_tab(ctx.config),
         "robot_type": config.robot.type,
-        "device_selection": ctx.device_settings.workspace.initial_selection(config),
+        "device_selection": device_selection,
         "transport_type": config.transport.type,
         "policy": {
             "type": config.policy.type,
@@ -2674,6 +2677,17 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         active_config = config or self.ctx.runtime.active_config or self.ctx.config
         work_root = Path(_resolve_dataset_dir(str(active_config.get("work_dir") or "work_dirs")))
         roots = [work_root]
+        dashboard = active_config.get("dashboard") or {}
+        raw_roots = dashboard.get("raw_roots") or []
+        if isinstance(raw_roots, (str, Path)):
+            raw_roots = [raw_roots]
+        for raw_root in raw_roots:
+            value = str(raw_root).strip()
+            if not value:
+                continue
+            resolved = Path(_resolve_dataset_dir(value))
+            if resolved not in roots:
+                roots.append(resolved)
         if self.ctx.output_dir:
             roots.append(Path(self.ctx.output_dir))
         return tuple(roots)

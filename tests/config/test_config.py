@@ -40,6 +40,31 @@ def test_load_config_uses_configured_collection_task_set(tmp_path):
     assert dict(cfg.collection.tasks) == {"demo_set": [("place the cup", 5)]}
 
 
+def test_loaded_task_sets_allow_duplicate_prompts_across_datasets(tmp_path):
+    prompt = "insert the plate into the rack"
+    task_set_dirs = []
+    for name in ("insert", "insert_withdraw"):
+        task_set = tmp_path / name
+        task_set.mkdir()
+        (task_set / "tasks.csv").write_text(
+            "task_id,prompt_en,total_epsiodes_count\n"
+            f"{name.upper()},\"{prompt}\",5\n",
+            encoding="utf-8",
+        )
+        task_set_dirs.append(str(task_set))
+
+    config_path = _write_config(
+        tmp_path / "collection.py",
+        f"collection = dict(task_set_dir={task_set_dirs!r}, tasks={{}})\n",
+    )
+
+    cfg = load_config(config_path)
+
+    assert set(cfg.collection.tasks) == {"insert", "insert_withdraw"}
+    assert cfg.collection.tasks["insert"] == [(prompt, 5)]
+    assert cfg.collection.tasks["insert_withdraw"] == [(prompt, 5)]
+
+
 @pytest.mark.parametrize(
     ("body", "match"),
     [
@@ -96,7 +121,14 @@ def test_deploy_config_builds_robot_contract(preset):
 
 @pytest.mark.parametrize(
     "preset",
-    ["arx_r5.py", "arx_x5_tasks_set.py", "dual_yam.py", "r1lite.py", "ur5e.py"],
+    [
+        "arx_r5.py",
+        "arx_x5_tasks_set.py",
+        "dual_agilex_piper_tasks_set.py",
+        "dual_yam.py",
+        "r1lite.py",
+        "ur5e.py",
+    ],
 )
 def test_collection_config_resolves_recording_schema(preset):
     cfg = load_config(_CONFIGS_DIR / "02_collection" / preset)

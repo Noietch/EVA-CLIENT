@@ -1,4 +1,20 @@
 import { $, S, apiGet, apiPost } from "./core.js";
+import { t } from "./i18n.js";
+
+const DEVICE_KIND_LABELS = {
+  robot: "device.kind.robot",
+  teleop: "device.kind.teleop",
+  camera: "device.kind.camera",
+};
+
+const DEVICE_STATE_LABELS = {
+  Stopping: "device.state.stopping",
+  Failed: "device.state.failed",
+  Running: "device.state.running",
+  "Waiting for headset": "device.state.waiting",
+  Starting: "device.state.starting",
+  Stopped: "device.state.stopped",
+};
 
 class DevicePanel {
   constructor() {
@@ -26,12 +42,12 @@ class DevicePanel {
   render() {
     const {catalog, selected} = this.data;
     $("device-selections").replaceChildren();
-    for (const [kind, name] of [["robot", "Robot"], ["teleop", "Operation"], ["camera", "Camera"]]) {
+    for (const kind of ["robot", "teleop", "camera"]) {
       const row = document.createElement("div");
       row.className = "device-row";
       const label = document.createElement("label");
       label.htmlFor = "device-select-" + kind;
-      label.textContent = name;
+      label.textContent = t(DEVICE_KIND_LABELS[kind]);
       const indicator = document.createElement("span");
       indicator.id = "device-state-" + kind;
       indicator.className = "device-state";
@@ -50,8 +66,8 @@ class DevicePanel {
       }
       select.value = selected[kind];
       if (kind === "robot") {
-        select.add(new Option("Real", "real"));
-        select.add(new Option("Fake", "fake"));
+        select.add(new Option(t("device.real"), "real"));
+        select.add(new Option(t("device.fake"), "fake"));
         select.value = this.data.values.robot.mode || "real";
         select.title = catalog.robot[selected.robot].label;
       }
@@ -69,8 +85,8 @@ class DevicePanel {
         pico.id = "device-open-pico";
         pico.type = "button";
         pico.className = "btn";
-        pico.textContent = "WebXR";
-        pico.title = "Open WebXR on the headset";
+        pico.textContent = t("device.webxr");
+        pico.title = t("device.openWebxr");
         pico.onclick = () => this.openPico();
         actions.append(pico);
       }
@@ -100,7 +116,7 @@ class DevicePanel {
         if (status.state === "failed") throw new Error(status.error);
         if (status.boot_id !== before.boot_id) { location.reload(); return; }
       }
-      throw new Error("Device selection timed out");
+      throw new Error(t("device.selectionTimedOut"));
     } catch (error) {
       window.alert(error.message);
       this.pending = false;
@@ -116,7 +132,7 @@ class DevicePanel {
       const result = await apiPost("/api/device_" + action, {component: kind});
       if (result.ok === false) throw new Error(result.error);
       if (typeof result.request_id !== "string" || !result.request_id) {
-        throw new Error("Device server is out of date. The command may already have been sent. Restart EVA and refresh this page before trying again.");
+        throw new Error(t("device.serverOutOfDate"));
       }
       // Queue acknowledgement is not device readiness.
       for (let attempt = 0; attempt < 240; attempt++) {
@@ -131,7 +147,7 @@ class DevicePanel {
           throw new Error(this.status.error || "Device process exited");
         }
       }
-      throw new Error("Device command timed out");
+      throw new Error(t("device.commandTimedOut"));
     } catch (error) { window.alert(error.message); }
     finally { this.busy.delete(kind); this.updateControls(); }
   }
@@ -147,7 +163,7 @@ class DevicePanel {
   }
 
   async killAll() {
-    if (!window.confirm("KILL ALL will force-kill Robot, Operation and Camera processes immediately. Robot torque will be removed. Continue?")) return;
+    if (!window.confirm(t("device.killConfirm"))) return;
     this.killBusy = true;
     this.updateControls();
     try {
@@ -177,17 +193,18 @@ class DevicePanel {
       const transitioning = ["queued", "starting", "stopping"].includes(operation?.state);
       const failed = operation?.state === "failed" || (kind in this.status.processes && !running);
       const state = stopping ? "Stopping" : failed ? "Failed" : ready ? (connected ? "Running" : "Waiting for headset") : running || this.busy.has(kind) || transitioning ? "Starting" : "Stopped";
+      const stateLabel = t(DEVICE_STATE_LABELS[state]);
       const indicator = $("device-state-" + kind);
       indicator.dataset.state = state;
-      indicator.title = state === "Failed" ? operation?.error || this.status.error || state : state;
-      indicator.setAttribute("aria-label", state);
-      button.textContent = stopping ? "Stopping..." : (kind === "robot" && running && failed) ? "Stop" : ready ? (connected ? "Stop" : "Cancel") : running || this.busy.has(kind) || transitioning ? "Starting..." : "Start";
+      indicator.title = state === "Failed" ? operation?.error || this.status.error || stateLabel : stateLabel;
+      indicator.setAttribute("aria-label", stateLabel);
+      button.textContent = stopping ? t("device.button.stopping") : (kind === "robot" && running && failed) ? t("device.button.stop") : ready ? (connected ? t("device.button.stop") : t("device.button.cancel")) : running || this.busy.has(kind) || transitioning ? t("device.button.starting") : t("device.button.start");
       button.classList.toggle("danger", !!ready && connected);
       button.disabled = this.killBusy || this.pending || this.busy.has(kind) || transitioning || (running && !ready && !failed) || (!running && moving);
       const spec = this.data.catalog[kind][this.data.selected[kind]];
       const launchable = spec.launch || spec.separate || (kind === "robot" && this.data.values.robot.mode === "fake");
       if (!launchable) button.disabled = true;
-      button.title = !launchable ? "No local process" : "";
+      button.title = !launchable ? t("device.noLocalProcess") : "";
       $("device-select-" + kind).disabled = this.killBusy || this.pending || moving || this.busy.size > 0 ||
         Object.values(this.status.processes).some(code => code === null);
     }
@@ -198,7 +215,7 @@ class DevicePanel {
       const vrConnected = !!S.STATUS.teleop?.connected;
       pico.disabled = this.pending || this.busy.has("pico") ||
         this.status.processes.teleop !== null || !this.status.ready?.teleop || vrConnected;
-      pico.title = vrConnected ? "WebXR is already streaming" : "Open WebXR on the headset";
+      pico.title = vrConnected ? t("device.webxrStreaming") : t("device.openWebxr");
     }
   }
 

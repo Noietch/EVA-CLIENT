@@ -114,6 +114,111 @@ const GLOSSARY = {
   "collect.qc.selectSaved": ["先选择已保存的数据", "Select saved data first"],
   "collect.error.statusSwitch": ["状态切换失败：{error}", "Failed to switch status: {error}"],
   "collect.error.page": ["翻页失败：{error}", "Failed to change page: {error}"],
+  "collect.guide.disabled": ["配置中已禁用采集", "Collection disabled in <b>config</b>"],
+  "collect.guide.enable": ["开始录制前请启用采集和记录", "Enable collection + logging before recording"],
+  "collect.guide.selectTask": ["开始录制前请选择<b>任务</b>", "Select a <b>TASK</b> before recording"],
+  "collect.guide.chooseTask": ["请先选择任务", "Choose a task before recording"],
+  "collect.guide.motionLocked": ["采集运动已<b>锁定</b>", "Collection motion is <b>locked</b>"],
+  "collect.guide.switchArm": ["开始录制前请开启机械臂", "Switch ARM on before START RECORD"],
+  "collect.guide.recording": ["录制中 — <b>{frames}</b> 帧", "Recording — <b>{frames}</b> frames"],
+  "collect.guide.recordingHint": ["结束/保存会将回合加入队列 · 取消会丢弃当前回合", "END/SAVE queues the episode · CANCEL discards it"],
+  "collect.guide.converting": ["转换中 — 队列中有 <b>{count}</b> 项", "Converting — <b>{count}</b> item(s) in queue"],
+  "collect.guide.convertingHint": ["请选择绿色项目，然后按回放", "Select a green item, then press REPLAY"],
+  "collect.guide.ready": ["准备就绪 — 点击<b>开始录制</b>", "Ready — click <b>START RECORD</b>"],
+  "collect.guide.readyHint": ["队列默认折叠；展开查看详情", "Queue is collapsed by default; expand for details"],
+  "teleop.vr.linked": ["VR 已连接", "VR LINKED"],
+  "teleop.vr.down": ["VR 未连接", "VR DOWN"],
+  "teleop.vr.error": ["VR 错误", "VR ERROR"],
+  "teleop.input": ["输入设备", "INPUT"],
+  "teleop.arm.left.enabled": ["左臂已启用", "LEFT ARM ENABLED"],
+  "teleop.arm.left.disabled": ["左臂未启用", "LEFT ARM DISABLED"],
+  "teleop.arm.left.unavailable": ["左臂不可用", "LEFT ARM UNAVAILABLE"],
+  "teleop.arm.right.enabled": ["右臂已启用", "RIGHT ARM ENABLED"],
+  "teleop.arm.right.disabled": ["右臂未启用", "RIGHT ARM DISABLED"],
+  "teleop.arm.right.unavailable": ["右臂不可用", "RIGHT ARM UNAVAILABLE"],
+  "guide.robotReady": ["机器人就绪", "ROBOT READY"],
+  "guide.paused": ["已暂停 — 点击继续", "PAUSED — CLICK RESUME"],
+  "guide.setupFailed": ["设置失败", "SETUP FAILED"],
+  "guide.awaitingConfig": ["等待配置…", "AWAITING CONFIG…"],
+  "guide.preparing": ["自动 · 正在准备机器人…", "AUTO · PREPARING ROBOT…"],
+  "guide.rlSelect": ["请选择<b>任务和策略</b>", "Select <b>task and Policy</b>"],
+  "guide.rlCriticHint": ["Critic 可选；可用时会增加价值遥测", "Critic is optional and adds value telemetry when available"],
+  "guide.rlSetup": ["设置 · <b>{stage}</b>", "SETUP · <b>{stage}</b>"],
+  "guide.rlAutoSetup": ["设置将<b>自动</b>开始", "SETUP starts <b>automatically</b>"],
+  "guide.rlCriticOptional": ["Critic 可选", "Critic is optional"],
+  "guide.rlHilRecording": ["人在回路干预正在<b>录制</b>", "HIL intervention is <b>recording</b>"],
+  "guide.rlHilHint": ["接受会继续演练；放弃会回滚当前片段", "ACCEPT resumes rollout; ABANDON rolls the segment back"],
+  "guide.rlRunning": ["演练<b>运行中</b>", "Rollout is <b>running</b>"],
+  "guide.rlLiveHint": ["Critic 曲线和演练/干预轨迹会实时更新", "The Critic curve and rollout/intervention track update live"],
+  "guide.rlSavedReady": ["已保存回合可在<b>回放</b>", "Saved episode is ready for <b>REPLAY</b>"],
+  "guide.rlReadyRun": ["准备<b>运行</b>", "Ready to <b>RUN</b>"],
+  "guide.rlReplayHint": ["停止、保存，然后选择回合进行回放", "Stop, save, then select an episode to replay"],
+  "guide.device": ["设备", "DEVICE"],
+  "guide.robotConnected": ["机器人已连接", "ROBOT CONNECTED"],
+  "guide.robotDisconnected": ["机器人未连接", "ROBOT DISCONNECTED"],
+  "guide.controlEnabled": ["控制已启用", "CONTROL ENABLED"],
+  "guide.controlLocked": ["控制已锁定", "CONTROL LOCKED"],
+  "guide.follow": ["按左侧步骤 1 → 4 执行", "Follow steps 1 → 4 on the left to run"],
+  "guide.selectMode": ["第 2 步 — 在配置中选择<b>模式</b>", "Step 2 — pick a <b>MODE</b> under CONFIG"],
+  "guide.selectStrategy": ["第 2 步 — 在配置中选择<b>策略</b>", "Step 2 — pick a <b>STRATEGY</b> under CONFIG"],
+  "guide.setupFailedStep": ["第 3 步 — <b>设置失败</b>", "Step 3 — <b>setup failed</b>"],
+  "guide.setupFailedHint": ["检查错误，然后点击设置面板中的重试", "Check the error, then click RETRY under SETUP"],
+  "guide.setupStage": ["第 3 步 — <b>{stage}</b>…", "Step 3 — <b>{stage}</b>…"],
+  "guide.preparingStep": ["第 3 步 — 正在<b>准备机器人</b>…", "Step 3 — <b>preparing the robot</b>…"],
+  "guide.autoSetupHint": ["正在自动设置，可能需要几秒钟", "Setting up automatically — this can take a few seconds"],
+  "guide.readyRun": ["准备就绪 — 点击<b>运行 ▶</b>开始", "Ready — click <b>RUN ▶</b> to start"],
+  "guide.readyRunHint": ["停止以中止 · 重置以回零", "STOP to halt · RESET to home"],
+  "guide.running": ["运行中 — 点击<b>停止 ■</b>中止", "Running — click <b>STOP ■</b> to halt"],
+  "guide.runningHint": ["右侧显示实时观测", "Live observation on the right"],
+  "run.continue": ["继续 ▶▶", "CONTINUE ▶▶"],
+  "run.replay": ["回放 ▶", "REPLAY ▶"],
+  "run.simPreviewDone": ["仿真预览完成 · {count} 个动作 · 按真实 ▶ 发送", "SIM preview done · {count} actions · press REAL ▶ to dispatch"],
+  "run.stepReady": ["准备就绪 · 按仿真 ↻ 推理一个动作块", "READY · press SIM ↻ to infer one chunk"],
+  "run.stepIdle": ["空闲 · 请先设置", "IDLE · SETUP FIRST"],
+  "run.resume": ["恢复 ▶", "RESUME ▶"],
+  "run.hilOn": ["人在回路已开启", "HIL ON"],
+  "run.hilOff": ["人在回路已关闭", "HIL OFF"],
+  "run.hilUnavailable": ["人在回路不可用", "HIL N/A"],
+  "run.hilTitle": ["启用演练中的人在回路干预", "Enable rollout HIL intervention"],
+  "device.devices": ["设备", "DEVICES"],
+  "device.kind.robot": ["机器人", "Robot"],
+  "device.kind.teleop": ["遥操作", "Operation"],
+  "device.kind.camera": ["相机", "Camera"],
+  "device.real": ["真实", "Real"],
+  "device.fake": ["仿真", "Fake"],
+  "device.webxr": ["WebXR", "WebXR"],
+  "device.openWebxr": ["在头显上打开 WebXR", "Open WebXR on the headset"],
+  "device.webxrStreaming": ["WebXR 已在传输", "WebXR is already streaming"],
+  "device.killTitle": ["停止全部设备进程并清除设备状态", "Stop every device process and clear device state"],
+  "device.killConfirm": ["停止全部会立即强制终止机器人、遥操作和相机进程，并移除机器人力矩。继续吗？", "KILL ALL will force-kill Robot, Operation and Camera processes immediately. Robot torque will be removed. Continue?"],
+  "device.serverOutOfDate": ["设备服务版本过旧。命令可能已经发送。请重启 EVA 并刷新页面后再试。", "Device server is out of date. The command may already have been sent. Restart EVA and refresh this page before trying again."],
+  "device.selectionTimedOut": ["设备选择超时", "Device selection timed out"],
+  "device.commandTimedOut": ["设备命令超时", "Device command timed out"],
+  "device.processExited": ["设备进程已退出", "Device process exited"],
+  "device.noLocalProcess": ["无本地进程", "No local process"],
+  "device.state.stopping": ["停止中", "Stopping"],
+  "device.state.failed": ["失败", "Failed"],
+  "device.state.running": ["运行中", "Running"],
+  "device.state.waiting": ["等待头显", "Waiting for headset"],
+  "device.state.starting": ["启动中", "Starting"],
+  "device.state.stopped": ["已停止", "Stopped"],
+  "device.button.stopping": ["停止中…", "Stopping..."],
+  "device.button.stop": ["停止", "Stop"],
+  "device.button.cancel": ["取消", "Cancel"],
+  "device.button.starting": ["启动中…", "Starting..."],
+  "device.button.start": ["启动", "Start"],
+  "manual.connectReal": ["连接真实设备", "CONNECT REAL"],
+  "manual.disconnect": ["断开连接", "DISCONNECT"],
+  "manual.cancel": ["取消", "CANCEL"],
+  "manual.stop": ["停止 ■", "STOP ■"],
+  "manual.simNoRobot": ["仿真调试 · 无真实机器人（传输类型不是 zmq/ros）", "SIM DEBUG · no real robot (transport not zmq/ros)"],
+  "manual.realLive": ["真实机器人 · 实时", "REAL ROBOT · LIVE"],
+  "manual.waitingRobot": ["等待机器人…（没有实时数据）", "WAITING FOR ROBOT… (no live data)"],
+  "manual.simConnectHint": ["仿真调试 · 按连接真实设备控制硬件", "SIM DEBUG · press CONNECT REAL to drive hardware"],
+  "manual.publishRate": ["发布频率 Hz", "publish rate Hz"],
+  "manual.targetCurrentQpos": ["目标 / 当前 QPOS", "TARGET / CURRENT QPOS"],
+  "manual.targetCurrent": ["目标 / 当前", "target / current"],
+  "manual.enableTeleop": ["启用遥操作运动", "Enable teleop motion"],
   "replay.episode": ["回合", "EPISODE"],
   "replay.joint": ["关节", "joint"],
   "replay.eef": ["末端", "eef"],
@@ -230,7 +335,7 @@ const GLOSSARY = {
   "word.video": ["视频", "video"],
 };
 
-const locale = document.documentElement.dataset.evaLanguage === "zh" ? "zh" : "en";
+const locale = globalThis.document?.documentElement?.dataset?.evaLanguage === "zh" ? "zh" : "en";
 const index = new Map();
 const phrases = [];
 const templates = [];
@@ -293,7 +398,11 @@ function translateNode(root) {
 }
 
 function translateAttributes(root) {
-  const elements = root.querySelectorAll ? root.querySelectorAll("*") : [];
+  const elements = [];
+  if (root?.nodeType === 1 && root.matches("[title], [aria-label], [placeholder]")) {
+    elements.push(root);
+  }
+  if (root.querySelectorAll) elements.push(...root.querySelectorAll("*"));
   for (const element of elements) {
     for (const attribute of ["title", "aria-label", "placeholder"]) {
       const value = element.getAttribute(attribute);
@@ -304,9 +413,35 @@ function translateAttributes(root) {
   }
 }
 
+function explicitElements(root, selector) {
+  const elements = [];
+  if (root?.nodeType === 1 && root.matches(selector)) elements.push(root);
+  if (root.querySelectorAll) elements.push(...root.querySelectorAll(selector));
+  return elements;
+}
+
+function applyExplicitTranslations(root) {
+  for (const element of explicitElements(root, "[data-i18n]")) {
+    element.textContent = t(element.dataset.i18n);
+  }
+  for (const element of explicitElements(root, "[data-i18n-html]")) {
+    element.innerHTML = t(element.dataset.i18nHtml);
+  }
+  for (const [attribute, datasetKey] of [
+    ["title", "i18nTitle"],
+    ["aria-label", "i18nAriaLabel"],
+    ["placeholder", "i18nPlaceholder"],
+  ]) {
+    for (const element of explicitElements(root, `[data-i18n-${attribute}]`)) {
+      element.setAttribute(attribute, t(element.dataset[datasetKey]));
+    }
+  }
+}
+
 export function applyLocale(root = document) {
   translateNode(root);
   translateAttributes(root);
+  applyExplicitTranslations(root);
 }
 
 export function initLocale() {

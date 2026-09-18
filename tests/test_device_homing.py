@@ -133,7 +133,8 @@ def test_real_robot_readiness_waits_for_fresh_feedback(monkeypatch):
         command_queue=None,
         transport=SimpleNamespace(
             get_latest_qpos=lambda: qpos,
-            seconds_since_last_recv=seconds_since_last_recv,
+            seconds_since_last_qpos_recv=seconds_since_last_recv,
+            seconds_since_last_recv=lambda: 0.0,
         ),
     )
     session = SimpleNamespace(interrupt_requested=False)
