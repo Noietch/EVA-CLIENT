@@ -19,6 +19,7 @@ import pytest
 from core.config import ConfigDict
 from core.recorder import episode as episode_module
 from core.recorder.episode import EpisodeLogger, sanitize_path_component
+from core.utils.lerobot import LeRobotDatasetIO
 from core.types import (
     CollectionRawBatch,
     CollectionRawSample,
@@ -104,6 +105,15 @@ def test_failed_async_save_does_not_consume_queue_capacity(tmp_path, monkeypatch
     assert status["pipeline_state"] == "QUEUE_FULL"
     assert status["save_queue_size"] == 1
     assert [item["status"] for item in status["queue"]] == ["failed", "queued"]
+
+
+def test_wait_for_saves_checks_only_the_requested_job(tmp_path):
+    logger = _logger(tmp_path, async_save=True)
+    failed_history = type("Job", (), {"status": "failed"})()
+    current = type("Job", (), {"status": "saved"})()
+    logger._save_jobs = [failed_history]
+
+    assert logger.wait_for_saves(fail_on_error=True, job=current)
 
 
 def _collection_logger(
@@ -342,7 +352,10 @@ def test_collection_qc_lands_in_the_ledger_next_to_a_save(tmp_path):
     # The verdict lives only in the ledger, never on the recording rows.
     assert all("qc_verdict" not in episode for episode in episodes)
     ledger = _read_jsonl(dataset_dir / "meta" / "qc.jsonl")
-    assert [(row["episode_index"], row["qc_verdict"]) for row in ledger] == [(0, "pass")]
+    assert [(row["episode_index"], row["qc_verdict"]) for row in ledger] == [
+        (0, "pass"),
+        (1, "unreviewed"),
+    ]
 
 
 def test_a_retake_replaces_the_slots_previous_episode(tmp_path):
@@ -372,7 +385,90 @@ def test_a_retake_replaces_the_slots_previous_episode(tmp_path):
     saved = pq.read_table(dataset_dir / "data/chunk-000/episode_000000.parquet")
     assert saved.num_rows == 3
     # The replaced take's verdict dies with it: the new recording is unreviewed.
-    assert _read_jsonl(dataset_dir / "meta" / "qc.jsonl") == []
+    ledger = _read_jsonl(dataset_dir / "meta" / "qc.jsonl")
+    assert [(row["episode_index"], row["qc_verdict"]) for row in ledger] == [
+        (0, "unreviewed")
+    ]
+
+
+def test_retake_removes_duplicate_episode_and_stats_rows(tmp_path):
+    logger = _collection_logger(tmp_path)
+    dataset_dir = _collection_task_dir(tmp_path)
+    qpos = np.zeros(_DIM, dtype=np.float32)
+    slot = "TASK-1:SC-1:0"
+
+    logger.start_episode("t")
+    logger.set_episode_meta(slot_id=slot)
+    logger.ingest_collection_snapshot(_collection_raw_snapshot(0.0, state=qpos))
+    assert logger.end_episode()
+
+    episodes_path = dataset_dir / "meta" / "episodes.jsonl"
+    stats_path = dataset_dir / "meta" / "episodes_stats.jsonl"
+    episodes_path.write_text(
+        episodes_path.read_text() + episodes_path.read_text(), encoding="utf-8"
+    )
+    stats_path.write_text(stats_path.read_text() + stats_path.read_text(), encoding="utf-8")
+
+    logger.start_episode("t")
+    logger.set_episode_meta(slot_id=slot)
+    logger.ingest_collection_snapshot(_collection_raw_snapshot(0.1, state=qpos))
+    assert logger.end_episode()
+
+    episodes = _read_jsonl(episodes_path)
+    stats = _read_jsonl(stats_path)
+    assert [row["episode_index"] for row in episodes] == [0]
+    assert [row["episode_index"] for row in stats] == [0]
+
+
+def test_qc_drop_canonicalizes_duplicate_rows(tmp_path):
+    logger = _collection_logger(tmp_path)
+    qpos = np.zeros(_DIM, dtype=np.float32)
+    for timestamp in (0.0, 0.1, 0.2):
+        logger.start_episode("t")
+        logger.ingest_collection_snapshot(_collection_raw_snapshot(timestamp, state=qpos))
+        assert logger.end_episode()
+    dataset_dir = _collection_task_dir(tmp_path)
+    qc_path = dataset_dir / "meta" / "qc.jsonl"
+    rows = _read_jsonl(qc_path)
+    qc_path.write_text(
+        "".join(json.dumps(row) + "\n" for row in [rows[2], rows[0], rows[1], rows[1]]),
+        encoding="utf-8",
+    )
+
+    assert LeRobotDatasetIO(dataset_dir).drop_qc(1)
+    rows = _read_jsonl(qc_path)
+    assert [row["episode_index"] for row in rows] == [0, 2]
+
+
+def test_collection_save_rolls_back_when_qc_write_fails(tmp_path, monkeypatch):
+    logger = _collection_logger(tmp_path)
+    qpos = np.zeros(_DIM, dtype=np.float32)
+    slot = "TASK-1:SC-1:0"
+    logger.start_episode("t")
+    logger.set_episode_meta(slot_id=slot)
+    logger.ingest_collection_snapshot(_collection_raw_snapshot(0.0, state=qpos))
+    assert logger.end_episode()
+    dataset_dir = _collection_task_dir(tmp_path)
+    old_parquet = (dataset_dir / "data/chunk-000/episode_000000.parquet").read_bytes()
+
+    original = LeRobotDatasetIO.mark_qc
+
+    def fail_qc(self, *args, **kwargs):
+        if args and int(args[0]) == 0:
+            raise OSError("qc disk full")
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(LeRobotDatasetIO, "mark_qc", fail_qc)
+    logger.start_episode("t")
+    logger.set_episode_meta(slot_id=slot)
+    for timestamp in (0.1, 0.2):
+        logger.ingest_collection_snapshot(_collection_raw_snapshot(timestamp, state=qpos))
+    with pytest.raises(OSError, match="qc disk full"):
+        logger.end_episode()
+
+    episodes = _read_jsonl(dataset_dir / "meta/episodes.jsonl")
+    assert [(row["episode_index"], row["length"]) for row in episodes] == [(0, 1)]
+    assert (dataset_dir / "data/chunk-000/episode_000000.parquet").read_bytes() == old_parquet
 
 
 def test_collection_qc_failure_leaves_the_ledger_intact(tmp_path, monkeypatch):

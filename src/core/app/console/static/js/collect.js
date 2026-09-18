@@ -1327,7 +1327,13 @@ function handleCollectionReviewInput(feedback) {
     return;
   }
   const fresh = events.filter((event) => !collectionReviewSeen.has(event.id));
-  collectionReviewSeen = ids;
+  // The server keeps a short replay window. Keep a bounded history instead of
+  // replacing it with the current window, otherwise an event can be processed
+  // twice when SSE reconnects or the window rolls over.
+  for (const id of ids) collectionReviewSeen.add(id);
+  if (collectionReviewSeen.size > 256) {
+    collectionReviewSeen = new Set([...collectionReviewSeen].slice(-128));
+  }
   if (!feedback.connected || S.ACTIVE_TAB !== "collect" ||
       collectControlsConfig().mode !== "vr" || !collectEnabled()) {
     cancelCollectionReviewClick();
@@ -1360,11 +1366,23 @@ function handleCollectionReviewInput(feedback) {
       continue;
     }
     if (event.action === "toggle_qc" || event.action === "mark_red") {
-      const selected = selectedCollectEpisodeItem();
+      const selectedSlot = (S.collectionSlots.slots || []).find(
+        (slot) => slot.slot_id === S.collectionSlots.selectedSlotId
+      );
+      const targeted = selectedCollectEpisodeItem();
+      // Resolve the episode from the cursor's current slot. The cached QC target
+      // may refer to the previous slot while a poll or a stick move is settling.
+      // Keep the explicit target when it is the same episode; this preserves
+      // note/verdict edits made by the review panel while the slot payload refreshes.
+      const selected = selectedSlot && savedEpisodeId(selectedSlot.episode) != null
+        ? (targeted && savedEpisodeId(targeted) === savedEpisodeId(selectedSlot.episode)
+          ? targeted : selectedSlot.episode)
+        : targeted;
       if (!selected) {
         if ($("collect-qc-status")) $("collect-qc-status").textContent = "Select a saved episode first";
         continue;
       }
+      selectCollectionQcTarget(selected);
       // A verdict must not move the tile the operator is judging.
       pinCollectionSlotCursor(S.collectionSlots.selectedSlotId);
       collectionReviewBusy = true;

@@ -48,6 +48,7 @@ logger = logging.getLogger(__name__)
 
 
 COLLECT_STEP_MAX_RAW_SNAPSHOTS = 16
+COLLECT_SAVE_WAIT_TIMEOUT_SEC = 120.0
 ROLLOUT_STEP_MAX_RAW_SNAPSHOTS = 1
 ROLLOUT_INTERVENTION_SOURCE_TRANSPORT = "transport"
 ROLLOUT_INTERVENTION_SOURCE_CLIENT = "teleop_client"
@@ -1250,6 +1251,14 @@ def collect_start(config: ConfigDict, runtime: RuntimeState, session: SessionSta
         session.last_error = "Save queue is full; wait for a slot"
         logger.warning("collect_start refused: save queue full")
         return False
+    if runtime.episode_logger.is_collection_enabled and config.collection.get("task_set_dir"):
+        if not session.collection_slot_id:
+            sync_slot = getattr(getattr(runtime, "console_ctx", None), "sync_collection_slot", None)
+            if callable(sync_slot):
+                sync_slot()
+        if not session.collection_slot_id:
+            session.last_error = "Select a collection slot before recording a planned episode"
+            return False
     runtime.collection_replay_qpos = None
     runtime.collection_replay_episode = None
     if runtime.episode_logger.is_collection_enabled:
@@ -1384,20 +1393,39 @@ def ingest_client_teleop_action(
 def collect_stop(config: ConfigDict, runtime: RuntimeState, session: SessionState) -> bool:
     """End the collection episode and leave teleop active at its current pose."""
     saved = False
+    save_error = ""
     if runtime.episode_logger is not None and runtime.episode_logger.is_collection_enabled:
         stop_collection_capture(runtime)
         try:
             saved = runtime.episode_logger.end_episode()
+            if saved:
+                wait_for_saves = getattr(runtime.episode_logger, "wait_for_saves", None)
+                if callable(wait_for_saves):
+                    save_job = getattr(runtime.episode_logger, "_last_save_job", None)
+                    saved = bool(
+                        wait_for_saves(
+                            timeout=COLLECT_SAVE_WAIT_TIMEOUT_SEC,
+                            fail_on_error=True,
+                            job=save_job,
+                        )
+                    )
+                    if not saved:
+                        save_error = (
+                            "Episode save did not complete; check the save queue and logs"
+                        )
         finally:
             session.status = SessionStatus.READY
         if not saved:
-            diagnostics = runtime.transport.collection_diagnostics()
-            if diagnostics:
-                session.last_error = f"Episode saved 0 frames; {diagnostics}"
+            if save_error:
+                session.last_error = save_error
             else:
-                session.last_error = (
-                    "Episode saved 0 frames (teleop action never arrived); nothing recorded"
-                )
+                diagnostics = runtime.transport.collection_diagnostics()
+                if diagnostics:
+                    session.last_error = f"Episode saved 0 frames; {diagnostics}"
+                else:
+                    session.last_error = (
+                        "Episode saved 0 frames (teleop action never arrived); nothing recorded"
+                    )
             logger.warning(session.last_error)
     else:
         if runtime.episode_logger is not None:
