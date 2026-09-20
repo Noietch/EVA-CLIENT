@@ -66,6 +66,28 @@ def _subscription_callback(rospy: _FakeRospy, topic: str):
     raise AssertionError(f"missing subscription for {topic}")
 
 
+def test_ros1_image_decode_normalizes_ros_rgb8_to_bgr(monkeypatch):
+    # Astra colour topics are truthfully labelled `rgb8` (RViz renders them
+    # correctly off the topic), but every consumer downstream expects
+    # OpenCV-native BGR. Asking cv_bridge for "bgr8" applies that single swap;
+    # "passthrough" would leave RGB bytes to be read as BGR and invert red/blue.
+    calls = []
+
+    class _FakeBridge:
+        def imgmsg_to_cv2(self, msg, encoding):
+            calls.append((msg, encoding))
+            return np.array([[[3, 2, 1]]], dtype=np.uint8)
+
+    transport = object.__new__(ros1.Ros1Transport)
+    transport._bridge = _FakeBridge()
+    message = object()
+
+    image = transport._decode_image_msg("front", message)
+
+    np.testing.assert_array_equal(image, [[[3, 2, 1]]])
+    assert calls == [(message, "bgr8")]
+
+
 def test_ros1_collection_subscriptions_only_buffer_active_episode(monkeypatch):
     config = ConfigDict(
         transport=ConfigDict(

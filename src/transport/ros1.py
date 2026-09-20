@@ -555,7 +555,10 @@ class Ros1Transport(_RosTransportBase):
         for camera in schema.cameras:
             deque = self._camera_deques[camera.name]
             msg = self._pop_synced_msg(deque, frame_time)
-            images[camera.observation_key] = self._bridge.imgmsg_to_cv2(msg, "passthrough")
+            image = self._decode_image_msg(camera.name, msg)
+            if image is None:
+                return None
+            images[camera.observation_key] = image
 
         # Build state vector
         state_parts: list[np.ndarray] = []
@@ -595,7 +598,13 @@ class Ros1Transport(_RosTransportBase):
         return _stamp_to_sec(msg)
 
     def _decode_image_msg(self, camera_name: str, msg: Any) -> np.ndarray | None:
-        return self._bridge.imgmsg_to_cv2(msg, "passthrough")
+        # The AgileX Astra colour topics declare `encoding: rgb8`, and the payload
+        # matches that label — RViz renders them correctly straight off the topic.
+        # "passthrough" would therefore hand back an RGB-ordered array while the
+        # rest of the pipeline treats transport frames as OpenCV-native BGR, which
+        # is what inverts red and blue in the console preview and the released
+        # actions. Requesting "bgr8" applies the one swap that reconciles the two.
+        return self._bridge.imgmsg_to_cv2(msg, "bgr8")
 
     def _eef_from_msg(self, group: Any, msg: Any, frame_time: float) -> np.ndarray:
         return pose_and_gripper_to_eef(msg, self._collection_gripper(group, frame_time))
@@ -739,7 +748,7 @@ class Ros1Transport(_RosTransportBase):
             if not deque:
                 return None
             msg = deque[-1]
-        return self._bridge.imgmsg_to_cv2(msg, "passthrough")
+        return self._decode_image_msg(camera_name, msg)
 
     def publish_action(self, action: np.ndarray, target: str = "real") -> None:
         """Split the action by group and publish JointState commands to ROS topics.

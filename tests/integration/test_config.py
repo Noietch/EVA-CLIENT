@@ -98,3 +98,9 @@ def test_deploy_config_builds_robot_contract(preset):
     assert robot.initial_qpos.shape == (robot.total_action_dim,)
     assert robot.observation_schema.cameras
     assert cfg.inference_cfg.publish_rate > 0
+
+
+def test_agilex_piper_deploy_converts_ros_bgr_frames_to_rgb():
+    cfg = load_config(_CONFIGS_DIR / "01_deploy" / "dual_agilex_piper" / "openpi_qpos.py")
+
+    assert cfg.transport.convert_bgr_to_rgb is True
