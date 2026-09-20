@@ -25,9 +25,12 @@ import dataclasses
 import datetime as _dt
 import json
 import logging
+import os
+import shutil
 import subprocess
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -310,6 +313,7 @@ class EpisodeLogger:
         self._completed_episode_signatures: dict[Path, tuple[int, int, int]] = {}
         self._save_jobs: list[SaveJob] = []
         self._save_worker: threading.Thread | None = None
+        self._last_save_job: SaveJob | None = None
         self._lock = threading.Lock()
         self._collection_history = (
             self._load_collection_history() if self._collection_writer is not None else []
@@ -722,6 +726,7 @@ class EpisodeLogger:
             self._episode_meta = {}
             if job is None:
                 return False
+            self._last_save_job = job
             if self._async_save:
                 job.queued_wall_time = time.time()
                 self._enqueue_save_job(job)
@@ -814,6 +819,7 @@ class EpisodeLogger:
         self._raw_episode_snapshots = []
         self._task = None
         if self._async_save:
+            self._last_save_job = job
             self._enqueue_save_job(job)
             return True
         job.started_wall_time = job.queued_wall_time
@@ -1698,24 +1704,82 @@ class EpisodeLogger:
             raise ValueError("collection save job missing columns or episode row")
         dataset_dir = job.dataset_dir or self._log_dir
         path = self._parquet_path(job.episode_index, dataset_dir)
-        # An existing parquet means this take replaced the slot's previous episode,
-        # whose verdict must not carry over to the new recording.
-        replaces_existing = path.exists()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        pq.write_table(pa.table(columns), str(path))
-        self._write_videos(job.episode_index, job.videos, job.video_fps, dataset_dir)
-        episode_stats = {key: _vector_episode_stats(vals) for key, vals in columns.items()}
-        if job.videos:
-            for video_key, frames in job.videos.items():
-                episode_stats[video_key] = _image_episode_stats(frames)
-        with self._lock:
-            self._upsert_episode_dict_row_locked(row, dataset_dir)
-            self._upsert_episode_stats_locked(job.episode_index, episode_stats, dataset_dir)
-            self._write_tasks_jsonl_from(job.task_to_index, dataset_dir)
-        if replaces_existing:
-            LeRobotDatasetIO(dataset_dir).drop_qc(job.episode_index)
-        if self._collection_writer is not None:
-            self._collection_writer.finalize(dataset_dir)
+        transaction_dir = dataset_dir / f".collection-save-{job.episode_index}-{uuid.uuid4().hex}"
+        targets = [
+            path,
+            self._meta_path("episodes.jsonl", dataset_dir),
+            self._meta_path("episodes_stats.jsonl", dataset_dir),
+            self._meta_path("tasks.jsonl", dataset_dir),
+            self._meta_path("qc.jsonl", dataset_dir),
+            self._meta_path("info.json", dataset_dir),
+            self._meta_path("stats.json", dataset_dir),
+        ]
+        if self._save_video:
+            targets.extend(
+                self._video_path(job.episode_index, camera, dataset_dir)
+                for camera in self._camera_keys
+                if resolve_video_key(self._keys, camera) is not None
+            )
+        metadata_targets = {
+            self._meta_path(name, dataset_dir)
+            for name in (
+                "episodes.jsonl",
+                "episodes_stats.jsonl",
+                "tasks.jsonl",
+                "qc.jsonl",
+                "info.json",
+                "stats.json",
+            )
+        }
+        backups: dict[Path, Path] = {}
+        transaction_dir.mkdir(parents=True, exist_ok=False)
+        try:
+            # Move every artifact that this episode can replace out of the way first.
+            # This lets a failed parquet/video/QC write restore the previous take
+            # instead of leaving a mixed old/new episode on disk.
+            for target in targets:
+                if not target.exists():
+                    continue
+                backup = transaction_dir / target.relative_to(dataset_dir)
+                backup.parent.mkdir(parents=True, exist_ok=True)
+                if target in metadata_targets:
+                    shutil.copy2(target, backup)
+                else:
+                    target.replace(backup)
+                backups[target] = backup
+
+            path.parent.mkdir(parents=True, exist_ok=True)
+            pq.write_table(pa.table(columns), str(path))
+            self._write_videos(job.episode_index, job.videos, job.video_fps, dataset_dir)
+            episode_stats = {key: _vector_episode_stats(vals) for key, vals in columns.items()}
+            if job.videos:
+                for video_key, frames in job.videos.items():
+                    episode_stats[video_key] = _image_episode_stats(frames)
+            with self._lock:
+                self._upsert_episode_dict_row_locked(row, dataset_dir)
+                self._upsert_episode_stats_locked(job.episode_index, episode_stats, dataset_dir)
+                self._write_tasks_jsonl_from(job.task_to_index, dataset_dir)
+            qc = LeRobotDatasetIO(dataset_dir)
+            if not qc.mark_qc(job.episode_index, "unreviewed", "", ""):
+                raise ValueError(
+                    f"collection episode {job.episode_index} was saved without a QC row"
+                )
+            if self._collection_writer is not None:
+                self._collection_writer.finalize(dataset_dir)
+        except BaseException:
+            for target in targets:
+                if target.exists():
+                    if target.is_dir():
+                        shutil.rmtree(target)
+                    else:
+                        target.unlink()
+            for target, backup in backups.items():
+                if backup.exists():
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    backup.replace(target)
+            raise
+        finally:
+            shutil.rmtree(transaction_dir, ignore_errors=True)
 
     def _write_videos(
         self,
@@ -1744,13 +1808,33 @@ class EpisodeLogger:
             finally:
                 writer.close()
 
-    def wait_for_saves(self, timeout: float | None = None) -> bool:
-        """Block until active saves finish, ignoring retained failure summaries."""
+    def wait_for_saves(
+        self,
+        timeout: float | None = None,
+        *,
+        fail_on_error: bool = False,
+        job: SaveJob | None = None,
+    ) -> bool:
+        """Block until active saves finish.
+
+        The default preserves the existing shutdown behavior: retained failed-job
+        summaries do not make a later shutdown wait fail. Collection stop uses
+        ``fail_on_error`` so the UI cannot report a recording as saved when its
+        parquet/video write failed.
+        """
         worker = self._save_worker
         if worker is not None and worker.is_alive():
             worker.join(timeout)
         with self._lock:
-            return not any(job.status in ("queued", "saving") for job in self._save_jobs)
+            if job is not None:
+                if job.status in ("queued", "saving"):
+                    return False
+                return job.status != "failed" or not fail_on_error
+            if any(job.status in ("queued", "saving") for job in self._save_jobs):
+                return False
+            if fail_on_error and any(job.status == "failed" for job in self._save_jobs):
+                return False
+            return True
 
     def status_snapshot(
         self,
@@ -2118,40 +2202,40 @@ class EpisodeLogger:
             row.update(episode_meta)
         path = self._meta_path("episodes.jsonl")
         rows = _read_jsonl(path)
-        replaced = False
-        for i, existing in enumerate(rows):
+        filtered: list[dict[str, Any]] = []
+        inserted = False
+        for existing in rows:
             if int(existing.get("episode_index", -1)) == episode_index:
-                rows[i] = row
-                replaced = True
-                break
-        if not replaced:
-            self._append_episode_dict_row_locked(row)
-            return
+                if not inserted:
+                    filtered.append(row)
+                    inserted = True
+                continue
+            filtered.append(existing)
+        if not inserted:
+            filtered.append(row)
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w") as f:
-            for r in rows:
-                f.write(json.dumps(r, ensure_ascii=False) + "\n")
+        self._write_jsonl_atomic(path, filtered)
 
     def _upsert_episode_dict_row_locked(
         self, row: dict[str, Any], dataset_dir: Path | None = None
     ) -> None:
-        """Write one episode row, replacing the row of the same episode index."""
+        """Write one episode row, removing every stale row of the same index."""
         episode_index = int(row["episode_index"])
         path = self._meta_path("episodes.jsonl", dataset_dir)
         rows = _read_jsonl(path)
-        replaced = False
-        for index, existing in enumerate(rows):
+        filtered: list[dict[str, Any]] = []
+        inserted = False
+        for existing in rows:
             if int(existing.get("episode_index", -1)) == episode_index:
-                rows[index] = row
-                replaced = True
-                break
-        if not replaced:
-            self._append_episode_dict_row_locked(row, dataset_dir)
-            return
+                if not inserted:
+                    filtered.append(row)
+                    inserted = True
+                continue
+            filtered.append(existing)
+        if not inserted:
+            filtered.append(row)
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w") as f:
-            for existing in rows:
-                f.write(json.dumps(existing, ensure_ascii=False) + "\n")
+        self._write_jsonl_atomic(path, filtered)
 
     def _append_episode_dict_row_locked(
         self, row: dict[str, Any], dataset_dir: Path | None = None
@@ -2175,34 +2259,49 @@ class EpisodeLogger:
     def _upsert_episode_stats_locked(
         self, episode_index: int, stats: dict[str, Any], dataset_dir: Path | None = None
     ) -> None:
-        """Write one episode's stats, replacing the stats of the same episode index."""
+        """Write one episode's stats, removing every stale row of the same index."""
         path = self._meta_path("episodes_stats.jsonl", dataset_dir)
         rows = _read_jsonl(path)
         row = {"episode_index": episode_index, "stats": stats}
-        for index, existing in enumerate(rows):
+        filtered: list[dict[str, Any]] = []
+        inserted = False
+        for existing in rows:
             if int(existing.get("episode_index", -1)) == episode_index:
-                rows[index] = row
-                break
-        else:
-            rows.append(row)
+                if not inserted:
+                    filtered.append(row)
+                    inserted = True
+                continue
+            filtered.append(existing)
+        if not inserted:
+            filtered.append(row)
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w") as f:
-            for existing in rows:
-                f.write(json.dumps(existing, ensure_ascii=False) + "\n")
+        self._write_jsonl_atomic(path, filtered)
 
     def _write_tasks_jsonl_from(
         self, task_to_index: dict[str, int], dataset_dir: Path | None = None
     ) -> None:
         path = self._meta_path("tasks.jsonl", dataset_dir)
         items = sorted(task_to_index.items(), key=lambda kv: kv[1])
+        rows: list[dict[str, Any]] = []
+        for task, idx in items:
+            row = {"task_index": idx, "task": task}
+            required = self._collection_task_target(task, dataset_dir)
+            if required is not None:
+                row["required_episodes"] = int(required)
+            rows.append(row)
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w") as f:
-            for task, idx in items:
-                row: dict[str, Any] = {"task_index": idx, "task": task}
-                required = self._collection_task_target(task, dataset_dir)
-                if required is not None:
-                    row["required_episodes"] = int(required)
-                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        self._write_jsonl_atomic(path, rows)
+
+    @staticmethod
+    def _write_jsonl_atomic(path: Path, rows: list[dict[str, Any]]) -> None:
+        """Replace one metadata file atomically after serializing its complete rows."""
+        replacement = path.with_suffix(f"{path.suffix}.tmp-{uuid.uuid4().hex}")
+        try:
+            body = "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows)
+            replacement.write_text(body, encoding="utf-8")
+            os.replace(replacement, path)
+        finally:
+            replacement.unlink(missing_ok=True)
 
     def _write_info_json(self) -> None:
         episodes = _read_jsonl(self._meta_path("episodes.jsonl"))
@@ -2499,17 +2598,29 @@ class EpisodeLogger:
         slot_id = str(episode_meta.get("slot_id") or "")
         if not slot_id:
             return None
+        matches = []
         for row in _read_jsonl(self._meta_path("episodes.jsonl", dataset_dir)):
-            if str(row.get("slot_id") or "") == slot_id:
+            row_slot = str(row.get("slot_id") or "")
+            if not row_slot and row.get("task_id") and row.get("scene_id"):
+                row_slot = f"{row['task_id']}:{row['scene_id']}:{row.get('scene_round')}"
+            if row_slot == slot_id:
                 index = row.get("episode_index")
                 if index is not None:
-                    return int(index)
-        return None
+                    matches.append(int(index))
+        # Match the latest take displayed by the slot grid.
+        return max(matches, default=None)
 
     def _next_collection_episode_index(
         self, dataset_dir: Path, episode_meta: dict[str, Any] | None = None
     ) -> int:
         with self._lock:
+            slot_id = str((episode_meta or {}).get("slot_id") or "")
+            if slot_id:
+                for job in reversed(self._save_jobs):
+                    if (job.dataset_dir or self._log_dir) == dataset_dir and str(
+                        job.episode_meta.get("slot_id") or ""
+                    ) == slot_id:
+                        return job.episode_index
             existing = self._existing_collection_episode_index(dataset_dir, episode_meta or {})
             if existing is not None:
                 return existing

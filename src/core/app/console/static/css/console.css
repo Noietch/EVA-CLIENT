@@ -1435,13 +1435,6 @@
   .collect-tile.replayable { cursor: pointer; box-shadow: inset 0 0 0 2px rgba(255,255,255,0.45), var(--shadow-sm); }
   .collect-tile.replayable:hover { transform: translateY(-1px); box-shadow: inset 0 0 0 2px rgba(255,255,255,0.55), 0 3px 6px rgba(28,25,23,0.18); }
   .collect-tile.selected { outline: 2px solid var(--ink); outline-offset: 2px; }
-  .collect-tile.slot-active {
-    border: 2px solid var(--ink); background: var(--surface-2); color: var(--ink);
-    box-shadow: none;
-  }
-  .collect-tile.slot-current {
-    outline: 2px solid var(--ink); outline-offset: 1px;
-  }
   .collect-tile.slot-deferred {
     border-color: var(--danger); color: var(--danger);
     background: repeating-linear-gradient(135deg, var(--paper), var(--paper) 3px, #FDE9E4 3px, #FDE9E4 6px);

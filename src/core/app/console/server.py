@@ -121,7 +121,10 @@ _EPISODE_HISTORY_MAX_LIMIT = 512
 # Transports that talk to a real arm: they track receipt freshness, so "no message
 # yet" means offline (not merely "configured"). debug/dataset are not in this set.
 _LIVE_TRANSPORT_TYPES = {"zmq", "ros1", "ros2"}
-_VIDEO_CACHE_CONTROL = "public, max-age=3600"
+# A retake replaces its slot's mp4 at the same URL, so the browser must revalidate
+# instead of trusting a fresh-cached copy of the take it replaced. The ETag below
+# turns the revalidation into a 304 while the file is unchanged.
+_VIDEO_CACHE_CONTROL = "no-cache"
 _VIDEO_FASTSTART_CACHE_ENV = "EVA_VIDEO_CACHE_DIR"
 _VIDEO_FASTSTART_LOCK = threading.Lock()
 _VIDEO_POSTER_LOCK = threading.Lock()
@@ -542,6 +545,12 @@ def _open_review_episode(
     )
 
 
+def _review_episode_signature(dataset_dir: Path, episode_index: int) -> tuple[int, int]:
+    """Mtime and size of one episode's parquet, the cache key for its projected data."""
+    stat = LeRobotDatasetIO(dataset_dir).episode_parquet(episode_index).stat()
+    return int(stat.st_mtime_ns), int(stat.st_size)
+
+
 def _cached_review_episode(
     ctx: ConsoleContext,
     dataset_dir: str | Path,
@@ -557,7 +566,8 @@ def _cached_review_episode(
     Returns:
         Cached state/action series, camera mapping, and scene qpos rows.
     """
-    key = (str(Path(dataset_dir).resolve()), int(episode_index))
+    root = Path(dataset_dir).resolve()
+    key = (str(root), int(episode_index), *_review_episode_signature(root, episode_index))
     with _REVIEW_DATA_CACHE_LOCK:
         cached = _REVIEW_DATA_CACHE.get(key)
         if cached is not None:

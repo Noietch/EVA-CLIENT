@@ -9,9 +9,11 @@ The DatasetTransport (transport/dataset.py) holds one of these for its own reads
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from uuid import uuid4
 
 import numpy as np
 import pyarrow as pa
@@ -247,7 +249,12 @@ class LeRobotDatasetIO:
             row.pop(key, None)
 
     def _edit_qc(self, episode: int, edit: Callable[[dict], bool]) -> bool:
-        """Apply ``edit`` to one episode's QC row and persist a changed row."""
+        """Apply ``edit`` to one episode's QC row and persist a canonical ledger.
+
+        QC rows are keyed by episode index. Keep that key unique and sort the file
+        after every write so a newly reviewed episode cannot appear to move another
+        episode when the console reloads the ledger.
+        """
         path = self.root / "meta" / "episodes.jsonl"
         qc_path = self.root / "meta" / "qc.jsonl"
         if not path.exists():
@@ -260,17 +267,11 @@ class LeRobotDatasetIO:
                     rows.append(json.loads(line))
         if not any(int(row.get("episode_index", -1)) == episode for row in rows):
             return False
-        qc_rows = []
-        if qc_path.exists():
-            qc_rows = [
-                json.loads(line) for line in qc_path.read_text().splitlines() if line.strip()
-            ]
-        qc_row = next(
-            (row for row in qc_rows if int(row.get("episode_index", -1)) == episode), None
-        )
+        qc_by_episode = self._read_qc_by_episode(qc_path)
+        qc_row = qc_by_episode.get(episode)
         if qc_row is None:
             qc_row = {"episode_index": episode}
-            qc_rows.append(qc_row)
+            qc_by_episode[episode] = qc_row
         if not edit(qc_row):
             return False
         timestamp = datetime.now(UTC)
@@ -278,25 +279,53 @@ class LeRobotDatasetIO:
             previous = datetime.fromisoformat(qc_row["qc_updated_at"].replace("Z", "+00:00"))
             timestamp = max(timestamp, previous + timedelta(microseconds=1))
         qc_row["qc_updated_at"] = timestamp.isoformat(timespec="microseconds")
-        qc_path.parent.mkdir(parents=True, exist_ok=True)
-        replacement = qc_path.with_suffix(f"{qc_path.suffix}.qc.tmp")
-        body = "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in qc_rows)
-        replacement.write_text(body)
-        replacement.replace(qc_path)
+        self._write_canonical_qc(qc_path, qc_by_episode)
         return True
+
+    @staticmethod
+    def _read_qc_by_episode(qc_path: Path) -> dict[int, dict]:
+        by_episode: dict[int, dict] = {}
+        if not qc_path.exists():
+            return by_episode
+        for line in qc_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+                row_episode = int(row["episode_index"])
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+                continue
+            previous = by_episode.get(row_episode)
+            previous_at = str(previous.get("qc_updated_at", "")) if previous else ""
+            current_at = str(row.get("qc_updated_at", ""))
+            if previous is None or current_at >= previous_at:
+                by_episode[row_episode] = row
+        return by_episode
+
+    @staticmethod
+    def _write_canonical_qc(qc_path: Path, by_episode: dict[int, dict]) -> None:
+        qc_path.parent.mkdir(parents=True, exist_ok=True)
+        replacement = qc_path.with_suffix(f"{qc_path.suffix}.qc.tmp-{uuid4().hex}")
+        try:
+            body = "".join(
+                json.dumps(by_episode[index], ensure_ascii=False) + "\n"
+                for index in sorted(by_episode)
+            )
+            replacement.write_text(body, encoding="utf-8")
+            os.replace(replacement, qc_path)
+        finally:
+            replacement.unlink(missing_ok=True)
 
     def drop_qc(self, episode: int) -> bool:
         """Forget one episode's QC row so a fresh take starts unreviewed."""
         qc_path = self.root / "meta" / "qc.jsonl"
         if not qc_path.exists():
             return False
-        rows = [json.loads(line) for line in qc_path.read_text().splitlines() if line.strip()]
-        kept = [row for row in rows if int(row.get("episode_index", -1)) != episode]
-        if len(kept) == len(rows):
+        by_episode = self._read_qc_by_episode(qc_path)
+        if episode not in by_episode:
             return False
-        replacement = qc_path.with_suffix(f"{qc_path.suffix}.qc.tmp")
-        replacement.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in kept))
-        replacement.replace(qc_path)
+        del by_episode[episode]
+        self._write_canonical_qc(qc_path, by_episode)
         return True
 
     def read_annotation(self, episode: int) -> str:
