@@ -1098,6 +1098,15 @@ class EpisodeLogger:
         return tuple(fields)
 
     def _raw_episode_image_skew_tolerance_sec(self) -> float:
+        storage = (self._collection or {}).get("storage", {})
+        configured = storage.get("image_skew_tolerance_sec")
+        if configured is not None:
+            tolerance = float(configured)
+            if not np.isfinite(tolerance) or tolerance <= 0.0:
+                raise ValueError(
+                    "collection.storage.image_skew_tolerance_sec must be a positive number"
+                )
+            return tolerance
         return image_skew_tolerance_sec(float(self._fps))
 
     def _write_raw_episode_job(self, job: SaveJob) -> None:

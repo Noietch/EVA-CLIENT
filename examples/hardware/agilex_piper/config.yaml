@@ -4,7 +4,9 @@ robot:
     defaults: {teleop: piper_leader, camera: external}
     launch:
       script: examples/hardware/agilex_piper/run_agilex_ros.sh
-    settings: {}
+      fixed: [--skip-camera]
+    settings:
+      camera_endpoint: tcp://127.0.0.1:5557
     config:
       robot:
         type: agilex_piper
@@ -118,4 +120,5 @@ teleop:
       max_qpos_step: 0.03
 camera:
   none: {}
-  external: {}
+  external:
+    separate: true

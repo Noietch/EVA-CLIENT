@@ -989,6 +989,13 @@ def _scene_plan_root(config: ConfigDict | None = None, dataset: str | None = Non
         if task_set_dir:
             task_set_root = _resolve_runtime_path(task_set_dir).expanduser().resolve()
             if task_set_root.is_dir():
+                # A scalar task_set_dir may be the parent of multiple named
+                # task sets. Resolve the selected dataset before parsing its
+                # scene.csv and layout.yaml files.
+                if dataset:
+                    dataset_root = task_set_root / dataset
+                    if dataset_root.is_dir():
+                        return dataset_root
                 return task_set_root
     cwd_root = Path.cwd() / "work_dirs"
     repo_root = Path(__file__).resolve().parents[4] / "work_dirs"
@@ -4278,7 +4285,10 @@ def build_console_context(
         output_dir=output_dir,
     )
     # RESULT-tab playback reads recorded episodes under <output_dir>/episodes.
-    if with_obs_reader and config.transport.type != "dataset":
+    # ROS transports already subscribe to the configured image topics.  A
+    # separate ZMQ preview is only needed for non-ROS hardware launchers;
+    # creating it for ROS would hide the live ROS frames behind an idle socket.
+    if with_obs_reader and config.transport.type not in {"dataset", "ros1", "ros2"}:
         workspace = ctx.device_settings.workspace
         selected = workspace.initial_selection(config)
         spec = workspace.hardware.options(selected["robot"])["camera"][selected["camera"]]

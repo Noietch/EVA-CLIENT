@@ -1,6 +1,7 @@
 // collect.js: data-collection tab (collect) + QC/annotation review &
 // stage-video playback control (review).
 import { $, LIVE, S, apiGet, apiPost, clientTrace } from "./core.js";
+import { t } from "./i18n.js";
 import { updateScrub } from "./charts.js";
 import {
   applyCollectTaskSelection, collectTaskIndexValue, collectSetValue, selectCollectSet, collectTaskValue,

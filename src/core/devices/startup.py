@@ -117,6 +117,20 @@ def _camera_startup_keys(config, values) -> set[str]:
     return schema_keys
 
 
+def _ros_camera_ready(runtime) -> bool:
+    """Require live frames from every camera subscribed by a ROS transport."""
+    camera_deques = getattr(runtime.transport, "_camera_deques", None)
+    cameras = getattr(getattr(runtime, "robot", None), "observation_schema", None)
+    expected = getattr(cameras, "cameras", ())
+    if isinstance(camera_deques, dict) and len(camera_deques) < len(expected):
+        return False
+    image_rate = getattr(runtime.transport, "image_min_hz", None)
+    if not callable(image_rate):
+        return False
+    rate = image_rate()
+    return rate is not None and rate > 0.5
+
+
 def _robot_is_at_startup_pose(config, runtime, qpos) -> bool:
     """Check whether fresh feedback already satisfies the startup pose."""
     robot = getattr(runtime, "robot", None)
@@ -148,8 +162,13 @@ def prepare_device(config, runtime, session, service, component, pid, *, timeout
     selected = workspace.initial_selection(config)
     values = workspace.resolve(selected)
     robot_mode = str(values["robot"].get("mode", "real")).lower()
+    transport_config = getattr(config, "transport", {})
+    if hasattr(transport_config, "get"):
+        transport_type = str(transport_config.get("type", "")).lower()
+    else:
+        transport_type = str(getattr(transport_config, "type", "")).lower()
     http = build_opener(ProxyHandler({}))
-    if component == "camera":
+    if component == "camera" and transport_type not in {"ros1", "ros2"}:
         camera = CameraSource(values["robot"]["settings"]["camera_endpoint"])
         expected_camera_keys = _camera_startup_keys(config, values)
     try:
@@ -179,14 +198,21 @@ def prepare_device(config, runtime, session, service, component, pid, *, timeout
                             _home_robot(config, runtime, session, qpos)
                         break
             elif component == "camera":
-                images = camera.snapshot()
-                observed_at = time.monotonic()
-                observed_camera_keys.update(images)
-                observed_camera_at.update({key: observed_at for key in images})
-                recent = all(
-                    observed_at - observed_camera_at.get(key, 0.0) <= _CAMERA_STARTUP_FRAME_WINDOW_S
-                    for key in expected_camera_keys
-                )
+                if transport_type in {"ros1", "ros2"}:
+                    if _ros_camera_ready(runtime):
+                        break
+                    recent = False
+                else:
+                    assert camera is not None
+                    images = camera.snapshot()
+                    observed_at = time.monotonic()
+                    observed_camera_keys.update(images)
+                    observed_camera_at.update({key: observed_at for key in images})
+                    recent = all(
+                        observed_at - observed_camera_at.get(key, 0.0)
+                        <= _CAMERA_STARTUP_FRAME_WINDOW_S
+                        for key in expected_camera_keys
+                    )
                 if expected_camera_keys.issubset(observed_camera_keys) and recent:
                     break
             elif status.get("browser_url"):
@@ -205,7 +231,10 @@ def prepare_device(config, runtime, session, service, component, pid, *, timeout
                     images = camera.snapshot()
                     observed_camera_keys.update(images)
                 missing = sorted(expected_camera_keys - observed_camera_keys)
-                detail = f"; missing camera keys: {', '.join(missing)}" if missing else ""
+                if transport_type in {"ros1", "ros2"}:
+                    detail = "; ROS camera topics did not deliver fresh frames"
+                else:
+                    detail = f"; missing camera keys: {', '.join(missing)}" if missing else ""
                 raise ValueError(f"{component} startup timed out waiting for live feedback{detail}")
             raise ValueError(f"{component} startup timed out waiting for live feedback")
         service.request("ready", {"component": component, "pid": pid})

@@ -9,12 +9,14 @@ CAMERA_ROOT="${CAMERA_ROOT:-${DEFAULT_CAMERA_ROOT}}"
 PIPER_PYTHON_ENV="${PIPER_PYTHON_ENV:-/home/agilex/miniconda3/envs/aloha}"
 CAMERA_LAUNCH_PKG="${CAMERA_LAUNCH_PKG:-astra_camera}"
 CAMERA_LAUNCH_FILE="${CAMERA_LAUNCH_FILE:-multi_camera.launch}"
+CAMERA_ENDPOINT="${CAMERA_ENDPOINT:-tcp://127.0.0.1:5557}"
 MODE="1"
 AUTO_ENABLE="true"
 RUN_CAN_CONFIG="true"
 RUN_BUILD="false"
 START_ROSCORE="true"
 START_CAMERA="true"
+CAMERA_ONLY="false"
 ROSCORE_LOG="${PIPER_ROOT}/roscore.log"
 CAMERA_PID=""
 ROSCORE_PID=""
@@ -29,6 +31,7 @@ Options:
   --auto-enable <bool>   auto_enable passed to roslaunch. Default: true
   --skip-can             Skip running can_config.sh
   --skip-camera          Skip launching camera_ws
+  --camera-only          Launch only the camera stack; leave Piper stopped
   --build                Run catkin_make before launch
   --no-roscore           Assume roscore is already running
   -h, --help             Show this help
@@ -49,11 +52,19 @@ log() {
 cleanup() {
     local exit_code=$?
     trap - EXIT INT TERM
-    stop_process_tree "${PIPER_LAUNCH_PID}"
-    cleanup_piper_processes
-    stop_process_tree "${CAMERA_PID}"
-    cleanup_camera_processes
-    stop_process_tree "${ROSCORE_PID}"
+    if [[ "${CAMERA_ONLY}" != "true" ]]; then
+        stop_process_tree "${PIPER_LAUNCH_PID}"
+        cleanup_piper_processes
+    fi
+    if [[ "${CAMERA_ONLY}" == "true" || "${START_CAMERA}" == "true" ]]; then
+        stop_process_tree "${CAMERA_PID}"
+        cleanup_camera_processes
+    fi
+    # ROS is shared by the independent robot and camera components. Never
+    # tear down an existing master when the camera component exits.
+    if [[ "${CAMERA_ONLY}" != "true" ]]; then
+        stop_process_tree "${ROSCORE_PID}"
+    fi
     exit "${exit_code}"
 }
 
@@ -173,12 +184,22 @@ while [[ $# -gt 0 ]]; do
             AUTO_ENABLE="${2:-}"
             shift 2
             ;;
+        --camera-endpoint)
+            CAMERA_ENDPOINT="${2:-}"
+            shift 2
+            ;;
         --skip-can)
             RUN_CAN_CONFIG="false"
             shift
             ;;
         --skip-camera)
             START_CAMERA="false"
+            shift
+            ;;
+        --camera-only)
+            CAMERA_ONLY="true"
+            START_CAMERA="true"
+            RUN_CAN_CONFIG="false"
             shift
             ;;
         --build)
@@ -201,7 +222,11 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ ! -d "${PIPER_ROOT}" ]]; then
+if [[ "${CAMERA_ONLY}" == "true" && ! -d "$(dirname "${ROSCORE_LOG}")" ]]; then
+    ROSCORE_LOG="${CAMERA_ROOT}/roscore.log"
+fi
+
+if [[ "${CAMERA_ONLY}" != "true" && ! -d "${PIPER_ROOT}" ]]; then
     echo "PIPER_ROOT not found: ${PIPER_ROOT}" >&2
     exit 1
 fi
@@ -237,7 +262,7 @@ if [[ "${START_CAMERA}" == "true" && ( ! -f "${CAMERA_ROOT}/devel/setup.bash" ||
     )
 fi
 
-if [[ ! -f "${PIPER_ROOT}/devel/setup.bash" || "${RUN_BUILD}" == "true" ]]; then
+if [[ "${CAMERA_ONLY}" != "true" && ( ! -f "${PIPER_ROOT}/devel/setup.bash" || "${RUN_BUILD}" == "true" ) ]]; then
     log "Building workspace with catkin_make"
     (
         cd "${PIPER_ROOT}"
@@ -249,16 +274,18 @@ if [[ "${START_CAMERA}" == "true" ]]; then
     source "${CAMERA_ROOT}/devel/setup.bash"
 fi
 
-source "${PIPER_ROOT}/devel/setup.bash"
+if [[ "${CAMERA_ONLY}" != "true" ]]; then
+    source "${PIPER_ROOT}/devel/setup.bash"
+fi
 
 # The upstream Piper ROS node uses /usr/bin/env python3. Device starts inherit
 # EVA's Python 3.11 environment, while the verified Piper SDK is installed in
 # the ROS workspace's Python 3.8 runtime. Put that runtime first for roslaunch
 # child nodes without changing EVA's own environment.
-if [[ -x "${PIPER_PYTHON_ENV}/bin/python3" ]]; then
+if [[ "${CAMERA_ONLY}" != "true" && -x "${PIPER_PYTHON_ENV}/bin/python3" ]]; then
     export PATH="${PIPER_PYTHON_ENV}/bin:${PATH}"
 fi
-if ! python3 -c 'import piper_sdk' >/dev/null 2>&1; then
+if [[ "${CAMERA_ONLY}" != "true" ]] && ! python3 -c 'import piper_sdk' >/dev/null 2>&1; then
     echo "Piper Python environment cannot import piper_sdk: ${PIPER_PYTHON_ENV}" >&2
     echo "Set PIPER_PYTHON_ENV to the environment that contains piper_sdk." >&2
     exit 1
@@ -276,6 +303,14 @@ if [[ "${START_ROSCORE}" == "true" ]]; then
             exit 1
         fi
     fi
+fi
+
+if [[ "${CAMERA_ONLY}" == "true" ]]; then
+    # Let DeviceService monitor roslaunch itself. Camera frame readiness is
+    # checked by the application startup probe, not by rostopic list.
+    log "Launching camera stack: ${CAMERA_LAUNCH_PKG} ${CAMERA_LAUNCH_FILE}"
+    cleanup_camera_processes
+    exec roslaunch "${CAMERA_LAUNCH_PKG}" "${CAMERA_LAUNCH_FILE}"
 fi
 
 if [[ "${START_CAMERA}" == "true" ]]; then
@@ -309,15 +344,7 @@ fi
 log "Launching piper: puppet_mode=${MODE}, master_mode=0, auto_enable=${AUTO_ENABLE}"
 cd "${PIPER_ROOT}"
 cleanup_piper_processes
-roslaunch piper start_ms_piper.launch puppet_mode:="${MODE}" master_mode:="0" auto_enable:="${AUTO_ENABLE}" &
-PIPER_LAUNCH_PID=$!
-if ! wait_for_topics \
-    "/master/joint_left" \
-    "/master/joint_right" \
-    "/puppet/joint_left" \
-    "/puppet/joint_right"; then
-    echo "Failed to detect Piper leader/follower topics. Check terminal output above." >&2
-    exit 1
-fi
-log "Piper leader/follower topics are ready"
-wait "${PIPER_LAUNCH_PID}"
+exec roslaunch piper start_ms_piper.launch \
+    puppet_mode:="${MODE}" \
+    master_mode:="0" \
+    auto_enable:="${AUTO_ENABLE}"
