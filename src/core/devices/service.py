@@ -26,7 +26,7 @@ from urllib.parse import parse_qs, urlsplit
 import psutil
 
 from core.devices import DEVICE_KINDS, REPOSITORY_ROOT, DeviceWorkspace
-from core.devices.preflight import check_yam_can
+from core.devices.preflight import check_arx_x5_can, check_yam_can
 
 
 class DeviceProcesses:
@@ -108,6 +108,7 @@ class DeviceProcesses:
             if not os.access(command[0], os.X_OK):
                 raise ValueError(f"Device environment is missing: {command[0]}")
             check_yam_can(command, prepare=True)
+            check_arx_x5_can(command, prepare=True)
 
         # Start only missing components and roll back this attempt on failure
         self.log_root.mkdir(parents=True, exist_ok=True)
