@@ -366,10 +366,11 @@ def _validate(cfg: ConfigDict) -> None:
         )
     storage = coll.get("storage") or {}
     remotes = [name for name in ("huggingface", "sftp", "s3", "loopback") if storage.get(name)]
-    if len(remotes) > 1:
+    delivery_remotes = [name for name in ("sftp", "s3", "loopback") if storage.get(name)]
+    if len(delivery_remotes) > 1:
         raise ValueError(
             f"collection.storage configures multiple remotes: {', '.join(remotes)}; "
-            "sync with exactly one"
+            "configure at most one delivery remote"
         )
     sftp = (coll.get("storage") or {}).get("sftp") or {}
     if sftp:

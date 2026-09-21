@@ -1,7 +1,7 @@
 """Dual Agilex Piper collection task-set defaults.
 
-Choose exactly one machine-local sync backend in the matching ``*.local.py``
-override: Hugging Face or SFTP.
+Configure Hugging Face for task-set/QC sync and optionally add one delivery
+backend (SFTP, S3 or loopback) in the matching ``*.local.py`` override.
 """
 
 _base_ = ["dual_agilex_piper.py"]

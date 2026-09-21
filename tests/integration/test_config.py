@@ -65,6 +65,42 @@ def test_loaded_task_sets_allow_duplicate_prompts_across_datasets(tmp_path):
     assert cfg.collection.tasks["insert_withdraw"] == [(prompt, 5)]
 
 
+def test_collection_allows_huggingface_with_one_delivery_remote(tmp_path):
+    config_path = _write_config(
+        tmp_path / "collection.py",
+        "collection = dict(\n"
+        "    storage=dict(\n"
+        "        huggingface=dict(repo_id='team/data'),\n"
+        "        sftp=dict(\n"
+        "            host='upload.example.com',\n"
+        "            port=22,\n"
+        "            remote_dir='/datasets/collection',\n"
+        "        ),\n"
+        "    ),\n"
+        ")\n",
+    )
+
+    cfg = load_config(config_path)
+
+    assert cfg.collection.storage.huggingface.repo_id == "team/data"
+    assert cfg.collection.storage.sftp.host == "upload.example.com"
+
+
+def test_collection_rejects_multiple_delivery_remotes(tmp_path):
+    config_path = _write_config(
+        tmp_path / "invalid_storage.py",
+        "collection = dict(\n"
+        "    storage=dict(\n"
+        "        sftp=dict(host='upload.example.com', remote_dir='/datasets/collection'),\n"
+        "        loopback=dict(remote_dir='/tmp/collection-upload'),\n"
+        "    ),\n"
+        ")\n",
+    )
+
+    with pytest.raises(ValueError, match="multiple remotes"):
+        load_config(config_path)
+
+
 @pytest.mark.parametrize(
     ("body", "match"),
     [

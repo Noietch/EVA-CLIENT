@@ -1,8 +1,7 @@
-"""ARX X5 collection synced to exactly one remote.
+"""ARX X5 collection with optional Hugging Face sync and one delivery remote.
 
-Pick one of the three remotes below and leave the others commented out:
-``huggingface`` (task sets, QC ledgers and datasets), ``sftp`` or ``s3``
-(export delivery). Credentials live in the matching ``*.local.py``.
+Hugging Face sync may be combined with one of ``sftp`` or ``s3`` for export
+delivery. Credentials live in the matching ``*.local.py``.
 """
 
 _base_ = ["arx_x5.py"]
