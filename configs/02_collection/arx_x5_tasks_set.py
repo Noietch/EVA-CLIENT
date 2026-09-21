@@ -7,8 +7,8 @@ delivery. Credentials live in the matching ``*.local.py``.
 _base_ = ["arx_x5.py"]
 
 collection = dict(
-    task_set_dir="datasets/data_collection/task_sets/larybench2_20260901_arx_x5",
-    task_set_name="larybench2.0-20260901-arx_x5",
+    # The parent directory: every child task set is offered by its directory name.
+    task_set_dir="datasets/data_collection/task_sets",
     storage=dict(
         huggingface=dict(
             repo_id="example-org/example-dataset",
