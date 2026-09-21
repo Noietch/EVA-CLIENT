@@ -14,6 +14,7 @@ import time
 
 import numpy as np
 
+from core.app.agent_control import handle_agent_command
 from core.app.cli import maybe_start_inference_cli
 from core.app.console.server import build_console_context, start_console_server
 from core.app.control_channel import maybe_start_control_channel
@@ -1447,6 +1448,15 @@ def run(
                 except queue.Empty:
                     break
                 handle_command(cmd, effective, runtime, session, base_config=config)
+                effective = runtime.active_config or config
+                prompt_ready.set()
+
+            while True:
+                try:
+                    agent_command = runtime.agent_command_queue.get_nowait()
+                except queue.Empty:
+                    break
+                handle_agent_command(agent_command, effective, runtime, session)
                 effective = runtime.active_config or config
                 prompt_ready.set()
 
