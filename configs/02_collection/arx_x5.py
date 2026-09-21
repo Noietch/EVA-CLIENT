@@ -20,4 +20,9 @@ collection = dict(
     ),
 )
 
+dashboard = dict(
+    raw_roots=["datasets/data_collection/datasets/real_robot/arx_x5"],
+    raw_roots_only=True,
+)
+
 robot = dict(type="arx_x5")
