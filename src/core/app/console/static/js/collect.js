@@ -910,17 +910,22 @@ function renderCollectControls() {
   $("collect-control-groups").querySelectorAll(".collect-control-state").forEach((row) => {
     const group = groups.find((item) => String(item.id) === row.dataset.group);
     if (!group) return;
-    let state = "disabled";
+    // "off" is the MOTION gate itself and "waiting" is that gate being open while
+    // this arm's grip is still untouched. Neither says anything about the arm
+    // hardware, so only a missing VR link reports as unavailable.
+    let state = "off";
     if (!connected) state = "unavailable";
     else if (armEnabled && engaged.has(group.id)) state = "active";
     else if (armEnabled && authorized.has(group.id)) state = "ready";
+    else if (armEnabled) state = "waiting";
     const value = row.querySelector(".collect-state-value");
     if (value) value.textContent = t({
       unavailable: "collect.controlUnavailable",
-      disabled: "collect.controlDisabled",
+      off: "collect.controlOff",
+      waiting: "collect.controlWaiting",
       active: "collect.controlActive",
       ready: "collect.controlReady",
-    }[state] || "collect.controlDisabled");
+    }[state] || "collect.controlOff");
     row.dataset.state = state;
     const armBinding = controlBinding(group.binding) || {};
     updateControlHint(row.querySelector(".control-hint"), {

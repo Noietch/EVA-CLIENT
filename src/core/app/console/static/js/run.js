@@ -392,9 +392,13 @@ function collectInputSourceSuffix(status) {
       ["left", "right"].forEach((hand) => {
         const group = groups.find((item) => item.control === `${hand}.grip`);
         const available = state === "LINKED" && !!group;
-        const enabled = available && S.collectArmEnabled &&
-          (authorized.has(group.id) || engaged.has(group.id));
-        const armState = !available ? "UNAVAILABLE" : (enabled ? "ENABLED" : "DISABLED");
+        // A closed MOTION gate and an open-but-not-yet-gripped one are different
+        // states: only the second one is waiting on the operator, not on hardware.
+        const gripping = !!group && (authorized.has(group.id) || engaged.has(group.id));
+        const enabled = available && S.collectArmEnabled && gripping;
+        const armState = !available ? "UNAVAILABLE"
+          : !S.collectArmEnabled ? "OFF"
+            : gripping ? "ENABLED" : "AWAITING";
         const armKey = `teleop.arm.${hand}.${armState.toLowerCase()}`;
         suffix += ` | <span class="vr-input-status ${enabled ? "linked" : "down"}">${t(armKey)}</span>`;
       });
