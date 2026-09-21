@@ -59,7 +59,7 @@ camera_devices:
     - realsense_camera
     settings:
       realsense_camera:
-      - cam_high=index:0
+      - cam_high=409122271504
       realsense_color_profiles:
         cam_high:
           enable_auto_exposure: false
@@ -73,7 +73,7 @@ camera_devices:
     - realsense_camera
     settings:
       realsense_camera:
-      - cam_left_wrist=index:1
+      - cam_left_wrist=352122272510
       realsense_color_profiles:
         cam_left_wrist:
           enable_auto_exposure: false
@@ -87,7 +87,7 @@ camera_devices:
     - realsense_camera
     settings:
       realsense_camera:
-      - cam_right_wrist=index:2
+      - cam_right_wrist=352122271326
       realsense_color_profiles:
         cam_right_wrist:
           enable_auto_exposure: false
@@ -101,7 +101,7 @@ camera_devices:
     - realsense_camera
     settings:
       realsense_camera:
-      - cam_high=index:0
+      - cam_high=409122271504
       realsense_color_profiles:
         cam_high:
           enable_auto_exposure: false
@@ -115,7 +115,7 @@ camera_devices:
     - realsense_camera
     settings:
       realsense_camera:
-      - cam_left_wrist=index:1
+      - cam_left_wrist=352122272510
       realsense_color_profiles:
         cam_left_wrist:
           enable_auto_exposure: false
@@ -129,7 +129,7 @@ camera_devices:
     - realsense_camera
     settings:
       realsense_camera:
-      - cam_right_wrist=index:2
+      - cam_right_wrist=352122271326
       realsense_color_profiles:
         cam_right_wrist:
           enable_auto_exposure: false

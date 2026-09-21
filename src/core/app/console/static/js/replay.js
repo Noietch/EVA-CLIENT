@@ -566,7 +566,10 @@ function stopRealReplayVisual(frame) {
   }
 
 function mountEpisodeVideos({ datasetDir, episodeId, videoKeys }) {
-    const cams = (S.CFG && S.CFG.camera_keys) || [];
+    // The recorded episode decides which cameras exist; the configured list is only a
+    // fallback for datasets whose image columns could not be mapped to camera keys.
+    const mapped = Object.keys(videoKeys || {});
+    const cams = mapped.length ? mapped : ((S.CFG && S.CFG.camera_keys) || []);
     replaceCamStripContent(cams.map((k) => {
       const params = new URLSearchParams({
         cam: k,
