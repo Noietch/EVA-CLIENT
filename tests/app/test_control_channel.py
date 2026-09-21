@@ -19,6 +19,19 @@ def test_catalog_matches_web_command_dispatch_branches() -> None:
     assert WEB_COMMAND_VERBS <= branches | {"select_collect_task"}
 
 
+def test_every_dispatch_branch_is_reachable_over_the_control_channel() -> None:
+    """The catalog is the channel's allow-list, so a verb run.py dispatches but the
+    catalog omits is unreachable over ZMQ while still working in the browser."""
+    source = inspect.getsource(run._handle_web_command)
+    branches = {
+        line.split('"', 2)[1]
+        for line in source.splitlines()
+        if line.lstrip().startswith('if verb == "')
+    }
+    assert branches, "no dispatch branches found; the parser above stopped matching"
+    assert branches <= WEB_COMMAND_VERBS
+
+
 def test_catalog_is_json_ready_and_exposes_rl_templates() -> None:
     entries = control_command_catalog()
     assert all(set(entry) == {"verb", "command", "controls"} for entry in entries)
@@ -48,6 +61,13 @@ def test_channel_rejects_unknown_commands_without_queueing() -> None:
     reply = _handle_message(runtime, {"cmd": "web:not_a_command"})
     assert reply == {"ok": False, "error": "command not allowed: 'not_a_command'"}
     assert runtime.command_queue.empty()
+
+
+def test_channel_accepts_setup_and_queues_it() -> None:
+    runtime = _runtime()
+    reply = _handle_message(runtime, {"cmd": "web:setup"})
+    assert reply == {"ok": True, "cmd": "web:setup"}
+    assert runtime.command_queue.get_nowait() == "web:setup"
 
 
 def test_channel_handles_rl_and_collect_commands() -> None:
