@@ -19,6 +19,7 @@ def _runtime(*, teleop_client: object | None = None) -> SimpleNamespace:
                 selected_collect_task=None,
                 selected_collect_set=None,
                 selected_collect_task_index=None,
+                collection_sim_metadata=None,
                 last_error="",
             ),
         ),
@@ -35,6 +36,52 @@ def test_channel_rejects_unknown_commands_without_queueing() -> None:
     reply = _handle_message(runtime, {"cmd": "web:not_a_command"})
     assert reply == {"ok": False, "error": "command not allowed: 'not_a_command'"}
     assert runtime.command_queue.empty()
+
+
+def test_channel_start_binds_eval_sim_metadata_before_queueing() -> None:
+    runtime = _runtime()
+    sim_metadata = {
+        "schema_version": 3,
+        "scene": {"scene_id": "scene-01"},
+        "task_item": {"task_item_id": "task-01"},
+    }
+
+    reply = _handle_message(
+        runtime,
+        {
+            "cmd": "web:start",
+            "clip_id": "trial-0001",
+            "prompt": "pick the block",
+            "trial": 1,
+            "sim_metadata": sim_metadata,
+        },
+    )
+
+    assert reply == {"ok": True, "cmd": "web:start"}
+    assert runtime.current_cell == {
+        "prompt": "pick the block",
+        "trial": 1,
+        "sim_metadata": sim_metadata,
+    }
+    assert runtime.command_queue.get_nowait() == "web:start"
+
+
+def test_channel_collect_start_binds_sim_metadata_before_queueing() -> None:
+    runtime = _runtime()
+    sim_metadata = {
+        "schema_version": 4,
+        "scene": {"scene_id": "scene-01"},
+        "task_item": {"task_item_id": "task-01"},
+    }
+
+    reply = _handle_message(
+        runtime,
+        {"cmd": "web:collect_start", "sim_metadata": sim_metadata},
+    )
+
+    assert reply == {"ok": True, "cmd": "web:collect_start"}
+    assert runtime.console_ctx.session.collection_sim_metadata == sim_metadata
+    assert runtime.command_queue.get_nowait() == "web:collect_start"
 
 
 def test_channel_haptic_supports_both_hands_and_clamps_values() -> None:

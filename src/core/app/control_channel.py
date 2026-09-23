@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import math
 import threading
+from copy import deepcopy
 from typing import cast
 
 from core.app.command_catalog import WEB_COMMAND_VERBS
@@ -166,6 +167,7 @@ def _handle_command(runtime: RuntimeState, message: dict) -> dict:
         ctx.session.selected_collect_task = task
         ctx.session.selected_collect_set = dataset
         ctx.session.selected_collect_task_index = task_index
+        ctx.session.collection_sim_metadata = None
         response = {"ok": True, "selected_collect_task": task}
         if dataset is not None:
             response.update(dataset=dataset, task_index=task_index)
@@ -181,12 +183,25 @@ def _handle_command(runtime: RuntimeState, message: dict) -> dict:
 
     # Bind trial metadata before starting evaluation
     if verb == "start" and message.get("clip_id"):
+        sim_metadata = message.get("sim_metadata")
+        if sim_metadata is not None and not isinstance(sim_metadata, dict):
+            return _reject("sim_metadata must be an object")
         clip_id = str(message["clip_id"])
         runtime.current_clip_id = clip_id
         runtime.current_cell = {
             "prompt": message.get("prompt"),
             "trial": message.get("trial"),
         }
+        if sim_metadata is not None:
+            runtime.current_cell["sim_metadata"] = deepcopy(sim_metadata)
+
+    if verb == "collect_start" and "sim_metadata" in message:
+        sim_metadata = message.get("sim_metadata")
+        if sim_metadata is not None and not isinstance(sim_metadata, dict):
+            return _reject("sim_metadata must be an object")
+        ctx.session.collection_sim_metadata = (
+            deepcopy(sim_metadata) if sim_metadata is not None else None
+        )
 
     assert runtime.command_queue is not None
     runtime.command_queue.put(command)

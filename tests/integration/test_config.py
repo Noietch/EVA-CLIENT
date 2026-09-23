@@ -47,8 +47,7 @@ def test_loaded_task_sets_allow_duplicate_prompts_across_datasets(tmp_path):
         task_set = tmp_path / name
         task_set.mkdir()
         (task_set / "tasks.csv").write_text(
-            "task_id,prompt_en,total_epsiodes_count\n"
-            f"{name.upper()},\"{prompt}\",5\n",
+            f'task_id,prompt_en,total_epsiodes_count\n{name.upper()},"{prompt}",5\n',
             encoding="utf-8",
         )
         task_set_dirs.append(str(task_set))
@@ -125,6 +124,7 @@ def test_teleop_config_validation_rejects_unsafe_combinations(tmp_path, body, ma
 @pytest.mark.parametrize(
     "preset",
     [
+        "dual_agilex_piper/pi05_qpos.py",
         "dual_yam/openpi_qpos.py",
     ],
 )
@@ -140,3 +140,37 @@ def test_agilex_piper_deploy_converts_ros_bgr_frames_to_rgb():
     cfg = load_config(_CONFIGS_DIR / "01_deploy" / "dual_agilex_piper" / "openpi_qpos.py")
 
     assert cfg.transport.convert_bgr_to_rgb is True
+
+
+def test_pi05_piper_config_owns_joint_qpos_contract():
+    cfg = load_config(_CONFIGS_DIR / "01_deploy/dual_agilex_piper/pi05_qpos.py")
+    robot = ROBOT_REGISTRY.build(cfg.robot.type)
+
+    assert cfg.robot.type == "agilex_piper"
+    assert cfg.policy.backend_options.env_cfg_type == "piper"
+    assert cfg.policy.backend_options.action_type == "joint"
+    assert cfg.inference_cfg.obs_space.type == "JointState"
+    assert cfg.inference_cfg.action_space.type == "JointState"
+    assert robot.total_action_dim == 14
+
+
+def test_arx_x5_eva_sim_eval_config_uses_on_demand_zmq_transport():
+    cfg = load_config(_CONFIGS_DIR / "03_evaluation" / "arx_x5_eva_sim_eval.py")
+
+    assert cfg.transport.type == "zmq"
+    assert cfg.transport.image_mode == "on_demand"
+    assert cfg.control_channel.enabled is True
+
+
+def test_dual_yam_eva_sim_config_selects_multiple_task_sets():
+    cfg = load_config(_CONFIGS_DIR / "02_collection" / "dual_yam_eva_sim.py")
+
+    assert len(cfg.collection.task_set_dir) == 12
+    assert cfg.collection.storage.log_dir == "work_dirs/collection/eva_sim_dual_yam/"
+    assert cfg.transport.sub_endpoint == "tcp://127.0.0.1:5555"
+    assert cfg.transport.pub_endpoint == "tcp://127.0.0.1:5556"
+    assert cfg.transport.disabled_cameras == [
+        "cam_high",
+        "cam_left_wrist",
+        "cam_right_wrist",
+    ]

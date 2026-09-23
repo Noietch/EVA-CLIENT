@@ -76,13 +76,14 @@ def test_eval_cancel_discards_active_episode_and_is_idempotent(console):
         def __init__(self) -> None:
             self.has_active_episode = False
             self.cancelled = 0
+            self.episode_meta = {}
 
         def start_episode(self, task: str) -> None:
             del task
             self.has_active_episode = True
 
         def set_episode_meta(self, **fields) -> None:
-            del fields
+            self.episode_meta.update(fields)
 
         def cancel_episode(self, reason: str) -> None:
             assert reason == "external eval cancel"
@@ -116,9 +117,15 @@ def test_eval_cancel_discards_active_episode_and_is_idempotent(console):
     console.runtime.web_phase = "ready"
     console.do(
         "/api/eval_start",
-        {"clip_id": "clip-cancel", "prompt": prompt, "trial": 1},
+        {
+            "clip_id": "clip-cancel",
+            "prompt": prompt,
+            "trial": 1,
+            "sim_metadata": {"scene": {"scene_id": "scene-01"}},
+        },
     )
     assert console.status()["eval_recorder"]["active"] is True
+    assert eval_logger.episode_meta["sim_metadata"] == {"scene": {"scene_id": "scene-01"}}
 
     console.do("/api/eval_cancel")
 
@@ -158,10 +165,17 @@ def test_completed_slot_retake_survives_polling_and_releases_after_save(tmp_path
 
     with serve_console(console_config()) as h:
         h.runtime.episode_logger = cast(Any, Logger())
-        body = {"dataset": "cup_set", "slot_id": "INLINE-0:0"}
+        sim_metadata = {"schema_version": 4, "scene": {"scene_id": "scene-01"}}
+        body = {
+            "dataset": "cup_set",
+            "slot_id": "INLINE-0:0",
+            "sim_metadata": sim_metadata,
+        }
         selected = h.post("/api/select_collection_slot", body)
         assert selected.status == 200
         assert selected.json["active"]["repair"]
+        assert selected.json["sim_metadata_attached"] is True
+        assert h.session.collection_sim_metadata == sim_metadata
         for _ in range(2):
             snapshot = h.get("/api/collection_slots?dataset=cup_set&all=1").json
             assert snapshot["active"]["slot_id"] == "INLINE-0:0"

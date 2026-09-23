@@ -545,11 +545,14 @@ def _handle_web_command(
             # prompt/trial + clip_id; scores join back to the result row via clip_id.
             if runtime.episode_logger is not None and runtime.current_clip_id is not None:
                 cell = runtime.current_cell or {}
-                runtime.episode_logger.set_episode_meta(
-                    prompt=cell.get("prompt"),
-                    trial=cell.get("trial"),
-                    clip_id=runtime.current_clip_id,
-                )
+                episode_meta = {
+                    "prompt": cell.get("prompt"),
+                    "trial": cell.get("trial"),
+                    "clip_id": runtime.current_clip_id,
+                }
+                if cell.get("sim_metadata") is not None:
+                    episode_meta["sim_metadata"] = cell["sim_metadata"]
+                runtime.episode_logger.set_episode_meta(**episode_meta)
         else:
             set_phase(runtime, "ready")
         return
@@ -959,6 +962,7 @@ def _handle_web_command(
             session.collection_scene_round = None
             session.collection_slot_id = None
             session.collection_task_id = None
+            session.collection_sim_metadata = None
         runtime.collection_replay_qpos = None
         runtime.collection_replay_episode = None
         stop_rollout_intervention(config, runtime, session, required=False)

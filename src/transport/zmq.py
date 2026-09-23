@@ -43,6 +43,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _PACKER = msgpack_numpy.Packer()
+_PACKER_LOCK = threading.Lock()
 COLLECTION_START_TARGET = "collect_start"
 COLLECTION_STOP_TARGET = "collect_stop"
 IMAGE_REQUEST_TARGET = "image_request"
@@ -133,7 +134,8 @@ def pack_observation(obs: WireObservation) -> bytes:
     if obs.operator_event:
         payload["operator_event"] = str(obs.operator_event)
         payload["operator_event_id"] = int(obs.operator_event_id)
-    return _PACKER.pack(payload)
+    with _PACKER_LOCK:
+        return _PACKER.pack(payload)
 
 
 def unpack_observation(payload: bytes) -> WireObservation:
@@ -211,7 +213,8 @@ def pack_action(action: WireAction) -> bytes:
     }
     if action.mode is not None:
         payload["mode"] = action.mode
-    return _PACKER.pack(payload)
+    with _PACKER_LOCK:
+        return _PACKER.pack(payload)
 
 
 def unpack_action(payload: bytes) -> WireAction:
