@@ -8,6 +8,18 @@ import pytest
 pytestmark = pytest.mark.static
 
 
+def test_automatic_repair_slot_stays_selected():
+    source = (
+        Path(__file__).resolve().parents[2] / "src/core/app/console/static/js/collect.js"
+    ).read_text()
+    handler = source[
+        source.index("async function activateCollectionSlot(") : source.index(
+            "async function pollCollectionSlots("
+        )
+    ]
+    assert "manual: manual || !!slot.repair" in handler
+
+
 def test_review_cursor_and_qc_events():
     source = (
         Path(__file__).resolve().parents[2] / "src/core/app/console/static/js/collect.js"
@@ -33,7 +45,7 @@ def test_review_cursor_and_qc_events():
 const assert = require("node:assert/strict");
 const S = {ACTIVE_TAB: "collect", STATUS: {collect: {}},
   collectionSlots: {selectedSlotId: "", slots: [], dataset: "test", page: 1, pageCount: 3}};
-let collectionSlotClickTimer = null, collectionSlotsPolling = false, target = null, marks = 0;
+let collectionSlotClickTimer = null, collectionSlotsPollPromise = null, target = null, marks = 0;
 const tiles = Array.from({length: 6}, (_, i) => ({
   dataset: {slotId: String(i)},
   getBoundingClientRect: () => ({

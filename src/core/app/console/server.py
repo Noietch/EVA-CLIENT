@@ -644,6 +644,9 @@ class ConsoleContext:
     active_tab: str = "debug"
     language: str = "en"
     output_dir: str = ""  # results root; debug results land in <output_dir>/console/
+    collection_save_revision: int = 0
+    completed_collection_dataset: str = ""
+    completed_collection_slot_id: str = ""
     preview: Any = None  # EpisodePreview for RESULT-tab playback (lazily set)
     quality_upload_lock: threading.RLock = dataclasses.field(default_factory=threading.RLock)
     dataset_manager: DatasetTransfer = dataclasses.field(
@@ -664,9 +667,9 @@ class ConsoleContext:
         """Folder name of the active model's eval dataset (matches the recorder's rooting)."""
         return eval_model_name(self.config, self.runtime)
 
-    def sync_collection_slot(self) -> dict[str, Any] | None:
-        """Advance the backend collection cursor after an episode is queued."""
-        return _sync_collection_slot_session(self)
+    def sync_collection_slot(self, completed_slot_id: str | None = None) -> dict[str, Any] | None:
+        """Resolve the backend collection cursor after a confirmed save."""
+        return _sync_collection_slot_session(self, completed_slot_id)
 
 
 def _run_quality_upload_scan(
@@ -1312,18 +1315,25 @@ def _apply_collection_slot_session(session: SessionState, slot: dict[str, Any] |
     session.collection_task_id = slot["task_id"]
 
 
-def _sync_collection_slot_session(ctx: ConsoleContext) -> dict[str, Any] | None:
+def _sync_collection_slot_session(
+    ctx: ConsoleContext, completed_slot_id: str | None = None
+) -> dict[str, Any] | None:
     """Select the next unresolved slot without waiting for a browser poll."""
     dataset = str(ctx.session.selected_collect_set or "").strip()
     logger_obj = ctx.runtime.episode_logger
     if not dataset or logger_obj is None or bool(getattr(logger_obj, "has_active_episode", False)):
         return None
+    config = ctx.runtime.active_config or ctx.config
+    state_path = slot_state_path(config, dataset)
+    if completed_slot_id:
+        slot_state = load_slot_state(state_path)
+        if slot_state.selected_slot_id == completed_slot_id:
+            select_collection_slot(state_path, completed_slot_id, slot_state)
     snapshot = _collection_slots_snapshot(ctx, dataset)
     active = snapshot["active"]
     if active is not None:
-        config = ctx.runtime.active_config or ctx.config
         select_collection_slot(
-            slot_state_path(config, dataset),
+            state_path,
             active["slot_id"],
             snapshot["slot_state"],
             episode_index=(active.get("episode") or {}).get("episode_index"),
@@ -1331,6 +1341,10 @@ def _sync_collection_slot_session(ctx: ConsoleContext) -> dict[str, Any] | None:
             manual=bool(active.get("repair")),
         )
     _apply_collection_slot_session(ctx.session, active)
+    if completed_slot_id:
+        ctx.completed_collection_dataset = dataset
+        ctx.completed_collection_slot_id = completed_slot_id
+        ctx.collection_save_revision += 1
     logger.info(
         "[COLLECTION_SLOT_SYNC] dataset=%s active=%s",
         dataset,
@@ -2321,6 +2335,11 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                 "scene_plan": snapshot["scene_plan"],
                 "dataset_dir": snapshot["dataset_dir"],
                 "active": snapshot["active"],
+                "session_slot_id": self.ctx.session.collection_slot_id,
+                "session_dataset": self.ctx.session.selected_collect_set,
+                "save_revision": self.ctx.collection_save_revision,
+                "completed_dataset": self.ctx.completed_collection_dataset,
+                "completed_slot_id": self.ctx.completed_collection_slot_id,
                 "counts": snapshot["counts"],
                 "scenes": snapshot["scenes"],
                 "tasks": snapshot["tasks"],

@@ -198,6 +198,12 @@ def test_completed_slot_retake_survives_polling_and_releases_after_save(tmp_path
         assert snapshot["slots"][0]["state"] == "complete"
         assert snapshot["slots"][0]["episode"]["episode_index"] == 1
         assert snapshot["active"]["slot_id"] == "INLINE-0:1"
+        h.runtime.console_ctx.sync_collection_slot("INLINE-0:0")
+        snapshot = h.get("/api/collection_slots?dataset=cup_set&all=1").json
+        assert snapshot["session_slot_id"] == "INLINE-0:1"
+        assert snapshot["session_dataset"] == "cup_set"
+        assert snapshot["completed_slot_id"] == "INLINE-0:0"
+        assert snapshot["save_revision"] == 1
 
         # A later failed QC result must replace the earlier green attempt.
         episodes.append({**episodes[0], "episode_index": 2, "quality": "red"})

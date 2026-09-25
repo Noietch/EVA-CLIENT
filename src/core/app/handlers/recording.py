@@ -1439,7 +1439,7 @@ def collect_stop(config: ConfigDict, runtime: RuntimeState, session: SessionStat
         sync_collection_slot = getattr(console_ctx, "sync_collection_slot", None)
         if callable(sync_collection_slot):
             try:
-                sync_collection_slot()
+                sync_collection_slot(session.collection_slot_id)
             except Exception:
                 logger.exception("Failed to advance collection slot after queuing episode")
     logger.info("Collection episode stopped; leaving hardware at current pose")

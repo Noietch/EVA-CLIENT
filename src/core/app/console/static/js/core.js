@@ -93,6 +93,7 @@ export const S = {
     scenes: [], tasks: [], slots: [], page: 1, pageCount: 1, filteredTotal: 0,
     sceneFilter: "", taskFilter: "", showAll: true, selectedSlotId: "",
     cursorPinned: false, followActivePage: true, lastAttemptAt: 0,
+    lastSaveRevision: 0, sessionDataset: "", sessionSlotId: "",
   },
   collectArmEnabled: false,
   collectToggleBusy: null,

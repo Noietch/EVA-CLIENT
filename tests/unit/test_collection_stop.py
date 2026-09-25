@@ -10,6 +10,7 @@ from core.app.console.collection_slots import (
     build_collection_slots,
     collection_slot_status,
     load_slot_state,
+    select_collection_slot,
 )
 from core.app.handlers.recording import collect_stop
 from core.app.state import SessionState, SessionStatus
@@ -79,6 +80,53 @@ def test_automatic_red_retake_survives_sync_until_new_capture(tmp_path, monkeypa
     assert console_server._sync_collection_slot_session(ctx)["slot_id"] == slots[2].slot_id
 
 
+def test_saved_retake_advances_despite_reused_episode_index(tmp_path, monkeypatch):
+    slots = build_collection_slots(
+        ConfigDict(collection=ConfigDict(tasks={"set": [("task", 2)]})), {}, "set"
+    )
+    episodes = [
+        {"episode_index": index, "slot_id": slot.slot_id, "status": "saved", "qc_verdict": "fail"}
+        for index, slot in enumerate(slots)
+    ]
+    config = ConfigDict(collection={"storage": {"log_dir": str(tmp_path)}})
+    state_path = tmp_path / "collection_slots" / "set.json"
+    select_collection_slot(
+        state_path, slots[0].slot_id, CollectionSlotState([]), episode_index=0, manual=True
+    )
+
+    def snapshot(_ctx, _dataset):
+        state = load_slot_state(state_path)
+        _, active, _ = collection_slot_status(slots, episodes, [], state)
+        return {"active": active, "slot_state": state}
+
+    monkeypatch.setattr(console_server, "_collection_slots_snapshot", snapshot)
+    session = SessionState()
+    session.selected_collect_set = "set"
+    session.collection_slot_id = slots[0].slot_id
+    ctx = SimpleNamespace(
+        session=session,
+        config=config,
+        runtime=SimpleNamespace(
+            episode_logger=SimpleNamespace(has_active_episode=False), active_config=None
+        ),
+        collection_save_revision=0,
+        completed_collection_dataset="",
+        completed_collection_slot_id="",
+    )
+
+    assert console_server._sync_collection_slot_session(ctx)["slot_id"] == slots[0].slot_id
+    episodes[0]["qc_verdict"] = "unreviewed"
+    assert (
+        console_server._sync_collection_slot_session(ctx, slots[0].slot_id)["slot_id"]
+        == slots[1].slot_id
+    )
+    assert session.collection_slot_id == slots[1].slot_id
+    assert load_slot_state(state_path).selected_slot_id == slots[1].slot_id
+    assert ctx.collection_save_revision == 1
+    assert ctx.completed_collection_dataset == "set"
+    assert ctx.completed_collection_slot_id == slots[0].slot_id
+
+
 class _CollectionLogger:
     is_collection_enabled = True
 
@@ -94,18 +142,19 @@ def _runtime(saved: bool, synced: list[str]) -> SimpleNamespace:
         episode_logger=_CollectionLogger(saved),
         collection_capture_runner=None,
         transport=SimpleNamespace(finish_collection_capture=lambda: None),
-        console_ctx=SimpleNamespace(sync_collection_slot=lambda: synced.append("next")),
+        console_ctx=SimpleNamespace(sync_collection_slot=lambda slot_id: synced.append(slot_id)),
     )
 
 
 def test_collect_stop_advances_slot_after_episode_is_queued() -> None:
     synced: list[str] = []
     session = SessionState(status=SessionStatus.RUNNING)
+    session.collection_slot_id = "slot-1"
 
     assert collect_stop(SimpleNamespace(), _runtime(True, synced), session)
 
     assert session.status is SessionStatus.READY
-    assert synced == ["next"]
+    assert synced == ["slot-1"]
 
 
 def test_collect_stop_keeps_slot_when_episode_has_no_frames() -> None:

@@ -47,7 +47,7 @@ const EPISODE_HISTORY_POLL_MS = 5000;
 const EPISODE_HISTORY_PAGE_SIZE = 128;
 const COLLECTION_SLOT_POLL_MS = 2000;
 let episodeHistoryPolling = false;
-let collectionSlotsPolling = false;
+let collectionSlotsPollPromise = null;
 let collectItemsRenderKey = "";
 let rolloutItemsRenderKey = "";
 let collectionSlotClickTimer = null;
@@ -138,6 +138,9 @@ function applyCollectionSlotsPayload(payload) {
   state.pageCount = Number(payload.page_count) || 1;
   state.filteredTotal = Number(payload.filtered_total) || 0;
   state.viewerActive = !!payload.viewer_active;
+  state.lastSaveRevision = Number(payload.save_revision) || 0;
+  state.sessionDataset = String(payload.session_dataset || "");
+  state.sessionSlotId = String(payload.session_slot_id || "");
   if (state.active) adoptCollectionSlot(state.active);
   syncCollectionSlotCursor();
 }
@@ -154,6 +157,8 @@ async function activateCollectionSlot(slot, { manual = false } = {}) {
   const state = S.collectionSlots;
   if (manual) state.followActivePage = false;
   const previousActive = state.active;
+  const previousSessionDataset = state.sessionDataset;
+  const previousSessionSlotId = state.sessionSlotId;
   const previousStatus = {
     task: S.STATUS.selected_collect_task,
     dataset: S.STATUS.selected_collect_set,
@@ -167,11 +172,13 @@ async function activateCollectionSlot(slot, { manual = false } = {}) {
   if (manual) pinCollectionSlotCursor(slot.slot_id);
   adoptCollectionSlot(state.active);
   renderCollect();
+  let activated = false;
   try {
     const response = await apiPost("/api/select_collection_slot", {
       dataset: slot.dataset,
       slot_id: slot.slot_id,
-      manual,
+      // An automatically chosen repair must stay selected until its retry starts.
+      manual: manual || !!slot.repair,
     }, { concurrent: true, timeoutMs: 5000 });
     if (!response.ok || !response.active) {
       setCollectError(response.error || "Unable to select this slot");
@@ -186,17 +193,22 @@ async function activateCollectionSlot(slot, { manual = false } = {}) {
       response.active.scene_id
     );
     state.active = response.active;
+    state.sessionDataset = response.active.dataset;
+    state.sessionSlotId = response.active.slot_id;
     state.counts = response.counts || state.counts;
     S.STATUS.collection_slot_id = response.active.slot_id;
     S.STATUS.collection_task_id = response.active.task_id;
     adoptCollectionSlot(response.active);
+    activated = true;
     return true;
   } catch (error) {
     setCollectError(error.message || "Unable to select this slot");
     return false;
   } finally {
-    if (S.STATUS.collection_slot_id !== slot.slot_id) {
+    if (!activated) {
       state.active = previousActive;
+      state.sessionDataset = previousSessionDataset;
+      state.sessionSlotId = previousSessionSlotId;
       S.STATUS.selected_collect_task = previousStatus.task;
       S.STATUS.selected_collect_set = previousStatus.dataset;
       S.STATUS.selected_collect_task_index = previousStatus.taskIndex;
@@ -218,20 +230,42 @@ async function activateCollectionSlot(slot, { manual = false } = {}) {
   }
 }
 
-async function pollCollectionSlots(force = false) {
+async function pollCollectionSlots(force = false, { autoActivate = true } = {}) {
   const state = S.collectionSlots;
   const dataset = state.dataset || collectSetValue();
-  if (!dataset || collectionSlotsPolling) return;
+  if (!dataset) return;
+  if (collectionSlotsPollPromise) {
+    if (autoActivate) return;
+    await collectionSlotsPollPromise;
+    return pollCollectionSlots(force, { autoActivate });
+  }
   const now = performance.now();
   if (!force && now - Number(state.lastAttemptAt || 0) < COLLECTION_SLOT_POLL_MS) return;
   state.lastAttemptAt = now;
-  collectionSlotsPolling = true;
+  let finishPoll;
+  collectionSlotsPollPromise = new Promise((resolve) => { finishPoll = resolve; });
   const previousActiveId = String((state.active && state.active.slot_id) || "");
   try {
     let payload = await apiGet(collectionSlotQuery(dataset));
     if (!payload || payload.ok === false) return;
     const activeChanged = String((payload.active && payload.active.slot_id) || "") !== previousActiveId;
-    if (state.followActivePage && activeChanged && payload.active_page &&
+    if (dataset !== (state.dataset || collectSetValue()) ||
+        collectionSlotClickTimer !== null || S.collectTaskSelectionPending) return;
+    const previousSaving = (payload.slots || []).some(
+      (slot) => slot.slot_id === previousActiveId && slot.state === "saving"
+    );
+    const savedSelectionChanged = state.loaded && !!payload.active &&
+      Number(payload.save_revision) > state.lastSaveRevision &&
+      payload.completed_dataset === dataset &&
+      payload.active.slot_id !== payload.completed_slot_id;
+    const savedAdvance = savedSelectionChanged && state.cursorPinned &&
+      state.selectedSlotId === payload.completed_slot_id;
+    if (savedAdvance) {
+      clearCollectionSlotCursor();
+      state.followActivePage = true;
+    }
+    if (state.followActivePage && !previousSaving &&
+        (activeChanged || savedSelectionChanged) && payload.active_page &&
         Number(payload.active_page) !== Number(payload.page)) {
       state.page = Number(payload.active_page);
       payload = await apiGet(collectionSlotQuery(dataset));
@@ -241,17 +275,28 @@ async function pollCollectionSlots(force = false) {
     if (dataset !== (state.dataset || collectSetValue()) ||
         collectionSlotClickTimer !== null || S.collectTaskSelectionPending) return;
     applyCollectionSlotsPayload(payload);
+    if (!previousSaving && (activeChanged || savedSelectionChanged) && state.active) {
+      applyCollectTaskSelection(
+        state.active.task, state.active.dataset, Number(state.active.task_index),
+        state.active.scene_id
+      );
+      adoptCollectionSlot(state.active);
+    }
     renderCollect();
     const active = state.active;
     const collecting = !!(S.STATUS.collect && S.STATUS.collect.collecting);
-    if (active && state.followActivePage && !collecting && !S.collectTaskSelectionPending &&
-        S.STATUS.collection_slot_id !== active.slot_id) {
+    // A confirmed save already switched the backend session to the next slot.
+    if (autoActivate && active && state.followActivePage && !savedSelectionChanged && !previousSaving &&
+        !collecting && !S.collectTaskSelectionPending &&
+        (!payload.session_slot_id || payload.session_dataset === dataset) &&
+        payload.session_slot_id !== active.slot_id) {
       queueMicrotask(() => activateCollectionSlot(active));
     }
   } catch {
     // Keep the last complete plan while the low-frequency endpoint recovers.
   } finally {
-    collectionSlotsPolling = false;
+    collectionSlotsPollPromise = null;
+    finishPoll();
   }
 }
 
@@ -276,7 +321,11 @@ async function selectCollectionDataset(dataset) {
   state.followActivePage = true;
   const select = $("collect-set-list");
   if (select) select.value = value;
-  await pollCollectionSlots(true);
+  await pollCollectionSlots(true, { autoActivate: false });
+  if (state.dataset === value && state.active &&
+      (state.sessionDataset !== value || state.sessionSlotId !== state.active.slot_id)) {
+    await activateCollectionSlot(state.active);
+  }
   return !!state.active;
 }
 
@@ -1076,7 +1125,8 @@ async function startCollectFromTab() {
       renderCollect();
       return;
     }
-    const confirmed = S.STATUS.collection_slot_id === slot.slot_id ||
+    const confirmed = (state.sessionDataset === slot.dataset &&
+      state.sessionSlotId === slot.slot_id) ||
       await activateCollectionSlot(slot, { manual: state.active !== slot });
     if (!confirmed) {
       S.collectToggleBusy = null;
@@ -1421,7 +1471,7 @@ function handleCollectionReviewInput(feedback) {
 function moveCollectionReviewCursor(direction) {
   if (!["left", "right", "up", "down"].includes(direction)) return;
   // The visible tiles are the page being loaded; stepping on stale ones jumps.
-  if (collectionSlotsPolling) return;
+  if (collectionSlotsPollPromise) return;
   // A move selects, and the console locks the target while it records.
   if (S.STATUS.collect && S.STATUS.collect.collecting) return;
   const host = $("collect-queue-tiles");
@@ -2023,7 +2073,7 @@ function renderCollect() {
       renderCollectTiles(slotPlan.slots || []);
     }
     renderCollectControls();
-    if (collectionSet && !collectionSlotsPolling) {
+    if (collectionSet && !collectionSlotsPollPromise) {
       queueMicrotask(() => pollCollectionSlots(!slotPlan.loaded));
     }
 
