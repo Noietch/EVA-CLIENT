@@ -130,6 +130,7 @@ class SessionState:
     collection_slot_id: str | None = None
     collection_task_id: str | None = None
     collection_sim_metadata: dict[str, Any] | None = None
+    collection_scene_reset_requests: int = 0
     interrupt_requested: bool = False
     follow_human_gripper: bool = False
     gripper_locks: dict[str, float] = dataclasses.field(default_factory=dict)

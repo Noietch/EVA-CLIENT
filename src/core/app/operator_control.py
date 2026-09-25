@@ -281,6 +281,10 @@ def handle_teleop_operator_event(
                 and not bool(runtime.collection_teleop_active)
                 and not bool(getattr(execution, "active", False))
             )
+            if accepted:
+                # HOME also asks the collection orchestrator to rebuild the scene, so
+                # the request rides the same ARM-OFF precondition instead of its own.
+                session.collection_scene_reset_requests += 1
             message = (
                 "Collection HOME requested"
                 if accepted

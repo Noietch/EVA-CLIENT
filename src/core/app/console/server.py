@@ -47,6 +47,7 @@ from core.app.console.collection_slots import (
 )
 from core.app.console.dashboard import build_dashboard, discover_dashboard_upload_candidates
 from core.app.console.transform_worker import build_transform_blob
+from core.app.control_channel import _haptic_request
 from core.app.handlers import (
     _resolve_runtime_path,
     build_policy_observation,
@@ -56,6 +57,7 @@ from core.app.handlers import (
     rollout_hil_status,
     rollout_intervention_source,
     rollout_save_status,
+    send_teleop_haptic,
     teleop_status,
 )
 from core.app.handlers.io import load_replay_dataset
@@ -1422,6 +1424,7 @@ def _serialize_status(ctx: ConsoleContext, *, include_history: bool = False) -> 
         "collection_slot_id": s.collection_slot_id,
         "collection_task_id": s.collection_task_id,
         "collection_sim_metadata_ready": s.collection_sim_metadata is not None,
+        "collection_scene_reset_requests": s.collection_scene_reset_requests,
         "collection_sim_metadata_schema_version": (
             s.collection_sim_metadata.get("schema_version")
             if s.collection_sim_metadata is not None
@@ -3715,6 +3718,25 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         arg = f"{side}:{value}" if value is not None else side
         self._enqueue_ok(f"web:gripper:{arg}")
 
+    def _post_haptic(self, body: dict) -> None:
+        """Vibrate the controllers for one explicit request from the orchestrator."""
+        try:
+            hands, intensity, duration_ms = _haptic_request(body, "")
+        except ValueError as error:
+            self._send_json(400, {"ok": False, "error": str(error)})
+            return
+        sent = [
+            hand
+            for hand in hands
+            if send_teleop_haptic(
+                self.ctx.runtime,
+                hand=hand,
+                intensity=intensity,
+                duration_ms=duration_ms,
+            )
+        ]
+        self._send_json(200, {"ok": bool(sent), "hands": sent})
+
     def _post_collect_start(self, body: dict) -> None:
         self._clear_collection_replay()
         if self.ctx.active_tab != "collect" or not self.ctx.runtime.collection_teleop_armed:
@@ -4287,6 +4309,7 @@ _POST_ROUTES = {
     "/api/manual_send": ConsoleRequestHandler._post_manual_send,
     "/api/manual_dispatch": ConsoleRequestHandler._post_manual_dispatch,
     "/api/gripper": ConsoleRequestHandler._post_gripper,
+    "/api/haptic": ConsoleRequestHandler._post_haptic,
     "/api/collect_start": ConsoleRequestHandler._post_collect_start,
     "/api/select_ckpt": ConsoleRequestHandler._post_select_ckpt,
     "/api/init_move": ConsoleRequestHandler._post_init_move,
