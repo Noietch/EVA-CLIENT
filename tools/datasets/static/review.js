@@ -28,6 +28,7 @@ let translate;
 const STATIC_REASON = "static_frames_excessive";
 const CAMERA_REASON = "camera_offline";
 const SHORT_REASON = "trajectory_too_short";
+const LIMIT_REASON = "joint_limit_exceeded";
 const REVIEW_REASON = "needs_manual_review";
 const REASON_KEYS = {
   image_quality: "qc.imageReason",
@@ -36,6 +37,7 @@ const REASON_KEYS = {
   [STATIC_REASON]: "qc.staticFramesExcessive",
   [CAMERA_REASON]: "qc.cameraOffline",
   [SHORT_REASON]: "qc.shortEpisode",
+  [LIMIT_REASON]: "qc.jointLimitExceeded",
   [REVIEW_REASON]: "qc.needsReview",
   other: "qc.otherReason",
 };
@@ -606,6 +608,7 @@ function buildQcControls(task, slot) {
     [STATIC_REASON, translate("qc.staticFramesExcessive")],
     [CAMERA_REASON, translate("qc.cameraOffline")],
     [SHORT_REASON, translate("qc.shortEpisode")],
+    [LIMIT_REASON, translate("qc.jointLimitExceeded")],
     [REVIEW_REASON, translate("qc.needsReview")],
     ["other", translate("qc.otherReason")],
   ];

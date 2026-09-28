@@ -80,6 +80,7 @@ class CollectionRawBatch:
 
     images: dict[str, list[CollectionRawSample]] = dataclasses.field(default_factory=dict)
     vectors: dict[str, list[CollectionRawSample]] = dataclasses.field(default_factory=dict)
+    sim_states: list[CollectionRawSample] = dataclasses.field(default_factory=list)
     start_time: float | None = None
     end_time: float | None = None
 

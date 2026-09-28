@@ -47,7 +47,8 @@ CACHE_EVICTION_SECONDS = 3600.0
 STATIC_FRAMES_REASON = "static_frames_excessive"
 CAMERA_OFFLINE_REASON = "camera_offline"
 SHORT_EPISODE_REASON = "trajectory_too_short"
-# The machine never closes an episode: what it finds is handed to a reviewer.
+JOINT_LIMIT_REASON = "joint_limit_exceeded"
+# The handover reason a scan uses for a finding that still needs a human.
 MANUAL_REVIEW_REASON = "needs_manual_review"
 QC_REASONS = {
     "image_quality",
@@ -56,6 +57,7 @@ QC_REASONS = {
     STATIC_FRAMES_REASON,
     CAMERA_OFFLINE_REASON,
     SHORT_EPISODE_REASON,
+    JOINT_LIMIT_REASON,
     MANUAL_REVIEW_REASON,
     "other",
 }

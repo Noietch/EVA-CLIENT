@@ -56,8 +56,10 @@ from core.types import (
     RolloutInterventionSegment,
 )
 from core.utils.collection_paths import dataset_location
+from core.utils.dataset_lock import dataset_lock
 from core.utils.images import resize_direct
 from core.utils.lerobot import LeRobotDatasetIO
+from core.utils.render_notify import notify_render_service
 
 if TYPE_CHECKING:
     from core.config import ConfigDict
@@ -92,6 +94,8 @@ def _release_failed_save_payload(job: SaveJob) -> None:
     job.raw_episode_payload = None
     job.videos = None
     job.raw_video_samples = None
+    job.sim_state_rows = None
+    job.sim_state_raw_rows = None
     job.intervention_segments = []
 
 
@@ -119,6 +123,18 @@ def sanitize_path_component(text: str) -> str:
     if sanitized == "":
         return "unset"
     return sanitized[:96]
+
+
+def _slot_id(row: dict[str, Any]) -> str:
+    """The collection slot an episode row belongs to.
+
+    Rows written before slot ids existed identify their slot by task/scene instead,
+    matching how the slot grid still displays them.
+    """
+    slot_id = str(row.get("slot_id") or "")
+    if slot_id or not (row.get("task_id") and row.get("scene_id")):
+        return slot_id
+    return f"{row['task_id']}:{row['scene_id']}:{row.get('scene_round')}"
 
 
 @dataclasses.dataclass
@@ -159,6 +175,8 @@ class SaveJob:
     raw_episode_payload: Any | None = None
     videos: dict[str, list[np.ndarray]] | None = None
     raw_video_samples: dict[str, list[CollectionRawSample]] | None = None
+    sim_state_rows: list[dict[str, Any]] | None = None
+    sim_state_raw_rows: list[dict[str, Any]] | None = None
     video_fps: float | None = None
     dataset_dir: Path | None = None
     intervention_segments: list[RolloutInterventionSegment] = dataclasses.field(
@@ -302,13 +320,15 @@ class EpisodeLogger:
         # parquet, video, or meta writes.
         self._async_save = async_save
         self._save_queue_max = max(1, save_queue_max)
-        # Per dataset_dir monotonic counters for collection episodes. Seeded from disk
-        # on first use, then only advanced — allocation is decoupled from the async save
-        # queue so a job that is mid-flush (already on disk but not yet popped off
-        # _save_jobs) can never be counted twice and collide a later episode's index.
+        # Per dataset_dir provisional counters for collection episodes. They keep the
+        # recording thread and the save queue moving without touching the dataset, and
+        # stay decoupled from the async queue so a job that is mid-flush can never be
+        # counted twice. The authoritative index of an episode is settled against disk
+        # under the dataset lock when its save runs, because peer processes write the
+        # same directory; _collection_global_floor is the one-time scan that places this
+        # process above whatever frames the dataset already held when it started.
         self._collection_next_index: dict[Path, int] = {}
-        self._collection_next_global: dict[Path, int] = {}
-        self._collection_task_indices: dict[Path, dict[str, int]] = {}
+        self._collection_global_floor: dict[Path, int] = {}
         self._completed_episode_counts: dict[Path, int] = {}
         self._completed_episode_signatures: dict[Path, tuple[int, int, int]] = {}
         self._save_jobs: list[SaveJob] = []
@@ -601,9 +621,7 @@ class EpisodeLogger:
                 patched = True
                 break
         if patched:
-            with path.open("w") as f:
-                for row in rows:
-                    f.write(json.dumps(row, ensure_ascii=False) + "\n")
+            self._write_jsonl_atomic(path, rows)
             if self._eval_mode and ("score" in fields or "max_score" in fields):
                 self._write_info_json()
         return patched
@@ -635,13 +653,14 @@ class EpisodeLogger:
             return False
         dataset_dir = self._collection_dataset_dir(task, collection_dataset)
         with self._lock:
-            if any(
+            saving = any(
                 job.episode_index == episode_index
                 and (job.dataset_dir or self._log_dir) == dataset_dir
                 for job in self._save_jobs
-            ):
-                return False
-            return LeRobotDatasetIO(dataset_dir).mark_qc(episode_index, verdict, note)
+            )
+        if saving:
+            return False
+        return LeRobotDatasetIO(dataset_dir).mark_qc(episode_index, verdict, note)
 
     def patch_episode_meta_by_clip(self, clip_id: str, **fields: Any) -> int | None:
         """Merge eval metadata into an existing or still-saving episode for clip_id.
@@ -911,6 +930,7 @@ class EpisodeLogger:
                     job.finished_wall_time = time.time()
                     self._remember_finished_job(job)
                     self._save_jobs = [j for j in self._save_jobs if j is not job]
+                self._request_render(job)
             del job
             with self._lock:
                 episode_active = self._active
@@ -918,6 +938,15 @@ class EpisodeLogger:
                 logger.info("[SAVE_MEMORY_RELEASE] deferred=active_episode")
             else:
                 _trim_process_allocator()
+
+    def _request_render(self, job: SaveJob) -> None:
+        """Ask the configured render service to render this just-saved episode."""
+        render_service = (self._collection or {}).get("render_service") or {}
+        url = str(render_service.get("url") or "")
+        is_collection_job = job.collection_columns is not None or job.collection_payload is not None
+        if not url or not is_collection_job or job.dataset_dir is None:
+            return
+        notify_render_service(url, str(job.dataset_dir), job.episode_index)
 
     def _write_job(self, job: SaveJob) -> None:
         """Background-thread disk write from a frozen snapshot (no live buffers)."""
@@ -1088,6 +1117,10 @@ class EpisodeLogger:
                 ]
                 for key, samples in batch.vectors.items()
             },
+            sim_states=[
+                CollectionRawSample(sample.timestamp, _copy_raw_value(sample.value))
+                for sample in batch.sim_states
+            ],
             start_time=batch.start_time,
             end_time=batch.end_time,
         )
@@ -1694,6 +1727,19 @@ class EpisodeLogger:
             return index
 
     def _write_collection_job(self, job: SaveJob) -> None:
+        """Write one collection episode, exclusive against the dataset's other writers.
+
+        Several stations record into the same dataset directory, so the index
+        allocation and the whole data/meta transaction run under that directory's
+        lock: a peer can neither take the index this job allocates nor have its
+        committed rows reverted by this job's rollback.
+        """
+        dataset_dir = job.dataset_dir or self._log_dir
+        with dataset_lock(dataset_dir).acquire():
+            self._claim_collection_indices(job, dataset_dir)
+            self._write_episode_job(job, dataset_dir)
+
+    def _write_episode_job(self, job: SaveJob, dataset_dir: Path) -> None:
         if job.collection_payload is not None:
             if self._collection_writer is None:
                 raise ValueError("collection save job has payload but no collection writer")
@@ -1702,7 +1748,6 @@ class EpisodeLogger:
         row = job.collection_episode_row
         if columns is None or row is None:
             raise ValueError("collection save job missing columns or episode row")
-        dataset_dir = job.dataset_dir or self._log_dir
         path = self._parquet_path(job.episode_index, dataset_dir)
         transaction_dir = dataset_dir / f".collection-save-{job.episode_index}-{uuid.uuid4().hex}"
         targets = [
@@ -1720,6 +1765,8 @@ class EpisodeLogger:
                 for camera in self._camera_keys
                 if resolve_video_key(self._keys, camera) is not None
             )
+        sim_state_paths = self._sim_state_paths(job, dataset_dir)
+        targets.extend(sim_state_paths)
         metadata_targets = {
             self._meta_path(name, dataset_dir)
             for name in (
@@ -1751,6 +1798,7 @@ class EpisodeLogger:
             path.parent.mkdir(parents=True, exist_ok=True)
             pq.write_table(pa.table(columns), str(path))
             self._write_videos(job.episode_index, job.videos, job.video_fps, dataset_dir)
+            self._write_sim_state_sidecars(job, dataset_dir)
             episode_stats = {key: _vector_episode_stats(vals) for key, vals in columns.items()}
             if job.videos:
                 for video_key, frames in job.videos.items():
@@ -1807,6 +1855,33 @@ class EpisodeLogger:
                     writer.append_data(np.ascontiguousarray(frame))
             finally:
                 writer.close()
+
+    def _sim_state_paths(self, job: SaveJob, dataset_dir: Path) -> tuple[Path, ...]:
+        episode_index = job.episode_index
+        root = dataset_dir / "meta" / "sim_state"
+        # Include both exact paths in every collection transaction so replacing a
+        # simulator episode with a real-robot episode cannot leave stale traces.
+        return (
+            root / f"episode_{episode_index:06d}.jsonl",
+            root / "raw" / f"episode_{episode_index:06d}.jsonl",
+        )
+
+    def _write_sim_state_sidecars(self, job: SaveJob, dataset_dir: Path) -> None:
+        if job.sim_state_rows is None and job.sim_state_raw_rows is None:
+            return
+        root = dataset_dir / "meta" / "sim_state"
+        root.mkdir(parents=True, exist_ok=True)
+        (root / "raw").mkdir(parents=True, exist_ok=True)
+        if job.sim_state_rows is not None:
+            self._write_jsonl_atomic(
+                root / f"episode_{job.episode_index:06d}.jsonl",
+                job.sim_state_rows,
+            )
+        if job.sim_state_raw_rows is not None:
+            self._write_jsonl_atomic(
+                root / "raw" / f"episode_{job.episode_index:06d}.jsonl",
+                job.sim_state_raw_rows,
+            )
 
     def wait_for_saves(
         self,
@@ -2464,19 +2539,22 @@ class EpisodeLogger:
 
     # -- dataset-resume discovery (so reruns append, not overwrite) -------------
 
-    def _discover_next_episode_index(self, dataset_dir: Path | None = None) -> int:
-        root = dataset_dir or self._log_dir
+    def _occupied_episode_indices(self, dataset_dir: Path, rows: list[dict[str, Any]]) -> set[int]:
+        """Episode indices the dataset already holds, from its rows and its parquet."""
         indices = {
-            int(row["episode_index"])
-            for row in _read_jsonl(self._meta_path("episodes.jsonl", dataset_dir))
-            if row.get("episode_index") is not None
+            int(row["episode_index"]) for row in rows if row.get("episode_index") is not None
         }
-        for path in (root / "data").glob("chunk-*/episode_*.parquet"):
+        for path in (dataset_dir / "data").glob("chunk-*/episode_*.parquet"):
             try:
                 indices.add(int(path.stem.rsplit("_", 1)[1]))
             except (IndexError, ValueError):
                 continue
-        return max(indices, default=-1) + 1
+        return indices
+
+    def _discover_next_episode_index(self, dataset_dir: Path | None = None) -> int:
+        root = dataset_dir or self._log_dir
+        rows = _read_jsonl(self._meta_path("episodes.jsonl", dataset_dir))
+        return max(self._occupied_episode_indices(root, rows), default=-1) + 1
 
     def _load_existing_tasks(self, dataset_dir: Path | None = None) -> dict[str, int]:
         mapping: dict[str, int] = {}
@@ -2573,14 +2651,16 @@ class EpisodeLogger:
         }
 
     def _resolve_collection_task(self, dataset_dir: Path, task: str) -> tuple[int, dict[str, int]]:
-        with self._lock:
-            mapping = self._collection_task_indices.get(dataset_dir)
-            if mapping is None:
-                mapping = self._load_existing_tasks(dataset_dir)
-                self._collection_task_indices[dataset_dir] = mapping
-            if task not in mapping:
-                mapping[task] = len(mapping)
-            return mapping[task], dict(mapping)
+        """The dataset's task table plus ``task``, read from its own tasks.jsonl.
+
+        The table is read rather than cached because peer stations add tasks to the
+        same dataset, and it is written back as this merged mapping so their rows
+        survive a save.
+        """
+        mapping = self._load_existing_tasks(dataset_dir)
+        if task not in mapping:
+            mapping[task] = max(mapping.values(), default=-1) + 1
+        return mapping[task], mapping
 
     def _resolve_task_index(self, task: str) -> int:
         if task not in self._task_to_index:
@@ -2595,18 +2675,21 @@ class EpisodeLogger:
         A re-take replaces its slot's previous recording in place, the way an eval
         re-run replaces its trial, instead of appending a second take per slot.
         """
-        slot_id = str(episode_meta.get("slot_id") or "")
+        return self._slot_episode_index(
+            _read_jsonl(self._meta_path("episodes.jsonl", dataset_dir)), episode_meta
+        )
+
+    @staticmethod
+    def _slot_episode_index(rows: list[dict[str, Any]], episode_meta: dict[str, Any]) -> int | None:
+        """Latest recorded episode index of one slot, or None when it has none."""
+        slot_id = _slot_id(episode_meta)
         if not slot_id:
             return None
-        matches = []
-        for row in _read_jsonl(self._meta_path("episodes.jsonl", dataset_dir)):
-            row_slot = str(row.get("slot_id") or "")
-            if not row_slot and row.get("task_id") and row.get("scene_id"):
-                row_slot = f"{row['task_id']}:{row['scene_id']}:{row.get('scene_round')}"
-            if row_slot == slot_id:
-                index = row.get("episode_index")
-                if index is not None:
-                    matches.append(int(index))
+        matches = [
+            int(row["episode_index"])
+            for row in rows
+            if row.get("episode_index") is not None and _slot_id(row) == slot_id
+        ]
         # Match the latest take displayed by the slot grid.
         return max(matches, default=None)
 
@@ -2632,13 +2715,54 @@ class EpisodeLogger:
             self._collection_next_index[dataset_dir] = index + 1
             return index
 
-    def _next_collection_global_index(self, dataset_dir: Path, n_frames: int) -> int:
+    def _claim_collection_indices(self, job: SaveJob, dataset_dir: Path) -> None:
+        """Settle the indices of one collection save against the dataset on disk.
+
+        Runs under the dataset lock, so a slot another station already recorded is
+        replaced in place and every index is taken past what the dataset holds —
+        not past this process's own view of it.
+        """
+        rows = _read_jsonl(self._meta_path("episodes.jsonl", dataset_dir))
+        job.episode_index = self._claim_collection_episode_index(job, dataset_dir, rows)
+        job.global_index = self._claim_collection_global_index(dataset_dir, rows)
+        job.task_index, job.task_to_index = self._resolve_collection_task(dataset_dir, job.task)
+
+    def _claim_collection_episode_index(
+        self, job: SaveJob, dataset_dir: Path, rows: list[dict[str, Any]]
+    ) -> int:
+        """Authoritative episode index: the slot's recording, or a free index."""
+        existing = self._slot_episode_index(rows, job.episode_meta)
+        if existing is not None:
+            return existing
+        occupied = self._occupied_episode_indices(dataset_dir, rows)
+        index = job.episode_index
+        if index in occupied:
+            index = max(occupied, default=-1) + 1
         with self._lock:
-            if dataset_dir not in self._collection_next_global:
-                self._collection_next_global[dataset_dir] = self._load_global_index(dataset_dir)
-            index = self._collection_next_global[dataset_dir]
-            self._collection_next_global[dataset_dir] = index + n_frames
-            return index
+            self._collection_next_index[dataset_dir] = max(
+                self._collection_next_index.get(dataset_dir, index), index + 1
+            )
+        return index
+
+    def _claim_collection_global_index(self, dataset_dir: Path, rows: list[dict[str, Any]]) -> int:
+        """First free dataset-global frame index, cross-checked against the rows.
+
+        Each row records the ``index`` column start it wrote, so a peer station's
+        committed episodes are accounted for without re-reading every parquet; the
+        one-time scan covers episodes recorded before that key existed.
+        """
+        with self._lock:
+            floor = self._collection_global_floor.get(dataset_dir)
+        if floor is None:
+            floor = self._load_global_index(dataset_dir)
+            with self._lock:
+                self._collection_global_floor[dataset_dir] = floor
+        recorded = 0
+        for row in rows:
+            start = row.get("global_index_start")
+            if start is not None:
+                recorded = max(recorded, int(start) + int(row.get("length", 0)))
+        return max(floor, recorded)
 
     # -- path helpers (mirror transport.dataset layout so output is replayable) -
 

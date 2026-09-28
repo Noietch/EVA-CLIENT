@@ -8,6 +8,7 @@ in that directory's ``meta/qc.jsonl``.
 
 from __future__ import annotations
 
+import socket
 from pathlib import Path
 
 import yaml
@@ -57,8 +58,8 @@ def runtime_dir(config: ConfigDict) -> Path:
 
 
 def slot_state_path(config: ConfigDict, dataset: str) -> Path:
-    """Where the console keeps one dataset's deferred/selected slot state."""
-    return runtime_dir(config) / "collection_slots" / f"{dataset}.json"
+    """Keep each host's console cursor separate on a shared runtime directory."""
+    return runtime_dir(config) / "collection_slots" / socket.gethostname() / f"{dataset}.json"
 
 
 def task_set_root(config: ConfigDict, dataset: str) -> Path | None:

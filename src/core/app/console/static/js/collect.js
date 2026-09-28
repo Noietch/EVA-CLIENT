@@ -483,11 +483,10 @@ function renderSceneGridCells(host, scene) {
   }));
 }
 
-function renderCurrentSceneGrid(scene) {
+function renderCurrentSceneGrid(scene, task) {
   const host = $("collect-current-scene-grid");
   if (!host) return;
   renderSceneGridCells(host, scene);
-  const task = scenePlanTask();
   const byPosition = new Map();
   (scene && scene.placements || []).forEach((placement) => {
     const positionId = String(placement.position_id || "");
@@ -1991,11 +1990,15 @@ function renderCollect() {
 
     $("collect-current-position").textContent = displaySlot
       ? `${Number(displaySlot.ordinal) + 1} / ${totalSlots}` : `${totalSlots} / ${totalSlots}`;
-    renderCurrentSceneGrid(scenePlanScene());
+    const displayTask = scenePlanTasks().find((task) => task.task_id === displaySlot?.task_id);
+    const displayScene = (S.SCENE_PLAN?.scenes || []).find(
+      (scene) => scene.scene_id === displaySlot?.scene_id
+    );
+    renderCurrentSceneGrid(displayScene, displayTask);
     $("collect-current-task").textContent = displaySlot
       ? (displaySlot.task_zh || displaySlot.task || displaySlot.episode?.task || displaySlot.episode?.prompt || "--") : "--";
     $("collect-current-task-en").textContent = displaySlot && displaySlot.task_zh
-      ? (scenePlanTask()?.prompt_en || displaySlot.task || "") : "";
+      ? (displayTask?.prompt_en || displaySlot.task || "") : "";
     $("collect-current-round").textContent = displaySlot
       ? t("collect.roundValue", {
         round: Number(displaySlot.round_index) + 1,
@@ -2064,7 +2067,6 @@ function renderCollect() {
       slotPlan.sceneFilter,
       slotPlan.taskFilter,
       slotPlan.showAll,
-      slotPlan.selectedSlotId,
       S.collectTaskSelectionPending,
       JSON.stringify(slotPlan.slots || []),
     ].join("\n");
@@ -2072,6 +2074,9 @@ function renderCollect() {
       collectItemsRenderKey = renderKey;
       renderCollectTiles(slotPlan.slots || []);
     }
+    $("collect-queue-tiles").querySelectorAll("[data-slot-id]").forEach((tile) => {
+      tile.classList.toggle("selected", tile.dataset.slotId === slotPlan.selectedSlotId);
+    });
     renderCollectControls();
     if (collectionSet && !collectionSlotsPollPromise) {
       queueMicrotask(() => pollCollectionSlots(!slotPlan.loaded));

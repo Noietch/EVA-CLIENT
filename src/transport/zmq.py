@@ -71,6 +71,9 @@ class WireObservation:
             mode only), used as action_qpos by the collection API.
         eef: optional actuator group_name -> end-effector pose array.
         action_eef: optional teleop end-effector action aligned with this frame.
+        sim_state: optional simulator trace for this frame. Real-robot publishers omit
+            it; simulator publishers use a JSON-shaped dict with object poses and the
+            action applied by the previous physics step.
     """
 
     t: float
@@ -79,6 +82,7 @@ class WireObservation:
     action: np.ndarray | None = None
     eef: dict[str, np.ndarray] | None = None
     action_eef: np.ndarray | None = None
+    sim_state: dict[str, Any] | None = None
     hil_supported: bool = False
     hil_active: bool = False
     hil_error: str = ""
@@ -127,6 +131,8 @@ def pack_observation(obs: WireObservation) -> bytes:
         payload["eef"] = {k: np.asarray(v, dtype=np.float32) for k, v in obs.eef.items()}
     if obs.action_eef is not None:
         payload["action_eef"] = np.asarray(obs.action_eef, dtype=np.float32)
+    if obs.sim_state is not None:
+        payload["sim_state"] = obs.sim_state
     payload["hil_supported"] = bool(obs.hil_supported)
     payload["hil_active"] = bool(obs.hil_active)
     if obs.hil_error:
@@ -154,6 +160,7 @@ def unpack_observation(payload: bytes) -> WireObservation:
     action = raw.get("action")
     eef = raw.get("eef")
     action_eef = raw.get("action_eef")
+    sim_state = raw.get("sim_state")
     return WireObservation(
         t=float(raw["t"]),
         images={k: np.asarray(v) for k, v in raw["images"].items()},
@@ -161,6 +168,7 @@ def unpack_observation(payload: bytes) -> WireObservation:
         action=None if action is None else np.asarray(action, dtype=np.float32),
         eef=(None if eef is None else {k: np.asarray(v, dtype=np.float32) for k, v in eef.items()}),
         action_eef=None if action_eef is None else np.asarray(action_eef, dtype=np.float32),
+        sim_state=sim_state,
         hil_supported=bool(raw.get("hil_supported", False)),
         hil_active=bool(raw.get("hil_active", False)),
         hil_error=str(raw.get("hil_error", "")),
@@ -774,6 +782,13 @@ class _ObservationReader:
                     CollectionRawSample(
                         timestamp=wire_obs.t,
                         value=np.asarray(wire_obs.action_eef, dtype=np.float32),
+                    )
+                )
+            if wire_obs.sim_state is not None:
+                batch.sim_states.append(
+                    CollectionRawSample(
+                        timestamp=wire_obs.t,
+                        value={**wire_obs.sim_state, "wire_timestamp": wire_obs.t},
                     )
                 )
             return batch

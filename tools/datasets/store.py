@@ -38,9 +38,9 @@ DEFAULT_LAYOUT = {
     "unit": "mm",
     "orientation": "x_right_y_down",
     "calibration_status": "unverified",
-    "bounds": {"width": 1500, "height": 500},
+    "bounds": {"width": 840, "height": 280},
     "sampling_points": [
-        {"position_id": f"P{position}", "x": column * 250, "y": row * 250}
+        {"position_id": f"P{position}", "x": column * 140, "y": row * 140}
         for row, positions in enumerate(DEFAULT_POSITION_ROWS)
         for column, position in enumerate(positions)
     ],

@@ -467,7 +467,7 @@ function gridGeometry(batch) {
     [18, 19, 7, 8, 9, 20, 21],
   ];
   const points = configured.length ? configured : defaultRows.flatMap((row, y) => (
-    row.map((id, x) => ({ position_id: "P" + id, x: x * 250, y: y * 250 }))
+    row.map((id, x) => ({ position_id: "P" + id, x: x * 140, y: y * 140 }))
   ));
   const normalized = points.map((point, index) => ({
     position_id: String(point.position_id || "P" + (index + 1)),
@@ -488,8 +488,8 @@ function gridGeometry(batch) {
       return {
         ...configured,
         position_id: "P" + id,
-        x: Number.isFinite(configured.x) ? configured.x : x * 250,
-        y: Number.isFinite(configured.y) ? configured.y : y * 250,
+        x: Number.isFinite(configured.x) ? configured.x : x * 140,
+        y: Number.isFinite(configured.y) ? configured.y : y * 140,
       };
     }));
     return {

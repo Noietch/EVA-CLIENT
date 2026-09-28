@@ -8,6 +8,7 @@ into a SaveJob the parent EpisodeLogger flushes to disk.
 
 from __future__ import annotations
 
+import bisect
 import dataclasses
 import json
 import logging
@@ -36,6 +37,7 @@ from core.recorder.episode import (
 )
 from core.recorder.lerobot_meta import build_info
 from core.types import CollectionRawBatch, Observation
+from core.utils.dataset_lock import dataset_lock
 from core.utils.images import resize_direct
 
 if TYPE_CHECKING:
@@ -229,6 +231,8 @@ class CollectionEpisodeWriter:
             for key, samples in batch.vectors.items():
                 self._raw_batch.vectors.setdefault(key, []).extend(samples)
                 self._track_raw_sample_times(samples)
+            self._raw_batch.sim_states.extend(batch.sim_states)
+            self._track_raw_sample_times(batch.sim_states)
 
     def _track_raw_sample_times(self, samples: list[Any]) -> None:
         for sample in samples:
@@ -244,7 +248,7 @@ class CollectionEpisodeWriter:
     def _raw_sample_count(self) -> int:
         return sum(len(samples) for samples in self._raw_batch.images.values()) + sum(
             len(samples) for samples in self._raw_batch.vectors.values()
-        )
+        ) + len(self._raw_batch.sim_states)
 
     def _decode_raw_snapshots(self, snapshots: Iterable[RawCollectionSnapshot]) -> None:
         for snapshot in snapshots:
@@ -261,7 +265,11 @@ class CollectionEpisodeWriter:
 
         streams = [
             samples
-            for family in (self._raw_batch.images, self._raw_batch.vectors)
+            for family in (
+                self._raw_batch.images,
+                self._raw_batch.vectors,
+                {"sim_state": self._raw_batch.sim_states},
+            )
             for samples in family.values()
             if samples
         ]
@@ -569,6 +577,7 @@ class CollectionEpisodeWriter:
             )
 
         collection_fps = self._episode_average_fps()
+        sim_state_rows, sim_state_raw_rows = self._sim_state_sidecars()
         videos = self._snapshot_videos()
         video_prepared = time.perf_counter()
         n_frames = len(self._records)
@@ -593,8 +602,6 @@ class CollectionEpisodeWriter:
         fps = float(self._logger._fps)
         dataset_dir = job.dataset_dir or self._logger._collection_dataset_dir(job.task)
         global_index = job.global_index
-        if global_index < 0:
-            global_index = self._logger._next_collection_global_index(dataset_dir, n_frames)
         columns.update(
             {
                 "timestamp": [i / fps for i in range(n_frames)],
@@ -613,6 +620,7 @@ class CollectionEpisodeWriter:
             "episode_index": job.episode_index,
             "tasks": [job.task],
             "length": n_frames,
+            "global_index_start": global_index,
             "quality": "red" if self._quality_issues else "green",
             "quality_issues": [dataclasses.asdict(issue) for issue in self._quality_issues],
             "video_keys": sorted(videos or {}),
@@ -647,6 +655,8 @@ class CollectionEpisodeWriter:
         job.collection_episode_row = row
         job.videos = videos
         job.video_fps = fps
+        job.sim_state_rows = sim_state_rows
+        job.sim_state_raw_rows = sim_state_raw_rows
         job.dataset_dir = dataset_dir
         job.collection_payload = None
         logger.info(
@@ -686,7 +696,57 @@ class CollectionEpisodeWriter:
                 else:
                     stream_parts.append(f"{key}:0")
             parts.append(f"{family}=" + (",".join(stream_parts) if stream_parts else "none"))
+        if self._raw_batch.sim_states:
+            parts.append(
+                "sim_states="
+                f"{len(self._raw_batch.sim_states)}["
+                f"{self._raw_batch.sim_states[0].timestamp:.6f},"
+                f"{self._raw_batch.sim_states[-1].timestamp:.6f}]"
+            )
         return " ".join(parts)
+
+    def _sim_state_sidecars(
+        self,
+    ) -> tuple[list[dict[str, Any]] | None, list[dict[str, Any]] | None]:
+        """Build raw and fixed-grid simulator trace rows for one saved episode."""
+        samples = sorted(self._raw_batch.sim_states, key=lambda sample: sample.timestamp)
+        if not samples:
+            return None, None
+        raw_rows = []
+        for sample in samples:
+            row = {"source_timestamp": float(sample.timestamp)}
+            row.update(sample.value)
+            raw_rows.append(row)
+
+        sample_times = [float(sample.timestamp) for sample in samples]
+        aligned_rows = []
+        for frame_index, frame in enumerate(self._records):
+            timestamp = float(frame.timestamp)
+            index = bisect.bisect_left(sample_times, timestamp)
+            if index == 0:
+                selected = 0
+            elif index == len(samples):
+                selected = len(samples) - 1
+            elif timestamp - sample_times[index - 1] <= sample_times[index] - timestamp:
+                selected = index - 1
+            else:
+                selected = index
+            row = {
+                "frame_index": frame_index,
+                "timestamp": frame_index / float(self._logger._fps),
+                "frame_timestamp": timestamp,
+                "source_timestamp": sample_times[selected],
+                "alignment_offset_s": sample_times[selected] - timestamp,
+            }
+            row.update(
+                {
+                    key: value
+                    for key, value in samples[selected].value.items()
+                    if key != "wire_timestamp"
+                }
+            )
+            aligned_rows.append(row)
+        return aligned_rows, raw_rows
 
     def cancel_episode(self) -> None:
         """Discard the in-flight episode and drop all raw snapshot buffers."""
@@ -831,19 +891,23 @@ class CollectionEpisodeWriter:
 
     def ensure_collection_started_at(self, dataset_dir: Path, started_at: str) -> None:
         info_path = self._logger._meta_path("info.json", dataset_dir)
-        existing_started_at = self._existing_collection_started_at(info_path)
-        if existing_started_at:
+        if self._existing_collection_started_at(info_path):
             return
-        episodes = _read_jsonl(self._logger._meta_path("episodes.jsonl", dataset_dir))
-        if episodes:
-            logger.warning(
-                "Collection dataset %s predates collection_started_at metadata; "
-                "leaving it unset until explicitly backfilled",
-                dataset_dir,
-            )
-            return
-        info_path.parent.mkdir(parents=True, exist_ok=True)
-        self._write_info_json(dataset_dir, collection_started_at=started_at)
+        # First recording into the dataset: write it once, exclusive of the other
+        # stations, so a concurrent episode save cannot revert it with its rollback.
+        with dataset_lock(dataset_dir).acquire():
+            if self._existing_collection_started_at(info_path):
+                return
+            episodes = _read_jsonl(self._logger._meta_path("episodes.jsonl", dataset_dir))
+            if episodes:
+                logger.warning(
+                    "Collection dataset %s predates collection_started_at metadata; "
+                    "leaving it unset until explicitly backfilled",
+                    dataset_dir,
+                )
+                return
+            info_path.parent.mkdir(parents=True, exist_ok=True)
+            self._write_info_json(dataset_dir, collection_started_at=started_at)
 
     def _write_info_json(
         self,

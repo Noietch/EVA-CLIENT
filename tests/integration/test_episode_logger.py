@@ -19,13 +19,13 @@ import pytest
 from core.config import ConfigDict
 from core.recorder import episode as episode_module
 from core.recorder.episode import EpisodeLogger, sanitize_path_component
-from core.utils.lerobot import LeRobotDatasetIO
 from core.types import (
     CollectionRawBatch,
     CollectionRawSample,
     Observation,
     RawCollectionSnapshot,
 )
+from core.utils.lerobot import LeRobotDatasetIO
 from robots.base import (
     ActuatorGroup,
     CameraSpec,
@@ -120,7 +120,14 @@ def _collection_logger(
     log_dir,
     *,
     async_save: bool = False,
+    shared_dataset: bool = False,
 ) -> EpisodeLogger:
+    """A collection logger over ``log_dir``.
+
+    With ``shared_dataset`` the logger is bound to a mounted task set, so every
+    prompt records into one dataset directory instead of one directory per prompt —
+    the way two stations collecting the same task set share their output.
+    """
     return EpisodeLogger(
         log_dir,
         _robot(),
@@ -134,6 +141,7 @@ def _collection_logger(
         collection=ConfigDict(
             enabled=True,
             storage=ConfigDict(data_root=str(_collection_data_root(log_dir))),
+            task_set_dir=str(log_dir / "task_sets") if shared_dataset else "",
             tasks={},
             schema=ConfigDict(
                 robot_type="fake_arm",

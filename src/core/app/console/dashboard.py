@@ -14,6 +14,7 @@ from core.utils.dataset_upload import (
     uploaded_source_episode_indices,
     uploaded_source_episode_indices_for_export,
 )
+from core.utils.qc import qc_state
 from tools.conversion import DATASET_EXPORT_FORMATS
 
 _DATASET_CACHE_MAX = 32
@@ -108,7 +109,10 @@ def _dataset_mode(dataset_dir: Path) -> str | None:
     if dataset_dir.parent.name == "episodes":
         return "eval"
     # Collection datasets live under the shared <data_root>/datasets tree.
-    if any(part in _COLLECTION_ROOT_NAMES for part in dataset_dir.parts) or "datasets" in dataset_dir.parts:
+    if (
+        any(part in _COLLECTION_ROOT_NAMES for part in dataset_dir.parts)
+        or "datasets" in dataset_dir.parts
+    ):
         return "collection"
     return None
 
@@ -197,16 +201,11 @@ def _episode_record(
     status = str(row.get("status") or "valid").lower()
     quality = str(row.get("quality") or "green").lower()
     qc_verdict = str(row.get("qc_verdict") or ("fail" if status == "failed" else "")).lower()
-    valid = (
-        quality != "red"
-        and qc_verdict != "fail"
-        and status
-        not in {
-            "invalid",
-            "cancelled",
-            "failed",
-        }
-    )
+    valid = qc_state(qc_verdict, quality) != "failed" and status not in {
+        "invalid",
+        "cancelled",
+        "failed",
+    }
     robot_id = str(row.get("robot_id") or info.get("robot_type") or "unknown")
     result = row.get("eval_result")
     if result is None and mode == "eval" and row.get("score") is not None:
@@ -248,6 +247,7 @@ def _load_dataset_records(
         raw_dir / "meta" / "info.json",
         raw_dir / "meta" / "tasks.jsonl",
         raw_dir / "meta" / "episodes.jsonl",
+        raw_dir / "meta" / "qc.jsonl",
     )
     signatures = tuple(_file_signature(path) for path in paths)
     key = (str(raw_dir.resolve()), mode, signatures)
@@ -263,9 +263,15 @@ def _load_dataset_records(
         for row in _read_jsonl(paths[1])
         if row.get("task")
     }
+    qc_by_episode = {
+        int(row["episode_index"]): row
+        for row in _read_jsonl(paths[3])
+    }
     records = []
     for row in _read_jsonl(paths[2]):
-        record = _episode_record(row, raw_dir, mode, info, requirements)
+        qc = qc_by_episode.get(int(row.get("episode_index", -1)), {})
+        qc_fields = {key: value for key, value in qc.items() if key.startswith("qc_")}
+        record = _episode_record({**row, **qc_fields}, raw_dir, mode, info, requirements)
         if record is not None:
             records.append(record)
     value = (info, requirements, records)

@@ -10,14 +10,38 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
+
+from core.utils.dataset_lock import dataset_lock
+
+
+def _write_jsonl_atomic(path: Path, rows: Iterable[dict[str, Any]]) -> None:
+    """Replace one JSONL file after serializing its complete rows."""
+    replacement = path.with_suffix(f"{path.suffix}.tmp-{uuid4().hex}")
+    try:
+        body = "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows)
+        replacement.write_text(body, encoding="utf-8")
+        os.replace(replacement, path)
+    finally:
+        replacement.unlink(missing_ok=True)
+
+
+def _write_json_atomic(path: Path, payload: Any) -> None:
+    """Replace one JSON file after serializing it, so readers never see it torn."""
+    replacement = path.with_suffix(f"{path.suffix}.tmp-{uuid4().hex}")
+    try:
+        replacement.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        os.replace(replacement, path)
+    finally:
+        replacement.unlink(missing_ok=True)
 
 
 class LeRobotDatasetIO:
@@ -253,34 +277,37 @@ class LeRobotDatasetIO:
 
         QC rows are keyed by episode index. Keep that key unique and sort the file
         after every write so a newly reviewed episode cannot appear to move another
-        episode when the console reloads the ledger.
+        episode when the console reloads the ledger. The ledger is rewritten whole,
+        so the read and the write hold the dataset lock: two stations reviewing at
+        once would otherwise each drop the other's rows.
         """
         path = self.root / "meta" / "episodes.jsonl"
         qc_path = self.root / "meta" / "qc.jsonl"
-        if not path.exists():
-            return False
-        rows = []
-        with path.open() as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    rows.append(json.loads(line))
-        if not any(int(row.get("episode_index", -1)) == episode for row in rows):
-            return False
-        qc_by_episode = self._read_qc_by_episode(qc_path)
-        qc_row = qc_by_episode.get(episode)
-        if qc_row is None:
-            qc_row = {"episode_index": episode}
-            qc_by_episode[episode] = qc_row
-        if not edit(qc_row):
-            return False
-        timestamp = datetime.now(UTC)
-        if "qc_updated_at" in qc_row:
-            previous = datetime.fromisoformat(qc_row["qc_updated_at"].replace("Z", "+00:00"))
-            timestamp = max(timestamp, previous + timedelta(microseconds=1))
-        qc_row["qc_updated_at"] = timestamp.isoformat(timespec="microseconds")
-        self._write_canonical_qc(qc_path, qc_by_episode)
-        return True
+        with dataset_lock(self.root).acquire():
+            if not path.exists():
+                return False
+            rows = []
+            with path.open() as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        rows.append(json.loads(line))
+            if not any(int(row.get("episode_index", -1)) == episode for row in rows):
+                return False
+            qc_by_episode = self._read_qc_by_episode(qc_path)
+            qc_row = qc_by_episode.get(episode)
+            if qc_row is None:
+                qc_row = {"episode_index": episode}
+                qc_by_episode[episode] = qc_row
+            if not edit(qc_row):
+                return False
+            timestamp = datetime.now(UTC)
+            if "qc_updated_at" in qc_row:
+                previous = datetime.fromisoformat(qc_row["qc_updated_at"].replace("Z", "+00:00"))
+                timestamp = max(timestamp, previous + timedelta(microseconds=1))
+            qc_row["qc_updated_at"] = timestamp.isoformat(timespec="microseconds")
+            self._write_canonical_qc(qc_path, qc_by_episode)
+            return True
 
     @staticmethod
     def _read_qc_by_episode(qc_path: Path) -> dict[int, dict]:
@@ -305,28 +332,20 @@ class LeRobotDatasetIO:
     @staticmethod
     def _write_canonical_qc(qc_path: Path, by_episode: dict[int, dict]) -> None:
         qc_path.parent.mkdir(parents=True, exist_ok=True)
-        replacement = qc_path.with_suffix(f"{qc_path.suffix}.qc.tmp-{uuid4().hex}")
-        try:
-            body = "".join(
-                json.dumps(by_episode[index], ensure_ascii=False) + "\n"
-                for index in sorted(by_episode)
-            )
-            replacement.write_text(body, encoding="utf-8")
-            os.replace(replacement, qc_path)
-        finally:
-            replacement.unlink(missing_ok=True)
+        _write_jsonl_atomic(qc_path, (by_episode[index] for index in sorted(by_episode)))
 
     def drop_qc(self, episode: int) -> bool:
         """Forget one episode's QC row so a fresh take starts unreviewed."""
         qc_path = self.root / "meta" / "qc.jsonl"
-        if not qc_path.exists():
-            return False
-        by_episode = self._read_qc_by_episode(qc_path)
-        if episode not in by_episode:
-            return False
-        del by_episode[episode]
-        self._write_canonical_qc(qc_path, by_episode)
-        return True
+        with dataset_lock(self.root).acquire():
+            if not qc_path.exists():
+                return False
+            by_episode = self._read_qc_by_episode(qc_path)
+            if episode not in by_episode:
+                return False
+            del by_episode[episode]
+            self._write_canonical_qc(qc_path, by_episode)
+            return True
 
     def read_annotation(self, episode: int) -> str:
         """Read an episode's stored language annotation from meta/episodes.jsonl.
@@ -359,31 +378,31 @@ class LeRobotDatasetIO:
         Returns False when the dataset has no episodes.jsonl or the episode is absent.
         """
         path = self.root / "meta" / "episodes.jsonl"
-        if not path.exists():
-            return False
-        rows = []
-        with path.open() as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    rows.append(json.loads(line))
-        patched = False
-        for row in rows:
-            if int(row.get("episode_index", -1)) == episode:
-                row[self._ANNOTATION_KEY] = annotation
-                patched = True
-                break
-        if not patched:
-            return False
-        with path.open("w") as f:
+        with dataset_lock(self.root).acquire():
+            if not path.exists():
+                return False
+            rows = []
+            with path.open() as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        rows.append(json.loads(line))
+            patched = False
             for row in rows:
-                f.write(json.dumps(row, ensure_ascii=False) + "\n")
-        self._write_annotation_parquet_column(episode, annotation)
-        self._declare_annotation_feature()
-        return True
+                if int(row.get("episode_index", -1)) == episode:
+                    row[self._ANNOTATION_KEY] = annotation
+                    patched = True
+                    break
+            if not patched:
+                return False
+            _write_jsonl_atomic(path, rows)
+            self._write_annotation_parquet_column(episode, annotation)
+            self._declare_annotation_feature()
+            return True
 
     def _write_annotation_parquet_column(self, episode: int, annotation: str) -> None:
-        # Rewrite the episode parquet's constant language_annotation string column in place.
+        # Rewrite the episode parquet's constant language_annotation string column,
+        # replacing the file in one step so a concurrent reader sees old or new.
         parquet_path = self.episode_parquet(episode)
         if not parquet_path.exists():
             return
@@ -395,7 +414,12 @@ class LeRobotDatasetIO:
             )
         else:
             table = table.append_column(self._ANNOTATION_KEY, arr)
-        pq.write_table(table, str(parquet_path))
+        replacement = parquet_path.with_suffix(f"{parquet_path.suffix}.tmp-{uuid4().hex}")
+        try:
+            pq.write_table(table, str(replacement))
+            os.replace(replacement, parquet_path)
+        finally:
+            replacement.unlink(missing_ok=True)
 
     def _declare_annotation_feature(self) -> None:
         # Declare language_annotation in info.json features (idempotent), matching the
@@ -408,8 +432,7 @@ class LeRobotDatasetIO:
         features = info.setdefault("features", {})
         if self._ANNOTATION_KEY not in features:
             features[self._ANNOTATION_KEY] = {"dtype": "string", "shape": [1], "names": None}
-            with open(info_path, "w") as f:
-                json.dump(info, f, indent=2, ensure_ascii=False)
+            _write_json_atomic(info_path, info)
 
     def infer_keys(self) -> dict:
         """Guess image / state / action column roles from the dataset's info.json features.

@@ -87,6 +87,12 @@ class VisPart:
     qpos_to_cfg: maps this part's qpos slice (n_joints,) to its URDF actuated-joint
         cfg (array or named dict) for yourdfpy ``update_cfg``.
     gripper_visual_ranges: (index, lo, hi) per gripper dim, for visual range remap.
+    render_exclude: raw geom names to skip when rendering the console 3D scene (e.g.
+        mobile base / wheels that never move during a fixed-base manipulation task).
+        Pure render-layer cull: kinematics, IK and data collection are untouched.
+    segments: the segment table this part was built from, kept so a consumer can read
+        which dataset dimensions drive which URDF joints (dataset QC checks their
+        bounds). Empty for a part built from a plain callable mapping.
     """
 
     name: str
@@ -97,10 +103,8 @@ class VisPart:
     n_joints: int
     qpos_to_cfg: Callable[[np.ndarray], Any]
     gripper_visual_ranges: tuple[tuple[int, float, float], ...] = ()
-    # Raw geom names to skip when rendering the console 3D scene (e.g. mobile base /
-    # wheels that never move during a fixed-base manipulation task). Pure render-layer
-    # cull: kinematics, IK and data collection are untouched.
     render_exclude: tuple[str, ...] = ()
+    segments: tuple[dict[str, Any], ...] = ()
 
     @classmethod
     def from_segments(
@@ -142,6 +146,7 @@ class VisPart:
             n_joints=n_joints,
             qpos_to_cfg=_compile_segments(segments),
             gripper_visual_ranges=gripper_visual_ranges,
+            segments=tuple(segments),
         )
 
 

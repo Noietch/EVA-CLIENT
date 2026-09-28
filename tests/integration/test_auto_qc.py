@@ -1,4 +1,4 @@
-"""Automatic QC must flag a stalled camera without touching human verdicts."""
+"""Automatic QC must flag stalled cameras and unreachable joints, human verdicts untouched."""
 
 from __future__ import annotations
 
@@ -12,14 +12,18 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from robots.zoo.dual_yam import DualYam
 from tools.datasets.auto_qc import (
     ARM_TRAVEL,
     CAMERA_OFFLINE_REASON,
     CameraMotion,
     DatasetAutoQc,
+    dataset_arm_limits,
+    limit_breaches,
     offline_cameras,
 )
 from tools.datasets.collection import (
+    JOINT_LIMIT_REASON,
     MANUAL_REVIEW_REASON,
     SHORT_EPISODE_REASON,
     STATIC_FRAMES_REASON,
@@ -137,6 +141,16 @@ def _dataset(
     return root
 
 
+def _spike_action(root: Path, episode: int, dim: int, value: float) -> None:
+    """Command one action dimension past its joint limit at the episode's midpoint."""
+    path = root / f"data/chunk-000/episode_{episode:06d}.parquet"
+    table = pq.read_table(path)
+    actions = table.column("action.qpos").to_pylist()
+    actions[len(actions) // 2][dim] = value
+    index = table.schema.get_field_index("action.qpos")
+    pq.write_table(table.set_column(index, "action.qpos", pa.array(actions)), path)
+
+
 def _catalog(tmp_path: Path, names: tuple[str, ...], episodes: int = 2) -> PlanCatalog:
     plans = tmp_path / "task_sets"
     for name in names:
@@ -235,6 +249,47 @@ def test_scan_keeps_a_uniformly_short_dataset_clean(tmp_path):
 
     assert result[SHORT_EPISODE_REASON] == 0
     assert result["flagged"] == 0
+
+
+def test_scan_rejects_a_trajectory_outside_its_joint_limits(tmp_path):
+    """A commanded position past the URDF bound rejects the take without a reviewer."""
+    dataset = _dataset(tmp_path / "collection", BATCH, frozen=())
+    _spike_action(dataset, 1, dim=3, value=1.6644)
+    catalog = _catalog(tmp_path, (BATCH,))
+    result = DatasetAutoQc(catalog, dataset, "dual_yam", threading.Event()).run(lambda *_: None)
+
+    assert (result["checked"], result["failed"], result["flagged"]) == (2, 1, 0)
+    assert result[JOINT_LIMIT_REASON] == 1
+    row = _qc_rows(dataset)[1]
+    assert row["qc_verdict"] == "fail"
+    assert row["qc_auto"] is True
+    assert row["qc_reason"] == JOINT_LIMIT_REASON
+    assert "动作超出关节极限：left_arm.joint4 最大 1.6644（限 1.5708" in row["qc_note"]
+    assert "状态超出关节极限" not in row["qc_note"]
+    assert "判红 1 条" in result["summary"]
+
+    state = catalog.state(BATCH)
+    slots = {slot["slot_id"]: slot for task in state["tasks"] for slot in task["slots"]}
+    assert slots["TASK-1:SC-1:1"]["qc_state"] == "failed"
+    assert slots["TASK-1:SC-1:0"]["qc_state"] == "passed"
+
+
+def test_limit_rule_ignores_noise_and_leaves_grippers_out():
+    limits = dataset_arm_limits(DualYam().vis_config.parts)
+    assert limits[3] == ("left_arm.joint4", -1.69297, 1.5708)
+    assert 6 not in limits and 13 not in limits
+
+    values = np.zeros((3, 14))
+    # Sim clamping and float32 noise sit at the bound without leaving it, and so does a
+    # robot's own zero offset against the URDF bound.
+    values[0, 3] = 1.5708 + 5e-6
+    values[1, 3] = 1.5708 + 0.003
+    assert limit_breaches(values, limits) == []
+
+    values[2, 3] = 1.6644
+    breach = limit_breaches(values, limits)[0]
+    assert (breach["joint"], breach["above"], breach["frames"]) == ("left_arm.joint4", True, 1)
+    assert breach["limit"] == 1.5708
 
 
 def test_offline_rule_needs_arm_travel_and_repeated_frames():
