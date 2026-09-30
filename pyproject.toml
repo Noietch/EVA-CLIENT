@@ -14,6 +14,7 @@ dependencies = [
     "jax==0.6.2",
     "jaxlib==0.6.2",
     "jaxls @ git+https://github.com/brentyi/jaxls.git@50a58be88c5ef74532f09e3f55268b4f02c490e3",
+    "mcp==2.0.0",
     "msgpack==1.1.2",
     "msgpack-numpy==0.4.8",
     "mcap==1.4.0",
@@ -24,7 +25,7 @@ dependencies = [
     "psutil==7.1.0",
     "pyarrow==23.0.0",
     "pycollada==0.9.3",
-    "pydantic==2.11.7",
+    "pydantic==2.13.5",
     "pyroki @ git+https://github.com/chungmin99/pyroki.git@388e43e1fc0d0ee382968d3dd72970fd62a0450c",
     "pyyaml==6.0.3",
     "pyzmq>=25.0.0",
@@ -51,6 +52,7 @@ viz = [
 
 [project.scripts]
 eva = "main:main"
+eva-mcp = "tools.mcp.server:main"
 
 [tool.uv]
 environments = [

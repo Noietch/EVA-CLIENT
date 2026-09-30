@@ -104,14 +104,54 @@ def _handle_command(runtime: RuntimeState, message: dict) -> dict:
     return {"ok": True, "cmd": command}
 
 
+def _handle_agent_query(runtime: RuntimeState, payload: object) -> dict:
+    """Serve MCP-oriented capability, state, camera, and operation queries."""
+    from core.app.agent_control import (
+        serialize_agent_operation,
+        serialize_agent_status,
+        serialize_camera,
+        serialize_robot_state,
+    )
+
+    if not isinstance(payload, dict):
+        return _reject("agent_query must be a JSON object")
+    action = str(payload.get("action", "")).strip()
+    try:
+        if action == "status":
+            return serialize_agent_status(runtime)
+        if action == "robot_state":
+            return serialize_robot_state(runtime)
+        if action == "operation":
+            operation_id = payload.get("operation_id")
+            return serialize_agent_operation(
+                runtime,
+                None if operation_id is None else str(operation_id),
+            )
+        if action == "camera_capture":
+            return serialize_camera(runtime, str(payload.get("camera", "")))
+    except Exception as error:
+        return _reject(str(error))
+    return _reject(f"unknown agent query: {action!r}")
+
+
 def _handle_message(runtime: RuntimeState, message: object) -> dict:
     if not isinstance(message, dict):
         return _reject("message must be a JSON object")
+    if "agent_query" in message:
+        return _handle_agent_query(runtime, message["agent_query"])
+    if "agent_command" in message:
+        from core.app.agent_control import queue_agent_command
+
+        return queue_agent_command(runtime, message["agent_command"])
+    if "agent_stop" in message:
+        from core.app.agent_control import request_agent_stop
+
+        return request_agent_stop(runtime)
     if "query" in message:
         return _handle_query(runtime, str(message.get("query", "")).strip())
     if "cmd" in message:
         return _handle_command(runtime, message)
-    return _reject("message must carry 'cmd' or 'query'")
+    return _reject("message must carry cmd, query, agent_query, agent_command, or agent_stop")
 
 
 def maybe_start_control_channel(config: ConfigDict, runtime: RuntimeState) -> None:

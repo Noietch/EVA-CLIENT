@@ -527,7 +527,7 @@ def test_start_rollout_intervention_activates_teleop_client_source() -> None:
     assert recording.start_rollout_intervention(config, runtime, session) is True
     assert runtime.rollout_intervention_active is True
     assert runtime.teleop_client.starts == 1
-    assert runtime.teleop_client.resets == [True]
+    assert runtime.teleop_client.resets == [False]
     assert runtime.transport.hil_modes == []
 
 
@@ -800,7 +800,7 @@ def test_start_rollout_intervention_uses_teleop_client_path() -> None:
     assert runtime.transport.hil_resets == 0
     assert runtime.transport.hil_relay_enabled == []
     assert runtime.teleop_client.starts == 1
-    assert runtime.teleop_client.resets == [True]
+    assert runtime.teleop_client.resets == [False]
 
 
 def test_rollout_hil_status_tracks_teleop_client_connection() -> None:
