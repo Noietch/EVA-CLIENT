@@ -177,7 +177,7 @@ If EVA-Client is useful for your research or product, please cite:
 For questions or collaboration, feel free to reach out via WeChat:
 
 <p align="left">
-  <img src="https://github.com/user-attachments/assets/b2c19c65-9573-4fcc-a921-8872653ab680" alt="WeChat QR Code" width="240" />
+  <img src="https://github.com/user-attachments/assets/3d3e63a2-e4c2-4dcc-96ef-0e15c0ac7dc3" alt="WeChat QR Code" width="240" />
 </p>
 
 ---
