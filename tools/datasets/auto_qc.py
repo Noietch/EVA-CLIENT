@@ -28,7 +28,9 @@ import pyarrow.parquet as pq
 
 import robots  # noqa: F401
 from core.registry import ROBOT_REGISTRY
+from core.utils.dataset_lock import dataset_lock
 from core.utils.lerobot import LeRobotDatasetIO
+from robots.base import Robot
 from robots.utils import VisPart
 from tools.datasets.collection import (
     CAMERA_OFFLINE_REASON,
@@ -156,9 +158,10 @@ def urdf_joint_bounds(path: Path) -> dict[str, tuple[float, float] | None]:
         limit = joint.find("limit")
         if joint.get("type") == "fixed":
             continue
-        declared = limit is not None and limit.get("lower") is not None
-        bounds[joint.get("name")] = (
-            (float(limit.get("lower")), float(limit.get("upper"))) if declared else None
+        bounds[joint.attrib["name"]] = (
+            (float(limit.attrib["lower"]), float(limit.attrib["upper"]))
+            if limit is not None and "lower" in limit.attrib
+            else None
         )
     return bounds
 
@@ -231,6 +234,164 @@ def limit_note(breaches: list[dict[str, Any]], label: str) -> str:
     return f"{label}超出关节极限：{details}"
 
 
+class EpisodeAutoQc:
+    """Run the collection QC rules for one saved episode.
+
+    The episode path is deliberately independent of ``PlanCatalog``.  Collection
+    recording can therefore run the same checks without opening the catalog's
+    cache database or reading the other episodes in the dataset.
+    """
+
+    def __init__(self, dataset_dir: Path, robot: Robot | None) -> None:
+        self.dataset_dir = dataset_dir
+        self.io = LeRobotDatasetIO(dataset_dir)
+        self.attached_to = (
+            {
+                camera.observation_key: camera.attached_to
+                for camera in robot.observation_schema.cameras
+            }
+            if robot
+            else {}
+        )
+        self.groups = robot.actuator_groups if robot else ()
+        self.arm_limits = (
+            dataset_arm_limits(robot.vis_config.parts)
+            if robot is not None and robot.vis_config is not None
+            else {}
+        )
+        inferred = self.io.infer_keys()
+        self.state_key = inferred["state"]["default"]
+        self.action_key = inferred["action"]["default"]
+        self.video_keys = self._video_keys(inferred)
+        info = json.loads((dataset_dir / "meta/info.json").read_text())
+        self.fps = float(info.get("fps", 30) or 30)
+
+    def check(self, row: dict[str, Any], fence: float | None = None) -> list[tuple[str, str]]:
+        """Return this episode's automatic findings without changing QC state."""
+        episode_index = int(row["episode_index"])
+        series = self._series(episode_index)
+        issues = [(JOINT_LIMIT_REASON, note) for note in self._limit_notes(series)]
+        issues += [
+            (CAMERA_OFFLINE_REASON, note) for note in self._camera_notes(episode_index, series)
+        ]
+        seconds = episode_seconds(row, self.fps)
+        if fence is not None and seconds < fence:
+            issues.append(
+                (
+                    SHORT_EPISODE_REASON,
+                    f"时长 {seconds:.1f}s（低于本数据集极端离群下限 {fence:.1f}s）",
+                )
+            )
+        actions = series.get(self.action_key)
+        labels = PlanCatalog._action_frame_labels(actions.tolist() if actions is not None else [])
+        analysis = PlanCatalog._frame_label_analysis(labels)
+        if analysis["static_frames_excessive"]:
+            issues.append(
+                (STATIC_FRAMES_REASON, f"中间静止帧 {analysis['middle_static_frames']} 帧")
+            )
+        issues.extend(
+            (
+                MANUAL_REVIEW_REASON,
+                f"{quality_issue['code']}: {quality_issue['detail']}",
+            )
+            for quality_issue in row.get("quality_issues") or []
+        )
+        return issues
+
+    def record(self, row: dict[str, Any], issues: list[tuple[str, str]]) -> dict[str, Any]:
+        """Write a checked result; the caller holds this dataset's lock."""
+        episode_index = int(row["episode_index"])
+        if not issues:
+            return {
+                "issues": [],
+                "cleared": int(self.io.drop_auto_qc(episode_index)),
+                "reviewed": 0,
+                "failed": 0,
+                "flagged": 0,
+            }
+
+        current_qc = self.io._read_qc_by_episode(self.dataset_dir / "meta" / "qc.jsonl").get(
+            episode_index, {}
+        )
+        reason = issues[0][0]
+        note = "；".join(detail for _, detail in issues)
+        machine_verdict = current_qc.get("qc_auto") is True
+        human_verdict = (
+            str(current_qc.get("qc_verdict") or "").strip() in {"pass", "fail"}
+            and not machine_verdict
+        )
+        if human_verdict:
+            self.io.mark_qc(episode_index, "fail", note, reason, auto=True)
+            reviewed, failed, flagged = 1, 0, 0
+        elif reason in DIRECT_FAIL_REASONS:
+            self.io.mark_qc(episode_index, "fail", note, reason, auto=True)
+            reviewed, failed, flagged = 0, 1, 0
+        else:
+            self.io.mark_qc(
+                episode_index,
+                "unreviewed",
+                note,
+                MANUAL_REVIEW_REASON,
+                auto=True,
+            )
+            reviewed, failed, flagged = 0, 0, 1
+        return {
+            "issues": issues,
+            "cleared": 0,
+            "reviewed": reviewed,
+            "failed": failed,
+            "flagged": flagged,
+        }
+
+    def _video_keys(self, inferred: dict[str, Any]) -> dict[str, str]:
+        candidates = inferred["image"]["candidates"]
+        keys = {}
+        for camera in self.attached_to:
+            match = next(
+                (name for name in candidates if name == camera or name.endswith("." + camera)),
+                None,
+            )
+            if match:
+                keys[camera] = match
+        return keys
+
+    def _limit_notes(self, series: dict[str, np.ndarray]) -> list[str]:
+        if not self.arm_limits:
+            return []
+        notes = []
+        for key, label in ((self.action_key, "动作"), (self.state_key, "状态")):
+            breaches = limit_breaches(series[key], self.arm_limits) if key in series else []
+            if breaches:
+                notes.append(limit_note(breaches, label))
+        return notes
+
+    def _camera_notes(self, episode_index: int, series: dict[str, np.ndarray]) -> list[str]:
+        videos = self.io.episode_video_paths(episode_index, self.video_keys)
+        if not videos:
+            return []
+        qpos = next((series[key] for key in QPOS_KEYS if key in series), None)
+        motions = {camera: camera_motion(path) for camera, path in videos.items()}
+        travel = group_travel(qpos, self.groups) if qpos is not None else {}
+        return [
+            f"{issue['camera']} 相邻帧重复 {issue['motion'].repeated_fraction:.0%}"
+            f"（{issue['arm'] or '任一臂'} 行程 {issue['travel']:.2f} rad）"
+            for issue in offline_cameras(self.attached_to, motions, travel)
+        ]
+
+    def _series(self, episode_index: int) -> dict[str, np.ndarray]:
+        path = self.io.episode_parquet(episode_index)
+        names = set(pq.read_schema(path).names)
+        keys = [
+            key
+            for key in dict.fromkeys((self.state_key, self.action_key, *QPOS_KEYS))
+            if key in names
+        ]
+        if not keys:
+            return {}
+        table = pq.read_table(path, columns=keys)
+        return {key: np.asarray(table.column(key).to_pylist(), dtype=np.float64) for key in keys}
+
+
 class DatasetAutoQc:
     """Flag static middle frames, stalled cameras, and unreachable joints in one dataset.
 
@@ -250,23 +411,9 @@ class DatasetAutoQc:
         self.catalog = catalog
         self.dataset_dir = dataset_dir
         self.stop = stop
-        self.io = LeRobotDatasetIO(dataset_dir)
         robot = ROBOT_REGISTRY.build(robot_type) if robot_type in ROBOT_REGISTRY else None
-        self.attached_to = (
-            {
-                camera.observation_key: camera.attached_to
-                for camera in robot.observation_schema.cameras
-            }
-            if robot
-            else {}
-        )
-        self.groups = robot.actuator_groups if robot else ()
-        self.arm_limits = dataset_arm_limits(robot.vis_config.parts) if robot else {}
-        inferred = self.io.infer_keys()
-        self.state_key = inferred["state"]["default"]
-        self.action_key = inferred["action"]["default"]
-        info = json.loads((dataset_dir / "meta/info.json").read_text())
-        self.fps = float(info.get("fps", 30) or 30)
+        self.episode_qc = EpisodeAutoQc(dataset_dir, robot)
+        self.fps = self.episode_qc.fps
 
     def run(self, progress: Callable[[int, int], None]) -> dict[str, Any]:
         """Scan every episode and record the failures it finds."""
@@ -285,27 +432,27 @@ class DatasetAutoQc:
                 break
             progress(position, len(rows))
             checked += 1
-            episode_index = int(row["episode_index"])
-            issues = self._episode_issues(row, fence)
+            with dataset_lock(self.dataset_dir).acquire():
+                current_row = self.episode_qc.io._episode_rows_by_index()[int(row["episode_index"])]
+                path = self.episode_qc.io.episode_parquet(int(row["episode_index"]))
+                stat = path.stat()
+                revision = (stat.st_ino, stat.st_mtime_ns)
+            findings = self.episode_qc.check(current_row, fence)
+            with dataset_lock(self.dataset_dir).acquire():
+                stat = path.stat()
+                if (stat.st_ino, stat.st_mtime_ns) != revision:
+                    continue
+                result = self.episode_qc.record(current_row, findings)
+            issues = result["issues"]
+            cleared += result["cleared"]
+            reviewed += result["reviewed"]
+            failed += result["failed"]
+            flagged += result["flagged"]
             if not issues:
-                cleared += self.io.drop_auto_qc(episode_index)
                 continue
             reason = issues[0][0]
-            counts[reason] += 1
-            note = "；".join(note for _, note in issues)
-            if str(row.get("qc_verdict") or "").strip() in {"pass", "fail"}:
-                # The verdict stays the reviewer's; the finding is filed beside it.
-                reviewed += 1
-                self.io.mark_qc(episode_index, "fail", note, reason, auto=True)
-                continue
-            if reason in DIRECT_FAIL_REASONS:
-                # A trajectory the robot cannot execute rejects the take; a reviewer
-                # overturns the machine verdict by judging the episode.
-                failed += 1
-                self.io.mark_qc(episode_index, "fail", note, reason, auto=True)
-                continue
-            flagged += 1
-            self.io.mark_qc(episode_index, "unreviewed", note, MANUAL_REVIEW_REASON, auto=True)
+            if reason in counts:
+                counts[reason] += 1
         over_limit = counts[JOINT_LIMIT_REASON]
         offline = counts[CAMERA_OFFLINE_REASON]
         static = counts[STATIC_FRAMES_REASON]
@@ -328,64 +475,3 @@ class DatasetAutoQc:
             "cleared": cleared,
             **counts,
         }
-
-    def _episode_issues(self, row: dict[str, Any], fence: float) -> list[tuple[str, str]]:
-        """Automatic failures as (reason, note), most severe first."""
-        episode_index = int(row["episode_index"])
-        series = self._series(episode_index)
-        issues = [(JOINT_LIMIT_REASON, note) for note in self._limit_notes(series)]
-        issues += [
-            (CAMERA_OFFLINE_REASON, note) for note in self._camera_notes(episode_index, series)
-        ]
-        seconds = episode_seconds(row, self.fps)
-        if seconds < fence:
-            issues.append(
-                (
-                    SHORT_EPISODE_REASON,
-                    f"时长 {seconds:.1f}s（低于本数据集极端离群下限 {fence:.1f}s）",
-                )
-            )
-        analysis = self.catalog.frame_analysis(self.dataset_dir, episode_index)
-        if analysis["static_frames_excessive"]:
-            issues.append(
-                (STATIC_FRAMES_REASON, f"中间静止帧 {analysis['middle_static_frames']} 帧")
-            )
-        return issues
-
-    def _limit_notes(self, series: dict[str, np.ndarray]) -> list[str]:
-        """Trajectories that leave the range of the joints they command."""
-        if not self.arm_limits:
-            return []
-        notes = []
-        for key, label in ((self.action_key, "动作"), (self.state_key, "状态")):
-            breaches = limit_breaches(series[key], self.arm_limits) if key in series else []
-            if breaches:
-                notes.append(limit_note(breaches, label))
-        return notes
-
-    def _camera_notes(self, episode_index: int, series: dict[str, np.ndarray]) -> list[str]:
-        videos = self.catalog.camera_videos(self.dataset_dir, episode_index, self.attached_to)
-        if not videos:
-            return []
-        qpos = next((series[key] for key in QPOS_KEYS if key in series), None)
-        motions = {camera: camera_motion(path) for camera, path in videos.items()}
-        travel = group_travel(qpos, self.groups) if qpos is not None else {}
-        return [
-            f"{issue['camera']} 相邻帧重复 {issue['motion'].repeated_fraction:.0%}"
-            f"（{issue['arm'] or '任一臂'} 行程 {issue['travel']:.2f} rad）"
-            for issue in offline_cameras(self.attached_to, motions, travel)
-        ]
-
-    def _series(self, episode_index: int) -> dict[str, np.ndarray]:
-        """Joint positions and commands of one episode, read once for every check."""
-        path = self.io.episode_parquet(episode_index)
-        names = set(pq.read_schema(path).names)
-        keys = [
-            key
-            for key in dict.fromkeys((self.state_key, self.action_key, *QPOS_KEYS))
-            if key in names
-        ]
-        if not keys:
-            return {}
-        table = pq.read_table(path, columns=keys)
-        return {key: np.asarray(table.column(key).to_pylist(), dtype=np.float64) for key in keys}

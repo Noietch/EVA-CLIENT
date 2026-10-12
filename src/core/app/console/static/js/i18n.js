@@ -142,6 +142,7 @@ const GLOSSARY = {
   "collect.error.selectFirst": ["请先用左摇杆选择采集位置", "Use the left stick to select a collection position first"],
   "collect.error.waitSave": ["请等待当前采集或保存完成后再选择采集位置", "Wait for the current capture or save to finish before selecting a collection position"],
   "collect.qc.selectSaved": ["先选择已保存的数据", "Select saved data first"],
+  "collect.qc.machineFinding": ["机器复核意见", "Machine finding"],
   "collect.error.statusSwitch": ["状态切换失败：{error}", "Failed to switch status: {error}"],
   "collect.error.page": ["翻页失败：{error}", "Failed to change page: {error}"],
   "collect.guide.disabled": ["配置中已禁用采集", "Collection disabled in <b>config</b>"],

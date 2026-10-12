@@ -93,12 +93,13 @@ def plan_placements(value: Any) -> list[dict[str, Any]]:
         position_ids = [str(position_id or "").strip() for position_id in position_ids]
         position_ids = [position_id for position_id in position_ids if position_id]
         if position_ids:
-            placements.append(
-                {
-                    "position_ids": position_ids,
-                    "object_id": object_id,
-                }
-            )
+            placement = {"position_ids": position_ids, "object_id": object_id}
+            pose = item.get("pose_xyzw")
+            if isinstance(pose, list) and len(pose) == 7:
+                placement["pose_xyzw"] = pose
+            if "fixed" in item:
+                placement["fixed"] = bool(item["fixed"])
+            placements.append(placement)
     return placements
 
 
@@ -198,6 +199,8 @@ def plan_scenes(
                     "group_id": group_id,
                     "position_ids": position_ids,
                     "object_id": object_id,
+                    "pose_xyzw": placement.get("pose_xyzw"),
+                    "fixed": placement.get("fixed"),
                     "name": obj["name"],
                     "name_zh": obj.get("name_zh", ""),
                     "name_en": obj.get("name_en", ""),
@@ -210,6 +213,8 @@ def plan_scenes(
                     {
                         "position_id": position_id,
                         "object_id": object_id,
+                        "pose_xyzw": placement.get("pose_xyzw"),
+                        "fixed": placement.get("fixed"),
                         "name": obj["name"],
                         "name_zh": obj.get("name_zh", ""),
                         "name_en": obj.get("name_en", ""),
@@ -262,6 +267,7 @@ def scene_plan_from_dir(
     root: Path, photo_url: Callable[[str, str], str] | None = None
 ) -> dict[str, Any]:
     """Parse one normalized scene catalog directory into its plan payload."""
+    info = read_plan_yaml(root, "info.yaml")
     task_rows = read_plan_csv(root, "tasks.csv")
     layout_doc = read_plan_yaml(root, "layout.yaml")
     layout_unit = str(layout_doc.get("unit", "") or "")
@@ -271,16 +277,21 @@ def scene_plan_from_dir(
     objects = plan_objects(root, photo_url)
     raw_bounds = layout_doc.get("bounds")
     bounds = raw_bounds if isinstance(raw_bounds, dict) else {}
+    display_grid = layout_doc.get("display_grid")
+    if not isinstance(display_grid, dict):
+        display_grid = {}
     return {
         "ok": True,
         "source": str(root / "tasks.csv") if task_rows else "",
         "layout_id": str(layout_doc.get("layout_id", "") or ""),
         "coordinate_frame": layout_frame,
+        "task_order": str(info.get("task_order", "spatial")),
         "bounds": {
             "width": optional_float(bounds.get("width")),
             "height": optional_float(bounds.get("height")),
             "unit": layout_unit,
         },
+        "display_grid": display_grid,
         "calibrated": bool(positions)
         and all(
             row["x"] is not None
@@ -401,7 +412,8 @@ def plan_slots(
 
     ``entries`` is the mounted task set's prompt list; when given, tasks outside
     it are left out and its indexes break spatial ties. Without it every task in
-    the plan is kept and the plan's own task order breaks ties.
+    the plan is kept and the plan's own task order breaks ties. Plans with
+    ``task_order: csv`` preserve CSV task order within each scene.
     """
     prompt_indices = {str(entry[0]): index for index, entry in enumerate(entries or ())}
     bindings = bindings or {}
@@ -417,9 +429,10 @@ def plan_slots(
             for index, task in enumerate(tasks)
             if scene_id in list(task.get("scene_ids") or [])
         ]
-        scene_tasks.sort(
-            key=lambda item: task_spatial_sort_key(item[1], scene, position_keys, item[0])
-        )
+        if scene_plan.get("task_order", "spatial") != "csv":
+            scene_tasks.sort(
+                key=lambda item: task_spatial_sort_key(item[1], scene, position_keys, item[0])
+            )
         for plan_index, task in scene_tasks:
             if bindings and str(task.get("task_id") or "") not in bindings:
                 continue

@@ -41,3 +41,37 @@ def test_qc_comparison_overlays_reviews_and_compares_episode_identity():
     assert compare_qc(local, qc_entries(episodes, []))["changed"] == ["3"]
     # Nothing recorded on either side is a match, not a separate state.
     assert compare_qc({}, {})["state"] == "same"
+
+
+@pytest.mark.parametrize(
+    ("verdict", "auto_verdict", "replay_required", "replay_verified", "expected"),
+    [
+        ("unreviewed", "fail", False, None, "fail"),
+        ("pass", "fail", False, None, "accept"),
+        ("pass", "", True, None, "unreviewed"),
+        ("pass", "", True, False, "fail"),
+        ("pass", "", True, True, "accept"),
+    ],
+)
+def test_qc_summary_uses_machine_verdict_and_replay_gate(
+    verdict, auto_verdict, replay_required, replay_verified, expected
+):
+    episodes = [
+        {
+            "episode_index": 0,
+            "quality": "green",
+            "replay_required": replay_required,
+            "replay_verified": replay_verified,
+        }
+    ]
+    qc = [{"episode_index": 0, "qc_verdict": verdict, "qc_auto_verdict": auto_verdict}]
+    counts = {"accept": 0, "fail": 0, "unreviewed": 0}
+    counts[expected] = 1
+    assert qc_summary(episodes, qc) == counts
+
+
+@pytest.mark.parametrize("metadata", [{"sim_metadata": {}}, {"render_report": "replay.json"}])
+def test_raw_sim_metadata_keeps_human_pass_pending_without_a_validated_report(metadata):
+    episodes = [{"episode_index": 0, "quality": "green", **metadata}]
+    qc = [{"episode_index": 0, "qc_verdict": "pass"}]
+    assert qc_summary(episodes, qc) == {"accept": 0, "fail": 0, "unreviewed": 1}

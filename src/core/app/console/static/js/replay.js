@@ -26,6 +26,7 @@ let replayTransformLoads = new Map();
 let _lastReplayChartDraw = 0;
 
 const REPLAY_DEFAULT_FPS = 10;
+const REPLAY_VIDEO_PREBUFFER_SECONDS = 5;
 
 // These tabs host the shared live stage. RESULT and DASHBOARD deliberately park
 // that stage off-screen; keeping their MJPEG streams alive only consumes one
@@ -583,7 +584,7 @@ function mountEpisodeVideos({ datasetDir, episodeId, videoKeys }) {
         `src="/api/replay_poster?${params.toString()}" ` +
         `onload="this.closest('.cam-cell').classList.remove('loading')" ` +
         `onerror="this.closest('.cam-cell').classList.add('failed')">` +
-        `<video class="cam cam-video" data-key="${k}" muted playsinline preload="none" ` +
+        `<video class="cam cam-video" data-key="${k}" muted playsinline preload="auto" ` +
         `data-poster="/api/replay_poster?${params.toString()}" ` +
         `data-src="/api/replay_video?${params.toString()}" ` +
         `oncanplay="this.closest('.cam-cell').classList.add('video-ready')" ` +
@@ -648,7 +649,15 @@ function setStageVideoLoading(on, text) {
   }
 
 function videoReady(v) {
-    return v.error || v.readyState >= 3;
+    if (v.error) return false;
+    if (v.readyState < 2 || !Number.isFinite(v.duration)) return false;
+    const target = replayTimeAtFrame(LIVE.cursor);
+    if (target > v.duration + 0.01) return false;
+    const end = Math.min(v.duration, target + REPLAY_VIDEO_PREBUFFER_SECONDS);
+    for (let i = 0; i < v.buffered.length; i += 1) {
+      if (v.buffered.start(i) <= target && v.buffered.end(i) >= end - 0.01) return true;
+    }
+    return false;
   }
 
 function ensureVideoSource(v) {
@@ -659,30 +668,32 @@ function ensureVideoSource(v) {
     v.setAttribute("src", src);
   }
 
-function waitForVideoReady(v) {
-    const signal = replayVideoAbortController ? replayVideoAbortController.signal : null;
-    if (videoReady(v)) return Promise.resolve();
+function waitForVideoReady(v, signal = replayVideoAbortController?.signal) {
+    if (signal?.aborted || v.error) return Promise.resolve(false);
+    if (videoReady(v)) return Promise.resolve(true);
     return new Promise((resolve) => {
-      let done = false;
-      const finish = () => {
-        if (done) return;
-        done = true;
-        v.removeEventListener("canplay", finish);
-        v.removeEventListener("canplaythrough", finish);
-        v.removeEventListener("error", finish);
-        if (signal) signal.removeEventListener("abort", finish);
-        resolve();
+      const events = ["loadedmetadata", "durationchange", "progress", "canplay", "canplaythrough", "seeked", "error"];
+      const finish = (ready) => {
+        events.forEach((event) => v.removeEventListener(event, check));
+        if (signal) signal.removeEventListener("abort", abort);
+        resolve(ready);
+      };
+      const abort = () => finish(false);
+      const check = () => {
+        if (v.error) { finish(false); return; }
+        const target = replayTimeAtFrame(LIVE.cursor);
+        if (Number.isFinite(v.duration) && target > v.duration + 0.01) { finish(false); return; }
+        if (v.readyState >= 1 && Math.abs(v.currentTime - target) > 0.001) {
+          v.currentTime = target;
+        }
+        if (videoReady(v)) finish(true);
       };
       if (signal) {
-        signal.addEventListener("abort", finish, { once: true });
-        if (signal.aborted) { finish(); return; }
+        signal.addEventListener("abort", abort, { once: true });
       }
-      v.addEventListener("canplay", finish);
-      v.addEventListener("canplaythrough", finish);
-      v.addEventListener("error", finish);
+      events.forEach((event) => v.addEventListener(event, check));
       ensureVideoSource(v);
-      try { v.load(); } catch (e) { finish(); }
-      if (videoReady(v)) finish();
+      check();
     });
   }
 
@@ -712,8 +723,7 @@ function waitForBrowserPaint() {
 
 async function waitForVideoPainted(v) {
     const signal = replayVideoAbortController ? replayVideoAbortController.signal : null;
-    if (v.error) return;
-    await waitForVideoReady(v);
+    if (!(await waitForVideoReady(v))) return;
     if (signal && signal.aborted) return;
     await new Promise((resolve) => {
       let done = false;
@@ -742,15 +752,25 @@ async function waitForStageVideosReady() {
       clientTrace("review.videos.ready", { count: 0, errors: 0 });
       return true;
     }
-    setVideosLoading(videos, true, "loading video");
-    await Promise.all(videos.map((v) => waitForVideoReady(v)));
+    setVideosLoading(videos, true, "buffering 5s of video");
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    if (signal?.aborted) controller.abort();
+    else if (signal) signal.addEventListener("abort", abort, { once: true });
+    const ready = await Promise.all(videos.map((v) =>
+      waitForVideoReady(v, controller.signal).then((ok) => {
+        if (!ok) controller.abort();
+        return ok;
+      })
+    ));
+    if (signal) signal.removeEventListener("abort", abort);
     if (signal && signal.aborted) return;
     clientTrace("review.videos.ready", {
       count: videos.length,
       errors: videos.filter((v) => !!v.error).length,
       states: videos.map((v) => ({ camera: v.dataset.key || "", ready_state: v.readyState })),
     });
-    return videos.length > 0 && videos.every((v) => !v.error && v.readyState >= 3);
+    return ready.every(Boolean);
   }
 
 async function waitForStageVideosPainted() {

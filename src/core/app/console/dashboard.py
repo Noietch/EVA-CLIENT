@@ -7,6 +7,7 @@ import json
 import threading
 from collections import OrderedDict, defaultdict
 from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -14,15 +15,26 @@ from core.utils.dataset_upload import (
     uploaded_source_episode_indices,
     uploaded_source_episode_indices_for_export,
 )
-from core.utils.qc import qc_state
+from core.utils.qc import qc_state, replay_report_signature, replay_validation
 from tools.conversion import DATASET_EXPORT_FORMATS
 
 _DATASET_CACHE_MAX = 32
 _DATASET_CACHE_LOCK = threading.RLock()
 _COLLECTION_ROOT_NAMES = frozenset({"collection", "data_collection"})
+
+
+@dataclass
+class _DatasetRecords:
+    info: dict[str, Any]
+    requirements: dict[str, int]
+    sources: list[dict[str, Any]]
+    report_signature: tuple[int, ...]
+    records: list[dict[str, Any]]
+
+
 _DATASET_CACHE: OrderedDict[
     tuple[str, str, tuple[tuple[str, int, int, int], ...]],
-    tuple[dict[str, Any], dict[str, int], list[dict[str, Any]]],
+    _DatasetRecords,
 ] = OrderedDict()
 
 
@@ -201,7 +213,14 @@ def _episode_record(
     status = str(row.get("status") or "valid").lower()
     quality = str(row.get("quality") or "green").lower()
     qc_verdict = str(row.get("qc_verdict") or ("fail" if status == "failed" else "")).lower()
-    valid = qc_state(qc_verdict, quality) != "failed" and status not in {
+    replay_verified, replay_reason = replay_validation(raw_dir, row)
+    valid = qc_state(
+        qc_verdict,
+        quality,
+        replay_verified,
+        bool(replay_reason) or replay_verified is not None,
+        row.get("qc_auto_verdict"),
+    ) != "failed" and status not in {
         "invalid",
         "cancelled",
         "failed",
@@ -254,36 +273,37 @@ def _load_dataset_records(
     with _DATASET_CACHE_LOCK:
         cached = _DATASET_CACHE.get(key)
         if cached is not None:
-            _DATASET_CACHE.move_to_end(key)
-            return cached
+            report_signature = replay_report_signature(raw_dir, cached.sources)
+            if cached.report_signature == report_signature:
+                _DATASET_CACHE.move_to_end(key)
+                return cached.info, cached.requirements, cached.records
 
-    info = _read_json(paths[0])
-    requirements = {
-        str(row.get("task") or ""): int(row.get("required_episodes") or 0)
-        for row in _read_jsonl(paths[1])
-        if row.get("task")
-    }
-    qc_by_episode = {
-        int(row["episode_index"]): row
-        for row in _read_jsonl(paths[3])
-    }
+    info = cached.info if cached is not None else _read_json(paths[0])
+    requirements = (
+        cached.requirements
+        if cached is not None
+        else {
+            str(row.get("task") or ""): int(row.get("required_episodes") or 0)
+            for row in _read_jsonl(paths[1])
+            if row.get("task")
+        }
+    )
+    qc_by_episode = {int(row["episode_index"]): row for row in _read_jsonl(paths[3])}
+    sources = cached.sources if cached is not None else _read_jsonl(paths[2])
+    report_signature = replay_report_signature(raw_dir, sources)
     records = []
-    for row in _read_jsonl(paths[2]):
+    for row in sources:
         qc = qc_by_episode.get(int(row.get("episode_index", -1)), {})
         qc_fields = {key: value for key, value in qc.items() if key.startswith("qc_")}
         record = _episode_record({**row, **qc_fields}, raw_dir, mode, info, requirements)
         if record is not None:
             records.append(record)
-    value = (info, requirements, records)
+    value = _DatasetRecords(info, requirements, sources, report_signature, records)
     with _DATASET_CACHE_LOCK:
-        existing = _DATASET_CACHE.get(key)
-        if existing is not None:
-            _DATASET_CACHE.move_to_end(key)
-            return existing
         _DATASET_CACHE[key] = value
         while len(_DATASET_CACHE) > _DATASET_CACHE_MAX:
             _DATASET_CACHE.popitem(last=False)
-    return value
+    return info, requirements, records
 
 
 def _metrics(episodes: list[dict[str, Any]]) -> dict[str, Any]:

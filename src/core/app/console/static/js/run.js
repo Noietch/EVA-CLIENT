@@ -1511,7 +1511,7 @@ export {
   applyRunControlStatus, applyStatus, mark, pauseSetup, replayIsLocalMode, resumeSetup,
   retrySetup, setPanel, startRunFromDebug, syncChip, uiMode, updateGuide,
   applyTune, applyManualTune, collectSetValue, selectCollectSet, collectTaskIndexValue,
-  collectTaskValue, renderConfig, applyCollectTaskSelection,
+  collectTaskValue, renderConfig, applyCollectTaskSelection, syncCollectTaskNavigation,
   renderEvalGripper,
   renderRlGripper,
   enterManualSim, manualConnect, manualDisconnect, manualDispatchToggle,

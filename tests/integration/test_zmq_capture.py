@@ -53,3 +53,41 @@ def test_new_episode_discards_old_zmq_pipe(tmp_path):
     finally:
         reader.close()
         publisher.close(linger=0)
+
+
+@pytest.mark.parametrize("ack_matches", [False, True])
+def test_action_ack_requires_the_published_timestamp(ack_matches):
+    publisher = zmq.Context.instance().socket(zmq.XPUB)
+    port = publisher.bind_to_random_port("tcp://127.0.0.1")
+    robot = ROBOT_REGISTRY.build("agilex_piper")
+    reader = _ObservationReader(
+        ConfigDict(
+            transport=ConfigDict(
+                sub_endpoint=f"tcp://127.0.0.1:{port}", disabled_cameras=[], disabled_groups=[]
+            )
+        ),
+        robot,
+        zmq,
+    )
+    try:
+        assert publisher.poll(2000), "subscriber did not connect"
+        assert publisher.recv()[0] == 1
+        publisher.send(
+            pack_observation(
+                WireObservation(
+                    t=1.0,
+                    images={},
+                    state={},
+                    sim_state={
+                        "action_time": 123.0 if ack_matches else 122.0,
+                        "execution_complete": True,
+                    },
+                )
+            )
+        )
+        assert reader._sub.poll(2000)
+        assert reader.wait_action_applied(123.0, timeout=0.05) is ack_matches
+        assert reader.execution_complete()
+    finally:
+        reader.close()
+        publisher.close(linger=0)

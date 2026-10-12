@@ -153,7 +153,13 @@ def episode_qc_state(episode: dict[str, Any] | None) -> str:
     """Match datasets tools' four QC states, independently of capture selection."""
     if not episode or episode.get("status") != "saved":
         return "pending"
-    return qc_state(episode.get("qc_verdict"), episode.get("quality"))
+    return qc_state(
+        episode.get("qc_verdict"),
+        episode.get("quality"),
+        episode.get("replay_verified"),
+        bool(episode.get("replay_required")),
+        episode.get("qc_auto_verdict"),
+    )
 
 
 def _episode_outcome(episode: dict[str, Any]) -> str:

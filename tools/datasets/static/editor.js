@@ -88,7 +88,7 @@ const LOCALE_TABLE = {
   "qc.shortEpisode": ["轨迹过短", "Trajectory too short"],
   "qc.jointLimitExceeded": ["轨迹超出关节极限", "Trajectory beyond joint limits"],
   "qc.needsReview": ["待人工审核", "Needs manual review"],
-  "qc.machineOpinion": ["机器复核意见（不改变人工判定）", "Machine finding (human verdict stands)"],
+  "qc.machineOpinion": ["机器复核意见", "Machine finding"],
   "qc.staticFramesHint": ["机器识别：中间存在静止段，请人工复核", "Machine flag: middle static segment needs review"],
   "qc.trimRange": ["保留帧范围", "Keep frame range"],
   "qc.trimApply": ["截取并保存", "Trim and save"],
@@ -601,6 +601,7 @@ async function runWrite(control, operation, successMessage) {
 }
 
 async function loadState(preserveReview = false, force = false) {
+  if (force) app.reviewCache.clear();
   showGlobalError();
   const loadingToken = ++app.qcLoadingToken;
   setQcLoading(true, loadingToken);

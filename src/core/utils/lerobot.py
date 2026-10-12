@@ -249,6 +249,16 @@ class LeRobotDatasetIO:
 
         return self._edit_qc(episode, edit)
 
+    def reset_qc(self, episode: int) -> bool:
+        """Start a saved retake's review without inheriting the previous take's QC."""
+
+        def edit(row: dict) -> bool:
+            row.update(qc_verdict="unreviewed", qc_note="", qc_reason="", qc_auto=False)
+            self._drop_auto_fields(row)
+            return True
+
+        return self._edit_qc(episode, edit)
+
     def drop_auto_qc(self, episode: int) -> bool:
         """Remove a machine verdict once a scan stops reporting the issue.
 
@@ -295,7 +305,7 @@ class LeRobotDatasetIO:
             if not any(int(row.get("episode_index", -1)) == episode for row in rows):
                 return False
             qc_by_episode = self._read_qc_by_episode(qc_path)
-            qc_row = qc_by_episode.get(episode)
+            qc_row: dict[str, Any] | None = qc_by_episode.get(episode)
             if qc_row is None:
                 qc_row = {"episode_index": episode}
                 qc_by_episode[episode] = qc_row

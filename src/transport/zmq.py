@@ -54,6 +54,7 @@ COLLECTION_CONTROL_INTERVAL_S = 0.02
 COLLECTION_SOCKET_DRAIN_MAX = 64
 COLLECTION_RECEIVE_HWM = 64
 HIL_ACK_TIMEOUT_S = 1.0
+ACTION_APPLIED_TIMEOUT_S = 2.0
 
 
 # --- wire protocol -------------------------------------------------------------
@@ -653,6 +654,25 @@ class _ObservationReader:
             parts.append(np.asarray(part, dtype=np.float32))
         return np.concatenate(parts, axis=0)
 
+    def wait_action_applied(self, action_time: float, timeout: float) -> bool:
+        """Wait for an observation echoing the published action timestamp."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            wire_obs = self._drain_latest()
+            if wire_obs is not None and wire_obs.sim_state is not None:
+                applied_time = wire_obs.sim_state.get("action_time")
+                if applied_time is not None and float(applied_time) == action_time:
+                    return True
+            time.sleep(0.001)
+        return False
+
+    def execution_complete(self) -> bool:
+        """Return the latest execution-complete marker, if one was published."""
+        wire_obs = self._drain_latest()
+        if wire_obs is None or wire_obs.sim_state is None:
+            return False
+        return bool(wire_obs.sim_state.get("execution_complete", False))
+
     def _concat_group_fields(
         self, mapping: dict[str, np.ndarray] | None, groups: tuple | None = None
     ) -> np.ndarray | None:
@@ -984,8 +1004,26 @@ class ZmqTransport(TransportBridge):
             action: [action_dim] float32 flat action vector.
             target: "real" or "sim" routing tag carried on the wire.
         """
-        message = WireAction(t=time.monotonic(), action=np.asarray(action), target=target)
+        action_time = time.monotonic()
+        message = WireAction(t=action_time, action=np.asarray(action), target=target)
         self._pub.send(pack_action(message))
+        wait_for_ack = bool(self._config.transport.get("wait_action_applied", False))
+        if target == "real" and wait_for_ack:
+            timeout = float(
+                self._config.transport.get("action_ack_timeout_s", ACTION_APPLIED_TIMEOUT_S)
+            )
+            if not self._qpos_reader.wait_action_applied(action_time, timeout):
+                logger.error(
+                    "Timed out waiting for applied action t=%.9f after %.2fs",
+                    action_time,
+                    timeout,
+                )
+                raise TimeoutError(f"timed out waiting for applied action t={action_time:.9f}")
+
+    @property
+    def execution_complete(self) -> bool:
+        """Return the latest execution-complete marker from the qpos reader."""
+        return self._qpos_reader.execution_complete()
 
     def _publish_image_request(self) -> None:
         action = np.zeros(self._robot.total_action_dim, dtype=np.float32)

@@ -6,6 +6,7 @@ from unittest.mock import Mock
 
 import pytest
 
+import core.app.console.server as console_server
 from core.app.control_channel import _handle_message
 
 pytestmark = pytest.mark.unit
@@ -36,6 +37,17 @@ def test_channel_rejects_unknown_commands_without_queueing() -> None:
     reply = _handle_message(runtime, {"cmd": "web:not_a_command"})
     assert reply == {"ok": False, "error": "command not allowed: 'not_a_command'"}
     assert runtime.command_queue.empty()
+
+
+def test_channel_status_includes_recorder_history(monkeypatch) -> None:
+    runtime = _runtime()
+    serialize = Mock(return_value={"eval_recorder": {"episodes": [{"clip_id": "trial-0001"}]}})
+    monkeypatch.setattr(console_server, "_serialize_status", serialize)
+
+    reply = _handle_message(runtime, {"query": "status"})
+
+    assert reply["data"]["eval_recorder"]["episodes"] == [{"clip_id": "trial-0001"}]
+    serialize.assert_called_once_with(runtime.console_ctx, include_history=True)
 
 
 def test_channel_start_binds_eval_sim_metadata_before_queueing() -> None:
@@ -81,6 +93,19 @@ def test_channel_collect_start_binds_sim_metadata_before_queueing() -> None:
 
     assert reply == {"ok": True, "cmd": "web:collect_start"}
     assert runtime.console_ctx.session.collection_sim_metadata == sim_metadata
+    assert runtime.command_queue.get_nowait() == "web:collect_start"
+
+
+def test_channel_collect_start_preserves_slot_bound_sim_metadata() -> None:
+    runtime = _runtime()
+    runtime.console_ctx.active_tab = "collect"
+    sim_metadata = {"schema_version": 4, "scene": {"scene_id": "scene-01"}}
+    runtime.console_ctx.session.collection_sim_metadata = sim_metadata
+
+    reply = _handle_message(runtime, {"cmd": "web:collect_start"})
+
+    assert reply == {"ok": True, "cmd": "web:collect_start"}
+    assert runtime.console_ctx.session.collection_sim_metadata is sim_metadata
     assert runtime.command_queue.get_nowait() == "web:collect_start"
 
 

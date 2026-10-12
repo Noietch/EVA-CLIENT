@@ -11,7 +11,6 @@ collection = dict(
         "datasets/data_collection/task_sets/larybench2_20260908_eva_sim_dual_yam_insert_withdraw",
         "datasets/data_collection/task_sets/larybench2_20260908_eva_sim_dual_yam_open_close",
         "datasets/data_collection/task_sets/larybench2_20260908_eva_sim_dual_yam_pickplace",
-        "datasets/data_collection/task_sets/larybench2_20260908_eva_sim_dual_yam_pickplace_last200",
         "datasets/data_collection/task_sets/larybench2_20260908_eva_sim_dual_yam_pour",
         "datasets/data_collection/task_sets/larybench2_20260908_eva_sim_dual_yam_press",
         "datasets/data_collection/task_sets/larybench2_20260908_eva_sim_dual_yam_pull",
@@ -20,6 +19,7 @@ collection = dict(
         "datasets/data_collection/task_sets/larybench2_20260908_eva_sim_dual_yam_scoop",
         "datasets/data_collection/task_sets/larybench2_20260908_eva_sim_dual_yam_sweep",
         "datasets/data_collection/task_sets/larybench2_20260908_eva_sim_dual_yam_wipe",
+        "datasets/data_collection/task_sets/larybench_eval_v1_supplement",
     ],
     storage=dict(
         log_dir="work_dirs/collection/eva_sim_dual_yam/",

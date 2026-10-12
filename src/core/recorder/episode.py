@@ -45,6 +45,7 @@ from core.recorder.collection_alignment import (
     align_collection_samples,
     image_skew_tolerance_sec,
 )
+from core.recorder.collection_qc import CollectionQcWorker
 from core.recorder.lerobot_meta import build_info, history_row, summarize_quality_issues
 from core.recorder.video_encoding import dataset_h264_ffmpeg_params
 from core.types import (
@@ -344,6 +345,7 @@ class EpisodeLogger:
             self._completed_episodes = 0
         self._save_durations: list[float] = []
         self._pending_episode_meta_by_clip: dict[str, dict[str, Any]] = {}
+        self._collection_qc = CollectionQcWorker(robot) if self._collection_writer else None
 
     # -- episode lifecycle ------------------------------------------------------
 
@@ -1738,6 +1740,8 @@ class EpisodeLogger:
         with dataset_lock(dataset_dir).acquire():
             self._claim_collection_indices(job, dataset_dir)
             self._write_episode_job(job, dataset_dir)
+            assert self._collection_qc is not None
+            self._collection_qc.submit(dataset_dir, job.episode_index)
 
     def _write_episode_job(self, job: SaveJob, dataset_dir: Path) -> None:
         if job.collection_payload is not None:
@@ -1758,6 +1762,7 @@ class EpisodeLogger:
             self._meta_path("qc.jsonl", dataset_dir),
             self._meta_path("info.json", dataset_dir),
             self._meta_path("stats.json", dataset_dir),
+            dataset_dir / "meta" / "render_reports" / f"episode_{job.episode_index:06d}.json",
         ]
         if self._save_video:
             targets.extend(
@@ -1808,7 +1813,7 @@ class EpisodeLogger:
                 self._upsert_episode_stats_locked(job.episode_index, episode_stats, dataset_dir)
                 self._write_tasks_jsonl_from(job.task_to_index, dataset_dir)
             qc = LeRobotDatasetIO(dataset_dir)
-            if not qc.mark_qc(job.episode_index, "unreviewed", "", ""):
+            if not qc.reset_qc(job.episode_index):
                 raise ValueError(
                     f"collection episode {job.episode_index} was saved without a QC row"
                 )
@@ -2184,6 +2189,11 @@ class EpisodeLogger:
             "quality": row.get("quality", "green"),
             "qc_verdict": row.get("qc_verdict", ""),
             "qc_note": row.get("qc_note", ""),
+            "qc_reason": row.get("qc_reason", ""),
+            "qc_auto": row.get("qc_auto", False),
+            "qc_auto_verdict": row.get("qc_auto_verdict", ""),
+            "qc_auto_note": row.get("qc_auto_note", ""),
+            "qc_auto_reason": row.get("qc_auto_reason", ""),
             "quality_issues": quality_issues,
             "quality_issue_count": quality_issue_count,
             "error": "" if job.error is None else str(job.error),
@@ -2203,6 +2213,8 @@ class EpisodeLogger:
         """Write meta/stats.json (per-feature min/max/mean/std) and meta/info.json."""
         if self._collection_writer is not None:
             self.wait_for_saves()
+            assert self._collection_qc is not None
+            self._collection_qc.close()
             self._collection_writer.finalize()
             return
         self.wait_for_saves()

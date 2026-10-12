@@ -18,7 +18,7 @@ repository_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
 data_root="${EVA_DATA_ROOT:-${repository_root}/datasets/data_collection}"
 python_bin="${EVA_DATASET_PYTHON:-${repository_root}/.venv/bin/python}"
 host="${EVA_DATASET_HOST:-0.0.0.0}"
-port="${EVA_DATASET_PORT:-8416}"
+port="${EVA_DATASET_PORT:-8412}"
 read_only="${EVA_DATASET_READ_ONLY:-0}"
 locale="${EVA_DATASET_LOCALE:-en}"
 

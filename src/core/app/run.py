@@ -995,10 +995,12 @@ def _handle_web_command(
         return
 
     if verb == "device_selection":
+        assert runtime.console_ctx is not None
         runtime.console_ctx.device_settings.save_selection(json.loads(arg), runtime, session)
         return
 
     if verb in {"device_start", "device_stop"}:
+        assert runtime.console_ctx is not None
         from core.devices import DEVICE_KINDS, DeviceWorkspace
         from core.devices.startup import prepare_device, stop_devices
 
@@ -1069,6 +1071,7 @@ def _handle_web_command(
             _handle_web_command("web:collect_arm:off", config, runtime, session)
             _dispatch_halt(config, runtime, session)
             return
+        assert runtime.console_ctx is not None
         workspace = runtime.console_ctx.device_settings.workspace
         selected = workspace.initial_selection(config)
         if workspace.catalog["teleop"][selected["teleop"]].get("manual"):
@@ -1546,6 +1549,7 @@ def run(
         while session.status is not SessionStatus.EXIT and not transport.is_shutdown():
             # Multi-ckpt: a switch_ckpt swaps in the active ckpt's full config.
             effective = runtime.active_config or config
+            published_this_tick = False
             target_hz = _target_loop_rate_hz(effective, runtime)
             if target_hz != loop_rate_hz:
                 loop_rate = transport.create_rate(target_hz)
@@ -1621,7 +1625,7 @@ def run(
                     logger.warning("[WATCHDOG] no client poll for %.1fs; halting active run", stale)
                     _dispatch_halt(effective, runtime, session)
                 else:
-                    publish_next_action(effective, runtime, session)
+                    published_this_tick = publish_next_action(effective, runtime, session)
             else:
                 last_running_tick = None
 
@@ -1725,7 +1729,23 @@ def run(
             if headless:
                 last_heartbeat = _maybe_log_heartbeat(runtime, session, last_heartbeat)
 
-            loop_rate.sleep()
+            action_ack_enabled = (
+                bool(effective.transport.get("wait_action_applied", False))
+                and effective.transport.type == "zmq"
+                and session.mode is SessionMode.REAL
+            )
+            execution_complete = False
+            if action_ack_enabled:
+                execution_complete = (
+                    transport.execution_complete  # pyright: ignore[reportAttributeAccessIssue]
+                )
+            if not (
+                action_ack_enabled
+                and session.status is SessionStatus.RUNNING
+                and published_this_tick
+                and not execution_complete
+            ):
+                loop_rate.sleep()
     finally:
         stop_console_server(runtime)
         gc.callbacks.remove(log_gc_timing)

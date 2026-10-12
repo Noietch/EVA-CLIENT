@@ -36,7 +36,13 @@ def _task_set(tmp_path: Path) -> Path:
         "unit: mm\nsampling_points:\n"
         "  - {position_id: P1, x: 0, y: 0}\n"
         "  - {position_id: P2, x: 250, y: 0}\n"
-        "  - {position_id: P3, x: 0, y: 250}\n",
+        "  - {position_id: P3, x: 0, y: 250}\n"
+        "display_grid:\n"
+        "  column_axis: y\n"
+        "  row_axis: x\n"
+        "  columns: [250, 0]\n"
+        "  rows: [0, 250]\n"
+        "  position_ids: [P3, P2, P1, P4]\n",
         encoding="utf-8",
     )
     # SC-1 holds the plate nearer the origin than the cup, so the scene's tasks
@@ -49,7 +55,11 @@ def _task_set(tmp_path: Path) -> Path:
                 "SC-1",
                 json.dumps(
                     [
-                        {"object_id": "cup", "position_ids": ["P2"]},
+                        {
+                            "object_id": "cup",
+                            "position_ids": ["P2"],
+                            "pose_xyzw": [0, 0, 0, 0, 0, 0, 1],
+                        },
                         {"object_id": "plate", "position_ids": ["P1"]},
                     ]
                 ),
@@ -84,6 +94,9 @@ def _catalog(tmp_path: Path) -> PlanCatalog:
 def test_both_panels_order_and_number_the_same_slots(tmp_path):
     root = _task_set(tmp_path)
     plan = scene_plan_from_dir(root)
+    assert plan["display_grid"]["column_axis"] == "y"
+    assert plan["display_grid"]["position_ids"] == ["P3", "P2", "P1", "P4"]
+    assert plan["scenes"][0]["placements"][0]["pose_xyzw"] == [0, 0, 0, 0, 0, 0, 1]
     bindings: dict[str, str] = {}
     tasks = load_collection_task_set(root, task_prompts=bindings)
     config = ConfigDict(collection=ConfigDict(tasks=tasks, task_prompt_bindings={BATCH: bindings}))

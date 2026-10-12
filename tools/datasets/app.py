@@ -309,7 +309,7 @@ class DatasetService:
             self.catalog.compare(
                 request.args.get("task_id", ""),
                 request.args.get("scene_id", ""),
-                request.args.get("round_index", 0),
+                int(request.args.get("round_index", "0")),
                 request.args.get("current_batch", ""),
             )
         )
@@ -412,7 +412,7 @@ def main() -> None:
     parser.add_argument("--assets-root", default=str(DEFAULT_ASSETS_ROOT))
     parser.add_argument("--collection-root", default=str(DEFAULT_COLLECTION_ROOT))
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=8416)
+    parser.add_argument("--port", type=int, default=8412)
     parser.add_argument("--read-only", action="store_true")
     parser.add_argument(
         "--language",

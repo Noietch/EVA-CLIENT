@@ -39,7 +39,10 @@ async function check(ack, statuses, expectedError = null) {
   }, {context});
   const source = fs.readFileSync("src/core/app/console/static/js/device.js", "utf8");
   const module = new vm.SourceTextModule(source + "\nexport { panel };", {context});
-  await module.link(() => core);
+  const i18n = new vm.SyntheticModule(["t"], function () {
+    this.setExport("t", key => key);
+  }, {context});
+  await module.link(specifier => specifier === "./i18n.js" ? i18n : core);
   await module.evaluate();
   const panel = module.namespace.panel;
   await panel.command("robot");
@@ -58,8 +61,8 @@ const ready = {
   processes: {robot: null}, ready: {robot: true},
   operations: {robot: {id: "new", state: "ready"}},
 };
-await check({ok: true}, [], /server is out of date/);
-await check({ok: true, request_id: ""}, [], /server is out of date/);
+await check({ok: true}, [], /device\.serverOutOfDate/);
+await check({ok: true, request_id: ""}, [], /device\.serverOutOfDate/);
 await check({ok: true, request_id: "new"}, [
   {processes: {}},
   {processes: {}, operations: {}},
@@ -119,7 +122,10 @@ const core = new vm.SyntheticModule(["$", "S", "apiGet", "apiPost"], function ()
 }, {context});
 const source = fs.readFileSync("src/core/app/console/static/js/device.js", "utf8");
 const module = new vm.SourceTextModule(source + "\nexport { panel };", {context});
-await module.link(() => core);
+const i18n = new vm.SyntheticModule(["t"], function () {
+  this.setExport("t", key => key);
+}, {context});
+await module.link(specifier => specifier === "./i18n.js" ? i18n : core);
 await module.evaluate();
 const panel = module.namespace.panel;
 panel.updateControls = () => {};

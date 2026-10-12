@@ -5,7 +5,7 @@ import { t } from "./i18n.js";
 import { updateScrub } from "./charts.js";
 import {
   applyCollectTaskSelection, collectTaskIndexValue, collectSetValue, selectCollectSet, collectTaskValue,
-  setPanel, applyStatus, uiMode,
+  setPanel, applyStatus, syncCollectTaskNavigation, uiMode,
 } from "./run.js";
 import {
   exitReplayMode, loadReviewPlayback, refreshCameraStreams, replayStop,
@@ -302,8 +302,32 @@ async function pollCollectionSlots(force = false, { autoActivate = true } = {}) 
 
 async function selectCollectionDataset(dataset) {
   const value = String(dataset || "").trim();
-  if (!value || (S.STATUS.collect && S.STATUS.collect.collecting)) return false;
-  if (!selectCollectSet(value)) return false;
+  if (!value || S.collectTaskSelectionPending || S.STATUS.collect?.collecting) return false;
+  const entry = S.CFG.collect_tasks[value]?.[0];
+  if (!entry) return false;
+  setCollectError();
+  clearTimeout(collectionSlotClickTimer);
+  collectionSlotClickTimer = null;
+  queuedCollectionSlotSwitch = null;
+  S.collectTaskSelectionPending = true;
+  syncCollectTaskNavigation();
+  try {
+    const response = await apiPost("/api/select_collect_task", {
+      dataset: value, task: entry[0], task_index: 0,
+    }, { concurrent: true, timeoutMs: 5000 });
+    if (!response.ok) {
+      setCollectError(response.error || "Unable to select this dataset");
+      return false;
+    }
+    applyCollectTaskSelection(response.task, response.dataset, response.task_index);
+    selectCollectSet(value);
+  } catch (error) {
+    setCollectError(error.message || "Unable to select this dataset");
+    return false;
+  } finally {
+    S.collectTaskSelectionPending = false;
+    syncCollectTaskNavigation();
+  }
   const state = S.collectionSlots;
   if (state.dataset !== value) setCollectTransferInfo("");
   state.dataset = value;
@@ -322,11 +346,12 @@ async function selectCollectionDataset(dataset) {
   const select = $("collect-set-list");
   if (select) select.value = value;
   await pollCollectionSlots(true, { autoActivate: false });
-  if (state.dataset === value && state.active &&
+  if (state.dataset !== value) return false;
+  if (state.active &&
       (state.sessionDataset !== value || state.sessionSlotId !== state.active.slot_id)) {
-    await activateCollectionSlot(state.active);
+    return activateCollectionSlot(state.active);
   }
-  return !!state.active;
+  return true;
 }
 
 function changeCollectionSlotFilter(kind, value) {
@@ -385,6 +410,57 @@ function scenePlanGridPositions(scene) {
   return positions;
 }
 
+function scenePlanDisplayGrid() {
+  // larybench display_grid uses world Y for columns and world X for rows.
+  const displayGrid = S.SCENE_PLAN && S.SCENE_PLAN.display_grid;
+  if (!displayGrid || typeof displayGrid !== "object") return null;
+  const columnAxis = String(displayGrid.column_axis || "").trim().toLowerCase();
+  const rowAxis = String(displayGrid.row_axis || "").trim().toLowerCase();
+  const columns = Array.isArray(displayGrid.columns)
+    ? displayGrid.columns.map(Number).filter(Number.isFinite) : [];
+  const rows = Array.isArray(displayGrid.rows)
+    ? displayGrid.rows.map(Number).filter(Number.isFinite) : [];
+  if (!columns.length || !rows.length || columnAxis !== "y" || rowAxis !== "x") return null;
+  const cellCount = columns.length * rows.length;
+  const labels = Array.isArray(displayGrid.position_ids) ? displayGrid.position_ids : [];
+  const flatLabels = labels.length && Array.isArray(labels[0]) ? labels.flat() : labels;
+  return {
+    columns: columns.length,
+    rows: rows.length,
+    columnAxis,
+    rowAxis,
+    columnValues: columns,
+    rowValues: rows,
+    labels: Array.from({length: cellCount}, (_, index) => (
+      String(flatLabels[index] || `G${String(index + 1).padStart(2, "0")}`)
+    )),
+  };
+}
+
+function nearestGridIndex(values, target) {
+  if (!values.length || !Number.isFinite(target)) return -1;
+  return values.reduce((best, value, index) => (
+    Math.abs(value - target) < Math.abs(values[best] - target) ? index : best
+  ), 0);
+}
+
+function sceneCoordinateText(value) {
+  const coordinates = Array.isArray(value) ? value : [];
+  return coordinates.map((coordinate) => {
+    const x = Number(coordinate.x);
+    const y = Number(coordinate.y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return "";
+    return `${coordinate.positionId || "point"}:(${x.toFixed(4)},${y.toFixed(4)})`;
+  }).filter(Boolean).join(" / ");
+}
+
+function placementPoseText(placement) {
+  if (!Array.isArray(placement?.pose_xyzw) || placement.pose_xyzw.length !== 7) return "";
+  const values = placement.pose_xyzw.map((value) => Number(value));
+  if (values.some((value) => !Number.isFinite(value))) return "";
+  return `pose=(${values.map((value) => value.toFixed(4)).join(",")})`;
+}
+
 function scenePlanGridGeometry(positions) {
   const count = Math.max(1, positions.length);
   const fallbackColumns = Math.ceil(Math.sqrt(count));
@@ -393,10 +469,36 @@ function scenePlanGridGeometry(positions) {
     rows: Math.ceil(count / fallbackColumns),
     cells: positions.map((position, index) => ({
       ...position,
+      cellId: position.positionId,
+      label: position.positionId,
+      positionIds: [position.positionId],
+      positionCoordinates: [{positionId: position.positionId, x: position.x, y: position.y}],
       column: index % fallbackColumns + 1,
       row: Math.floor(index / fallbackColumns) + 1,
     })),
   };
+  const displayGrid = scenePlanDisplayGrid();
+  if (displayGrid) {
+    const cells = displayGrid.labels.map((label, index) => ({
+      cellId: label,
+      label,
+      positionIds: [],
+      positionCoordinates: [],
+      column: index % displayGrid.columns + 1,
+      row: Math.floor(index / displayGrid.columns) + 1,
+    }));
+    positions.forEach((position) => {
+      const columnValue = position[displayGrid.columnAxis];
+      const rowValue = position[displayGrid.rowAxis];
+      const column = nearestGridIndex(displayGrid.columnValues, columnValue);
+      const row = nearestGridIndex(displayGrid.rowValues, rowValue);
+      if (column < 0 || row < 0) return;
+      const cell = cells[row * displayGrid.columns + column];
+      cell.positionIds.push(position.positionId);
+      cell.positionCoordinates.push({positionId: position.positionId, x: position.x, y: position.y});
+    });
+    return {columns: displayGrid.columns, rows: displayGrid.rows, cells};
+  }
   if (!positions.length || positions.some((position) => (
     !Number.isFinite(position.x) || !Number.isFinite(position.y)
   ))) return fallback;
@@ -409,6 +511,10 @@ function scenePlanGridGeometry(positions) {
     rows: yValues.length,
     cells: positions.map((position) => ({
       ...position,
+      cellId: position.positionId,
+      label: position.positionId,
+      positionIds: [position.positionId],
+      positionCoordinates: [{positionId: position.positionId, x: position.x, y: position.y}],
       column: xValues.indexOf(position.x) + 1,
       row: yValues.indexOf(position.y) + 1,
     })),
@@ -450,17 +556,11 @@ function taskHighlightsPlacement(task, placement) {
 
 function renderSceneGridCells(host, scene) {
   const geometry = scenePlanGridGeometry(scenePlanGridPositions(scene));
-  const bounds = S.SCENE_PLAN && S.SCENE_PLAN.bounds || {};
-  const physicalAspect = Number(bounds.width) / Number(bounds.height);
-  const gridAspect = geometry.columns / geometry.rows;
-  const aspect = Number.isFinite(physicalAspect) && physicalAspect > 0
-    ? physicalAspect : Math.max(0.5, Math.min(2, gridAspect));
   const layoutKey = geometry.cells.map((cell) => (
-    `${cell.positionId}:${cell.column}:${cell.row}`
+    `${cell.cellId}:${cell.column}:${cell.row}:${JSON.stringify(cell.positionCoordinates)}`
   )).join("|");
   host.style.setProperty("--scene-grid-columns", String(geometry.columns));
   host.style.setProperty("--scene-grid-rows", String(geometry.rows));
-  host.style.setProperty("--scene-grid-aspect", String(aspect));
   if (host.dataset.layoutKey === layoutKey) return;
   host.dataset.layoutKey = layoutKey;
   host.replaceChildren(...geometry.cells.map((position) => {
@@ -469,11 +569,14 @@ function renderSceneGridCells(host, scene) {
     const object = document.createElement("b");
     const photo = document.createElement("img");
     cell.className = "collect-scene-cell empty";
-    cell.dataset.positionId = position.positionId;
+    cell.dataset.positionIds = position.positionIds.join("|");
+    cell.dataset.positionCoordinates = JSON.stringify(position.positionCoordinates || []);
     cell.style.gridColumn = String(position.column);
     cell.style.gridRow = String(position.row);
-    cell.title = position.positionId;
-    label.textContent = position.positionId;
+    const coordinates = sceneCoordinateText(position.positionCoordinates);
+    cell.title = [position.positionIds.join(" / ") || position.cellId, coordinates]
+      .filter(Boolean).join(" · ");
+    label.textContent = position.label || position.cellId;
     photo.className = "collect-scene-object-photo";
     photo.alt = "";
     photo.hidden = true;
@@ -496,9 +599,11 @@ function renderCurrentSceneGrid(scene, task) {
     byPosition.set(positionId, values);
   });
   host.querySelectorAll(".collect-scene-cell").forEach((cell) => {
-    const placements = byPosition.get(cell.dataset.positionId) || [];
+    const positionIds = String(cell.dataset.positionIds || "").split("|").filter(Boolean);
+    const placements = positionIds.flatMap((positionId) => byPosition.get(positionId) || []);
     const names = [...new Set(placements.map((placement) => String(placement.name_en || (/[^\x00-\x7F]/.test(placement.name || "") ? placement.object_id : placement.name) || "")))]
       .filter(Boolean);
+    const poses = [...new Set(placements.map(placementPoseText).filter(Boolean))];
     cell.classList.toggle("empty", placements.length === 0);
     cell.classList.toggle("fixed", placements.length > 0);
     cell.classList.toggle(
@@ -506,7 +611,7 @@ function renderCurrentSceneGrid(scene, task) {
     );
     const object = cell.querySelector("b");
     object.textContent = names.join(" / ");
-    object.title = names.join(" / ");
+    object.title = [names.join(" / "), poses.join(" / ")].filter(Boolean).join(" · ");
     const photo = cell.querySelector("img");
     const photoUrl = placements.find((placement) => placement.photo_url)?.photo_url || "";
     if (photoUrl) {
@@ -518,8 +623,11 @@ function renderCurrentSceneGrid(scene, task) {
       photo.hidden = true;
       photo.removeAttribute("src");
     }
-    cell.title = names.length
-      ? `${cell.dataset.positionId} · ${names.join(" / ")}` : cell.dataset.positionId;
+    const positionLabel = positionIds.join(" / ") || cell.querySelector("span")?.textContent || "";
+    const coordinates = JSON.parse(cell.dataset.positionCoordinates);
+    const coordinateText = sceneCoordinateText(coordinates);
+    cell.title = [positionLabel, coordinateText, names.join(" / "), poses.join(" / ")]
+      .filter(Boolean).join(" · ");
   });
 }
 
@@ -580,6 +688,14 @@ function episodeItemsSummary(items) {
       item && item.status,
       item && item.quality,
       item && item.qc_verdict,
+      item && item.qc_auto_verdict,
+      item && item.replay_required,
+      item && item.replay_verified,
+      item && item.replay_qc_reason,
+      item && item.qc_note,
+      item && item.qc_reason,
+      item && item.qc_auto_note,
+      item && item.qc_auto_reason,
       item && item.length,
       item && item.error,
       item && item.quality_issue_count,
@@ -1164,11 +1280,17 @@ function collectEnabled() {
 
 function collectQcState(item) {
     if (savedEpisodeId(item) == null) return "pending";
-    const verdict = String(item.qc_verdict || "").toLowerCase();
-    if (verdict === "unreviewed") return "unreviewed";
-    if (verdict === "pass") return "passed";
-    if (verdict === "fail") return "failed";
-    return String(item.quality || "").toLowerCase() === "red" ? "failed" : "unreviewed";
+    const verdict = String(item.qc_verdict || "").trim().toLowerCase();
+    let state = {pass: "passed", fail: "failed", unreviewed: "unreviewed"}[verdict]
+      || (String(item.quality || "").toLowerCase() === "red" ? "failed" : "unreviewed");
+    if (verdict !== "pass" && verdict !== "fail" && item.qc_auto_verdict === "fail") {
+      state = "failed";
+    }
+    if (item.replay_required) {
+      if (item.replay_verified === false) return "failed";
+      if (item.replay_verified == null && state === "passed") return "unreviewed";
+    }
+    return state;
 }
 
 function collectQcLabel(state) {
@@ -1183,9 +1305,7 @@ function collectOutcome(item) {
 
 function collectResultLabel(item) {
     if (!item) return "UNKNOWN";
-    return item.qc_verdict
-      ? `QC ${String(item.qc_verdict).toUpperCase()}`
-      : String(item.quality || "unknown").toUpperCase();
+    return `QC ${collectQcLabel(collectQcState(item))}`;
   }
 
 function collectTone(item) {
@@ -1209,6 +1329,23 @@ function collectIssueText(item) {
     return issues.map((issue) => (
       `${issue.code || "issue"}${Number(issue.count || 1) > 1 ? ` ×${issue.count}` : ""}`
     )).join(", ");
+  }
+
+function collectQualityReason(item) {
+    if (!item) return "";
+    const issues = (item.quality_issues || []).map((issue) => {
+      const detail = issue.detail || issue.message || issue.code || "";
+      return `${detail}${Number(issue.count || 1) > 1 ? ` ×${issue.count}` : ""}`;
+    }).filter(Boolean);
+    const values = [
+      item.qc_auto_note,
+      item.qc_auto_reason,
+      item.qc_note,
+      item.qc_reason,
+      ...issues,
+      item.error,
+    ].map((value) => String(value || "").trim()).filter(Boolean);
+    return [...new Set(values)].join(" · ");
   }
 
 function savedEpisodeId(item) {
@@ -1280,6 +1417,30 @@ function selectCollectionQcTarget(item) {
     if ($("collect-qc-status")) $("collect-qc-status").textContent = "";
   }
 
+function renderCollectionMachineFinding(episode) {
+    const saved = savedEpisodeId(episode) != null;
+    const note = saved
+      ? (episode.qc_auto_note || (episode.qc_auto ? episode.qc_note : "")) : "";
+    const reason = saved
+      ? (episode.qc_auto_reason || (episode.qc_auto ? episode.qc_reason : "")) : "";
+    const finding = $("collect-qc-machine");
+    finding.hidden = !note && !reason;
+    finding.textContent = `${t("collect.qc.machineFinding")}\n${note || reason}`;
+  }
+
+function renderCollectionQcControls(enabled, pending) {
+    const episode = selectedCollectEpisodeItem();
+    const saved = savedEpisodeId(episode) != null;
+    renderCollectionMachineFinding(episode);
+    $("collect-qc-target").textContent = saved
+      ? `EPISODE ${episode.episode_index} · ${collectResultLabel(episode)}` : "--";
+    $("b-collect-qc-pass").disabled = !enabled || !saved || pending;
+    $("b-collect-qc-unreviewed").disabled = !enabled || !saved || pending;
+    $("b-goto-qc").disabled = !enabled || !saved || pending;
+    $("b-collect-note-save").disabled = !saved || pending;
+    return saved;
+  }
+
 function selectedCollectEpisodeItem() {
     if (!collectionQcTarget || collectionQcTarget.dataset !== S.collectionSlots.dataset) return null;
     const episode = collectionQcTarget.item.episode_index;
@@ -1326,6 +1487,14 @@ function syncCollectionSlotCursor() {
   const activeId = String((state.active && state.active.slot_id) || "");
   state.selectedSlotId = onPage(activeId) ? activeId : "";
   state.cursorPinned = false;
+}
+
+function collectionRecordingSlotId() {
+  const state = S.collectionSlots;
+  if (!S.STATUS.collect?.collecting || !state.dataset ||
+      !state.sessionDataset || state.sessionDataset !== state.dataset) return "";
+  // Both fields mirror the same session slot; the slot payload keeps the dataset pair.
+  return String(state.sessionSlotId || S.STATUS.collection_slot_id || "");
 }
 
 // The cursor is the capture slot: a move switches the console over at once, and
@@ -1558,6 +1727,7 @@ function renderCollectionSlotFilters() {
 
 function renderCollectTiles(items) {
     const host = $("collect-queue-tiles");
+    const recordingSlotId = collectionRecordingSlotId();
     const focusedSlotId = host.contains(document.activeElement)
       ? document.activeElement.dataset.slotId : null;
     host.innerHTML = "";
@@ -1575,20 +1745,24 @@ function renderCollectTiles(items) {
       tile.title = `${slot.scene_id} · ${slot.task} · ` +
         `${t("collect.round")} ${Number(slot.round_index) + 1}/${slot.round_total}`;
       const episode = savedEpisodeId(slot.episode);
-      tile.title = `${t("collect.slot")} ${Number(slot.ordinal) + 1} · ${tile.title}`;
-      if (episode != null) {
-        tile.title += ` · ${t("collect.episodeLabel")} ${episode} · ${collectResultLabel(slot.episode)}`;
-      }
+      const recording = recordingSlotId === String(slot.slot_id);
       const saving = slot.state === "saving";
+      tile.title = `${t("collect.slot")} ${Number(slot.ordinal) + 1} · ${tile.title}`;
+      if (episode != null) tile.title += ` · ${t("collect.episodeLabel")} ${episode}`;
       tile.textContent = String(Number(slot.ordinal) + 1);
-      tile.setAttribute("aria-label", tile.title);
-      const saved = savedEpisodeId(slot.episode) != null;
+      const saved = episode != null;
       const current = S.collectionSlots.active &&
         S.collectionSlots.active.slot_id === slot.slot_id;
-      const visibleState = slot.qc_state || collectQcState(slot.episode);
-      tile.title += saving ? " · SAVING" : ` · ${collectQcLabel(visibleState)}`;
+      const visibleState = recording ? "unreviewed" : (slot.qc_state || collectQcState(slot.episode));
+      if (recording) tile.title += " · RECORDING";
+      else if (saving) tile.title += " · SAVING";
+      else tile.title += ` · ${collectQcLabel(visibleState)}`;
+      if (!recording && !saving) {
+        const reason = collectQualityReason(slot.episode);
+        if (reason) tile.title += ` · ${reason}`;
+      }
       tile.setAttribute("aria-label", tile.title);
-      tile.setAttribute("aria-busy", String(saving));
+      tile.setAttribute("aria-busy", String(recording || saving));
       tile.className = `collect-tile slot-${visibleState}` +
         `${saving ? " slot-saving" : ""}`;
       // One cursor: the armed slot is framed only while it is where the operator is.
@@ -2041,15 +2215,8 @@ function renderCollect() {
     if (home) {
       home.disabled = S.collectHomeBusy || S.collectArmEnabled || collecting || !!S.STATUS.setup_stage;
     }
-    const selectedEpisode = selectedCollectEpisodeItem();
-    const selectedEpisodeSaved = savedEpisodeId(selectedEpisode) != null;
     const qcPending = S.collectTaskSelectionPending || collectionSlotClickTimer !== null;
-    $("collect-qc-target").textContent = selectedEpisodeSaved
-      ? `EPISODE ${selectedEpisode.episode_index} · ${collectResultLabel(selectedEpisode)}` : "--";
-    $("b-collect-qc-pass").disabled = !enabled || !selectedEpisodeSaved || qcPending;
-    $("b-collect-qc-unreviewed").disabled = !enabled || !selectedEpisodeSaved || qcPending;
-    $("b-goto-qc").disabled = !enabled || !selectedEpisodeSaved || qcPending;
-    $("b-collect-note-save").disabled = !selectedEpisodeSaved || qcPending;
+    const selectedEpisodeSaved = renderCollectionQcControls(enabled, qcPending);
     renderCollectionTransfer(enabled, usableCount + unreviewedCount, rejectedCount);
 
     const recordState = collecting || (hasPrompt && !S.collectArmEnabled)
@@ -2062,6 +2229,7 @@ function renderCollect() {
 
     const renderKey = [
       collectionSet,
+      collectionRecordingSlotId(),
       activeSlot ? activeSlot.slot_id : "",
       slotPlan.page,
       slotPlan.sceneFilter,

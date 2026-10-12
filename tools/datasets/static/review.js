@@ -1,5 +1,9 @@
 import { loadThree, RobotViewer } from "./robot-viewer.js";
 
+const VIDEO_PREBUFFER_SECONDS = 5;
+let reviewVideoAbortController = null;
+let reviewPlaybackRaf = null;
+
 const COLORS = ["#e8590c", "#1f1e1c", "#2563eb", "#2f9e44", "#d6336c", "#0b7285"];
 const $ = (id) => document.getElementById(id);
 function qcState(slot) {
@@ -67,11 +71,17 @@ function configureReview(context) {
 }
 
 function stopPlayback() {
+  cancelAnimationFrame(reviewPlaybackRaf);
+  reviewPlaybackRaf = null;
+  if (reviewVideoAbortController) reviewVideoAbortController.abort();
+  reviewVideoAbortController = null;
   app.playing = false;
   cancelAnimationFrame(app.playbackTimer);
   document.querySelectorAll(".cam-strip video").forEach((video) => video.pause());
   const control = $("review-play");
   if (control) control.textContent = "▶";
+  const range = $("review-range");
+  if (range) range.disabled = !reviewSeries()?.state.length;
 }
 
 
@@ -96,7 +106,9 @@ async function openSlot(task, slot) {
     const payloadPromise = cached && Date.now() - cached.timestamp < 300000
       ? Promise.resolve(cached.payload)
       : api("/api/review?" + query).then((payload) => {
-        app.reviewCache.set(reviewKey, { timestamp: Date.now(), payload });
+        if (token === app.reviewToken) {
+          app.reviewCache.set(reviewKey, { timestamp: Date.now(), payload });
+        }
         return payload;
       });
     const [payload] = await Promise.all([payloadPromise, loadThree()]);
@@ -284,10 +296,11 @@ function renderReview(task, slot, payload) {
   app.robotViewer = new RobotViewer($("review-gl"), $("robot-empty"));
   const episodeIndex = slot.episode ? Number(slot.episode.episode_index) : null;
   app.robotViewer.load(payload.robot_type, payload, episodeIndex);
-  requestAnimationFrame(() => {
+  reviewPlaybackRaf = requestAnimationFrame(() => {
+    reviewPlaybackRaf = null;
     renderChartControls();
     drawReviewCharts(0);
-    autoStartPlayback();
+    togglePlayback();
   });
 }
 
@@ -337,8 +350,7 @@ function buildCameraStrip(batch, slot, payload) {
     const cell = node("div", "cam-cell");
     cell.append(node("span", "cam-label", video.label));
     const media = node("video", "cam");
-    media.preload = "metadata";
-    media.autoplay = true;
+    media.preload = "auto";
     media.loop = true;
     media.muted = true;
     media.playsInline = true;
@@ -630,7 +642,7 @@ function buildQcControls(task, slot) {
   const failRow = node("div", "qc-verdict-row");
   failRow.append(fail);
   section.append(passRow, reason, note);
-  if (episode && episode.qc_auto_note) {
+  if (episode && (episode.qc_auto_note || episode.qc_auto_reason)) {
     const machine = node("div", "frame-label-warning");
     machine.append(
       node("b", "", translate("qc.machineOpinion")),
@@ -667,7 +679,15 @@ async function saveQc(task, slot, verdict, control) {
     localEpisode.qc_note = noteValue;
     localEpisode.qc_reason = verdict === "fail" || !verdict ? reasonValue : "";
   }
-  slot.qc_state = effectiveVerdict === "pass" ? "passed" : effectiveVerdict === "fail" ? "failed" : "unreviewed";
+  slot.qc_state = effectiveVerdict === "pass" ? "passed"
+    : effectiveVerdict === "fail" || localEpisode?.qc_auto_verdict === "fail" ? "failed"
+    : "unreviewed";
+  if (localEpisode?.replay_required) {
+    if (localEpisode.replay_verified === false) slot.qc_state = "failed";
+    else if (localEpisode.replay_verified == null && slot.qc_state === "passed") {
+      slot.qc_state = "unreviewed";
+    }
+  }
   if (control && verdict) {
     control.classList.add("selected");
     const sibling = control.parentElement && [...control.parentElement.children].find((item) => item !== control);
@@ -862,24 +882,41 @@ function frameForElapsed(timestamps, elapsed) {
   return Math.max(0, low - 1);
 }
 
-function autoStartPlayback() {
-  const series = reviewSeries();
-  if (!series || !series.state.length) return;
-  const videos = [...document.querySelectorAll(".cam-strip video")];
-  const begin = () => {
-    if (!app.playing) togglePlayback();
-    videos.forEach((video) => video.play().catch(() => {}));
-  };
-  videos.forEach((video) => {
-    video.addEventListener("canplay", begin, {once: true});
+function waitForReviewVideoBuffer(video, signal, elapsed) {
+  return new Promise((resolve) => {
+    const events = ["loadedmetadata", "durationchange", "progress", "canplay", "canplaythrough", "seeked", "error"];
+    const finish = (ready) => {
+      events.forEach((event) => video.removeEventListener(event, check));
+      signal.removeEventListener("abort", abort);
+      resolve(ready);
+    };
+    const abort = () => finish(false);
+    const check = () => {
+      if (video.error) { finish(false); return; }
+      if (Number.isFinite(video.duration) && elapsed > video.duration + 0.01) { finish(false); return; }
+      if (video.readyState >= 1 && Math.abs(video.currentTime - elapsed) > 0.001) {
+        video.currentTime = elapsed;
+      }
+      if (video.readyState < 2 || !Number.isFinite(video.duration)) return;
+      const end = Math.min(video.duration, elapsed + VIDEO_PREBUFFER_SECONDS);
+      for (let i = 0; i < video.buffered.length; i += 1) {
+        if (video.buffered.start(i) <= elapsed && video.buffered.end(i) >= end - 0.01) {
+          finish(true);
+          return;
+        }
+      }
+    };
+    if (signal.aborted) { abort(); return; }
+    signal.addEventListener("abort", abort, {once: true});
+    events.forEach((event) => video.addEventListener(event, check));
+    check();
   });
-  begin();
 }
 
-function togglePlayback() {
+async function togglePlayback() {
   const series = reviewSeries();
   if (!series || !series.state.length) return;
-  if (app.playing) {
+  if (app.playing || reviewVideoAbortController) {
     stopPlayback();
     return;
   }
@@ -889,11 +926,25 @@ function togglePlayback() {
     seekReview(frame);
   }
   const elapsed = (Number(series.timestamp[frame]) || 0) - (Number(series.timestamp[0]) || 0);
-  const videos = document.querySelectorAll(".cam-strip video");
-  videos.forEach((video) => {
-    if (Math.abs(video.currentTime - elapsed) > 0.04) video.currentTime = elapsed;
-    video.play().catch(() => {});
-  });
+  const videos = [...document.querySelectorAll(".cam-strip video")];
+  const controller = new AbortController();
+  reviewVideoAbortController = controller;
+  $("review-play").textContent = "…";
+  $("review-range").disabled = true;
+  const ready = await Promise.all(videos.map((video) =>
+    waitForReviewVideoBuffer(video, controller.signal, elapsed).then((ok) => {
+      if (!ok) controller.abort();
+      return ok;
+    })));
+  if (reviewVideoAbortController !== controller) return;
+  reviewVideoAbortController = null;
+  $("review-range").disabled = false;
+  if (ready.some((value) => !value)) {
+    $("review-play").textContent = "▶";
+    showToast(translate("qc.noVideo"), true);
+    return;
+  }
+  videos.forEach((video) => video.play().catch(() => {}));
   app.playbackStartedAt = performance.now() - elapsed * 1000;
   app.playbackFrame = frame;
   app.playbackChartAt = 0;

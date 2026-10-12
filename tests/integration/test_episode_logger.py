@@ -26,6 +26,7 @@ from core.types import (
     RawCollectionSnapshot,
 )
 from core.utils.lerobot import LeRobotDatasetIO
+from core.utils.qc import qc_state, replay_validation
 from robots.base import (
     ActuatorGroup,
     CameraSpec,
@@ -394,9 +395,138 @@ def test_a_retake_replaces_the_slots_previous_episode(tmp_path):
     assert saved.num_rows == 3
     # The replaced take's verdict dies with it: the new recording is unreviewed.
     ledger = _read_jsonl(dataset_dir / "meta" / "qc.jsonl")
-    assert [(row["episode_index"], row["qc_verdict"]) for row in ledger] == [
-        (0, "unreviewed")
-    ]
+    assert [(row["episode_index"], row["qc_verdict"]) for row in ledger] == [(0, "unreviewed")]
+
+
+def test_sim_retake_invalidates_the_previous_replay_report(tmp_path):
+    logger = _collection_logger(tmp_path)
+    dataset_dir = _collection_task_dir(tmp_path)
+    slot = "TASK-1:SC-1:0"
+    logger.start_episode("t")
+    logger.set_episode_meta(slot_id=slot, sim_metadata={"schema_version": 1})
+    logger.ingest_collection_snapshot(_collection_raw_snapshot(0.0))
+    assert logger.end_episode()
+    logger._collection_qc.wait(timeout=10)
+
+    report_path = dataset_dir / "meta/render_reports/episode_000000.json"
+    report_path.parent.mkdir(parents=True)
+    report_path.write_text(
+        json.dumps({"task_evaluation": {"success": True, "error": None}}),
+        encoding="utf-8",
+    )
+    previous = _read_jsonl(dataset_dir / "meta/episodes.jsonl")[0]
+    assert replay_validation(dataset_dir, previous) == (True, "")
+
+    logger.start_episode("t")
+    logger.set_episode_meta(slot_id=slot, sim_metadata={"schema_version": 1})
+    logger.ingest_collection_snapshot(_collection_raw_snapshot(0.1))
+    assert logger.end_episode()
+    logger._collection_qc.wait(timeout=10)
+    assert logger.mark_collection_qc("t", 0, "pass", "current take")
+    current = _read_jsonl(dataset_dir / "meta/episodes.jsonl")[0]
+    verified, reason = replay_validation(dataset_dir, current)
+    assert not report_path.exists()
+    assert (verified, reason) == (None, "replay_report_pending")
+    assert qc_state("pass", "green", verified, True) == "unreviewed"
+    logger.finalize()
+
+
+@pytest.mark.parametrize("secondary_finding", [False, True])
+def test_retake_enters_new_qc_without_inheriting_machine_failure(
+    tmp_path, monkeypatch, secondary_finding
+):
+    from tools.datasets.auto_qc import EpisodeAutoQc
+
+    logger = _collection_logger(tmp_path)
+    dataset_dir = _collection_task_dir(tmp_path)
+    slot = "TASK-1:SC-1:0"
+    logger.start_episode("t")
+    logger.set_episode_meta(slot_id=slot)
+    logger.ingest_collection_snapshot(_collection_raw_snapshot(0.0))
+    assert logger.end_episode()
+    logger._collection_qc.wait(timeout=10)
+    io = LeRobotDatasetIO(dataset_dir)
+    if secondary_finding:
+        assert io.mark_qc(0, "fail", "old human review")
+    assert io.mark_qc(0, "fail", "old machine finding", "joint_limit_exceeded", auto=True)
+
+    checking = threading.Event()
+    release = threading.Event()
+    check = EpisodeAutoQc.check
+
+    def paused_check(self, row, fence=None):
+        checking.set()
+        assert release.wait(10)
+        return check(self, row, fence)
+
+    monkeypatch.setattr(EpisodeAutoQc, "check", paused_check)
+    try:
+        logger.start_episode("t")
+        logger.set_episode_meta(slot_id=slot)
+        for index, timestamp in enumerate((0.1, 0.2, 0.3)):
+            logger.ingest_collection_snapshot(
+                _collection_raw_snapshot(timestamp, image=np.full((8, 8, 3), index * 60, np.uint8))
+            )
+        assert logger.end_episode()
+        assert checking.wait(10)
+        ledger = _read_jsonl(dataset_dir / "meta/qc.jsonl")[0]
+        assert ledger["qc_verdict"] == "unreviewed"
+        assert ledger["qc_note"] == ledger["qc_reason"] == ""
+        assert not any(key.startswith("qc_auto_") for key in ledger)
+        assert qc_state(ledger["qc_verdict"], "green") == "unreviewed"
+    finally:
+        release.set()
+        logger._collection_qc.wait(timeout=10)
+    ledger = _read_jsonl(dataset_dir / "meta/qc.jsonl")[0]
+    assert ledger["qc_verdict"] == "unreviewed"
+    assert ledger["qc_note"] == ledger["qc_reason"] == ""
+    logger.finalize()
+
+
+def test_older_qc_cannot_write_its_finding_into_a_new_retake(tmp_path, monkeypatch):
+    from tools.datasets.auto_qc import EpisodeAutoQc
+
+    logger = _collection_logger(tmp_path)
+    dataset_dir = _collection_task_dir(tmp_path)
+    slot = "TASK-1:SC-1:0"
+    checked = threading.Event()
+    release = threading.Event()
+    check = EpisodeAutoQc.check
+    first = True
+
+    def delayed_result(self, row, fence=None):
+        nonlocal first
+        issues = check(self, row, fence)
+        if first:
+            first = False
+            assert issues  # The first take has a genuinely frozen camera.
+            checked.set()
+            assert release.wait(10)
+        return issues
+
+    monkeypatch.setattr(EpisodeAutoQc, "check", delayed_result)
+    try:
+        logger.start_episode("t")
+        logger.set_episode_meta(slot_id=slot)
+        for timestamp in (0.0, 0.1, 0.2):
+            logger.ingest_collection_snapshot(_collection_raw_snapshot(timestamp))
+        assert logger.end_episode()
+        assert checked.wait(10)
+        logger.start_episode("t")
+        logger.set_episode_meta(slot_id=slot)
+        for index, timestamp in enumerate((0.3, 0.4, 0.5)):
+            logger.ingest_collection_snapshot(
+                _collection_raw_snapshot(timestamp, image=np.full((8, 8, 3), index * 60, np.uint8))
+            )
+        assert logger.end_episode()
+    finally:
+        release.set()
+        logger._collection_qc.wait(timeout=10)
+    ledger = _read_jsonl(dataset_dir / "meta/qc.jsonl")[0]
+    assert ledger["qc_verdict"] == "unreviewed"
+    assert ledger["qc_note"] == ledger["qc_reason"] == ""
+    assert _read_jsonl(dataset_dir / "meta/episodes.jsonl")[0]["quality"] == "green"
+    logger.finalize()
 
 
 def test_retake_removes_duplicate_episode_and_stats_rows(tmp_path):
@@ -458,15 +588,20 @@ def test_collection_save_rolls_back_when_qc_write_fails(tmp_path, monkeypatch):
     assert logger.end_episode()
     dataset_dir = _collection_task_dir(tmp_path)
     old_parquet = (dataset_dir / "data/chunk-000/episode_000000.parquet").read_bytes()
+    logger._collection_qc.wait(timeout=10)
+    report_path = dataset_dir / "meta/render_reports/episode_000000.json"
+    report_path.parent.mkdir(parents=True)
+    old_report = json.dumps({"task_evaluation": {"success": True, "error": None}})
+    report_path.write_text(old_report, encoding="utf-8")
 
-    original = LeRobotDatasetIO.mark_qc
+    original = LeRobotDatasetIO.reset_qc
 
     def fail_qc(self, *args, **kwargs):
         if args and int(args[0]) == 0:
             raise OSError("qc disk full")
         return original(self, *args, **kwargs)
 
-    monkeypatch.setattr(LeRobotDatasetIO, "mark_qc", fail_qc)
+    monkeypatch.setattr(LeRobotDatasetIO, "reset_qc", fail_qc)
     logger.start_episode("t")
     logger.set_episode_meta(slot_id=slot)
     for timestamp in (0.1, 0.2):
@@ -477,6 +612,8 @@ def test_collection_save_rolls_back_when_qc_write_fails(tmp_path, monkeypatch):
     episodes = _read_jsonl(dataset_dir / "meta/episodes.jsonl")
     assert [(row["episode_index"], row["length"]) for row in episodes] == [(0, 1)]
     assert (dataset_dir / "data/chunk-000/episode_000000.parquet").read_bytes() == old_parquet
+    assert report_path.read_text(encoding="utf-8") == old_report
+    logger.finalize()
 
 
 def test_collection_qc_failure_leaves_the_ledger_intact(tmp_path, monkeypatch):

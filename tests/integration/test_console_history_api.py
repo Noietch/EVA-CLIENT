@@ -8,10 +8,122 @@ from urllib.parse import urlencode
 
 import pytest
 
+from core.app.console.dashboard import _load_dataset_records
+from core.app.handlers.recording import load_episode_history
 from core.config import _normalize_collection_task_set
+from core.utils.collection_paths import dataset_location
 from tests.integration._harness import console_config, serve_console
 
 pytestmark = pytest.mark.integration
+
+
+@pytest.mark.parametrize("report_ref", [None, "custom-report.json", "absolute"])
+def test_history_refreshes_when_the_actual_replay_report_changes(tmp_path, report_ref):
+    meta = tmp_path / "meta"
+    meta.mkdir()
+    report_path = meta / "render_reports" / "episode_000000.json"
+    episode = {
+        "episode_index": 0,
+        "tasks": ["task"],
+        "length": 30,
+        "sim_metadata": {"schema_version": 1},
+        "qc_verdict": "pass",
+    }
+    if report_ref is not None:
+        report_path = tmp_path / "custom-report.json"
+        episode["render_report"] = str(report_path) if report_ref == "absolute" else report_ref
+    (meta / "episodes.jsonl").write_text(json.dumps(episode) + "\n")
+    pending = load_episode_history(tmp_path)
+    assert pending["episodes"][0]["replay_verified"] is None
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(json.dumps({"task_evaluation": {"success": True, "error": None}}))
+    passed = load_episode_history(tmp_path)
+    assert passed["episodes"][0]["replay_verified"] is True
+    assert passed["version"] != pending["version"]
+    report_path.write_text(json.dumps({"task_evaluation": {"success": False, "error": None}}))
+    failed = load_episode_history(tmp_path)
+    assert failed["episodes"][0]["replay_verified"] is False
+    assert failed["version"] != passed["version"]
+
+
+def test_dashboard_refreshes_replay_failures_without_rewriting_episode_metadata(tmp_path):
+    meta = tmp_path / "meta"
+    meta.mkdir()
+    (meta / "episodes.jsonl").write_text(
+        json.dumps(
+            {
+                "episode_index": 0,
+                "length": 30,
+                "sim_metadata": {},
+                "qc_verdict": "pass",
+            }
+        )
+        + "\n"
+    )
+    report_dir = meta / "render_reports"
+    report_dir.mkdir()
+    report = report_dir / "episode_000000.json"
+    for success in [True, False, True]:
+        report.write_text(json.dumps({"task_evaluation": {"success": success, "error": None}}))
+        _, _, records = _load_dataset_records(tmp_path, "collection")
+        assert records[0]["valid"] is success
+
+
+@pytest.mark.parametrize("machine_in_source", [False, True])
+def test_machine_findings_reach_history_and_color_unreviewed_slots(tmp_path, machine_in_source):
+    config = console_config(collection={"enabled": True})
+    config.collection.storage.data_root = str(tmp_path)
+    dataset_dir, _ = dataset_location(config, "cup_set")
+    meta = dataset_dir / "meta"
+    meta.mkdir(parents=True)
+    episodes = [
+        {
+            "episode_index": index,
+            "slot_id": f"INLINE-0:{index}",
+            "tasks": ["pick up cup"],
+            "length": 30,
+            "quality": "green",
+        }
+        for index in range(3)
+    ]
+    qc = [
+        {
+            "episode_index": index,
+            "qc_verdict": verdict,
+            "qc_note": "",
+            "qc_auto": False,
+            "qc_auto_verdict": auto_verdict,
+            "qc_auto_reason": "joint_limit_exceeded" if auto_verdict else "",
+            "qc_auto_note": "right_arm.joint4 exceeds its limit" if auto_verdict else "",
+        }
+        for index, (verdict, auto_verdict) in enumerate(
+            [("unreviewed", "fail"), ("pass", "fail"), ("unreviewed", "")]
+        )
+    ]
+    expected_note = qc[0]["qc_auto_note"]
+    if machine_in_source:
+        for episode, verdict in zip(episodes, qc, strict=True):
+            for key in ("qc_auto", "qc_auto_verdict", "qc_auto_reason", "qc_auto_note"):
+                episode[key] = verdict.pop(key)
+    episode_path = meta / "episodes.jsonl"
+    qc_path = meta / "qc.jsonl"
+    episode_path.write_text("".join(json.dumps(row) + "\n" for row in episodes))
+    qc_path.write_text("".join(json.dumps(row) + "\n" for row in qc))
+    originals = (episode_path.read_bytes(), qc_path.read_bytes())
+    with serve_console(config) as console:
+        console.runtime.episode_logger = _CollectionHistoryLogger(dataset_dir, [])
+        history = console.get("/api/episodes?scope=collect&set=cup_set").json
+        slots = console.get("/api/collection_slots?dataset=cup_set&all=1").json
+    row = history["episodes"][0]
+    assert row["qc_verdict"] == "unreviewed"
+    assert row["qc_note"] == ""
+    assert row["qc_auto_verdict"] == "fail"
+    assert row["qc_auto_reason"] == "joint_limit_exceeded"
+    assert row["qc_auto_note"] == expected_note
+    assert [slot["qc_state"] for slot in slots["slots"][:3]] == ["failed", "passed", "unreviewed"]
+    assert slots["counts"]["failed"] == 1
+    assert slots["slots"][0]["episode"]["qc_auto_note"] == expected_note
+    assert (episode_path.read_bytes(), qc_path.read_bytes()) == originals
 
 
 def test_collection_history_survives_description_change_with_task_identity(tmp_path):

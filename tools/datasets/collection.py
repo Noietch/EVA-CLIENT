@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import logging
@@ -24,7 +25,7 @@ import yaml
 import robots  # noqa: F401
 from core.registry import ROBOT_REGISTRY
 from core.utils.lerobot import LeRobotDatasetIO
-from core.utils.qc import qc_state
+from core.utils.qc import qc_state, replay_report_signature, replay_validation
 from core.utils.scene_plan import plan_slots, scene_plan_from_dir
 from robots.utils import UrdfScene
 from tools.datasets.assets import ObjectCatalog
@@ -38,9 +39,9 @@ TRANSFORM_CACHE_MAX = 32
 UNMATCHED_CACHE_SECONDS = 300.0
 PLAN_PAYLOAD_KEYS = ("batch_id", "info", "layout", "dataset_dir", "collection")
 # Bump when the state payload shape changes so cached pages are ignored.
-STATE_CACHE_VERSION = 8
+STATE_CACHE_VERSION = 10
 # Bump when the derived-row shape changes so existing database caches are ignored.
-DATA_CACHE_VERSION = 3
+DATA_CACHE_VERSION = 4
 # Derived rows stay useful while their source token holds; stale tokens are dead weight.
 DATA_CACHE_TTL_SECONDS = 3 * 24 * 3600.0
 CACHE_EVICTION_SECONDS = 3600.0
@@ -462,7 +463,15 @@ class PlanCatalog:
         frames = sum(int(row.get("length", 0) or 0) for row in records)
         status_counts = {"unreviewed": 0, "passed": 0, "failed": 0}
         for row in records:
-            status_counts[qc_state(row.get("qc_verdict"), row.get("quality"))] += 1
+            status_counts[
+                qc_state(
+                    row.get("qc_verdict"),
+                    row.get("quality"),
+                    row.get("replay_verified"),
+                    bool(row.get("replay_required")),
+                    row.get("qc_auto_verdict"),
+                )
+            ] += 1
         batch = self._unmatched_batch_id(robot_type)
         return {
             "batch_id": batch,
@@ -656,10 +665,6 @@ class PlanCatalog:
         """Return only the matching slot from each robot for one task comparison."""
         task_id = str(task_id).strip()
         scene_id = str(scene_id).strip()
-        try:
-            round_index = int(round_index)
-        except (TypeError, ValueError):
-            round_index = 0
         summaries = [self._batch_summary(batch) for batch in self.batch_ids()]
         summaries.sort(key=lambda item: 0 if item["batch_id"] == current_batch else 1)
         groups: list[dict[str, Any]] = []
@@ -997,7 +1002,7 @@ class PlanCatalog:
         )
         observed = 0
         try:
-            for index, frame in enumerate(reader):
+            for index, frame in enumerate(reader.iter_data()):
                 observed = index + 1
                 if index >= end:
                     break
@@ -1208,6 +1213,8 @@ class PlanCatalog:
                 dataset_dir / "meta" / "qc.jsonl",
             ):
                 parts.append(self._file_token(path))
+            self.episode_rows(dataset_dir)
+            parts.append(self._episode_rows_cache[str(dataset_dir / "meta/episodes.jsonl")][0])
         token = "|".join(parts)
         self._source_token_cache[cache_key] = (now, token)
         return token
@@ -1577,7 +1584,15 @@ class PlanCatalog:
                 daily[day] += 1
         status_counts = {"unreviewed": 0, "passed": 0, "failed": 0}
         for row in collected_rows:
-            status_counts[qc_state(row.get("qc_verdict"), row.get("quality"))] += 1
+            status_counts[
+                qc_state(
+                    row.get("qc_verdict"),
+                    row.get("quality"),
+                    row.get("replay_verified"),
+                    bool(row.get("replay_required")),
+                    row.get("qc_auto_verdict"),
+                )
+            ] += 1
         collected = sum(status_counts.values())
         summary = {
             "batch_id": batch,
@@ -1624,7 +1639,15 @@ class PlanCatalog:
     ) -> dict[str, Any]:
         summary = PlanCatalog._episode_summary(episode) if episode else None
         state = (
-            "pending" if summary is None else qc_state(summary["qc_verdict"], summary["quality"])
+            "pending"
+            if summary is None
+            else qc_state(
+                summary["qc_verdict"],
+                summary["quality"],
+                summary.get("replay_verified"),
+                bool(summary.get("replay_required")),
+                summary.get("qc_auto_verdict"),
+            )
         )
         return {
             "slot_id": slot_id,
@@ -1655,8 +1678,12 @@ class PlanCatalog:
             "qc_note": str(row.get("qc_note") or row.get("notes") or ""),
             "qc_reason": str(row.get("qc_reason") or row.get("reason") or ""),
             "qc_auto": bool(row.get("qc_auto", False)),
+            "qc_auto_verdict": str(row.get("qc_auto_verdict") or ""),
             "qc_auto_note": str(row.get("qc_auto_note") or ""),
             "qc_auto_reason": str(row.get("qc_auto_reason") or ""),
+            "replay_required": bool(row.get("replay_required", False)),
+            "replay_verified": row.get("replay_verified"),
+            "replay_qc_reason": str(row.get("replay_qc_reason") or ""),
             "frame_label_analysis": analysis,
             "middle_static_frames": int(analysis.get("middle_static_frames", 0) or 0),
             "machine_label": str(analysis.get("machine_label", "")),
@@ -1775,25 +1802,28 @@ class PlanCatalog:
     def episode_rows(self, dataset_dir: Path) -> list[dict[str, Any]]:
         path = dataset_dir / "meta" / "episodes.jsonl"
         qc_path = dataset_dir / "meta" / "qc.jsonl"
-        token = self._file_token(path) + "|" + self._file_token(qc_path)
+        metadata_token = self._file_token(path) + "|" + self._file_token(qc_path)
         key = str(path)
         cached = self._episode_rows_cache.get(key)
-        if cached is not None and cached[0] == token:
-            return cached[1]
-        db_rows = self._db_cache_get(f"episodes:{key}", token)
-        if isinstance(db_rows, list):
-            rows = [dict(row) for row in db_rows if isinstance(row, dict)]
-            self._episode_rows_cache[key] = (token, rows)
-            return rows
-        if not path.is_file():
-            rows: list[dict[str, Any]] = []
+        if cached is not None and cached[0].startswith(metadata_token + "|"):
+            rows = cached[1]
         else:
+            rows = self._db_cache_get(f"episodes:{key}", metadata_token)
+        if rows is None and not path.is_file():
+            rows = []
+        elif rows is None:
             rows = []
             with path.open(encoding="utf-8") as handle:
                 for line in filter(str.strip, handle):
                     payload = json.loads(line)
                     if isinstance(payload, dict):
                         rows.append(payload)
+        report_version = hashlib.blake2s(
+            repr(replay_report_signature(dataset_dir, rows)).encode(), digest_size=12
+        ).hexdigest()
+        token = metadata_token + "|" + report_version
+        if cached is not None and cached[0] == token:
+            return rows
         qc_rows = []
         if qc_path.is_file():
             qc_rows = [
@@ -1810,8 +1840,15 @@ class PlanCatalog:
                 int(row.get("episode_index", -1)), {}
             )
             row.update({key: value for key, value in source.items() if key.startswith("qc_")})
+            replay_verified, replay_reason = replay_validation(dataset_dir, row)
+            if replay_verified is not None or replay_reason:
+                row.update(
+                    replay_required=True,
+                    replay_verified=replay_verified,
+                    replay_qc_reason=replay_reason,
+                )
         self._episode_rows_cache[key] = (token, rows)
-        self._db_cache_put(f"episodes:{key}", token, rows)
+        self._db_cache_put(f"episodes:{key}", metadata_token, rows)
         return rows
 
     def _annotate_static_qc(

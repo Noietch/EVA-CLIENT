@@ -1018,6 +1018,21 @@ def publish_next_action(config: ConfigDict, runtime: RuntimeState, session: Sess
     strategy = runtime.infer_strategy
 
     sim_only = session.mode is SessionMode.SIM
+    action_ack_enabled = (
+        bool(config.transport.get("wait_action_applied", False))
+        and not sim_only
+        and config.transport.type == "zmq"
+    )
+    if action_ack_enabled:
+        execution_complete = (
+            runtime.transport.execution_complete  # pyright: ignore[reportAttributeAccessIssue]
+        )
+        if execution_complete:
+            logger.info(
+                "[ACTION_ACK] execution complete at step=%d; waiting for external stop",
+                session.step_index,
+            )
+            return False
 
     # Continuous mode: pop individual actions from the buffer
     if strategy is not None and strategy.is_loop_running():
@@ -1078,7 +1093,12 @@ def publish_next_action(config: ConfigDict, runtime: RuntimeState, session: Sess
         publish_real_action_with_preview(config, runtime, action, session=session)
 
     is_sync = strategy is not None and not strategy.runs_background_loop
-    if is_sync and strategy is not None and not is_offline_transport(runtime):
+    if (
+        is_sync
+        and strategy is not None
+        and not is_offline_transport(runtime)
+        and not action_ack_enabled
+    ):
         if not _wait_until_reached(
             runtime,
             action,

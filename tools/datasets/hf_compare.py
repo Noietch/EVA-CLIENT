@@ -79,7 +79,15 @@ def qc_summary(episodes: list[dict], qc: list[dict]) -> dict:
     counts = {"accept": 0, "fail": 0, "unreviewed": 0}
     for episode in episodes:
         row = {**episode, **overrides.get(episode.get("episode_index"), {})}
-        state = qc_state(row.get("qc_verdict"), row.get("quality"))
+        state = qc_state(
+            row.get("qc_verdict"),
+            row.get("quality"),
+            row.get("replay_verified"),
+            bool(row.get("replay_required"))
+            or isinstance(row.get("sim_metadata"), dict)
+            or bool(str(row.get("render_report") or "").strip()),
+            row.get("qc_auto_verdict"),
+        )
         counts[{"failed": "fail", "passed": "accept"}.get(state, "unreviewed")] += 1
     return counts
 

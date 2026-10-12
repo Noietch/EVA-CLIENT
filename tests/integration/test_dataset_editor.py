@@ -173,6 +173,30 @@ def test_object_measurements_round_trip_and_read_only(tmp_path):
     assert (assets / "objects.csv").read_bytes() == before
 
 
+@pytest.mark.parametrize("field", ["length_cm", "width_cm", "height_cm", "mass_g"])
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "abc"])
+def test_object_rejects_invalid_measurements(tmp_path, field, value):
+    client, _, assets, _ = _workspace(tmp_path)
+    before = (assets / "objects.csv").read_bytes()
+    response = client.put(
+        "/api/objects/OBJ-1",
+        json={"object_id": "OBJ-1", "object_name": "cup", field: value},
+    )
+    assert response.status_code == 400
+    assert (assets / "objects.csv").read_bytes() == before
+
+
+def test_object_rejects_unknown_modeling_method(tmp_path):
+    client, _, assets, _ = _workspace(tmp_path)
+    before = (assets / "objects.csv").read_bytes()
+    response = client.put(
+        "/api/objects/OBJ-1",
+        json={"object_id": "OBJ-1", "object_name": "cup", "modeling_method": "E"},
+    )
+    assert response.status_code == 400
+    assert (assets / "objects.csv").read_bytes() == before
+
+
 def test_batch_filter_and_plan_crud_round_trip(tmp_path):
     client, plans, _, _ = _workspace(tmp_path)
     _task_set(plans / "other_batch", "other")
@@ -363,6 +387,68 @@ def test_explicit_unreviewed_overrides_capture_failure_without_erasing_issues(tm
     saved = json.loads(path.read_text())
     assert saved["quality"] == "red"
     assert saved["quality_issues"] == [{"detail": "camera skew"}]
+
+
+def test_machine_failure_marks_unreviewed_dataset_slot_red(tmp_path):
+    client, _, _, collection = _workspace(tmp_path)
+    root = _episode_dataset(collection)
+    qc_path = root / "meta/qc.jsonl"
+    qc = {
+        "episode_index": 7,
+        "qc_verdict": "unreviewed",
+        "qc_note": "",
+        "qc_auto": False,
+        "qc_auto_verdict": "fail",
+        "qc_auto_reason": "joint_limit_exceeded",
+        "qc_auto_note": "right_arm.joint4 exceeds its limit",
+    }
+    qc_path.write_text(json.dumps(qc) + "\n")
+    state = client.get("/api/state?batch=" + BATCH).get_json()
+    slot = state["tasks"][0]["slots"][0]
+    assert slot["qc_state"] == "failed"
+    assert slot["episode"]["qc_verdict"] == "unreviewed"
+    assert slot["episode"]["qc_auto_verdict"] == "fail"
+    assert slot["episode"]["qc_auto_note"] == qc["qc_auto_note"]
+    assert state["all_batches"][0]["failed"] == 1
+    response = client.put(
+        "/api/batches/" + BATCH + "/episodes/7/qc", json={"verdict": "pass", "note": "checked"}
+    )
+    assert response.status_code == 200
+    passed = response.get_json()["tasks"][0]["slots"][0]
+    assert passed["qc_state"] == "passed"
+    assert passed["episode"]["qc_auto_note"] == qc["qc_auto_note"]
+
+
+@pytest.mark.parametrize("report_location", ["default", "relative", "absolute"])
+def test_replay_report_changes_refresh_rows_and_all_state_caches(tmp_path, report_location):
+    _, plans, assets, collection = _workspace(tmp_path)
+    dataset = _episode_dataset(collection)
+    episode_path = dataset / "meta/episodes.jsonl"
+    episode = json.loads(episode_path.read_text())
+    episode.update(sim_metadata={"schema_version": 1}, qc_verdict="pass")
+    if report_location == "default":
+        report_path = dataset / "meta/render_reports/episode_000007.json"
+    elif report_location == "relative":
+        episode["render_report"] = "custom_reports/replay.json"
+        report_path = dataset / episode["render_report"]
+    else:
+        report_path = tmp_path / "external_reports/replay.json"
+        episode["render_report"] = str(report_path)
+    episode_path.write_text(json.dumps(episode) + "\n")
+    report_path.parent.mkdir(parents=True)
+    catalog = PlanCatalog(plans, assets, collection)
+    pending = catalog.state(BATCH)
+    assert pending["tasks"][0]["slots"][0]["qc_state"] == "unreviewed"
+    assert catalog.episode_rows(dataset)[0]["replay_verified"] is None
+
+    for success, expected in [(True, "passed"), (False, "failed")]:
+        report_path.write_text(json.dumps({"task_evaluation": {"success": success, "error": None}}))
+        assert catalog.episode_rows(dataset)[0]["replay_verified"] is success
+        # Bypass only the one-second polling throttle, preserving all page caches.
+        catalog._source_token_cache.clear()
+        state = catalog.state(BATCH)
+        assert state["tasks"][0]["slots"][0]["qc_state"] == expected
+        assert state["all_batches"][0][expected] == 1
 
 
 def test_zip_export_import_and_metadata_update(tmp_path):

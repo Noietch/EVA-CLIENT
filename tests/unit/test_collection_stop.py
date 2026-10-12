@@ -15,6 +15,7 @@ from core.app.console.collection_slots import (
 from core.app.handlers.recording import collect_stop
 from core.app.state import SessionState, SessionStatus
 from core.config import ConfigDict
+from core.utils.collection_paths import slot_state_path
 
 pytestmark = pytest.mark.unit
 
@@ -70,7 +71,7 @@ def test_automatic_red_retake_survives_sync_until_new_capture(tmp_path, monkeypa
             episode_logger=SimpleNamespace(has_active_episode=False), active_config=None
         ),
     )
-    state_path = tmp_path / "collection_slots" / "set.json"
+    state_path = slot_state_path(ctx.config, "set")
     for _ in range(2):
         active = console_server._sync_collection_slot_session(ctx)
         assert active["slot_id"] == slots[1].slot_id
@@ -89,7 +90,7 @@ def test_saved_retake_advances_despite_reused_episode_index(tmp_path, monkeypatc
         for index, slot in enumerate(slots)
     ]
     config = ConfigDict(collection={"storage": {"log_dir": str(tmp_path)}})
-    state_path = tmp_path / "collection_slots" / "set.json"
+    state_path = slot_state_path(config, "set")
     select_collection_slot(
         state_path, slots[0].slot_id, CollectionSlotState([]), episode_index=0, manual=True
     )

@@ -1602,6 +1602,7 @@
     padding: 7px 9px; border: 1px solid var(--rule-strong); background: transparent; color: var(--ink);
   }
   .qc-status { font-size: 10px; color: var(--ink-dim); min-height: 12px; }
+  .qc-machine-finding { margin-top: 8px; font-size: 11px; white-space: pre-wrap; overflow-wrap: anywhere; }
   .quality-export-actions { display: grid; gap: 6px; }
   .quality-export-format {
     display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; align-items: center;

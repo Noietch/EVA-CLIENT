@@ -12,12 +12,16 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+from core.recorder.collection_qc import CollectionQcWorker
+from core.utils.dataset_lock import dataset_lock
+from core.utils.lerobot import LeRobotDatasetIO
 from robots.zoo.dual_yam import DualYam
 from tools.datasets.auto_qc import (
     ARM_TRAVEL,
     CAMERA_OFFLINE_REASON,
     CameraMotion,
     DatasetAutoQc,
+    EpisodeAutoQc,
     dataset_arm_limits,
     limit_breaches,
     offline_cameras,
@@ -272,6 +276,91 @@ def test_scan_rejects_a_trajectory_outside_its_joint_limits(tmp_path):
     slots = {slot["slot_id"]: slot for task in state["tasks"] for slot in task["slots"]}
     assert slots["TASK-1:SC-1:1"]["qc_state"] == "failed"
     assert slots["TASK-1:SC-1:0"]["qc_state"] == "passed"
+
+
+@pytest.mark.parametrize(("spike", "human_pass"), [(False, False), (True, False), (True, True)])
+def test_saved_take_gets_its_own_background_check(tmp_path, monkeypatch, spike, human_pass):
+    dataset = _dataset(tmp_path / "collection", BATCH, frozen=())
+    io = LeRobotDatasetIO(dataset)
+    assert io.mark_qc(1, "fail", "old failure", "old_reason", auto=True)
+    if spike:
+        _spike_action(dataset, 1, dim=3, value=1.6644)
+    assert io.reset_qc(1)
+    started = threading.Event()
+    release = threading.Event()
+    check = EpisodeAutoQc.check
+    inspected = []
+
+    def paused_check(self, row, fence=None):
+        inspected.append(row["episode_index"])
+        started.set()
+        assert release.wait(10)
+        return check(self, row, fence)
+
+    monkeypatch.setattr(EpisodeAutoQc, "check", paused_check)
+    worker = CollectionQcWorker(DualYam())
+    try:
+        with dataset_lock(dataset).acquire():
+            worker.submit(dataset, 1)
+        assert started.wait(10)
+        pending = _qc_rows(dataset)[1]
+        assert pending["qc_verdict"] == "unreviewed"
+        assert pending["qc_note"] == pending["qc_reason"] == ""
+        if human_pass:
+            assert io.mark_qc(1, "pass", "current human review")
+    finally:
+        release.set()
+        worker.close()
+    assert inspected == [1]
+    result = _qc_rows(dataset)[1]
+    assert result["qc_verdict"] == ("pass" if human_pass else "fail" if spike else "unreviewed")
+    if human_pass:
+        assert result["qc_note"] == "current human review"
+        assert result["qc_auto_reason"] == JOINT_LIMIT_REASON
+    elif spike:
+        assert result["qc_reason"] == JOINT_LIMIT_REASON
+        assert "old failure" not in result["qc_note"]
+    else:
+        assert result["qc_note"] == result["qc_reason"] == ""
+
+
+@pytest.mark.parametrize("retake", [False, True])
+def test_dataset_scan_releases_lock_and_discards_obsolete_result(tmp_path, monkeypatch, retake):
+    dataset = _dataset(tmp_path / "collection", BATCH, frozen=(), lengths=(10,))
+    catalog = _catalog(tmp_path, (BATCH,), episodes=1)
+    io = LeRobotDatasetIO(dataset)
+    updated = threading.Event()
+
+    def check(self, row, fence):
+        def update():
+            with dataset_lock(dataset).acquire():
+                if retake:
+                    path = io.episode_parquet(0)
+                    replacement = path.with_suffix(".replacement.parquet")
+                    pq.write_table(pq.read_table(path), replacement)
+                    replacement.replace(path)
+                    io.reset_qc(0)
+                else:
+                    io.mark_qc(0, "pass", "concurrent human review")
+            updated.set()
+
+        thread = threading.Thread(target=update)
+        thread.start()
+        thread.join(timeout=2)
+        assert updated.is_set(), "video checking must not hold the dataset lock"
+        return [(JOINT_LIMIT_REASON, "obsolete limit finding")]
+
+    monkeypatch.setattr(EpisodeAutoQc, "check", check)
+    result = DatasetAutoQc(catalog, dataset, "dual_yam", threading.Event()).run(lambda *_: None)
+    row = _qc_rows(dataset)[0]
+    if retake:
+        assert row["qc_verdict"] == "unreviewed"
+        assert row.get("qc_auto_reason", "") == ""
+        assert result["failed"] == result["flagged"] == 0
+    else:
+        assert row["qc_verdict"] == "pass"
+        assert row["qc_note"] == "concurrent human review"
+        assert row["qc_auto_reason"] == JOINT_LIMIT_REASON
 
 
 def test_limit_rule_ignores_noise_and_leaves_grippers_out():

@@ -42,6 +42,7 @@ from core.config import ConfigDict
 from core.recorder.episode import EpisodeLogger, sanitize_path_component
 from core.recorder.lerobot_meta import history_row
 from core.types import Observation, RolloutInterventionSegment
+from core.utils.qc import replay_report_signature, replay_validation
 from transport.base import HilStatus
 
 logger = logging.getLogger(__name__)
@@ -65,6 +66,8 @@ _EPISODE_HISTORY_CACHE_LOCK = threading.RLock()
 
 @dataclass
 class _EpisodeHistoryCacheEntry:
+    metadata_signature: tuple[int, ...]
+    source_rows: list[dict[str, Any]]
     signature: tuple[int, ...]
     version: str
     rows: list[dict[str, Any]]
@@ -72,7 +75,7 @@ class _EpisodeHistoryCacheEntry:
 
 
 _EPISODE_HISTORY_CACHE: dict[Path, _EpisodeHistoryCacheEntry] = {}
-_EPISODE_HISTORY_COUNT_CACHE: dict[Path, tuple[tuple[int, int, int], str, int]] = {}
+_EPISODE_HISTORY_COUNT_CACHE: dict[Path, tuple[tuple[int, ...], str, int]] = {}
 
 
 def _episode_history_signature(path: Path) -> tuple[int, int, int]:
@@ -84,7 +87,7 @@ def _episode_history_signature(path: Path) -> tuple[int, int, int]:
 
 
 def _episode_history_version(signature: tuple[int, ...]) -> str:
-    return "-".join(f"{value:x}" for value in signature)
+    return hashlib.blake2s(repr(signature).encode(), digest_size=12).hexdigest()
 
 
 def _json_object(line: str) -> dict[str, Any] | None:
@@ -110,10 +113,21 @@ def _iter_json_objects(path: Path):
                 yield row
 
 
-def _read_episode_history_rows(path: Path, qc_path: Path | None = None) -> list[dict[str, Any]]:
-    """Read and project one dataset history, tolerating a partial append line."""
-    source_rows = list(_iter_json_objects(path))
+def _read_episode_history_rows(
+    dataset_dir: Path, source_rows: list[dict[str, Any]], qc_path: Path | None
+) -> list[dict[str, Any]]:
+    """Project one dataset history and join its current replay and QC results."""
     rows = [history_row(row, index) for index, row in enumerate(source_rows)]
+    for episode, source in zip(rows, source_rows, strict=True):
+        replay_verified, replay_reason = replay_validation(
+            dataset_dir, {**source, "episode_index": episode["episode_index"]}
+        )
+        if replay_verified is not None or replay_reason:
+            episode.update(
+                replay_required=True,
+                replay_verified=replay_verified,
+                replay_qc_reason=replay_reason,
+            )
     if qc_path is None:
         return rows
     qc_by_episode = {
@@ -123,7 +137,8 @@ def _read_episode_history_rows(path: Path, qc_path: Path | None = None) -> list[
     }
     canonical_episodes = qc_path.parent / "episodes.jsonl"
     using_canonical_rows = (
-        canonical_episodes.is_file() and canonical_episodes.resolve() != path.resolve()
+        canonical_episodes.is_file()
+        and canonical_episodes.resolve() != (dataset_dir / "meta" / "episodes.jsonl").resolve()
     )
     qc_by_capture = {}
     if using_canonical_rows:
@@ -148,10 +163,14 @@ def _read_episode_history_rows(path: Path, qc_path: Path | None = None) -> list[
             continue
         episode["qc_verdict"] = str(qc.get("qc_verdict") or "").lower()
         episode["qc_note"] = str(qc.get("qc_note") or "")
+        episode["qc_reason"] = str(qc.get("qc_reason", episode["qc_reason"]) or "")
+        episode["qc_auto"] = bool(qc.get("qc_auto", episode["qc_auto"]))
+        for key in ("qc_auto_verdict", "qc_auto_note", "qc_auto_reason"):
+            episode[key] = str(qc.get(key, episode[key]) or "")
     return rows
 
 
-def _capture_identity(row: dict[str, Any]) -> tuple[str, str, str, str] | None:
+def _capture_identity(row: dict[str, Any]) -> tuple[str, ...] | None:
     fields = tuple(
         str(row.get(key) or "") for key in ("session_id", "started_at", "ended_at", "slot_id")
     )
@@ -236,9 +255,21 @@ def load_episode_history(
         }
     with _EPISODE_HISTORY_CACHE_LOCK:
         cached = _EPISODE_HISTORY_CACHE.get(resolved)
+        source_rows = (
+            cached.source_rows
+            if cached is not None and cached.metadata_signature == signature
+            else [
+                {**row, "episode_index": row.get("episode_index", index)}
+                for index, row in enumerate(_iter_json_objects(path))
+            ]
+        )
+        metadata_signature = signature
+        signature += replay_report_signature(resolved, source_rows)
         if cached is None or cached.signature != signature:
-            rows = _read_episode_history_rows(path, qc_path)
+            rows = _read_episode_history_rows(resolved, source_rows, qc_path)
             cached = _EpisodeHistoryCacheEntry(
+                metadata_signature,
+                source_rows,
                 signature,
                 _episode_history_version(signature),
                 rows,
@@ -940,6 +971,7 @@ def rebuild_eval_episode_logger(config: ConfigDict, runtime: RuntimeState) -> No
 def start_episode(runtime: RuntimeState, session: SessionState) -> None:
     """Begin one episode = one inference run (status -> RUNNING)."""
     if runtime.episode_logger is not None:
+        runtime.transport.clear_collection_backlog()
         prepare_collection_capture(runtime, runtime.episode_logger)
         runtime.episode_logger.start_episode(task=format_task_label(session.selected_task))
 
@@ -1249,7 +1281,6 @@ def collect_start(config: ConfigDict, runtime: RuntimeState, session: SessionSta
     """Begin one teleop collection episode. Backpressure: refuse to start when the
     async save queue is full so we never grow memory unbounded. Returns True when
     an episode was opened."""
-    target_meta = _collection_target_meta(session)
     if runtime.episode_logger is None:
         session.last_error = "Recording is disabled (log.enabled is false)"
         return False
@@ -1265,6 +1296,7 @@ def collect_start(config: ConfigDict, runtime: RuntimeState, session: SessionSta
         if not session.collection_slot_id:
             session.last_error = "Select a collection slot before recording a planned episode"
             return False
+    target_meta = _collection_target_meta(session)
     runtime.collection_replay_qpos = None
     runtime.collection_replay_episode = None
     if runtime.episode_logger.is_collection_enabled:
@@ -1536,7 +1568,20 @@ def record_executed_action(
         if snapshot is None:
             logger.warning("Collection raw snapshot missing at action capture")
             continue
-        if state_qpos is None:
+        if config.inference_cfg.action_space.is_eef():
+            if state_qpos is None:
+                raise RuntimeError("EEF recording requires state_qpos but the frame has none")
+            frame = Observation(images={}, state_qpos=state_qpos)
+            _fill_record_eef(config, runtime, frame, action)
+            logger_obj.ingest_raw_episode_snapshot(snapshot, state_qpos=state_qpos)
+            logger_obj.ingest_policy_action(
+                action,
+                state_qpos,
+                snapshot.timestamp,
+                state_eef=frame.state_eef,
+                action_eef=frame.action_eef,
+            )
+        elif state_qpos is None:
             logger_obj.ingest_raw_episode_snapshot(snapshot, action)
         else:
             logger_obj.ingest_raw_episode_snapshot(snapshot, action, state_qpos)
