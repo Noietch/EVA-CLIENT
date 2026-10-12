@@ -15,6 +15,8 @@ import json
 import logging
 import math
 import re
+import threading
+from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,6 +25,9 @@ from typing import Any
 import yaml
 
 logger = logging.getLogger(__name__)
+_YAML_CACHE_MAX = 32
+_YAML_CACHE_LOCK = threading.RLock()
+_YAML_CACHE: OrderedDict[Path, tuple[tuple[int, int, int], dict[str, Any]]] = OrderedDict()
 
 
 @dataclass(frozen=True)
@@ -53,17 +58,35 @@ def read_plan_csv(root: Path, filename: str) -> list[dict[str, str]]:
         return []
 
 
-def read_plan_yaml(root: Path, filename: str) -> dict[str, Any]:
-    path = root / filename
-    if not path.is_file():
-        return {}
-    try:
+def load_plan_yaml(path: Path) -> dict[str, Any]:
+    """Cache parsed plan metadata, retaining file and parse errors for callers."""
+    stat = path.stat()
+    signature = (stat.st_ino, stat.st_mtime_ns, stat.st_size)
+    with _YAML_CACHE_LOCK:
+        cached = _YAML_CACHE.get(path)
+        if cached is not None and cached[0] == signature:
+            _YAML_CACHE.move_to_end(path)
+            return cached[1]
         with path.open("r", encoding="utf-8") as handle:
-            payload = yaml.safe_load(handle)
+            payload = yaml.load(handle, Loader=yaml.CSafeLoader)
+        result = payload if isinstance(payload, dict) else {}
+        _YAML_CACHE[path] = (signature, result)
+        _YAML_CACHE.move_to_end(path)
+        while len(_YAML_CACHE) > _YAML_CACHE_MAX:
+            _YAML_CACHE.popitem(last=False)
+        return result
+
+
+def read_plan_yaml(root: Path, filename: str) -> dict[str, Any]:
+    """Read optional scene metadata for display; malformed files remain visible in logs."""
+    path = root / filename
+    try:
+        return load_plan_yaml(path)
+    except FileNotFoundError:
+        return {}
     except (OSError, UnicodeError, yaml.YAMLError) as exc:
         logger.warning("Unable to read scene plan %s: %s", path, exc)
         return {}
-    return payload if isinstance(payload, dict) else {}
 
 
 def optional_float(value: Any) -> float | None:

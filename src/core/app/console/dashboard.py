@@ -25,6 +25,7 @@ _COLLECTION_ROOT_NAMES = frozenset({"collection", "data_collection"})
 
 @dataclass
 class _DatasetRecords:
+    metadata_signatures: tuple[tuple[str, int, int, int], ...]
     info: dict[str, Any]
     requirements: dict[str, int]
     sources: list[dict[str, Any]]
@@ -32,10 +33,7 @@ class _DatasetRecords:
     records: list[dict[str, Any]]
 
 
-_DATASET_CACHE: OrderedDict[
-    tuple[str, str, tuple[tuple[str, int, int, int], ...]],
-    _DatasetRecords,
-] = OrderedDict()
+_DATASET_CACHE: OrderedDict[tuple[str, str], _DatasetRecords] = OrderedDict()
 
 
 def _file_signature(path: Path) -> tuple[str, int, int, int]:
@@ -269,19 +267,24 @@ def _load_dataset_records(
         raw_dir / "meta" / "qc.jsonl",
     )
     signatures = tuple(_file_signature(path) for path in paths)
-    key = (str(raw_dir.resolve()), mode, signatures)
+    key = (str(raw_dir.resolve()), mode)
     with _DATASET_CACHE_LOCK:
         cached = _DATASET_CACHE.get(key)
         if cached is not None:
-            report_signature = replay_report_signature(raw_dir, cached.sources)
-            if cached.report_signature == report_signature:
-                _DATASET_CACHE.move_to_end(key)
-                return cached.info, cached.requirements, cached.records
+            _DATASET_CACHE.move_to_end(key)
 
-    info = cached.info if cached is not None else _read_json(paths[0])
+    source_cache = (
+        cached if cached is not None and cached.metadata_signatures[:3] == signatures[:3] else None
+    )
+    if cached is not None and cached.metadata_signatures == signatures:
+        report_signature = replay_report_signature(raw_dir, cached.sources)
+        if cached.report_signature == report_signature:
+            return cached.info, cached.requirements, cached.records
+
+    info = source_cache.info if source_cache is not None else _read_json(paths[0])
     requirements = (
-        cached.requirements
-        if cached is not None
+        source_cache.requirements
+        if source_cache is not None
         else {
             str(row.get("task") or ""): int(row.get("required_episodes") or 0)
             for row in _read_jsonl(paths[1])
@@ -289,7 +292,7 @@ def _load_dataset_records(
         }
     )
     qc_by_episode = {int(row["episode_index"]): row for row in _read_jsonl(paths[3])}
-    sources = cached.sources if cached is not None else _read_jsonl(paths[2])
+    sources = source_cache.sources if source_cache is not None else _read_jsonl(paths[2])
     report_signature = replay_report_signature(raw_dir, sources)
     records = []
     for row in sources:
@@ -298,7 +301,7 @@ def _load_dataset_records(
         record = _episode_record({**row, **qc_fields}, raw_dir, mode, info, requirements)
         if record is not None:
             records.append(record)
-    value = _DatasetRecords(info, requirements, sources, report_signature, records)
+    value = _DatasetRecords(signatures, info, requirements, sources, report_signature, records)
     with _DATASET_CACHE_LOCK:
         _DATASET_CACHE[key] = value
         while len(_DATASET_CACHE) > _DATASET_CACHE_MAX:

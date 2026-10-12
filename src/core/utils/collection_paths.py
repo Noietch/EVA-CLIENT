@@ -11,12 +11,12 @@ from __future__ import annotations
 import socket
 from pathlib import Path
 
-import yaml
-
-from core.config import ConfigDict
+from core.cfg import ConfigDict
+from core.utils.scene_plan import load_plan_yaml
 
 DEFAULT_DATA_ROOT = "datasets/data_collection"
 TASK_SETS_DIR = "task_sets"
+TASK_SET_VERSIONS = ("larybenchv2.v1.1", "larybenchv2.v1.2")
 ROBOT_DIR = "real_robot"
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 
@@ -32,21 +32,56 @@ def _task_set_directories(config: ConfigDict) -> list[Path]:
     return [_resolve(str(value)) for value in values if str(value).strip()]
 
 
+def discover_task_sets(root: Path) -> dict[str, Path]:
+    """Discover leaves directly below a root or its two current version folders."""
+    if (root / "tasks.csv").is_file():
+        return {root.name: root}
+    directories = sorted(path for path in root.iterdir() if path.is_dir())
+    leaves = []
+    for directory in directories:
+        if (directory / "tasks.csv").is_file():
+            leaves.append(directory)
+        elif directory.name in TASK_SET_VERSIONS:
+            leaves.extend(
+                sorted(
+                    child
+                    for child in directory.iterdir()
+                    if child.is_dir() and (child / "tasks.csv").is_file()
+                )
+            )
+    result = {}
+    for leaf in leaves:
+        if leaf.name in result:
+            raise ValueError(f"Duplicate task-set name {leaf.name}: {result[leaf.name]}, {leaf}")
+        result[leaf.name] = leaf
+    return result
+
+
+def resolve_task_set(root: Path, dataset: str) -> Path | None:
+    """Resolve a leaf name without searching historical or deeper directories."""
+    candidates = [root] if root.name == dataset else []
+    candidates.append(root / dataset)
+    candidates.extend(root / version / dataset for version in TASK_SET_VERSIONS)
+    matches = [path for path in candidates if (path / "tasks.csv").is_file()]
+    if len(matches) > 1:
+        raise ValueError(f"Duplicate task-set name {dataset}: {matches}")
+    return matches[0] if matches else None
+
+
 def data_root(config: ConfigDict, plan_root: Path | None = None) -> Path:
     """The one root holding ``task_sets/``, ``datasets/`` and ``assets/``."""
     storage = (config.get("collection") or {}).get("storage") or {}
     configured = str(storage.get("data_root", "") or "").strip()
     if configured:
         return _resolve(configured)
-    # A mounted task set already states the root: <root>/task_sets/<set>.
+    # A task set may live directly below task_sets or one version folder.
     directories = [plan_root] if plan_root is not None else _task_set_directories(config)
     for directory in directories:
         if directory is None:
             continue
-        if directory.name == TASK_SETS_DIR:
-            return directory.parent
-        if directory.parent.name == TASK_SETS_DIR:
-            return directory.parent.parent
+        for ancestor in (directory, directory.parent, directory.parent.parent):
+            if ancestor.name == TASK_SETS_DIR:
+                return ancestor.parent
     return _resolve(DEFAULT_DATA_ROOT)
 
 
@@ -65,11 +100,11 @@ def slot_state_path(config: ConfigDict, dataset: str) -> Path:
 def task_set_root(config: ConfigDict, dataset: str) -> Path | None:
     """Directory of the mounted task set named ``dataset``, or None."""
     for root in _task_set_directories(config):
-        if root.name == dataset and (root / "tasks.csv").is_file():
-            return root
-        child = root / dataset
-        if (child / "tasks.csv").is_file():
-            return child
+        if root.name != dataset and (root / "tasks.csv").is_file():
+            continue
+        plan = resolve_task_set(root, dataset)
+        if plan is not None:
+            return plan
     return None
 
 
@@ -82,9 +117,10 @@ def dataset_location(
     plan = Path(plan_root) if plan_root is not None else task_set_root(config, dataset)
     info_path = plan / "info.yaml" if plan is not None else None
     if info_path is not None and info_path.is_file():
-        info = yaml.safe_load(info_path.read_text(encoding="utf-8-sig")) or {}
-        if isinstance(info, dict) and str(info.get("collection_dir") or "").strip():
-            relative = str(info["collection_dir"]).strip()
+        info = load_plan_yaml(info_path)
+        collection_dir = str(info.get("collection_dir") or "").strip()
+        if collection_dir:
+            relative = collection_dir
     path = Path(relative)
     if (
         not relative.startswith("datasets/")

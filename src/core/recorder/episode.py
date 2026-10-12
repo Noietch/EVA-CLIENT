@@ -31,6 +31,7 @@ import subprocess
 import threading
 import time
 import uuid
+from collections import deque
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -1936,6 +1937,11 @@ class EpisodeLogger:
             else self._log_dir
         )
         history_count = self._completed_count_for(dataset_dir)
+        collection_history = (
+            self._load_collection_history(dataset_dir)
+            if self._collection_writer is not None and include_history
+            else []
+        )
         with self._lock:
             jobs = [
                 job
@@ -1950,7 +1956,7 @@ class EpisodeLogger:
                 pending_episode_indices = {job.episode_index for job in jobs}
                 history = [
                     row
-                    for row in self._load_collection_history(dataset_dir)
+                    for row in collection_history
                     if row["episode_index"] not in pending_episode_indices
                 ]
             elif include_history:
@@ -2592,10 +2598,11 @@ class EpisodeLogger:
         )
 
     def _load_collection_history(self, dataset_dir: Path | None = None) -> list[dict[str, Any]]:
-        history = []
-        for row in _read_jsonl(self._meta_path("episodes.jsonl", dataset_dir)):
-            history.append(history_row(row, len(history)))
-        return history[-200:]
+        rows = deque(
+            enumerate(_iter_json_objects(self._meta_path("episodes.jsonl", dataset_dir))),
+            maxlen=200,
+        )
+        return [history_row(row, index) for index, row in rows]
 
     def _count_episode_rows(self, dataset_dir: Path) -> int:
         """Count valid episode metadata rows without materializing their projections."""

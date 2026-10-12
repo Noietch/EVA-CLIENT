@@ -47,7 +47,8 @@ const EPISODE_HISTORY_POLL_MS = 5000;
 const EPISODE_HISTORY_PAGE_SIZE = 128;
 const COLLECTION_SLOT_POLL_MS = 2000;
 let episodeHistoryPolling = false;
-let collectionSlotsPollPromise = null;
+let collectionSlotsController = null;
+let currentSceneGridRender = null;
 let collectItemsRenderKey = "";
 let rolloutItemsRenderKey = "";
 let collectionSlotClickTimer = null;
@@ -120,19 +121,21 @@ function collectionSlotQuery(dataset) {
   if (state.sceneFilter) params.set("scene", state.sceneFilter);
   if (state.taskFilter) params.set("task", state.taskFilter);
   if (state.showAll) params.set("all", "1");
+  if (state.scenePlanVersion) params.set("scene_plan_version", state.scenePlanVersion);
   return `/api/collection_slots?${params.toString()}`;
 }
 
 function applyCollectionSlotsPayload(payload) {
   const state = S.collectionSlots;
   if (payload.scene_plan) S.SCENE_PLAN = payload.scene_plan;
+  state.scenePlanVersion = payload.scene_plan_version;
   state.loaded = true;
   state.dataset = String(payload.dataset || state.dataset || "");
   state.datasetDir = String(payload.dataset_dir || "");
   state.active = payload.active || null;
   state.counts = payload.counts || {};
-  state.scenes = Array.isArray(payload.scenes) ? payload.scenes : [];
-  state.tasks = Array.isArray(payload.tasks) ? payload.tasks : [];
+  if (payload.scenes) state.scenes = payload.scenes;
+  if (payload.tasks) state.tasks = payload.tasks;
   state.slots = Array.isArray(payload.slots) ? payload.slots : [];
   state.page = Number(payload.page) || 1;
   state.pageCount = Number(payload.page_count) || 1;
@@ -234,20 +237,27 @@ async function pollCollectionSlots(force = false, { autoActivate = true } = {}) 
   const state = S.collectionSlots;
   const dataset = state.dataset || collectSetValue();
   if (!dataset) return;
-  if (collectionSlotsPollPromise) {
-    if (autoActivate) return;
-    await collectionSlotsPollPromise;
-    return pollCollectionSlots(force, { autoActivate });
+  if (collectionSlotsController) {
+    if (!force) return;
+    collectionSlotsController.abort();
   }
   const now = performance.now();
-  if (!force && now - Number(state.lastAttemptAt || 0) < COLLECTION_SLOT_POLL_MS) return;
+  if (!force && state.lastAttemptAt && now - state.lastAttemptAt < COLLECTION_SLOT_POLL_MS) return;
   state.lastAttemptAt = now;
-  let finishPoll;
-  collectionSlotsPollPromise = new Promise((resolve) => { finishPoll = resolve; });
+  const controller = new AbortController();
+  collectionSlotsController = controller;
+  state.loading = force || !state.loaded;
+  if (state.error) setCollectError();
+  state.error = "";
+  if (state.loading) {
+    state.slots = [];
+    renderCollect();
+  }
   const previousActiveId = String((state.active && state.active.slot_id) || "");
   try {
-    let payload = await apiGet(collectionSlotQuery(dataset));
-    if (!payload || payload.ok === false) return;
+    let payload = await apiGet(collectionSlotQuery(dataset), { timeoutMs: 20000, signal: controller.signal });
+    if (controller.signal.aborted) return;
+    if (!payload.ok) throw new Error(payload.error || "Unable to load collection slots");
     const activeChanged = String((payload.active && payload.active.slot_id) || "") !== previousActiveId;
     if (dataset !== (state.dataset || collectSetValue()) ||
         collectionSlotClickTimer !== null || S.collectTaskSelectionPending) return;
@@ -268,8 +278,9 @@ async function pollCollectionSlots(force = false, { autoActivate = true } = {}) 
         (activeChanged || savedSelectionChanged) && payload.active_page &&
         Number(payload.active_page) !== Number(payload.page)) {
       state.page = Number(payload.active_page);
-      payload = await apiGet(collectionSlotQuery(dataset));
-      if (!payload || payload.ok === false) return;
+      payload = await apiGet(collectionSlotQuery(dataset), { timeoutMs: 20000, signal: controller.signal });
+      if (controller.signal.aborted) return;
+      if (!payload.ok) throw new Error(payload.error || "Unable to load collection slots");
     }
     // A dataset switch can happen while the previous request is in flight.
     if (dataset !== (state.dataset || collectSetValue()) ||
@@ -282,7 +293,6 @@ async function pollCollectionSlots(force = false, { autoActivate = true } = {}) 
       );
       adoptCollectionSlot(state.active);
     }
-    renderCollect();
     const active = state.active;
     const collecting = !!(S.STATUS.collect && S.STATUS.collect.collecting);
     // A confirmed save already switched the backend session to the next slot.
@@ -292,11 +302,17 @@ async function pollCollectionSlots(force = false, { autoActivate = true } = {}) 
         payload.session_slot_id !== active.slot_id) {
       queueMicrotask(() => activateCollectionSlot(active));
     }
-  } catch {
-    // Keep the last complete plan while the low-frequency endpoint recovers.
+  } catch (error) {
+    if (!controller.signal.aborted) {
+      state.error = t("collect.error.page", { error: error.message });
+      setCollectError(state.error);
+    }
   } finally {
-    collectionSlotsPollPromise = null;
-    finishPoll();
+    if (collectionSlotsController === controller) {
+      collectionSlotsController = null;
+      state.loading = false;
+      renderCollect();
+    }
   }
 }
 
@@ -332,6 +348,7 @@ async function selectCollectionDataset(dataset) {
   if (state.dataset !== value) setCollectTransferInfo("");
   state.dataset = value;
   state.loaded = false;
+  state.scenePlanVersion = "";
   state.active = null;
   state.slots = [];
   state.scenes = [];
@@ -346,7 +363,7 @@ async function selectCollectionDataset(dataset) {
   const select = $("collect-set-list");
   if (select) select.value = value;
   await pollCollectionSlots(true, { autoActivate: false });
-  if (state.dataset !== value) return false;
+  if (state.dataset !== value || !state.loaded) return false;
   if (state.active &&
       (state.sessionDataset !== value || state.sessionSlotId !== state.active.slot_id)) {
     return activateCollectionSlot(state.active);
@@ -589,6 +606,10 @@ function renderSceneGridCells(host, scene) {
 function renderCurrentSceneGrid(scene, task) {
   const host = $("collect-current-scene-grid");
   if (!host) return;
+  if (currentSceneGridRender && currentSceneGridRender.host === host &&
+      currentSceneGridRender.scene === scene && currentSceneGridRender.task === task &&
+      currentSceneGridRender.plan === S.SCENE_PLAN) return;
+  currentSceneGridRender = { host, scene, task, plan: S.SCENE_PLAN };
   renderSceneGridCells(host, scene);
   const byPosition = new Map();
   (scene && scene.placements || []).forEach((placement) => {
@@ -1639,7 +1660,7 @@ function handleCollectionReviewInput(feedback) {
 function moveCollectionReviewCursor(direction) {
   if (!["left", "right", "up", "down"].includes(direction)) return;
   // The visible tiles are the page being loaded; stepping on stale ones jumps.
-  if (collectionSlotsPollPromise) return;
+  if (S.collectionSlots.loading) return;
   // A move selects, and the console locks the target while it records.
   if (S.STATUS.collect && S.STATUS.collect.collecting) return;
   const host = $("collect-queue-tiles");
@@ -1734,7 +1755,9 @@ function renderCollectTiles(items) {
     if (!items.length) {
       const empty = document.createElement("span");
       empty.className = "collect-empty";
-      empty.textContent = S.collectionSlots.viewerActive ? t("collect.noMatchingSlots") : t("collect.filterOff");
+      empty.textContent = S.collectionSlots.loading ? t("word.loading") :
+        (S.collectionSlots.error || (S.collectionSlots.viewerActive
+          ? t("collect.noMatchingSlots") : t("collect.filterOff")));
       host.appendChild(empty);
       return;
     }
@@ -2187,6 +2210,7 @@ function renderCollect() {
     const page = $("collect-slot-page");
     page.hidden = !slotPlan.viewerActive || slotPlan.pageCount <= 1;
     $("collect-slot-page-label").textContent = `${slotPlan.page} / ${slotPlan.pageCount}`;
+    $("collect-queue-tiles").setAttribute("aria-busy", String(slotPlan.loading));
     $("b-collect-slot-prev").disabled = slotPlan.page <= 1;
     $("b-collect-slot-next").disabled = slotPlan.page >= slotPlan.pageCount;
 
@@ -2236,6 +2260,8 @@ function renderCollect() {
       slotPlan.taskFilter,
       slotPlan.showAll,
       S.collectTaskSelectionPending,
+      slotPlan.loading,
+      slotPlan.error,
       JSON.stringify(slotPlan.slots || []),
     ].join("\n");
     if (renderKey !== collectItemsRenderKey) {
@@ -2246,8 +2272,8 @@ function renderCollect() {
       tile.classList.toggle("selected", tile.dataset.slotId === slotPlan.selectedSlotId);
     });
     renderCollectControls();
-    if (collectionSet && !collectionSlotsPollPromise) {
-      queueMicrotask(() => pollCollectionSlots(!slotPlan.loaded));
+    if (collectionSet && !collectionSlotsController) {
+      queueMicrotask(() => pollCollectionSlots());
     }
 
     renderCollectionReplayStatus(selectedEpisodeSaved);

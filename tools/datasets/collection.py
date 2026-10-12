@@ -24,6 +24,7 @@ import yaml
 
 import robots  # noqa: F401
 from core.registry import ROBOT_REGISTRY
+from core.utils.collection_paths import discover_task_sets, resolve_task_set
 from core.utils.lerobot import LeRobotDatasetIO
 from core.utils.qc import qc_state, replay_report_signature, replay_validation
 from core.utils.scene_plan import plan_slots, scene_plan_from_dir
@@ -351,11 +352,7 @@ class PlanCatalog:
         return result
 
     def batch_ids(self) -> list[str]:
-        return sorted(
-            path.name
-            for path in self.plans_root.iterdir()
-            if path.is_dir() and (path / "tasks.csv").is_file()
-        )
+        return sorted(discover_task_sets(self.plans_root))
 
     @staticmethod
     def _unmatched_batch_id(robot_type: str) -> str:
@@ -616,7 +613,8 @@ class PlanCatalog:
 
     def import_plan(self, batch: str, content: bytes) -> dict[str, Any]:
         batch_id = self._batch_id(batch)
-        TaskSetStore(self.plans_root / batch_id, self.assets.path).import_zip(content)
+        root = resolve_task_set(self.plans_root, batch_id) or self.plans_root / batch_id
+        TaskSetStore(root, self.assets.path).import_zip(content)
         self.invalidate(batch_id)
         return self.state(batch_id)
 
@@ -1196,7 +1194,7 @@ class PlanCatalog:
             return cached[1]
         parts: list[str] = [self._file_token(self.assets.path)]
         for batch in batches:
-            root = self.plans_root / batch
+            root = self._batch_root(batch)
             info_path = root / "info.yaml"
             for path in (info_path, root / "layout.yaml", root / "scene.csv", root / "tasks.csv"):
                 parts.append(self._file_token(path))
@@ -1614,8 +1612,8 @@ class PlanCatalog:
         return summary
 
     def _batch_root(self, batch: str) -> Path:
-        path = self.plans_root / self._batch_id(batch)
-        if not path.is_dir():
+        path = resolve_task_set(self.plans_root, self._batch_id(batch))
+        if path is None:
             raise RecordNotFoundError(batch)
         return path
 

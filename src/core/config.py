@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, TypedDict
 
 from core.cfg import Config, ConfigDict
 from core.devices.hardware import HardwareCatalog
+from core.utils.collection_paths import discover_task_sets
 from core.utils.s3_upload import S3UploadConfig
 
 if TYPE_CHECKING:
@@ -193,8 +194,10 @@ def _normalize_collection_task_set(cfg: ConfigDict) -> None:
         task_sets = {}
         for task_set_dir in task_set_dirs:
             root = _resolve_collection_task_set_path(task_set_dir)
-            if root.is_dir() and (root / "tasks.csv").is_file():
-                task_sets.update(load_bound_task_set(root, root.name))
+            for name, leaf in discover_task_sets(root).items():
+                if name in task_sets:
+                    raise ValueError(f"Duplicate configured task-set name {name}")
+                task_sets.update(load_bound_task_set(leaf, name))
         if task_sets:
             collection["tasks"] = task_sets
         return
@@ -206,9 +209,8 @@ def _normalize_collection_task_set(cfg: ConfigDict) -> None:
     # selector. The child directory name is the dataset name shown in the UI.
     if not dataset_name and not (root / "tasks.csv").is_file():
         task_sets = {}
-        for child in sorted(root.iterdir()):
-            if child.is_dir() and (child / "tasks.csv").is_file():
-                task_sets.update(load_bound_task_set(child, child.name))
+        for name, leaf in discover_task_sets(root).items():
+            task_sets.update(load_bound_task_set(leaf, name))
         if task_sets:
             collection["tasks"] = task_sets
         return

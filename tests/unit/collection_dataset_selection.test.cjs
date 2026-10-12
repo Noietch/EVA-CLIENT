@@ -113,6 +113,7 @@ async function loadCollectModule({apiPost, apiGet, state = makeState()} = {}) {
   };
   const context = vm.createContext({
     URLSearchParams,
+    AbortController,
     clearTimeout,
     setTimeout,
     performance: {now: () => 100},
@@ -186,7 +187,12 @@ async function loadCollectModule({apiPost, apiGet, state = makeState()} = {}) {
     return dependency;
   });
   await module.evaluate();
-  return {selectCollectionDataset: module.namespace.selectCollectionDataset, calls, dom, state};
+  return {
+    selectCollectionDataset: module.namespace.selectCollectionDataset,
+    pollCollectionSlots: module.namespace.pollCollectionSlots,
+    changeCollectionSlotPage: module.namespace.changeCollectionSlotPage,
+    calls, dom, state,
+  };
 }
 
 test("无 active 槽位时仍确认后端并保留新 dataset 名称", async () => {
@@ -288,4 +294,76 @@ test("有 active 槽位时使用正确 dataset/slot，并保留中文 task_zh", 
     taskIndex: 0,
     sceneId: "SCENE01",
   });
+});
+
+test("翻页立即取消旧请求，乱序响应不覆盖当前页", async () => {
+  const requests = [];
+  const harness = await loadCollectModule({
+    apiGet: (url, options) => new Promise((resolve) => {
+      requests.push({url, options, resolve});
+    }),
+  });
+  harness.state.collectionSlots.pageCount = 3;
+  harness.state.collectionSlots.followActivePage = false;
+  const first = harness.pollCollectionSlots(true);
+  harness.changeCollectionSlotPage(1);
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0].options.signal.aborted, true);
+  assert.equal(new URL(requests[1].url, "http://localhost").searchParams.get("page"), "2");
+  assert.equal(harness.state.collectionSlots.loading, true);
+  requests[1].resolve({...makePayload({dataset: "old_dataset"}), page: 2, page_count: 3});
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(harness.state.collectionSlots.page, 2);
+  requests[0].resolve({...makePayload({dataset: "old_dataset"}), page: 1, page_count: 3});
+  await first;
+  assert.equal(harness.state.collectionSlots.page, 2);
+  assert.equal(harness.state.collectionSlots.loading, false);
+  assert.equal(harness.dom.error.textContent, "");
+});
+
+test("相同版本增量响应保留场景计划和筛选项", async () => {
+  let requestCount = 0;
+  const payload = {...makePayload({dataset: "old_dataset"}), scene_plan_version: "plan-1"};
+  payload.scenes = [{id: "SCENE01"}];
+  payload.tasks = [{id: "TASK01"}];
+  const harness = await loadCollectModule({
+    apiGet: async () => {
+      requestCount += 1;
+      if (requestCount === 1) return payload;
+      const incremental = {...payload};
+      delete incremental.scene_plan;
+      delete incremental.scenes;
+      delete incremental.tasks;
+      return incremental;
+    },
+  });
+  await harness.pollCollectionSlots(true);
+  const plan = harness.state.SCENE_PLAN;
+  await harness.pollCollectionSlots(true);
+  assert.equal(harness.state.SCENE_PLAN, plan);
+  assert.equal(harness.state.collectionSlots.scenes, payload.scenes);
+  assert.equal(harness.state.collectionSlots.tasks, payload.tasks);
+  assert.equal(new URL(harness.calls.get[1][0], "http://localhost").searchParams.get("scene_plan_version"), "plan-1");
+});
+
+test("翻页失败显示错误并允许重试，后台轮询不与在途请求重叠", async () => {
+  let fail = true;
+  const harness = await loadCollectModule({
+    apiGet: async () => {
+      if (fail) throw new Error("HTTP 503");
+      return makePayload({dataset: "old_dataset"});
+    },
+  });
+  const first = harness.pollCollectionSlots(true);
+  await harness.pollCollectionSlots();
+  assert.equal(harness.calls.get.length, 1);
+  await first;
+  assert.equal(harness.state.collectionSlots.loading, false);
+  assert.equal(harness.state.collectionSlots.error, "collect.error.page");
+  assert.equal(harness.dom.error.textContent, "collect.error.page");
+  fail = false;
+  await harness.pollCollectionSlots(true);
+  assert.equal(harness.state.collectionSlots.loaded, true);
+  assert.equal(harness.state.collectionSlots.error, "");
+  assert.equal(harness.dom.error.textContent, "");
 });

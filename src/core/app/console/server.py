@@ -71,7 +71,13 @@ from core.app.state import (
 )
 from core.config import ConfigDict
 from core.devices.service import DeviceSettings
-from core.utils.collection_paths import dataset_location, slot_state_path
+from core.utils.collection_paths import (
+    dataset_location,
+    discover_task_sets,
+    resolve_task_set,
+    slot_state_path,
+    task_set_root,
+)
 from core.utils.dataset_upload import (
     DatasetUploadPlan,
     DatasetUploadSpec,
@@ -983,10 +989,13 @@ def _resolve_dataset_dir(dataset_dir: str) -> str:
 def _scene_plan_root(config: ConfigDict | None = None, dataset: str | None = None) -> Path:
     task_set_dirs = (config.get("collection") or {}).get("task_set_dir") if config else None
     if isinstance(task_set_dirs, (list, tuple)) and task_set_dirs:
-        roots = [
-            _resolve_runtime_path(str(value)).expanduser().resolve() for value in task_set_dirs
-        ]
-        root = next((path for path in roots if path.name == dataset), None) if dataset else roots[0]
+        root = (
+            task_set_root(config, dataset)
+            if dataset
+            else next(
+                iter(discover_task_sets(_resolve_runtime_path(str(task_set_dirs[0]))).values())
+            )
+        )
         if root is None:
             raise ValueError("unknown collection task-set directory")
         if not root.is_dir():
@@ -1002,16 +1011,19 @@ def _scene_plan_root(config: ConfigDict | None = None, dataset: str | None = Non
         else:
             task_set_dir = str(task_set_dirs).strip()
         if task_set_dir:
-            task_set_root = _resolve_runtime_path(task_set_dir).expanduser().resolve()
-            if task_set_root.is_dir():
+            plan_parent = _resolve_runtime_path(task_set_dir).expanduser().resolve()
+            if plan_parent.is_dir():
+                if (plan_parent / "tasks.csv").is_file():
+                    return plan_parent
                 # A scalar task_set_dir may be the parent of multiple named
                 # task sets. Resolve the selected dataset before parsing its
                 # scene.csv and layout.yaml files.
                 if dataset:
-                    dataset_root = task_set_root / dataset
-                    if dataset_root.is_dir():
-                        return dataset_root
-                return task_set_root
+                    root = resolve_task_set(plan_parent, dataset)
+                    if root is None:
+                        raise ValueError("unknown collection task-set directory")
+                    return root
+                return next(iter(discover_task_sets(plan_parent).values()))
     cwd_root = Path.cwd() / "work_dirs"
     repo_root = Path(__file__).resolve().parents[4] / "work_dirs"
     has_canonical_plan = any(
@@ -1061,10 +1073,10 @@ def _load_scene_plan(
         if cached is not None:
             _SCENE_PLAN_CACHE.move_to_end(signature)
             return cached
-    payload = _build_scene_plan(root)
-    for task in payload["tasks"]:
-        task["runtime_prompt"] = bindings.get(task["task_id"], task["prompt_en"])
-    with _SCENE_PLAN_CACHE_LOCK:
+        payload = _build_scene_plan(root)
+        payload["version"] = uuid.uuid4().hex
+        for task in payload["tasks"]:
+            task["runtime_prompt"] = bindings.get(task["task_id"], task["prompt_en"])
         _SCENE_PLAN_CACHE[signature] = payload
         _SCENE_PLAN_CACHE.move_to_end(signature)
         while len(_SCENE_PLAN_CACHE) > _SCENE_PLAN_CACHE_MAX:
@@ -2327,12 +2339,21 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         page_count = max(1, (len(rows) + page_size - 1) // page_size)
         page = min(requested_page, page_count)
         start = (page - 1) * page_size
+        plan_version = snapshot["scene_plan"]["version"]
+        plan_fields = {}
+        if self._query_str("scene_plan_version") != plan_version:
+            plan_fields = {
+                "scene_plan": snapshot["scene_plan"],
+                "scenes": snapshot["scenes"],
+                "tasks": snapshot["tasks"],
+            }
         self._send_json(
             200,
             {
                 "ok": True,
                 "dataset": snapshot["dataset"],
-                "scene_plan": snapshot["scene_plan"],
+                "scene_plan_version": plan_version,
+                **plan_fields,
                 "dataset_dir": snapshot["dataset_dir"],
                 "active": snapshot["active"],
                 "session_slot_id": self.ctx.session.collection_slot_id,
@@ -2341,8 +2362,6 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                 "completed_dataset": self.ctx.completed_collection_dataset,
                 "completed_slot_id": self.ctx.completed_collection_slot_id,
                 "counts": snapshot["counts"],
-                "scenes": snapshot["scenes"],
-                "tasks": snapshot["tasks"],
                 "slots": rows[start : start + page_size],
                 "filtered_total": len(rows),
                 "page": page,

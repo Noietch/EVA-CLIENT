@@ -89,7 +89,8 @@ export const S = {
   EVAL_MODEL_NAME: "",
   EVAL_EPISODES_DIR: "",
   collectionSlots: {
-    loaded: false, dataset: "", datasetDir: "", active: null, counts: {},
+    loaded: false, loading: false, error: "", scenePlanVersion: "",
+    dataset: "", datasetDir: "", active: null, counts: {},
     scenes: [], tasks: [], slots: [], page: 1, pageCount: 1, filteredTotal: 0,
     sceneFilter: "", taskFilter: "", showAll: true, selectedSlotId: "",
     cursorPinned: false, followActivePage: true, lastAttemptAt: 0,
@@ -201,11 +202,12 @@ async function apiGet(path, { timeoutMs = API_GET_TIMEOUT_MS, signal = null } = 
   let controller = null;
   let timer = null;
   let timedOut = false;
+  const abort = () => controller.abort();
   if (typeof AbortController !== "undefined" && timeoutMs > 0) {
     controller = new AbortController();
     if (signal) {
       if (signal.aborted) controller.abort();
-      else signal.addEventListener("abort", () => controller.abort(), { once: true });
+      else signal.addEventListener("abort", abort, { once: true });
     }
     timer = setTimeout(() => {
       timedOut = true;
@@ -213,13 +215,14 @@ async function apiGet(path, { timeoutMs = API_GET_TIMEOUT_MS, signal = null } = 
     }, timeoutMs);
   }
   try {
-    const r = await fetch(path, controller ? { signal: controller.signal } : {});
+    const r = await fetch(path, { signal: controller ? controller.signal : signal });
     if (!r.ok) clientTrace("api.get.error", { path, status: r.status });
     return await parseJsonResponse(r, path);
   } catch (error) {
     const aborted = !!(error && error.name === "AbortError");
     const lastAbortTraceAt = apiGetAbortTraceAt.get(path) || 0;
-    if (!aborted || Date.now() - lastAbortTraceAt >= API_GET_ABORT_TRACE_MS) {
+    if (!(signal && signal.aborted) &&
+        (!aborted || Date.now() - lastAbortTraceAt >= API_GET_ABORT_TRACE_MS)) {
       if (aborted) apiGetAbortTraceAt.set(path, Date.now());
       clientTrace("api.get.exception", {
         path,
@@ -230,6 +233,7 @@ async function apiGet(path, { timeoutMs = API_GET_TIMEOUT_MS, signal = null } = 
     throw error;
   } finally {
     if (timer !== null) clearTimeout(timer);
+    if (signal) signal.removeEventListener("abort", abort);
   }
 }
 

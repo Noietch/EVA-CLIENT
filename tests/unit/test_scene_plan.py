@@ -2,9 +2,36 @@ import json
 
 import pytest
 
-from core.utils.scene_plan import plan_scenes
+from core.utils.scene_plan import plan_scenes, read_plan_yaml
 
 pytestmark = pytest.mark.unit
+
+
+def test_yaml_cache_reuses_parsing_and_reloads_changed_files(tmp_path, monkeypatch):
+    from core.utils import scene_plan
+
+    path = tmp_path / "info.yaml"
+    path.write_text("collection_dir: datasets/first\n")
+    original_load = scene_plan.yaml.load
+    calls = []
+
+    def load(*args, **kwargs):
+        calls.append(1)
+        return original_load(*args, **kwargs)
+
+    monkeypatch.setattr(scene_plan.yaml, "load", load)
+    assert read_plan_yaml(tmp_path, "info.yaml")["collection_dir"] == "datasets/first"
+    assert read_plan_yaml(tmp_path, "info.yaml")["collection_dir"] == "datasets/first"
+    assert len(calls) == 1
+    path.write_text("collection_dir: datasets/second\n")
+    assert read_plan_yaml(tmp_path, "info.yaml")["collection_dir"] == "datasets/second"
+    assert len(calls) == 2
+
+
+def test_missing_yaml_is_not_cached(tmp_path):
+    assert read_plan_yaml(tmp_path, "info.yaml") == {}
+    (tmp_path / "info.yaml").write_text("task_order: spatial\n")
+    assert read_plan_yaml(tmp_path, "info.yaml") == {"task_order": "spatial"}
 
 
 def test_scene_placements_without_random_preserve_all_configured_positions():

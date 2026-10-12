@@ -190,11 +190,7 @@ class DatasetService:
 
     def publish_hf_task_sets(self) -> Any:
         """Publish every task set: task sets always sync as a whole."""
-        task_sets = {
-            path.name: path
-            for path in sorted(self.catalog.plans_root.iterdir())
-            if path.is_dir() and (path / "tasks.csv").is_file()
-        }
+        task_sets = {name: self.catalog._batch_root(name) for name in self.catalog.batch_ids()}
         return jsonify({"ok": True, **publish_task_sets(PROJECT_ROOT, task_sets)})
 
     def transfers_state(self) -> Any:

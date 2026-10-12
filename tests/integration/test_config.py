@@ -165,8 +165,10 @@ def test_arx_x5_eva_sim_eval_config_uses_on_demand_zmq_transport():
 def test_dual_yam_eva_sim_config_selects_multiple_task_sets():
     cfg = load_config(_CONFIGS_DIR / "02_collection" / "dual_yam_eva_sim.py")
 
-    assert len(cfg.collection.task_set_dir) == 15
-    assert "datasets/data_collection/task_sets/larybench_eval_v1_supplement" in (
+    assert len(cfg.collection.task_set_dir) == 11
+    assert (
+        "datasets/data_collection/task_sets/larybenchv2.v1.2/larybench.v1.2.train.supplement"
+    ) in (
         cfg.collection.task_set_dir
     )
     assert (
@@ -185,7 +187,10 @@ def test_dual_yam_eva_sim_config_selects_multiple_task_sets():
 def test_dual_yam_composite_config_reuses_the_sim_transport_and_render_service():
     cfg = load_config(_CONFIGS_DIR / "02_collection/dual_yam_eva_sim_composite.py")
     assert len(cfg.collection.task_set_dir) == 10
-    assert all(Path(path).name.startswith("composite_") for path in cfg.collection.task_set_dir)
+    assert all(
+        Path(path).name.startswith("larybench.v1.2.train.composite_")
+        for path in cfg.collection.task_set_dir
+    )
     assert cfg.collection.render_service.url == "http://127.0.0.1:8430"
     assert cfg.transport.type == "zmq"
 
