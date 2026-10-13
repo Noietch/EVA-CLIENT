@@ -114,3 +114,18 @@ def test_both_panels_order_and_number_the_same_slots(tmp_path):
         slot["slot_id"]: slot["ordinal"] for task in state["tasks"] for slot in task["slots"]
     }
     assert ordinals == {slot.slot_id: slot.ordinal for slot in console}
+
+
+@pytest.mark.parametrize("target, round_total", [(2, 2), (-1, 1)])
+def test_inline_slots_include_the_scene_in_their_identity(target, round_total):
+    config = ConfigDict(collection=ConfigDict(tasks={"inline": [("put cup aside", target)]}))
+
+    slots = build_collection_slots(config, {}, "inline")
+
+    assert len(slots) == round_total
+    assert [slot.slot_id for slot in slots] == [
+        f"INLINE-0:DEFAULT:{round_index}" for round_index in range(round_total)
+    ]
+    for slot in slots:
+        assert slot.slot_id == f"{slot.task_id}:{slot.scene_id}:{slot.round_index}"
+        assert slot.unbounded == (target == -1)

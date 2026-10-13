@@ -362,6 +362,9 @@ class PyrokiSingleArm:
                     self._dt,
                     self._max_iterations,
                 )
+            ).copy()
+            cfg[self._arm_cols] = np.clip(
+                cfg[self._arm_cols], self._arm_lower, self._arm_upper
             )
             sol[t] = cfg
             prev_cfg = cfg

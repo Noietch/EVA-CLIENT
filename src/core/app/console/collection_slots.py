@@ -86,7 +86,7 @@ def build_collection_slots(
         for round_index in range(round_total):
             slots.append(
                 CollectionSlot(
-                    slot_id=f"{task_id}:{round_index}",
+                    slot_id=f"{task_id}:DEFAULT:{round_index}",
                     ordinal=len(slots),
                     dataset=dataset,
                     task_index=task_index,
