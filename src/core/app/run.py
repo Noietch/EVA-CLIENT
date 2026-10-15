@@ -1644,7 +1644,7 @@ def run(
                             published,
                         )
                 else:
-                    recorded = record_rollout_intervention_step(runtime, session)
+                    recorded = record_rollout_intervention_step(effective, runtime, session)
                 if recorded:
                     segment = runtime.rollout_intervention_active_segment
                     assert segment is not None and segment.frames

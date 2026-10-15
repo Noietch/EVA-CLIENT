@@ -236,4 +236,10 @@
     <child link="tip_right" />
     <limit effort="1" velocity="1" lower="-0.04695" upper="0" />
   </joint>
+  <link name="tcp" />
+  <joint name="eef_to_tcp" type="fixed">
+    <origin xyz="0 0 -0.14593" rpy="3.141592654 0 0" />
+    <parent link="gripper" />
+    <child link="tcp" />
+  </joint>
 </robot>

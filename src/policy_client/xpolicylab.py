@@ -93,6 +93,12 @@ class XPolicyLabPolicyClient(PolicyClient):
             xpolicylab_root
         )
         self._robot_action_dim_info = get_dim_info(env_cfg_type)
+        if action_type == "ee":
+            # Robot metadata describes arm joints; TCP poses use xyz + wxyz.
+            self._robot_action_dim_info = {
+                **self._robot_action_dim_info,
+                "arm_dim": [7] * len(self._robot_action_dim_info["arm_dim"]),
+            }
         self._action_dim = sum(self._robot_action_dim_info["arm_dim"]) + sum(
             self._robot_action_dim_info["ee_dim"]
         )
@@ -118,7 +124,7 @@ class XPolicyLabPolicyClient(PolicyClient):
             "server_name", self._server_metadata.get("server", "xpolicylab")
         )
         self._server_metadata.update(
-            action_mode=self._action_type,
+            action_mode="eef" if self._action_type == "ee" else self._action_type,
             action_dim=self._action_dim,
         )
 
@@ -304,7 +310,10 @@ class XPolicyLabPolicyClient(PolicyClient):
         actions = self._flatten_actions(response["actions"])
         self._step += 1
         self._server_metadata["chunk_size"] = actions.shape[0]
-        result: dict[str, Any] = {"actions": actions, "action_mode": self._action_type}
+        result: dict[str, Any] = {
+            "actions": actions,
+            "action_mode": self._server_metadata["action_mode"],
+        }
         if "latency_ms" in response:
             result["latency_ms"] = response["latency_ms"]
         return result

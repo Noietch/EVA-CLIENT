@@ -378,9 +378,9 @@ def _fill_record_eef(
         return
     if frame.state_qpos is None:
         raise RuntimeError("EEF recording requires state_qpos but the frame has none")
-    if obs_is_eef and frame.state_eef is None:
+    if obs_is_eef and (frame.state_eef is None or config.robot.eef_links):
         frame.state_eef = state_to_eef(config, runtime, frame.state_qpos)
-    if action_is_eef and frame.action_eef is None:
+    if action_is_eef and (frame.action_eef is None or config.robot.eef_links):
         frame.action_eef = _qpos_to_eef(
             config,
             runtime,
@@ -398,8 +398,8 @@ def build_policy_observation(
 
     Each camera image is preprocessed (color/resize/layout per transport config) and
     combined with the robot state and prompt into the schema the policy expects. In EEF
-    mode the frame's EEF state is preferred when present, else it is derived from
-    state_qpos via forward kinematics; in joint mode state_qpos is used directly.
+    mode an explicitly configured target link is derived from state_qpos; otherwise
+    the frame's EEF state is preferred. Joint mode uses state_qpos directly.
 
     Args:
         frame: Raw observation with per-camera images and the robot state vectors.
@@ -421,7 +421,7 @@ def build_policy_observation(
     if config.inference_cfg.obs_space.is_eef():
         state = (
             frame.state_eef
-            if frame.state_eef is not None
+            if frame.state_eef is not None and not config.robot.eef_links
             else state_to_eef(config, runtime, frame.state_qpos)
         )
     else:
@@ -1117,7 +1117,9 @@ def _record_rollout_intervention_frame(
     return True
 
 
-def record_rollout_intervention_step(runtime: RuntimeState, session: SessionState) -> bool:
+def record_rollout_intervention_step(
+    config: ConfigDict, runtime: RuntimeState, session: SessionState
+) -> bool:
     """Record available teleop frames while normal rollout intervention is active."""
     if not runtime.rollout_intervention_active:
         return False
@@ -1127,6 +1129,11 @@ def record_rollout_intervention_step(runtime: RuntimeState, session: SessionStat
     frame = runtime.transport.get_hil_frame()
     if frame is None:
         return False
+    if config.robot.eef_links:
+        frame = _copy_observation(frame)
+        if frame.action_qpos is None:
+            raise RuntimeError("TCP intervention recording requires action_qpos")
+        _fill_record_eef(config, runtime, frame, frame.action_qpos)
     return _record_rollout_intervention_frame(runtime, session, frame)
 
 

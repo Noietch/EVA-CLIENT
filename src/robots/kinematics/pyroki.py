@@ -466,6 +466,8 @@ def pyroki_arms(
     urdf_path: Path,
     arms: list[dict[str, Any]],
     *,
+    eef_links: Sequence[str] | None = None,
+    reg_weight: float = 1.0,
     fixed_joints: dict[str, float] | None = None,
     default_reference_frame: str | None = None,
     supported_reference_frames: tuple[str, ...] = (),
@@ -481,6 +483,8 @@ def pyroki_arms(
         arms: one dict per arm (1 = single, 2 = dual), each with ``joints`` (ordered
             actuated joints solved), ``eef_link`` (the EEF link), and optional
             ``reference_frame``.
+        eef_links: target link per arm, overriding the robot's declared EEF links.
+        reg_weight: rest-pose weight used by each arm's inverse kinematics.
         fixed_joints: actuated joint name -> pinned value, applied to every arm.
         default_reference_frame: reference frame used when the runtime kwarg is unset,
             active only when ``supported_reference_frames`` is non-empty.
@@ -493,6 +497,8 @@ def pyroki_arms(
         A PyrokiDualArm (2 arms) or PyrokiSingleArmChunk (1 arm).
     """
     fixed = {k: float(v) for k, v in (fixed_joints or {}).items()}
+    if eef_links is not None:
+        arms = [{**arm, "eef_link": link} for arm, link in zip(arms, eef_links, strict=True)]
     kwargs.pop("frame_name", None)
     reference_frame = kwargs.pop("reference_frame", None)
 
@@ -512,6 +518,7 @@ def pyroki_arms(
             arm_cfg["eef_link"],
             reference_frame=resolve_frame(arm_cfg.get("reference_frame")),
             fixed_joints=fixed,
+            reg_weight=reg_weight,
         )
 
     if len(arms) == 2:

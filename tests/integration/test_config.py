@@ -2,18 +2,33 @@
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from pathlib import Path
+from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 import robots  # noqa: F401  (registers robots)
 import transport  # noqa: F401  (registers transport backends)
+from core.app.handlers.io import ensure_ik_solver, normalize_policy_action_chunk
+from core.app.handlers.recording import (
+    _fill_record_eef,
+    build_policy_observation,
+    record_rollout_intervention_step,
+)
+from core.app.state import RuntimeState, SessionState
 from core.config import load_config
 from core.registry import ROBOT_REGISTRY
+from core.types import Observation, RolloutInterventionSegment
+from policy_client.base import PolicyBuildContext
+from policy_client.xpolicylab import XPolicyLabPolicyClient, _load_robot_codec
 
 pytestmark = pytest.mark.integration
 
-_CONFIGS_DIR = Path(__file__).resolve().parents[2] / "configs"
+ROOT = Path(__file__).resolve().parents[2]
+_CONFIGS_DIR = ROOT / "configs"
 _DEFAULTS = _CONFIGS_DIR / "00_base" / "defaults.py"
 
 
@@ -154,12 +169,24 @@ def test_pi05_piper_config_owns_joint_qpos_contract():
     assert robot.total_action_dim == 14
 
 
-def test_arx_x5_eva_sim_eval_config_uses_on_demand_zmq_transport():
-    cfg = load_config(_CONFIGS_DIR / "03_evaluation" / "arx_x5_eva_sim_eval.py")
+@pytest.mark.parametrize(
+    ("preset", "robot_type"),
+    [
+        ("arx_r5", "arx_r5"),
+        ("arx_x5", "arx_x5"),
+        ("dual_agilex_piper", "agilex_piper"),
+        ("dual_yam", "dual_yam"),
+        ("r1lite", "r1_lite"),
+        ("ur5e", "ur5e"),
+    ],
+)
+def test_real_robot_evaluation_presets_keep_checkpoint_and_task_contract(preset, robot_type):
+    cfg = load_config(_CONFIGS_DIR / "03_evaluation" / f"{preset}_eval.py")
 
-    assert cfg.transport.type == "zmq"
-    assert cfg.transport.image_mode == "on_demand"
-    assert cfg.control_channel.enabled is True
+    assert cfg.robot.type == robot_type
+    assert cfg.console.initial_tab == "eval"
+    assert cfg.eval.checkpoints
+    assert cfg.eval.tasks
 
 
 def test_dual_yam_eva_sim_config_selects_multiple_task_sets():
@@ -204,3 +231,137 @@ def test_dual_yam_sim_evaluation_uses_eef_and_on_demand_transport():
     assert cfg.transport.image_mode == "on_demand"
     assert cfg.transport.convert_bgr_to_rgb is False
     assert cfg.control_channel.enabled is True
+
+
+@pytest.mark.parametrize(
+    ("preset", "links"),
+    [
+        ("dual_yam", ["tcp", "tcp"]),
+        ("arx_x5", ["tcp", "tcp"]),
+        ("dual_agilex_piper", ["tcp", "tcp"]),
+    ],
+)
+def test_tcp_preset_builds_actual_target_links(preset, links):
+    config = load_config(ROOT / "configs/01_deploy" / preset / "openpi_tcp.py")
+    robot = ROBOT_REGISTRY.build(config.robot.type)
+    runtime = RuntimeState(
+        robot=robot,
+        transport=SimpleNamespace(get_latest_qpos=lambda: robot.initial_qpos.copy()),
+    )
+    solver = ensure_ik_solver(config, runtime)
+
+    for arm, link in zip((solver._left_solver, solver._right_solver), links, strict=True):
+        assert arm._robot.links.names[int(arm._eef_idx)] == link
+    assert config.inference_cfg.obs_space.rotation_order == "wxyz"
+    assert config.inference_cfg.action_space.rotation_order == "wxyz"
+    assert ensure_ik_solver(config, runtime) is solver
+
+
+def test_yam_tcp_inference_replaces_wire_gripper_pose_and_solves_tcp_action():
+    config = load_config(ROOT / "configs/01_deploy/dual_yam/openpi_tcp.py")
+    robot = ROBOT_REGISTRY.build(config.robot.type)
+    qpos = robot.initial_qpos.copy()
+    runtime = RuntimeState(
+        robot=robot,
+        transport=SimpleNamespace(get_latest_qpos=lambda: qpos.copy()),
+    )
+    solver = ensure_ik_solver(config, runtime)
+    tcp_pose = solver.fk_chunk(qpos)[0]
+    gripper_solver = robot.build_kinematics(initial_qpos_groups=robot.initial_qpos_by_group())
+    gripper_pose = gripper_solver.fk_chunk(qpos)[0]
+    frame = Observation(images={}, state_qpos=qpos, state_eef=gripper_pose)
+    observation = build_policy_observation(frame, "pick the cup", config, runtime)
+
+    np.testing.assert_allclose(observation["state"], tcp_pose, atol=1e-6)
+    assert np.linalg.norm(observation["state"][:3] - gripper_pose[:3]) > 0.14
+    solved = normalize_policy_action_chunk(config, runtime, tcp_pose[np.newaxis])
+    np.testing.assert_allclose(solved, qpos[np.newaxis], atol=1e-4)
+    np.testing.assert_array_equal(solved[:, [6, 13]], qpos[np.newaxis, [6, 13]])
+
+    frame.action_qpos = qpos.copy()
+    frame.action_eef = gripper_pose.copy()
+    _fill_record_eef(config, runtime, frame, qpos)
+    np.testing.assert_allclose(frame.state_eef, tcp_pose, atol=1e-6)
+    np.testing.assert_allclose(frame.action_eef, tcp_pose, atol=1e-6)
+
+    frame.state_eef = gripper_pose.copy()
+    frame.action_eef = gripper_pose.copy()
+    runtime.transport.get_hil_frame = lambda: frame
+    runtime.rollout_intervention_active = True
+    segment = RolloutInterventionSegment(0, 0, qpos.copy())
+    runtime.rollout_intervention_active_segment = segment
+    assert record_rollout_intervention_step(config, runtime, SessionState())
+    np.testing.assert_allclose(segment.frames[0].state_eef, tcp_pose, atol=1e-6)
+    np.testing.assert_allclose(segment.frames[0].action_eef, tcp_pose, atol=1e-6)
+    np.testing.assert_array_equal(frame.state_eef, gripper_pose)
+    np.testing.assert_array_equal(frame.action_eef, gripper_pose)
+
+
+def test_tcp_target_count_mismatch_is_rejected():
+    robot = ROBOT_REGISTRY.build("dual_yam")
+    with pytest.raises(ValueError, match="zip"):
+        robot.build_kinematics(initial_qpos_groups=robot.initial_qpos_by_group(), eef_links=["tcp"])
+
+
+class _TcpEchoPolicy:
+    """Echo each arm's received TCP pose through the real server protocol."""
+
+    def __init__(self):
+        self.observation = None
+
+    def reset(self):
+        self.observation = None
+
+    def infer(self, observation):
+        self.observation = observation
+        return {"actions": [observation["state"], observation["state"]]}
+
+
+@pytest.mark.skipif(
+    not (ROOT.parent / "eva-xpolicylab/XPolicyLab.py").is_file(),
+    reason="requires the sibling eva-xpolicylab checkout",
+)
+def test_yam_tcp_eval_round_trip_through_actual_xpolicylab_server():
+    config = load_config(ROOT / "configs/03_evaluation/dual_yam_eva_sim_eval.py")
+    _load_robot_codec(str(ROOT / config.policy.backend_options.xpolicylab_root))
+    from client_server.ws.model_server import PolicyServer, PolicyServerConfig
+
+    robot = ROBOT_REGISTRY.build(config.robot.type)
+    qpos = robot.initial_qpos.copy()
+    runtime = RuntimeState(
+        robot=robot, transport=SimpleNamespace(get_latest_qpos=lambda: qpos.copy())
+    )
+    solver = ensure_ik_solver(config, runtime)
+    tcp = solver.fk_chunk(qpos)[0]
+    for arm in (solver._left_solver, solver._right_solver):
+        assert arm._robot.links.names[int(arm._eef_idx)] == "tcp"
+
+    model = _TcpEchoPolicy()
+    server = PolicyServer(model, PolicyServerConfig(host="127.0.0.1", port=0))
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    try:
+        asyncio.run_coroutine_threadsafe(server.start(), loop).result(timeout=5)
+        config.policy.port = int(server.url.rsplit(":", 1)[1])
+        config.policy.backend_options.xpolicylab_root = str(ROOT.parent / "eva-xpolicylab")
+        context = PolicyBuildContext(action_dim=robot.total_action_dim, retry_until_connected=False)
+        with XPolicyLabPolicyClient.from_config(config.policy, context) as client:
+            client.reset()
+            runtime.policy_metadata = client.metadata
+            observation = build_policy_observation(
+                Observation(images={}, state_qpos=qpos), "pick the cup", config, runtime
+            )
+            response = client.infer(observation)
+            assert response["action_mode"] == "eef"
+            assert client.metadata["action_dim"] == 16
+            np.testing.assert_allclose(response["actions"], np.tile(tcp, (2, 1)), atol=1e-6)
+            assert model.observation["state"]["left_ee_pose"].shape == (7,)
+            assert model.observation["state"]["right_ee_pose"].shape == (7,)
+            solved = normalize_policy_action_chunk(config, runtime, response["actions"], response)
+            np.testing.assert_allclose(solved, np.tile(qpos, (2, 1)), atol=1e-4)
+    finally:
+        asyncio.run_coroutine_threadsafe(server.stop(), loop).result(timeout=5)
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=5)
+        loop.close()

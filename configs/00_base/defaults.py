@@ -1,6 +1,6 @@
 """Shared model and workflow defaults; hardware defaults come from each device config.yaml."""
 
-robot = dict(type="agilex_piper")
+robot = dict(type="agilex_piper", eef_links=[], ik_reg_weight=1.0)
 
 transport = dict(
     image_mode="stream",

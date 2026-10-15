@@ -215,6 +215,9 @@ def ensure_ik_solver(config: ConfigDict, runtime: RuntimeState) -> Any:
     }
     if config.robot.eef_reference_frame in runtime.robot.supported_reference_frames:
         solver_kwargs["reference_frame"] = config.robot.eef_reference_frame
+    if config.robot.eef_links:
+        solver_kwargs["eef_links"] = config.robot.eef_links
+        solver_kwargs["reg_weight"] = config.robot.ik_reg_weight
     solver = runtime.robot.build_kinematics(**solver_kwargs)
     if solver is None:
         raise RuntimeError("EEF mode requires an IK solver but the robot does not provide one")

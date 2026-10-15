@@ -539,4 +539,10 @@
       effort="10"
       velocity="1" />
   </joint>
+  <link name="tcp" />
+  <joint name="eef_to_tcp" type="fixed">
+    <origin xyz="0 0 0.1348875" rpy="0 0 0" />
+    <parent link="gripper_base" />
+    <child link="tcp" />
+  </joint>
 </robot>

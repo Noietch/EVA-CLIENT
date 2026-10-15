@@ -9,6 +9,7 @@
 .vscode/
 
 # Python environments, caches, and type-checker output.
+.venv
 .venv/
 examples/hardware/*/.venv
 __pycache__/
