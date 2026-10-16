@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import multiprocessing as mp
+import os
 from itertools import pairwise
 from pathlib import Path
 
@@ -43,6 +44,7 @@ def _record_episode(logger, task: str, timestamp: float, index: int) -> None:
         },
     )
     logger.start_episode(task, collection_dataset=_SHARED_DATASET)
+    logger.set_episode_meta(slot_id=f"{task}:scene:{index}")
     logger.ingest_collection_snapshot(
         RawCollectionSnapshot(timestamp=timestamp, decode_raw=lambda: batch)
     )
@@ -191,3 +193,73 @@ def test_two_processes_annotating_one_dataset_keep_both_annotations(tmp_path) ->
     rows = _read_jsonl(dataset_dir / "meta" / "episodes.jsonl")
     annotations = {int(row["episode_index"]): row["language_annotation"] for row in rows}
     assert annotations == {0: "grasp the cup", 1: "place the cup"}
+
+
+def _record_station_with_stale_occupancy(root: Path, task: str, barrier) -> None:
+    """Force both stations to choose zero despite their peer's committed save."""
+    logger = _collection_logger(root, shared_dataset=True)
+    dataset_dir = _collection_task_dir(root, _SHARED_DATASET)
+    logger._collection_next_index[dataset_dir] = 0
+    logger._occupied_episode_indices = lambda _dataset, _rows: set()
+    barrier.wait(30.0)
+    _record_episode(logger, task, _STATION_START_SEC[task], 0)
+    logger.finalize()
+
+
+def test_stale_occupancy_cannot_overwrite_another_stations_slot(tmp_path) -> None:
+    context = mp.get_context("fork")
+    barrier = context.Barrier(3)
+    stations = [
+        context.Process(target=_record_station_with_stale_occupancy, args=(tmp_path, task, barrier))
+        for task in ("a", "b")
+    ]
+    for station in stations:
+        station.start()
+    barrier.wait(30.0)
+    for station in stations:
+        station.join(30.0)
+        assert station.exitcode == 0
+
+    dataset_dir = _collection_task_dir(tmp_path, _SHARED_DATASET)
+    rows = _read_jsonl(dataset_dir / "meta/episodes.jsonl")
+    assert {row["slot_id"] for row in rows} == {"a:scene:0", "b:scene:0"}
+    assert {row["episode_index"] for row in rows} == {0, 1}
+    for row in rows:
+        path = dataset_dir / "data/chunk-000" / f"episode_{row['episode_index']:06d}.parquet"
+        table = pq.read_table(path)
+        assert table.column("episode_index").to_pylist() == [row["episode_index"]]
+        assert table.column("task_index").to_pylist() == [
+            next(
+                task["task_index"]
+                for task in _read_jsonl(dataset_dir / "meta/tasks.jsonl")
+                if task["task"] == row["tasks"][0]
+            )
+        ]
+
+
+def _record_station_crashing_after_publish(root: Path) -> None:
+    logger = _collection_logger(root, shared_dataset=True)
+    logger._write_videos = lambda *_args: os._exit(17)
+    _record_episode(logger, "a", 1.0, 0)
+
+
+def test_crash_after_parquet_publish_does_not_block_the_next_save(tmp_path) -> None:
+    context = mp.get_context("fork")
+    station = context.Process(target=_record_station_crashing_after_publish, args=(tmp_path,))
+    station.start()
+    station.join(30.0)
+    assert station.exitcode == 17
+
+    dataset_dir = _collection_task_dir(tmp_path, _SHARED_DATASET)
+    orphan = dataset_dir / "data/chunk-000/episode_000000.parquet"
+    before = orphan.read_bytes()
+    assert pq.ParquetFile(orphan).metadata.num_rows == 1
+    resumed = _collection_logger(tmp_path, shared_dataset=True)
+    _record_episode(resumed, "b", 5.0, 0)
+    resumed.finalize()
+
+    assert orphan.read_bytes() == before
+    rows = _read_jsonl(dataset_dir / "meta/episodes.jsonl")
+    assert [(row["episode_index"], row["slot_id"]) for row in rows] == [(1, "b:scene:0")]
+    saved = pq.ParquetFile(dataset_dir / "data/chunk-000/episode_000001.parquet")
+    assert saved.metadata.num_rows == 1

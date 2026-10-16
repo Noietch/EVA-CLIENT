@@ -1739,12 +1739,42 @@ class EpisodeLogger:
         """
         dataset_dir = job.dataset_dir or self._log_dir
         with dataset_lock(dataset_dir).acquire():
-            self._claim_collection_indices(job, dataset_dir)
-            self._write_episode_job(job, dataset_dir)
+            overwrite = self._claim_collection_indices(job, dataset_dir)
+            self._write_episode_job(job, dataset_dir, overwrite)
+            logger.info(
+                "[COLLECTION_SAVE] dataset=%s episode=%d slot=%s",
+                dataset_dir,
+                job.episode_index,
+                _slot_id(job.episode_meta),
+            )
             assert self._collection_qc is not None
             self._collection_qc.submit(dataset_dir, job.episode_index)
 
-    def _write_episode_job(self, job: SaveJob, dataset_dir: Path) -> None:
+    def _stage_collection_parquet(
+        self, job: SaveJob, dataset_dir: Path, transaction_dir: Path, overwrite: bool
+    ) -> Path:
+        """Stage complete data and publish a new index without replacing another file."""
+        columns = cast(dict[str, Any], job.collection_columns)
+        row = cast(dict[str, Any], job.collection_episode_row)
+        staged = transaction_dir / "episode.parquet"
+        while True:
+            pq.write_table(pa.table(columns), staged)
+            path = self._parquet_path(job.episode_index, dataset_dir)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if overwrite:
+                return path
+            try:
+                os.link(staged, path)
+            except FileExistsError:
+                job.episode_index += 1
+                while self._parquet_path(job.episode_index, dataset_dir).exists():
+                    job.episode_index += 1
+                columns["episode_index"] = [job.episode_index] * int(row["length"])
+                row["episode_index"] = job.episode_index
+            else:
+                return path
+
+    def _write_episode_job(self, job: SaveJob, dataset_dir: Path, overwrite: bool) -> None:
         if job.collection_payload is not None:
             if self._collection_writer is None:
                 raise ValueError("collection save job has payload but no collection writer")
@@ -1753,56 +1783,56 @@ class EpisodeLogger:
         row = job.collection_episode_row
         if columns is None or row is None:
             raise ValueError("collection save job missing columns or episode row")
-        path = self._parquet_path(job.episode_index, dataset_dir)
         transaction_dir = dataset_dir / f".collection-save-{job.episode_index}-{uuid.uuid4().hex}"
-        targets = [
-            path,
-            self._meta_path("episodes.jsonl", dataset_dir),
-            self._meta_path("episodes_stats.jsonl", dataset_dir),
-            self._meta_path("tasks.jsonl", dataset_dir),
-            self._meta_path("qc.jsonl", dataset_dir),
-            self._meta_path("info.json", dataset_dir),
-            self._meta_path("stats.json", dataset_dir),
-            dataset_dir / "meta" / "render_reports" / f"episode_{job.episode_index:06d}.json",
-        ]
-        if self._save_video:
-            targets.extend(
-                self._video_path(job.episode_index, camera, dataset_dir)
-                for camera in self._camera_keys
-                if resolve_video_key(self._keys, camera) is not None
-            )
-        sim_state_paths = self._sim_state_paths(job, dataset_dir)
-        targets.extend(sim_state_paths)
-        metadata_targets = {
-            self._meta_path(name, dataset_dir)
-            for name in (
-                "episodes.jsonl",
-                "episodes_stats.jsonl",
-                "tasks.jsonl",
-                "qc.jsonl",
-                "info.json",
-                "stats.json",
-            )
-        }
         backups: dict[Path, Path] = {}
+        absent_targets: list[Path] = []
+        published_path: Path | None = None
         transaction_dir.mkdir(parents=True, exist_ok=False)
         try:
-            # Move every artifact that this episode can replace out of the way first.
-            # This lets a failed parquet/video/QC write restore the previous take
-            # instead of leaving a mixed old/new episode on disk.
+            path = self._stage_collection_parquet(job, dataset_dir, transaction_dir, overwrite)
+            if not overwrite:
+                published_path = path
+            metadata_targets = {
+                self._meta_path(name, dataset_dir)
+                for name in (
+                    "episodes.jsonl",
+                    "episodes_stats.jsonl",
+                    "tasks.jsonl",
+                    "qc.jsonl",
+                    "info.json",
+                    "stats.json",
+                )
+            }
+            targets = [
+                path,
+                *sorted(metadata_targets),
+                dataset_dir / "meta/render_reports" / f"episode_{job.episode_index:06d}.json",
+            ]
+            if self._save_video:
+                targets.extend(
+                    self._video_path(job.episode_index, camera, dataset_dir)
+                    for camera in self._camera_keys
+                    if resolve_video_key(self._keys, camera) is not None
+                )
+            targets.extend(self._sim_state_paths(job, dataset_dir))
             for target in targets:
+                if target == path and not overwrite:
+                    continue
                 if not target.exists():
+                    absent_targets.append(target)
                     continue
                 backup = transaction_dir / target.relative_to(dataset_dir)
                 backup.parent.mkdir(parents=True, exist_ok=True)
-                if target in metadata_targets:
+                # Keep the parquet path occupied throughout a re-take so another
+                # station cannot reserve its index while the backup is being made.
+                if target in metadata_targets or target == path:
                     shutil.copy2(target, backup)
                 else:
                     target.replace(backup)
                 backups[target] = backup
 
-            path.parent.mkdir(parents=True, exist_ok=True)
-            pq.write_table(pa.table(columns), str(path))
+            if overwrite:
+                (transaction_dir / "episode.parquet").replace(path)
             self._write_videos(job.episode_index, job.videos, job.video_fps, dataset_dir)
             self._write_sim_state_sidecars(job, dataset_dir)
             episode_stats = {key: _vector_episode_stats(vals) for key, vals in columns.items()}
@@ -1821,18 +1851,16 @@ class EpisodeLogger:
             if self._collection_writer is not None:
                 self._collection_writer.finalize(dataset_dir)
         except BaseException:
-            for target in targets:
-                if target.exists():
-                    if target.is_dir():
-                        shutil.rmtree(target)
-                    else:
-                        target.unlink()
+            if published_path is not None:
+                published_path.unlink(missing_ok=True)
+            for target in absent_targets:
+                target.unlink(missing_ok=True)
             for target, backup in backups.items():
-                if backup.exists():
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    backup.replace(target)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                backup.replace(target)
+            shutil.rmtree(transaction_dir, ignore_errors=True)
             raise
-        finally:
+        else:
             shutil.rmtree(transaction_dir, ignore_errors=True)
 
     def _write_videos(
@@ -2320,6 +2348,11 @@ class EpisodeLogger:
         inserted = False
         for existing in rows:
             if int(existing.get("episode_index", -1)) == episode_index:
+                if _slot_id(existing) != _slot_id(row):
+                    raise ValueError(
+                        f"episode {episode_index} belongs to slot {_slot_id(existing)!r}, "
+                        f"cannot replace it with {_slot_id(row)!r}"
+                    )
                 if not inserted:
                     filtered.append(row)
                     inserted = True
@@ -2734,7 +2767,7 @@ class EpisodeLogger:
             self._collection_next_index[dataset_dir] = index + 1
             return index
 
-    def _claim_collection_indices(self, job: SaveJob, dataset_dir: Path) -> None:
+    def _claim_collection_indices(self, job: SaveJob, dataset_dir: Path) -> bool:
         """Settle the indices of one collection save against the dataset on disk.
 
         Runs under the dataset lock, so a slot another station already recorded is
@@ -2742,17 +2775,18 @@ class EpisodeLogger:
         not past this process's own view of it.
         """
         rows = _read_jsonl(self._meta_path("episodes.jsonl", dataset_dir))
-        job.episode_index = self._claim_collection_episode_index(job, dataset_dir, rows)
         job.global_index = self._claim_collection_global_index(dataset_dir, rows)
         job.task_index, job.task_to_index = self._resolve_collection_task(dataset_dir, job.task)
+        job.episode_index, overwrite = self._claim_collection_episode_index(job, dataset_dir, rows)
+        return overwrite
 
     def _claim_collection_episode_index(
         self, job: SaveJob, dataset_dir: Path, rows: list[dict[str, Any]]
-    ) -> int:
-        """Authoritative episode index: the slot's recording, or a free index."""
+    ) -> tuple[int, bool]:
+        """Return the slot's recording, or a candidate for exclusive publication."""
         existing = self._slot_episode_index(rows, job.episode_meta)
         if existing is not None:
-            return existing
+            return existing, True
         occupied = self._occupied_episode_indices(dataset_dir, rows)
         index = job.episode_index
         if index in occupied:
@@ -2761,7 +2795,7 @@ class EpisodeLogger:
             self._collection_next_index[dataset_dir] = max(
                 self._collection_next_index.get(dataset_dir, index), index + 1
             )
-        return index
+        return index, False
 
     def _claim_collection_global_index(self, dataset_dir: Path, rows: list[dict[str, Any]]) -> int:
         """First free dataset-global frame index, cross-checked against the rows.

@@ -616,6 +616,92 @@ def test_collection_save_rolls_back_when_qc_write_fails(tmp_path, monkeypatch):
     logger.finalize()
 
 
+@pytest.mark.parametrize("failed_name", ["episodes_stats.jsonl", "episode_000000.parquet"])
+def test_failed_backup_preserves_every_existing_artifact(tmp_path, monkeypatch, failed_name):
+    logger = _collection_logger(tmp_path)
+    slot = "TASK-1:SC-1:0"
+    logger.start_episode("t")
+    logger.set_episode_meta(slot_id=slot)
+    logger.ingest_collection_snapshot(_collection_raw_snapshot(0.0))
+    assert logger.end_episode()
+    logger._collection_qc.wait(timeout=10)
+
+    dataset_dir = _collection_task_dir(tmp_path)
+    paths = [
+        dataset_dir / "data/chunk-000/episode_000000.parquet",
+        *(
+            dataset_dir / "meta" / name
+            for name in (
+                "episodes.jsonl",
+                "episodes_stats.jsonl",
+                "tasks.jsonl",
+                "qc.jsonl",
+                "info.json",
+                "stats.json",
+            )
+        ),
+    ]
+    before = {path: path.read_bytes() for path in paths}
+    copy = episode_module.shutil.copy2
+
+    def fail_backup(source, destination):
+        if source.name == failed_name:
+            raise OSError("backup disk full")
+        return copy(source, destination)
+
+    monkeypatch.setattr(episode_module.shutil, "copy2", fail_backup)
+    logger.start_episode("t")
+    logger.set_episode_meta(slot_id=slot)
+    logger.ingest_collection_snapshot(_collection_raw_snapshot(0.1))
+    with pytest.raises(OSError, match="backup disk full"):
+        logger.end_episode()
+
+    assert {path: path.read_bytes() for path in paths} == before
+    logger.finalize()
+
+
+def test_failed_parquet_staging_leaves_no_empty_episode(tmp_path, monkeypatch):
+    logger = _collection_logger(tmp_path)
+
+    def fail_write(_table, _path):
+        raise OSError("parquet disk full")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(episode_module.pq, "write_table", fail_write)
+        logger.start_episode("t")
+        logger.ingest_collection_snapshot(_collection_raw_snapshot(0.0))
+        with pytest.raises(OSError, match="parquet disk full"):
+            logger.end_episode()
+
+    dataset_dir = _collection_task_dir(tmp_path)
+    assert not list((dataset_dir / "data/chunk-000").glob("episode_*.parquet"))
+    logger.start_episode("t")
+    logger.ingest_collection_snapshot(_collection_raw_snapshot(0.1))
+    assert logger.end_episode()
+    rows = _read_jsonl(dataset_dir / "meta/episodes.jsonl")
+    assert len(rows) == 1
+    saved = pq.ParquetFile(logger._parquet_path(rows[0]["episode_index"], dataset_dir))
+    assert saved.metadata.num_rows == 1
+    logger.finalize()
+
+
+def test_episode_metadata_cannot_be_reassigned_to_another_slot(tmp_path):
+    logger = _collection_logger(tmp_path)
+    logger.start_episode("t")
+    logger.set_episode_meta(slot_id="TASK-1:SC-1:0")
+    logger.ingest_collection_snapshot(_collection_raw_snapshot(0.0))
+    assert logger.end_episode()
+    logger._collection_qc.wait(timeout=10)
+    dataset_dir = _collection_task_dir(tmp_path)
+    path = dataset_dir / "meta/episodes.jsonl"
+    before = path.read_bytes()
+    row = {**_read_jsonl(path)[0], "slot_id": "TASK-2:SC-2:0"}
+    with pytest.raises(ValueError, match="belongs to slot"):
+        logger._upsert_episode_dict_row_locked(row, dataset_dir)
+    assert path.read_bytes() == before
+    logger.finalize()
+
+
 def test_collection_qc_failure_leaves_the_ledger_intact(tmp_path, monkeypatch):
     logger = _collection_logger(tmp_path)
     qpos = np.zeros(_DIM, dtype=np.float32)
