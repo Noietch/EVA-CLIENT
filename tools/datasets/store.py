@@ -456,7 +456,7 @@ class TaskSetStore:
         if not path.is_file():
             return {}
         with path.open("r", encoding="utf-8-sig") as handle:
-            payload = yaml.safe_load(handle)
+            payload = yaml.load(handle, Loader=yaml.CSafeLoader)
         if not isinstance(payload, dict):
             raise ValueError(f"{filename} must contain a mapping")
         return payload

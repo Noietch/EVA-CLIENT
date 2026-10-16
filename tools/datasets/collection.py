@@ -1193,14 +1193,18 @@ class PlanCatalog:
         if cached is not None and now - cached[0] < 1.0:
             return cached[1]
         parts: list[str] = [self._file_token(self.assets.path)]
+        batch_tokens = {}
         for batch in batches:
+            start = len(parts)
             root = self._batch_root(batch)
             info_path = root / "info.yaml"
             for path in (info_path, root / "layout.yaml", root / "scene.csv", root / "tasks.csv"):
                 parts.append(self._file_token(path))
             info: dict[str, Any] = {}
             if info_path.is_file():
-                payload = yaml.safe_load(info_path.read_text(encoding="utf-8-sig"))
+                payload = yaml.load(
+                    info_path.read_text(encoding="utf-8-sig"), Loader=yaml.CSafeLoader
+                )
                 if isinstance(payload, dict):
                     info = payload
             dataset_dir = self._source_dataset_dir(batch, info)
@@ -1213,8 +1217,13 @@ class PlanCatalog:
                 parts.append(self._file_token(path))
             self.episode_rows(dataset_dir)
             parts.append(self._episode_rows_cache[str(dataset_dir / "meta/episodes.jsonl")][0])
+            batch_tokens[(batch,)] = "|".join([parts[0], *parts[start:]])
         token = "|".join(parts)
-        self._source_token_cache[cache_key] = (now, token)
+        cached_at = time.monotonic()
+        self._source_token_cache.update(
+            {key: (cached_at, value) for key, value in batch_tokens.items()}
+        )
+        self._source_token_cache[cache_key] = (cached_at, token)
         return token
 
     @staticmethod
