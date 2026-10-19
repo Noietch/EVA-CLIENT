@@ -356,6 +356,9 @@ def _check_scene_metadata(
     expected_sim = expected_metadata.get("sim_metadata")
     if isinstance(expected_sim, Mapping):
         expected = {**expected_metadata, **expected_sim}
+        task_item = expected_sim.get("task_item")
+        if isinstance(task_item, Mapping) and task_item.get("task_item_id") is not None:
+            expected["task_id"] = task_item["task_item_id"]
     else:
         expected = expected_metadata
     aliases = {
@@ -368,6 +371,9 @@ def _check_scene_metadata(
         actual_value = actual.get(actual_key)
         if actual_value is None:
             continue
+        if actual_key == "layout" and isinstance(actual_value, Mapping):
+            if not isinstance(expected.get("layout"), Mapping):
+                continue
         expected_value = next(
             (expected[key] for key in expected_keys if expected.get(key) is not None),
             None,

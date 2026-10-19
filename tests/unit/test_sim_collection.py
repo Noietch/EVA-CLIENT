@@ -131,6 +131,48 @@ def test_sim_reader_rejects_truncated_mcap(tmp_path: Path) -> None:
         read_sim_execution(path, "episode-1", expected_steps=1)
 
 
+def test_scene_metadata_accepts_canonical_composite_task_id() -> None:
+    scene_id = "v12_eval_v12_case_m059_001"
+    task_id = "v12_eval_v12_EV1C-ACT02"
+    sim_collection._check_scene_metadata(
+        {
+            "task_id": f"{task_id}__{scene_id}",
+            "scene_id": scene_id,
+            "metadata": {
+                "task_item": {"task_item_id": f"{task_id}__{scene_id}"},
+                "layout": {"layout_index": 0, "uid": "layout-0"},
+            },
+        },
+        {
+            "task_id": task_id,
+            "scene_id": scene_id,
+            "sim_metadata": {
+                "task_item": {"task_item_id": f"{task_id}__{scene_id}"}
+            },
+        },
+    )
+
+
+def test_scene_metadata_rejects_different_composite_task_id() -> None:
+    scene_id = "v12_eval_v12_case_m059_001"
+    with pytest.raises(SimRecordingError, match="task_id"):
+        sim_collection._check_scene_metadata(
+            {
+                "task_id": f"v12_eval_v12_EV1C-ACT03__{scene_id}",
+                "scene_id": scene_id,
+            },
+            {
+                "task_id": "v12_eval_v12_EV1C-ACT02",
+                "scene_id": scene_id,
+                "sim_metadata": {
+                    "task_item": {
+                        "task_item_id": f"v12_eval_v12_EV1C-ACT02__{scene_id}"
+                    }
+                },
+            },
+        )
+
+
 def test_sim_recording_path_is_absolute_and_exclusive(tmp_path: Path) -> None:
     handle = create_sim_recording_handle(tmp_path, scene_revision=3)
 
