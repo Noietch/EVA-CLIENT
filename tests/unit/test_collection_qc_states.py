@@ -189,7 +189,8 @@ def test_sim_replay_gate_rejects_json_one_as_success(tmp_path):
     assert (verified, reason) == (False, "replay_summary_failed")
 
 
-def test_pending_replay_cannot_turn_human_pass_into_passed(tmp_path):
+@pytest.mark.parametrize("verified", [None, False, True])
+def test_human_pass_overrides_replay_without_erasing_machine_findings(verified):
     slots = build_collection_slots(
         ConfigDict(collection=ConfigDict(tasks={"set": [("task", 1)]})), {}, "set"
     )
@@ -200,8 +201,16 @@ def test_pending_replay_cannot_turn_human_pass_into_passed(tmp_path):
         "quality": "green",
         "qc_verdict": "pass",
         "replay_required": True,
-        "replay_verified": None,
+        "replay_verified": verified,
+        "replay_qc_reason": "replay_summary_failed" if verified is False else "",
+        "qc_auto_verdict": "fail",
+        "qc_auto_reason": "joint_limit_exceeded",
     }
     rows, _, counts = collection_slot_status(slots, [episode], [], CollectionSlotState([]))
-    assert rows[0]["qc_state"] == "unreviewed"
-    assert counts["passed"] == 0
+    assert rows[0]["qc_state"] == "passed"
+    assert counts["passed"] == 1
+    dataset_slot = PlanCatalog._slot(slots[0].slot_id, "DEFAULT", 0, 1, episode)
+    assert dataset_slot["qc_state"] == "passed"
+    assert dataset_slot["episode"]["replay_verified"] is verified
+    assert dataset_slot["episode"]["replay_qc_reason"] == episode["replay_qc_reason"]
+    assert dataset_slot["episode"]["qc_auto_reason"] == "joint_limit_exceeded"

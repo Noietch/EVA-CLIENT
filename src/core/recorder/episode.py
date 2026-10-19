@@ -391,6 +391,27 @@ class EpisodeLogger:
             self._collection_writer.start_episode(collection_min_capture_time)
             return
 
+    def start_sim_recording(self, expected_metadata: dict[str, Any] | None = None) -> None:
+        """Start the file-backed SIM trace for the active collection episode."""
+        if self._collection_writer is None or not self._collection_writer.sim_recording_enabled:
+            return
+        if not self._active or self._task is None:
+            raise RuntimeError("cannot start SIM recording without an active episode")
+        dataset_dir = self._collection_dataset_dir(
+            self._task, self._active_collection_dataset
+        )
+        self._collection_writer.start_sim_recording(dataset_dir, expected_metadata)
+
+    def stop_sim_recording(self) -> None:
+        """Stop and validate SIM before the collection SaveJob is created."""
+        if self._collection_writer is not None:
+            self._collection_writer.stop_sim_recording()
+
+    def cancel_sim_recording(self) -> None:
+        """Cancel SIM while retaining its raw incomplete file."""
+        if self._collection_writer is not None:
+            self._collection_writer.cancel_sim_recording()
+
     def record_step(
         self,
         obs: Observation,
@@ -859,17 +880,19 @@ class EpisodeLogger:
         if not self._active:
             return
         if self._collection_writer is not None:
-            self._collection_writer.cancel_episode()
-            self._steps = []
-            self._live_steps = []
-            self._episode_meta = {}
-            self._intervention_segments = []
-            self._raw_episode_batch = CollectionRawBatch()
-            self._raw_episode_frame_labels = []
-            self._raw_episode_snapshots = []
-            self._active = False
-            self._task = None
-            self._active_collection_dataset = None
+            try:
+                self._collection_writer.cancel_episode()
+            finally:
+                self._steps = []
+                self._live_steps = []
+                self._episode_meta = {}
+                self._intervention_segments = []
+                self._raw_episode_batch = CollectionRawBatch()
+                self._raw_episode_frame_labels = []
+                self._raw_episode_snapshots = []
+                self._active = False
+                self._task = None
+                self._active_collection_dataset = None
             logger.info("Cancelled episode %d (%s)", self._episode_index, reason)
             return
         self._steps = []
@@ -1996,6 +2019,7 @@ class EpisodeLogger:
         current_episode_recorded_frames = 0
         current_episode_pending_frames = 0
         current_episode_skipped_before_start = 0
+        current_episode_sim_recording_error = ""
         active_for_task = self._active and (task is None or self._task == task)
         if active_for_task and collection_dataset is not None:
             active_for_task = self._active_collection_dataset == collection_dataset
@@ -2006,6 +2030,7 @@ class EpisodeLogger:
                 current_episode_recorded_frames = counts["recorded"]
                 current_episode_pending_frames = counts["pending"]
                 current_episode_skipped_before_start = counts["skipped_before_start"]
+                current_episode_sim_recording_error = counts.get("sim_recording_error", "")
             else:
                 current_episode_frames = self.active_frame_count
                 current_episode_recorded_frames = self.active_frame_count
@@ -2036,6 +2061,7 @@ class EpisodeLogger:
             "current_episode_recorded_frames": current_episode_recorded_frames,
             "current_episode_pending_frames": current_episode_pending_frames,
             "current_episode_skipped_before_start": current_episode_skipped_before_start,
+            "sim_recording_error": current_episode_sim_recording_error,
             "completed_episodes": history_count,
             "save_queue_size": active_jobs,
             "save_queue_max": self._save_queue_max,

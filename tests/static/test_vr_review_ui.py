@@ -305,16 +305,19 @@ assert.equal(episode.qc_note, "human note");
 assert.equal(episode.qc_verdict, "unreviewed");
 episode.qc_verdict = "pass";
 assert.equal(collectQcState(episode), "passed");
-for (const [verified, expected] of [[undefined, "unreviewed"], [null, "unreviewed"],
-  [false, "failed"], [true, "passed"]]) {
+for (const verified of [undefined, null, false, true]) {
   const simEpisode = {...episode, replay_required: true, replay_verified: verified};
-  assert.equal(collectQcState(simEpisode), expected);
-  assert.equal(collectResultLabel(simEpisode), `QC ${collectQcLabel(expected)}`);
-  assert.equal(collectOutcome(simEpisode), expected === "failed" ? "rejected" : "usable");
+  assert.equal(collectQcState(simEpisode), "passed");
+  assert.equal(collectResultLabel(simEpisode), "QC PASSED");
+  assert.equal(collectOutcome(simEpisode), "usable");
+  assert.equal(simEpisode.replay_verified, verified);
+  assert.equal(simEpisode.qc_auto_reason, "joint_limit_exceeded");
 }
 assert.equal(collectQcState({...episode, replay_verified: false}), "passed");
 assert.equal(collectQcState({...episode, qc_verdict: "unreviewed", replay_required: true,
   replay_verified: true}), "failed");
+assert.equal(collectQcState({...episode, qc_verdict: "unreviewed", qc_auto_verdict: "",
+  replay_required: true, replay_verified: false}), "failed");
 assert.equal(collectQcState({...episode, qc_verdict: "fail", replay_required: true,
   replay_verified: null}), "failed");
 renderCollectionMachineFinding(episode);
@@ -537,7 +540,7 @@ assert.doesNotMatch(otherDataset.title, /RECORDING/);
     )
 
 
-def test_dataset_qc_optimistic_state_respects_replay_gate():
+def test_dataset_qc_optimistic_human_pass_overrides_replay_and_rolls_back_on_error():
     source = (Path(__file__).resolve().parents[2] / "tools/datasets/static/review.js").read_text()
     handler = source[
         source.index("async function saveQc(") : source.index("function reviewSeries(")
@@ -559,14 +562,21 @@ const runWrite = async (control, operation) => {await operation(); return saved;
         + handler
         + r"""
 (async () => {
-  for (const [verified, expected] of [[null, "unreviewed"], [false, "failed"], [true, "passed"]]) {
+  for (const verified of [null, false, true]) {
     const slot = {qc_state: "failed", episode: {
       episode_index: 0, qc_verdict: "unreviewed", qc_auto_verdict: "fail",
-      replay_required: true, replay_verified: verified,
+      replay_required: true, replay_verified: verified, replay_qc_reason: "original replay finding",
+      qc_auto_reason: "joint_limit_exceeded",
     }};
     await saveQc({batch_id: "batch"}, slot, "pass", null);
-    assert.equal(slot.qc_state, expected);
+    assert.equal(slot.qc_state, "passed");
     assert.equal(slot.episode.qc_verdict, "pass");
+    assert.equal(slot.episode.replay_verified, verified);
+    assert.equal(slot.episode.replay_qc_reason, "original replay finding");
+    assert.equal(slot.episode.qc_auto_verdict, "fail");
+    assert.equal(slot.episode.qc_auto_reason, "joint_limit_exceeded");
+    await saveQc({batch_id: "batch"}, slot, "unreviewed", null);
+    assert.equal(slot.qc_state, "failed");
   }
   saved = false;
   const slot = {qc_state: "failed", episode: {

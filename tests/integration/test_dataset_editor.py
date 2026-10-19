@@ -389,9 +389,29 @@ def test_explicit_unreviewed_overrides_capture_failure_without_erasing_issues(tm
     assert saved["quality_issues"] == [{"detail": "camera skew"}]
 
 
-def test_machine_failure_marks_unreviewed_dataset_slot_red(tmp_path):
+@pytest.mark.parametrize(
+    ("report_text", "verified", "replay_reason"),
+    [
+        (None, None, "replay_report_pending"),
+        ('{"task_evaluation": {"success": false, "error": null}}', False, "replay_summary_failed"),
+        ("invalid", False, "replay_report_invalid"),
+        ('{"task_evaluation": {"success": true, "error": null}}', True, ""),
+    ],
+)
+def test_machine_failure_marks_unreviewed_dataset_slot_red(
+    tmp_path, report_text, verified, replay_reason
+):
     client, _, _, collection = _workspace(tmp_path)
     root = _episode_dataset(collection)
+    episode_path = root / "meta/episodes.jsonl"
+    episode = json.loads(episode_path.read_text())
+    episode["sim_metadata"] = {"schema_version": 1}
+    episode_path.write_text(json.dumps(episode) + "\n")
+    original = episode_path.read_bytes()
+    report_path = root / "meta/render_reports/episode_000007.json"
+    if report_text is not None:
+        report_path.parent.mkdir(parents=True)
+        report_path.write_text(report_text)
     qc_path = root / "meta/qc.jsonl"
     qc = {
         "episode_index": 7,
@@ -417,6 +437,23 @@ def test_machine_failure_marks_unreviewed_dataset_slot_red(tmp_path):
     passed = response.get_json()["tasks"][0]["slots"][0]
     assert passed["qc_state"] == "passed"
     assert passed["episode"]["qc_auto_note"] == qc["qc_auto_note"]
+    refreshed = client.get("/api/state?batch=" + BATCH).get_json()
+    slot = refreshed["tasks"][0]["slots"][0]
+    assert slot["qc_state"] == "passed"
+    assert refreshed["all_batches"][0]["passed"] == 1
+    assert slot["episode"]["replay_verified"] is verified
+    assert slot["episode"]["replay_qc_reason"] == replay_reason
+    assert slot["episode"]["qc_auto_reason"] == qc["qc_auto_reason"]
+    assert episode_path.read_bytes() == original
+    if report_text is not None:
+        assert report_path.read_text() == report_text
+    else:
+        assert not report_path.exists()
+    response = client.put(
+        "/api/batches/" + BATCH + "/episodes/7/qc", json={"verdict": "unreviewed"}
+    )
+    assert response.status_code == 200
+    assert response.get_json()["tasks"][0]["slots"][0]["qc_state"] == "failed"
 
 
 @pytest.mark.parametrize("report_location", ["default", "relative", "absolute"])
@@ -425,7 +462,7 @@ def test_replay_report_changes_refresh_rows_and_all_state_caches(tmp_path, repor
     dataset = _episode_dataset(collection)
     episode_path = dataset / "meta/episodes.jsonl"
     episode = json.loads(episode_path.read_text())
-    episode.update(sim_metadata={"schema_version": 1}, qc_verdict="pass")
+    episode.update(sim_metadata={"schema_version": 1}, qc_verdict="unreviewed")
     if report_location == "default":
         report_path = dataset / "meta/render_reports/episode_000007.json"
     elif report_location == "relative":
@@ -441,7 +478,7 @@ def test_replay_report_changes_refresh_rows_and_all_state_caches(tmp_path, repor
     assert pending["tasks"][0]["slots"][0]["qc_state"] == "unreviewed"
     assert catalog.episode_rows(dataset)[0]["replay_verified"] is None
 
-    for success, expected in [(True, "passed"), (False, "failed")]:
+    for success, expected in [(True, "unreviewed"), (False, "failed")]:
         report_path.write_text(json.dumps({"task_evaluation": {"success": success, "error": None}}))
         assert catalog.episode_rows(dataset)[0]["replay_verified"] is success
         # Bypass only the one-second polling throttle, preserving all page caches.

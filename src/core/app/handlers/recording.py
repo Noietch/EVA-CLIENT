@@ -978,9 +978,31 @@ def start_episode(runtime: RuntimeState, session: SessionState) -> None:
 
 def end_episode(runtime: RuntimeState) -> None:
     """Close the current episode, flushing parquet + mp4 to the dataset."""
-    stop_collection_capture(runtime)
-    if runtime.episode_logger is not None:
-        runtime.episode_logger.end_episode()
+    capture_error: Exception | None = None
+    try:
+        stop_collection_capture(runtime)
+    except Exception as error:
+        capture_error = error
+    logger_obj = runtime.episode_logger
+    if logger_obj is None:
+        if capture_error is not None:
+            raise capture_error
+        return
+    try:
+        logger_obj.stop_sim_recording()
+    except Exception:
+        try:
+            logger_obj.cancel_sim_recording()
+        finally:
+            if logger_obj.has_active_episode:
+                logger_obj.cancel_episode("SIM recording stop failed")
+        logger.error("SIM recording stop failed during generic episode end", exc_info=True)
+        if capture_error is not None:
+            logger.error("Collection capture stop also failed: %s", capture_error)
+        return
+    if capture_error is not None:
+        raise capture_error
+    logger_obj.end_episode()
 
 
 def start_rollout_intervention(
@@ -1284,6 +1306,10 @@ def _collection_target_meta(session: SessionState) -> dict[str, object]:
     }
 
 
+def _sim_recording_url(config: ConfigDict) -> str:
+    return str(config.collection.get("sim_recording_url") or "").strip()
+
+
 def collect_start(config: ConfigDict, runtime: RuntimeState, session: SessionState) -> bool:
     """Begin one teleop collection episode. Backpressure: refuse to start when the
     async save queue is full so we never grow memory unbounded. Returns True when
@@ -1311,7 +1337,11 @@ def collect_start(config: ConfigDict, runtime: RuntimeState, session: SessionSta
             return False
         logger_obj = runtime.episode_logger
         try:
-            collection_min_capture_time = runtime.transport.clear_collection_backlog()
+            collection_min_capture_time = (
+                None
+                if _sim_recording_url(config)
+                else runtime.transport.clear_collection_backlog()
+            )
             logger_obj.start_episode(
                 task=format_task_label(session.selected_collect_task),
                 collection_min_capture_time=collection_min_capture_time,
@@ -1319,10 +1349,12 @@ def collect_start(config: ConfigDict, runtime: RuntimeState, session: SessionSta
             )
             if target_meta:
                 logger_obj.set_episode_meta(**target_meta)
+            if _sim_recording_url(config):
+                logger_obj.start_sim_recording(target_meta or None)
             control_source = str(
                 (config.collection.teleop or {}).get("control_source", "transport")
             )
-            if control_source == "transport":
+            if control_source == "transport" and not _sim_recording_url(config):
                 start_collection_capture(
                     runtime,
                     fps=config.inference_cfg.publish_rate,
@@ -1338,6 +1370,16 @@ def collect_start(config: ConfigDict, runtime: RuntimeState, session: SessionSta
                 episode_active = False
                 cleanup_errors.append(active_error)
             if episode_active:
+                try:
+                    if _sim_recording_url(config):
+                        logger_obj.cancel_sim_recording()
+                except Exception as sim_cancel_error:
+                    cleanup_errors.append(sim_cancel_error)
+                    logger.error(
+                        "Failed to cancel SIM recording after start failure: %s",
+                        sim_cancel_error,
+                        exc_info=True,
+                    )
                 try:
                     logger_obj.cancel_episode("collection start failed")
                 except Exception as cancel_error:
@@ -1411,7 +1453,8 @@ def ingest_client_teleop_action(
     old frame per control tick. Keep all image/state samples, but pair the current
     action only with the newest observation in this batch.
     """
-    del config
+    if _sim_recording_url(config):
+        return False
     logger_obj = runtime.episode_logger
     if (
         logger_obj is None
@@ -1439,7 +1482,28 @@ def collect_stop(config: ConfigDict, runtime: RuntimeState, session: SessionStat
     saved = False
     save_error = ""
     if runtime.episode_logger is not None and runtime.episode_logger.is_collection_enabled:
-        stop_collection_capture(runtime)
+        try:
+            stop_collection_capture(runtime)
+            if _sim_recording_url(config):
+                runtime.episode_logger.stop_sim_recording()
+        except Exception as error:
+            cleanup_errors: list[Exception] = []
+            try:
+                runtime.episode_logger.cancel_sim_recording()
+            except Exception as cancel_error:
+                cleanup_errors.append(cancel_error)
+            try:
+                runtime.episode_logger.cancel_episode("SIM recording stop failed")
+            except Exception as cancel_error:
+                cleanup_errors.append(cancel_error)
+            session.status = SessionStatus.READY
+            session.last_error = f"SIM recording stop failed: {error}"
+            if cleanup_errors:
+                session.last_error += "; cleanup failed: " + "; ".join(
+                    str(cleanup_error) for cleanup_error in cleanup_errors
+                )
+            logger.exception("SIM recording stop failed; collection was not saved")
+            return False
         try:
             saved = runtime.episode_logger.end_episode()
             if saved:
@@ -1486,13 +1550,24 @@ def collect_stop(config: ConfigDict, runtime: RuntimeState, session: SessionStat
 
 
 def collect_cancel(runtime: RuntimeState, session: SessionState) -> None:
-    """Discard the in-flight collection episode (no save, partial files removed)."""
+    """Discard the in-flight collection episode and cancel SIM recording."""
     if runtime.episode_logger is not None and runtime.episode_logger.is_collection_enabled:
-        stop_collection_capture(runtime)
+        cleanup_errors: list[Exception] = []
         try:
+            stop_collection_capture(runtime)
+        except Exception as error:
+            cleanup_errors.append(error)
+        try:
+            runtime.episode_logger.cancel_sim_recording()
             runtime.episode_logger.cancel_episode("user cancel")
+        except Exception as error:
+            cleanup_errors.append(error)
         finally:
             session.status = SessionStatus.READY
+        if cleanup_errors:
+            session.last_error = "Collection cancel cleanup failed: " + "; ".join(
+                str(error) for error in cleanup_errors
+            )
     else:
         if runtime.episode_logger is not None:
             runtime.episode_logger.cancel_episode("user cancel")

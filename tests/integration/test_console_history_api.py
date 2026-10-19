@@ -8,6 +8,7 @@ from urllib.parse import urlencode
 
 import pytest
 
+from core.app.console.collection_slots import build_collection_slots
 from core.app.console.dashboard import _load_dataset_records
 from core.app.handlers.recording import load_episode_history
 from core.config import _normalize_collection_task_set
@@ -46,7 +47,8 @@ def test_history_refreshes_when_the_actual_replay_report_changes(tmp_path, repor
     assert failed["version"] != passed["version"]
 
 
-def test_dashboard_refreshes_replay_failures_without_rewriting_episode_metadata(tmp_path):
+@pytest.mark.parametrize("verdict", ["unreviewed", "pass"])
+def test_dashboard_refreshes_replay_failures_without_rewriting_episode_metadata(tmp_path, verdict):
     meta = tmp_path / "meta"
     meta.mkdir()
     (meta / "episodes.jsonl").write_text(
@@ -55,7 +57,7 @@ def test_dashboard_refreshes_replay_failures_without_rewriting_episode_metadata(
                 "episode_index": 0,
                 "length": 30,
                 "sim_metadata": {},
-                "qc_verdict": "pass",
+                "qc_verdict": verdict,
             }
         )
         + "\n"
@@ -66,20 +68,21 @@ def test_dashboard_refreshes_replay_failures_without_rewriting_episode_metadata(
     for success in [True, False, True]:
         report.write_text(json.dumps({"task_evaluation": {"success": success, "error": None}}))
         _, _, records = _load_dataset_records(tmp_path, "collection")
-        assert records[0]["valid"] is success
+        assert records[0]["valid"] is (verdict == "pass" or success)
 
 
 @pytest.mark.parametrize("machine_in_source", [False, True])
 def test_machine_findings_reach_history_and_color_unreviewed_slots(tmp_path, machine_in_source):
     config = console_config(collection={"enabled": True})
     config.collection.storage.data_root = str(tmp_path)
+    plan_slots = build_collection_slots(config, {}, "cup_set")
     dataset_dir, _ = dataset_location(config, "cup_set")
     meta = dataset_dir / "meta"
     meta.mkdir(parents=True)
     episodes = [
         {
             "episode_index": index,
-            "slot_id": f"INLINE-0:{index}",
+            "slot_id": plan_slots[index].slot_id,
             "tasks": ["pick up cup"],
             "length": 30,
             "quality": "green",

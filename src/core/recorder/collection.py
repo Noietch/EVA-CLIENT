@@ -36,6 +36,13 @@ from core.recorder.episode import (
     _to_rgb_uint8,
 )
 from core.recorder.lerobot_meta import build_info
+from core.recorder.sim_collection import (
+    SimExecutionRecord,
+    SimRecordingClient,
+    SimRecordingHandle,
+    create_sim_recording_handle,
+    read_sim_execution,
+)
 from core.types import CollectionRawBatch, Observation
 from core.utils.dataset_lock import dataset_lock
 from core.utils.images import resize_direct
@@ -74,6 +81,7 @@ class CollectionSavePayload:
     quality_issues: list[QualityIssue]
     min_capture_time: float | None
     max_capture_time: float | None
+    sim_execution: SimExecutionRecord | None = None
 
 
 def _is_hwc3(arr: np.ndarray) -> bool:
@@ -107,6 +115,13 @@ class CollectionEpisodeWriter:
         self._max_capture_time: float | None = None
         self._source_clock_repairs = 0
         self._source_clock_removed_sec = 0.0
+        sim_url = str(collection.get("sim_recording_url") or "").strip()
+        self._sim_client = SimRecordingClient(sim_url) if sim_url else None
+        self._sim_handle: SimRecordingHandle | None = None
+        self._sim_execution: SimExecutionRecord | None = None
+        self._sim_status_steps = 0
+        self._sim_status_checked_at = 0.0
+        self._sim_status_error = ""
 
     def start_episode(self, min_capture_time: float | None = None) -> None:
         """Reset buffers for a new collection episode.
@@ -115,6 +130,8 @@ class CollectionEpisodeWriter:
             min_capture_time: Source timestamp cutoff; frames at or before it are
                 treated as pre-start cache and skipped.
         """
+        if self._sim_handle is not None or self._sim_execution is not None:
+            raise RuntimeError("cannot reset an active SIM episode")
         self._records = []
         self._quality_issues = []
         self._raw_batch = CollectionRawBatch(start_time=min_capture_time)
@@ -127,6 +144,63 @@ class CollectionEpisodeWriter:
         self._max_capture_time = None
         self._source_clock_repairs = 0
         self._source_clock_removed_sec = 0.0
+        self._sim_execution = None
+        self._sim_status_steps = 0
+        self._sim_status_checked_at = 0.0
+        self._sim_status_error = ""
+
+    @property
+    def sim_recording_enabled(self) -> bool:
+        return self._sim_client is not None
+
+    def start_sim_recording(
+        self,
+        dataset_dir: Path,
+        expected_metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Pin the current SIM scene and start its file-backed trace."""
+        if self._sim_client is None:
+            return
+        if self._sim_handle is not None:
+            raise RuntimeError("SIM recording is already active")
+        scene_revision = self._sim_client.resolve_scene_revision(expected_metadata)
+        handle = create_sim_recording_handle(dataset_dir, scene_revision)
+        self._sim_handle = handle
+        self._sim_status_steps = 0
+        self._sim_status_checked_at = 0.0
+        self._sim_status_error = ""
+        try:
+            self._sim_client.start(handle, expected_metadata)
+        except BaseException as start_error:
+            try:
+                self._sim_client.cancel(handle)
+                self._sim_handle = None
+            except Exception as cancel_error:
+                raise RuntimeError(
+                    f"SIM start failed and cancel failed: {cancel_error}"
+                ) from start_error
+            raise
+
+    def stop_sim_recording(self) -> None:
+        """Stop SIM synchronously and validate the complete JSONL footer."""
+        if self._sim_client is None or self._sim_handle is None:
+            return
+        handle = self._sim_handle
+        reply = self._sim_client.stop(handle)
+        self._sim_execution = read_sim_execution(
+            handle.path,
+            expected_episode_id=handle.episode_id,
+            expected_steps=reply.steps,
+        )
+        self._sim_handle = None
+
+    def cancel_sim_recording(self) -> None:
+        """Cancel SIM recording while retaining its incomplete raw file."""
+        if self._sim_client is None or self._sim_handle is None:
+            return
+        handle = self._sim_handle
+        self._sim_client.cancel(handle)
+        self._sim_handle = None
 
     def ingest(self, snapshot: RawCollectionSnapshot, *, count_frame: bool = True) -> None:
         """Store one pre-decode snapshot. O(1), never decodes raw messages.
@@ -188,23 +262,50 @@ class CollectionEpisodeWriter:
                 else max(self._max_capture_time, record.timestamp)
             )
 
-    def frame_counts(self) -> dict[str, int]:
+    def frame_counts(self) -> dict[str, Any]:
         """Return live collection counters for UI status.
 
         received counts raw snapshots accepted by the main loop. recorded counts
         aligned rows that will be saved. pending bridges the ingest lag between
         those two so the UI does not show zero while frames are queued.
         """
+        sim_active = self._sim_handle is not None
+        if sim_active:
+            self._refresh_sim_status()
         with self._state_lock:
             recorded = len(self._records)
             received = max(self._received_snapshots, recorded)
             pending = max(0, received - recorded)
+            if sim_active:
+                received = max(received, self._sim_status_steps)
+                recorded = self._sim_status_steps
+                pending = 0
             return {
                 "received": received,
                 "recorded": recorded,
                 "pending": pending,
                 "skipped_before_start": self._skipped_before_start,
+                "sim_recording_error": self._sim_status_error,
             }
+
+    def _refresh_sim_status(self) -> None:
+        if self._sim_client is None or self._sim_handle is None:
+            return
+        now = time.monotonic()
+        if now - self._sim_status_checked_at < 0.5:
+            return
+        self._sim_status_checked_at = now
+        try:
+            self._sim_status_steps = self._sim_client.recording_steps(
+                self._sim_handle.episode_id
+            )
+        except Exception as error:
+            message = str(error)
+            if message != self._sim_status_error:
+                logger.warning("SIM recording progress RPC failed: %s", error)
+            self._sim_status_error = message
+        else:
+            self._sim_status_error = ""
 
     def _is_before_episode_start(self, timestamp: float | None) -> bool:
         if self._min_capture_time is None or timestamp is None or timestamp <= 0.0:
@@ -490,7 +591,10 @@ class CollectionEpisodeWriter:
         with self._state_lock:
             raw_snapshots = list(self._raw_snapshots)
             max_capture_time = self._max_capture_time
-        has_raw = bool(raw_snapshots)
+        if self._sim_handle is not None:
+            raise RuntimeError("SIM recording must be stopped or cancelled before save")
+        sim_execution = self._sim_execution
+        has_raw = bool(raw_snapshots) or sim_execution is not None
         if not has_raw:
             logger.warning(
                 "collection episode produced 0 frames; nothing saved "
@@ -521,6 +625,7 @@ class CollectionEpisodeWriter:
                 quality_issues=list(self._quality_issues),
                 min_capture_time=self._min_capture_time,
                 max_capture_time=max_capture_time,
+                sim_execution=sim_execution,
             ),
             video_fps=float(self._logger._fps),
             dataset_dir=dataset_dir,
@@ -532,6 +637,7 @@ class CollectionEpisodeWriter:
         self._alignment_report = None
         self._active_camera_keys = ()
         self._max_capture_time = None
+        self._sim_execution = None
         logger.info(
             "collection end_episode queued raw=%s raw_snapshots=%d: package=%.1fms total=%.1fms",
             has_raw,
@@ -553,6 +659,14 @@ class CollectionEpisodeWriter:
         preparer._min_capture_time = payload.min_capture_time
         preparer._max_capture_time = payload.max_capture_time
         preparer._image_shapes = dict(self._image_shapes)
+        if payload.sim_execution is not None:
+            preparer._sim_execution = payload.sim_execution
+            try:
+                preparer._build_sim_prepared_save_job(job)
+            finally:
+                self._client_fk_solver = getattr(preparer, "_client_fk_solver", None)
+            self._image_shapes.update(preparer._image_shapes)
+            return
         preparer._decode_raw_snapshots(payload.raw_snapshots)
         preparer._repair_source_clock_discontinuities(job.episode_meta.get("duration_seconds"))
         if preparer._raw_batch.end_time is None:
@@ -669,6 +783,96 @@ class CollectionEpisodeWriter:
             (columns_packed - started) * 1000.0,
         )
 
+    def _build_sim_prepared_save_job(self, job: SaveJob) -> None:
+        """Build direct rows from SIM control steps without alignment or sidecars."""
+        if self._sim_execution is None:
+            raise ValueError("SIM save job is missing execution data")
+        started = time.perf_counter()
+        self._records = [
+            Observation(
+                timestamp=frame.sim_time,
+                images={},
+                state_qpos=frame.state_qpos,
+                action_qpos=frame.action_qpos,
+            )
+            for frame in self._sim_execution.iter_frames(self.expected_dim("state_qpos"))
+        ]
+        if not self._records:
+            raise ValueError("SIM execution contains no control steps")
+        for camera_key in self._schema.cameras:
+            self._add_issue(
+                "missing_camera_stream",
+                f"SIM execution has no camera stream for configured camera {camera_key}",
+            )
+        if "eef" in self._schema.columns or "action_eef" in self._schema.columns:
+            self._derive_eef(self._records)
+        if len(self._records) < self._schema.min_episode_frames:
+            self._add_issue(
+                "episode_too_short",
+                f"episode has {len(self._records)} frames, expected at least "
+                f"{self._schema.min_episode_frames}",
+            )
+
+        n_frames = len(self._records)
+        columns: dict[str, Any] = {}
+        for column, output_key in self._schema.columns.items():
+            field = _COLUMN_TO_FIELD[column]
+            columns[output_key] = [
+                self._clean_vector(field, getattr(record, field), frame_index).tolist()
+                for frame_index, record in enumerate(self._records)
+            ]
+        fps = 1.0 / self._sim_execution.control_dt
+        dataset_dir = (job.dataset_dir or self._logger._collection_dataset_dir(job.task)).resolve()
+        try:
+            execution_path = self._sim_execution.path.resolve().relative_to(dataset_dir)
+        except ValueError as error:
+            raise ValueError("SIM execution path is outside its collection dataset") from error
+        global_index = job.global_index
+        columns.update(
+            {
+                "timestamp": [i / fps for i in range(n_frames)],
+                "capture_time": [float(record.timestamp or 0.0) for record in self._records],
+                "frame_index": list(range(n_frames)),
+                "episode_index": [job.episode_index] * n_frames,
+                "index": list(range(global_index, global_index + n_frames)),
+                "task_index": [job.task_index] * n_frames,
+            }
+        )
+        row: dict[str, Any] = {
+            "episode_index": job.episode_index,
+            "tasks": [job.task],
+            "length": n_frames,
+            "global_index_start": global_index,
+            "quality": "red" if self._quality_issues else "green",
+            "quality_issues": [dataclasses.asdict(issue) for issue in self._quality_issues],
+            "video_keys": [],
+            "total_videos": 0,
+            "collection_fps": fps,
+            "sim_execution_path": execution_path.as_posix(),
+            "sim_execution_schema_version": self._sim_execution.schema_version,
+            "sim_metadata": dict(self._sim_execution.sim_metadata),
+        }
+        if job.episode_meta:
+            row.update(job.episode_meta)
+            row["sim_execution_path"] = execution_path.as_posix()
+            row["sim_execution_schema_version"] = self._sim_execution.schema_version
+            row["sim_metadata"] = dict(self._sim_execution.sim_metadata)
+
+        job.global_index = global_index
+        job.collection_columns = columns
+        job.collection_episode_row = row
+        job.videos = {}
+        job.video_fps = fps
+        job.sim_state_rows = None
+        job.sim_state_raw_rows = None
+        job.dataset_dir = dataset_dir
+        job.collection_payload = None
+        logger.info(
+            "SIM collection save worker prepared %d direct frames in %.1fms",
+            n_frames,
+            (time.perf_counter() - started) * 1000.0,
+        )
+
     def _alignment_failure_detail(self) -> str:
         issues = []
         if self._alignment_report is not None:
@@ -750,13 +954,17 @@ class CollectionEpisodeWriter:
 
     def cancel_episode(self) -> None:
         """Discard the in-flight episode and drop all raw snapshot buffers."""
-        self._records = []
-        self._quality_issues = []
-        self._raw_batch = CollectionRawBatch()
-        self._raw_snapshots = []
-        self._alignment_report = None
-        self._active_camera_keys = ()
-        self._max_capture_time = None
+        try:
+            self.cancel_sim_recording()
+        finally:
+            self._records = []
+            self._quality_issues = []
+            self._raw_batch = CollectionRawBatch()
+            self._raw_snapshots = []
+            self._alignment_report = None
+            self._active_camera_keys = ()
+            self._max_capture_time = None
+            self._sim_execution = None
 
     def finalize(self, dataset_dir: Path | None = None) -> None:
         if dataset_dir is None:
@@ -924,9 +1132,18 @@ class CollectionEpisodeWriter:
             episode_keys = self._episode_video_keys(episode, dataset_dir)
             video_keys.update(episode_keys)
             total_videos += len(episode_keys)
-        # fps must equal the integer target used to synthesize timestamps, not the
-        # measured (jittery) average — LeRobot validates timestamp[i] == i/fps.
+        # SIM timestamps use the recorded control clock; real capture uses the
+        # configured alignment clock, not its measured jittery average.
         fps = float(self._logger._fps)
+        sim_rates = {
+            float(episode["collection_fps"])
+            for episode in episodes
+            if "sim_execution_path" in episode
+        }
+        if len(sim_rates) > 1:
+            raise ValueError("SIM episodes in one dataset must share the same control FPS")
+        if sim_rates:
+            fps = sim_rates.pop()
         total_tasks = len(self._logger._load_existing_tasks(dataset_dir))
         info = build_info(
             robot_type=self._schema.robot_type or self._logger._robot.name,

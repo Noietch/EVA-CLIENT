@@ -1,0 +1,196 @@
+import json
+import threading
+from pathlib import Path
+from urllib.error import URLError
+
+import numpy as np
+import pytest
+
+import core.recorder.collection as collection_module
+import core.recorder.sim_collection as sim_collection
+from core.recorder.collection import CollectionEpisodeWriter
+from core.recorder.sim_collection import (
+    SimRecordingClient,
+    SimRecordingError,
+    SimRecordingHandle,
+    create_sim_recording_handle,
+    read_sim_execution,
+)
+
+pytestmark = pytest.mark.unit
+
+
+def _state(qpos: list[float]) -> dict[str, object]:
+    return {"qpos": qpos, "scene_state": {}, "objects": {}, "liquids": {}}
+
+
+def _write_execution(path: Path, *, steps: list[dict], footer: dict | None = None) -> None:
+    records = [
+        {
+            "type": "header",
+            "schema_version": 1,
+            "episode_id": "episode-1",
+            "sim_metadata": {"layout": "test"},
+            "control_dt": 0.1,
+            "physics_dt": 0.01,
+            "initial_state": _state([1.0, 2.0]),
+        },
+        *steps,
+    ]
+    if footer is not None:
+        records.append(footer)
+    path.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+
+
+def _step(step_id: int, *, sim_time: float | None = None) -> dict:
+    payload = {
+        "type": "step",
+        "step_id": step_id,
+        "source_frame_id": 100 + step_id,
+        "action": [5.0 + step_id, 6.0 + step_id],
+        "state": _state([3.0 + step_id, 4.0 + step_id]),
+    }
+    if sim_time is not None:
+        payload["sim_time"] = sim_time
+    return payload
+
+
+def test_sim_reader_uses_sim_time_and_initial_state_for_frame_zero(tmp_path: Path) -> None:
+    path = tmp_path / "episode.jsonl"
+    _write_execution(
+        path,
+        steps=[
+            _step(0, sim_time=0.1),
+            _step(1, sim_time=0.2),
+        ],
+        footer={"type": "footer", "steps": 2, "complete": True},
+    )
+
+    record = read_sim_execution(path, "episode-1", expected_steps=2)
+    frames = list(record.iter_frames(expected_dim=2))
+
+    np.testing.assert_allclose(frames[0].state_qpos, [1.0, 2.0])
+    np.testing.assert_allclose(frames[0].action_qpos, [5.0, 6.0])
+    np.testing.assert_allclose(frames[1].state_qpos, [3.0, 4.0])
+    np.testing.assert_allclose(frames[1].action_qpos, [6.0, 7.0])
+    assert [frame.sim_time for frame in frames] == [0.0, 0.1]
+
+
+def test_sim_reader_rejects_missing_time_and_sequence_gap(tmp_path: Path) -> None:
+    missing_time = tmp_path / "missing-time.jsonl"
+    _write_execution(
+        missing_time,
+        steps=[_step(0)],
+        footer={"type": "footer", "steps": 1, "complete": True},
+    )
+    with pytest.raises(SimRecordingError, match="sim_time"):
+        read_sim_execution(missing_time, "episode-1", expected_steps=1)
+
+    gap = tmp_path / "gap.jsonl"
+    _write_execution(
+        gap,
+        steps=[_step(1, sim_time=0.1)],
+        footer={"type": "footer", "steps": 1, "complete": True},
+    )
+    with pytest.raises(SimRecordingError, match="sequence gap"):
+        read_sim_execution(gap, "episode-1", expected_steps=1)
+
+
+def test_sim_reader_rejects_incomplete_footer(tmp_path: Path) -> None:
+    path = tmp_path / "incomplete.jsonl"
+    _write_execution(path, steps=[_step(0, sim_time=0.1)])
+
+    with pytest.raises(SimRecordingError, match="incomplete"):
+        read_sim_execution(path, "episode-1", expected_steps=1)
+
+
+def test_sim_recording_path_is_absolute_and_exclusive(tmp_path: Path) -> None:
+    handle = create_sim_recording_handle(tmp_path, scene_revision=3)
+
+    assert handle.path.is_absolute()
+    assert handle.path == (tmp_path / "raw" / f"{handle.episode_id}.jsonl").resolve()
+    assert not handle.path.exists()
+    handle.path.open("x", encoding="utf-8").close()
+
+
+def test_sim_rpc_failure_is_rejected(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def fail(*args, **kwargs):
+        raise URLError("connection refused")
+
+    monkeypatch.setattr(sim_collection._SIM_OPENER, "open", fail)
+    handle = SimRecordingHandle("episode-1", tmp_path / "episode.jsonl", 4)
+
+    with pytest.raises(SimRecordingError, match="RPC failed"):
+        SimRecordingClient("http://127.0.0.1:18093").stop(handle)
+
+
+def test_cancel_rpc_failure_keeps_sim_handle_for_retry(tmp_path: Path) -> None:
+    handle = SimRecordingHandle("episode-1", tmp_path / "episode.jsonl", 4)
+
+    class _Client:
+        def cancel(self, _handle):
+            raise SimRecordingError("cancel unavailable")
+
+    writer = object.__new__(CollectionEpisodeWriter)
+    writer._sim_client = _Client()
+    writer._sim_handle = handle
+
+    with pytest.raises(SimRecordingError, match="cancel unavailable"):
+        writer.cancel_sim_recording()
+    assert writer._sim_handle is handle
+
+
+def test_start_cancel_failure_keeps_uncertain_sim_handle(tmp_path: Path) -> None:
+    class _Client:
+        def resolve_scene_revision(self, _metadata):
+            return 4
+
+        def start(self, _handle, _metadata):
+            raise SimRecordingError("start unavailable")
+
+        def cancel(self, _handle):
+            raise SimRecordingError("cancel unavailable")
+
+    writer = object.__new__(CollectionEpisodeWriter)
+    writer._sim_client = _Client()
+    writer._sim_handle = None
+
+    with pytest.raises(RuntimeError, match="cancel failed"):
+        writer.start_sim_recording(tmp_path, {})
+    assert writer._sim_handle is not None
+
+
+def test_sim_progress_uses_cached_status_steps_and_surfaces_rpc_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    handle = SimRecordingHandle("episode-1", tmp_path / "episode.jsonl", 4)
+    calls = 0
+
+    class _Client:
+        def recording_steps(self, _episode_id):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise SimRecordingError("progress unavailable")
+            return 7
+
+    writer = object.__new__(CollectionEpisodeWriter)
+    writer._sim_client = _Client()
+    writer._sim_handle = handle
+    writer._sim_status_steps = 0
+    writer._sim_status_checked_at = 0.0
+    writer._sim_status_error = ""
+    writer._records = []
+    writer._received_snapshots = 0
+    writer._skipped_before_start = 0
+    writer._state_lock = threading.Lock()
+    clock = iter((1.0, 1.1, 1.6))
+    monkeypatch.setattr(collection_module.time, "monotonic", lambda: next(clock))
+
+    assert writer.frame_counts()["received"] == 7
+    assert writer.frame_counts()["received"] == 7
+    assert calls == 1
+    progress = writer.frame_counts()
+    assert progress["recorded"] == 7
+    assert calls == 2
+    assert progress["sim_recording_error"] == "progress unavailable"

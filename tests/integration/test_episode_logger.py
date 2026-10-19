@@ -427,7 +427,7 @@ def test_sim_retake_invalidates_the_previous_replay_report(tmp_path):
     verified, reason = replay_validation(dataset_dir, current)
     assert not report_path.exists()
     assert (verified, reason) == (None, "replay_report_pending")
-    assert qc_state("pass", "green", verified, True) == "unreviewed"
+    assert qc_state("pass", "green", verified, True) == "passed"
     logger.finalize()
 
 

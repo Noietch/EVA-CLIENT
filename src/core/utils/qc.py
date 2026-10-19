@@ -4,8 +4,8 @@ A verdict recorded in ``meta/qc.jsonl`` always outranks the capture-time
 ``quality`` flag: an explicit ``pass`` keeps an episode the capture marked red,
 and an explicit ``fail`` rejects one that recorded green. Capture quality only
 decides while no verdict stands, so a red episode the reviewer has not judged
-yet still reads as failed. A SIM episode also requires its replay gate before
-any human pass becomes usable.
+yet still reads as failed. An explicit human pass also overrides SIM replay
+failures and pending reports; the replay result and reason remain unchanged.
 """
 
 from __future__ import annotations
@@ -24,23 +24,21 @@ def qc_state(
 ) -> str:
     """Resolve one episode's recorded verdict and capture quality into its state.
 
-    Returns ``unreviewed``, ``passed`` or ``failed``. A required replay gate keeps
-    a human pass unreviewed while pending and rejects a failed replay.
-    A machine failure remains effective until a human records pass or fail.
+    Returns ``unreviewed``, ``passed`` or ``failed``. An explicit pass overrides
+    machine and replay failures. Without it, a required failed replay rejects
+    the episode, and a machine failure remains effective.
     """
     verdict = str(verdict or "").strip().lower()
+    if verdict == "pass":
+        return "passed"
     state = {
         "unreviewed": "unreviewed",
-        "pass": "passed",
         "fail": "failed",
     }.get(verdict, "failed" if str(quality or "").lower() == "red" else "unreviewed")
-    if verdict not in {"pass", "fail"} and qc_auto_verdict == "fail":
+    if verdict != "fail" and qc_auto_verdict == "fail":
         state = "failed"
-    if replay_required:
-        if replay_verified is False:
-            return "failed"
-        if replay_verified is None and state == "passed":
-            return "unreviewed"
+    if replay_required and replay_verified is False:
+        return "failed"
     return state
 
 
@@ -79,7 +77,7 @@ def replay_validation(dataset_dir: Path, episode: dict[str, Any]) -> tuple[bool 
     ``(None, "")`` means this is an ordinary recording without a SIM replay contract;
     ``(None, "replay_report_pending")`` means a SIM report is still being produced.
     A SIM recording is identified by ``sim_metadata`` or ``render_report`` in its
-    episode metadata; a missing report therefore cannot become a pass.
+    episode metadata. Human QC overrides are resolved separately by ``qc_state``.
     """
     report_path = replay_report_path(dataset_dir, episode)
     if report_path is None:

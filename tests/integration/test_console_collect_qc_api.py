@@ -5,7 +5,10 @@ from pathlib import Path
 
 import pytest
 
+from core.app.console.collection_slots import build_collection_slots
 from core.recorder.episode import EpisodeLogger
+from core.utils.collection_paths import dataset_location
+from core.utils.lerobot import LeRobotDatasetIO
 from tests.integration._harness import console_config, serve_console
 
 pytestmark = pytest.mark.integration
@@ -79,5 +82,75 @@ def test_qc_survives_renamed_task_and_preserves_dataset_boundary(tmp_path):
             )
             assert response.status == 200
             assert json.loads(ledger.read_text())["qc_verdict"] == "unreviewed"
+        finally:
+            logger.finalize()
+
+
+@pytest.mark.parametrize("replay_success", [None, False, True])
+def test_sim_human_pass_survives_console_refresh_and_preserves_findings(tmp_path, replay_success):
+    config = console_config(collection={"enabled": True})
+    config.collection.storage.data_root = str(tmp_path)
+    config.collection.schema.columns = {"qpos": "observation.qpos", "action_qpos": "action"}
+    slot_id = build_collection_slots(config, {}, "cup_set")[0].slot_id
+    dataset_dir, _ = dataset_location(config, "cup_set")
+    meta = dataset_dir / "meta"
+    meta.mkdir(parents=True)
+    episode_path = meta / "episodes.jsonl"
+    episode_path.write_text(
+        json.dumps({
+            "episode_index": 44,
+            "tasks": ["pick up cup"],
+            "slot_id": slot_id,
+            "length": 30,
+            "quality": "red",
+            "sim_metadata": {"schema_version": 1},
+        }) + "\n"
+    )
+    original = episode_path.read_bytes()
+    report_path = meta / "render_reports/episode_000044.json"
+    if replay_success is not None:
+        report_path.parent.mkdir()
+        report_path.write_text(
+            json.dumps({"task_evaluation": {"success": replay_success, "error": None}})
+        )
+    io = LeRobotDatasetIO(dataset_dir)
+    assert io.mark_qc(44, "fail", "joint4 exceeds its limit", "joint_limit_exceeded", auto=True)
+    with serve_console(config) as console:
+        logger = EpisodeLogger(
+            tmp_path / "collection",
+            console.runtime.robot,
+            fps=30,
+            dataset_keys=config.transport.dataset_keys,
+            collection=config.collection,
+        )
+        console.runtime.episode_logger = logger
+        try:
+            body = {"dataset": "cup_set", "episode": "44", "verdict": "pass", "note": "reviewed"}
+            response = console.post("/api/collect_qc_mark", body)
+            assert response.status == 200
+            slots = console.get("/api/collection_slots?dataset=cup_set&all=1").json
+            slot = next(row for row in slots["slots"] if row["slot_id"] == slot_id)
+            assert slot["qc_state"] == "passed"
+            assert slots["counts"]["passed"] == 1
+            history = console.get(
+                "/api/episodes?scope=collect&set=cup_set&task=pick%20up%20cup"
+            ).json
+            saved = history["episodes"][0]
+            assert saved["qc_verdict"] == "pass"
+            assert saved["replay_verified"] is replay_success
+            expected_reason = (
+                "replay_report_pending" if replay_success is None
+                else "replay_summary_failed" if replay_success is False else ""
+            )
+            assert saved["replay_qc_reason"] == expected_reason
+            assert saved["qc_auto_verdict"] == "fail"
+            assert saved["qc_auto_reason"] == "joint_limit_exceeded"
+            assert saved["qc_auto_note"] == "joint4 exceeds its limit"
+            assert episode_path.read_bytes() == original
+            response = console.post("/api/collect_qc_mark", {**body, "verdict": "unreviewed"})
+            assert response.status == 200
+            slots = console.get("/api/collection_slots?dataset=cup_set&all=1").json
+            slot = next(row for row in slots["slots"] if row["slot_id"] == slot_id)
+            assert slot["qc_state"] == "failed"
         finally:
             logger.finalize()

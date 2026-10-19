@@ -66,7 +66,8 @@ def test_client_collection_preserves_batch_and_pairs_only_latest_observation():
         episode_logger=logger, transport=transport, last_collection_timestamp=None
     )
 
-    assert ingest_client_teleop_action(None, runtime, _published())
+    config = ConfigDict(collection=ConfigDict(sim_recording_url=""))
+    assert ingest_client_teleop_action(config, runtime, _published())
     assert logger.unpaired == snapshots[:1]
     assert [snapshot for snapshot, _ in logger.paired] == snapshots[1:]
     assert runtime.last_collection_timestamp == 2 / 60
@@ -84,7 +85,8 @@ def test_client_collection_bounds_work_per_control_tick():
         episode_logger=logger, transport=transport, last_collection_timestamp=None
     )
 
-    assert ingest_client_teleop_action(None, runtime, _published())
+    config = ConfigDict(collection=ConfigDict(sim_recording_url=""))
+    assert ingest_client_teleop_action(config, runtime, _published())
     assert transport.calls == COLLECT_STEP_MAX_RAW_SNAPSHOTS
     assert len(logger.unpaired) == COLLECT_STEP_MAX_RAW_SNAPSHOTS - 1
     assert len(transport.snapshots) == 1

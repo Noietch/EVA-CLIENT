@@ -1302,15 +1302,13 @@ function collectEnabled() {
 function collectQcState(item) {
     if (savedEpisodeId(item) == null) return "pending";
     const verdict = String(item.qc_verdict || "").trim().toLowerCase();
-    let state = {pass: "passed", fail: "failed", unreviewed: "unreviewed"}[verdict]
+    if (verdict === "pass") return "passed";
+    let state = {fail: "failed", unreviewed: "unreviewed"}[verdict]
       || (String(item.quality || "").toLowerCase() === "red" ? "failed" : "unreviewed");
-    if (verdict !== "pass" && verdict !== "fail" && item.qc_auto_verdict === "fail") {
+    if (verdict !== "fail" && item.qc_auto_verdict === "fail") {
       state = "failed";
     }
-    if (item.replay_required) {
-      if (item.replay_verified === false) return "failed";
-      if (item.replay_verified == null && state === "passed") return "unreviewed";
-    }
+    if (item.replay_required && item.replay_verified === false) return "failed";
     return state;
 }
 

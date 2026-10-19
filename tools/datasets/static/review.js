@@ -682,11 +682,9 @@ async function saveQc(task, slot, verdict, control) {
   slot.qc_state = effectiveVerdict === "pass" ? "passed"
     : effectiveVerdict === "fail" || localEpisode?.qc_auto_verdict === "fail" ? "failed"
     : "unreviewed";
-  if (localEpisode?.replay_required) {
-    if (localEpisode.replay_verified === false) slot.qc_state = "failed";
-    else if (localEpisode.replay_verified == null && slot.qc_state === "passed") {
-      slot.qc_state = "unreviewed";
-    }
+  if (effectiveVerdict !== "pass" && localEpisode?.replay_required
+      && localEpisode.replay_verified === false) {
+    slot.qc_state = "failed";
   }
   if (control && verdict) {
     control.classList.add("selected");

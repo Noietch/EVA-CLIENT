@@ -48,9 +48,11 @@ def test_qc_comparison_overlays_reviews_and_compares_episode_identity():
     [
         ("unreviewed", "fail", False, None, "fail"),
         ("pass", "fail", False, None, "accept"),
-        ("pass", "", True, None, "unreviewed"),
-        ("pass", "", True, False, "fail"),
+        ("pass", "", True, None, "accept"),
+        ("pass", "", True, False, "accept"),
         ("pass", "", True, True, "accept"),
+        ("unreviewed", "", True, False, "fail"),
+        ("unreviewed", "", True, None, "unreviewed"),
     ],
 )
 def test_qc_summary_uses_machine_verdict_and_replay_gate(
@@ -71,7 +73,7 @@ def test_qc_summary_uses_machine_verdict_and_replay_gate(
 
 
 @pytest.mark.parametrize("metadata", [{"sim_metadata": {}}, {"render_report": "replay.json"}])
-def test_raw_sim_metadata_keeps_human_pass_pending_without_a_validated_report(metadata):
+def test_raw_sim_metadata_allows_human_pass_without_a_validated_report(metadata):
     episodes = [{"episode_index": 0, "quality": "green", **metadata}]
     qc = [{"episode_index": 0, "qc_verdict": "pass"}]
-    assert qc_summary(episodes, qc) == {"accept": 0, "fail": 0, "unreviewed": 1}
+    assert qc_summary(episodes, qc) == {"accept": 1, "fail": 0, "unreviewed": 0}

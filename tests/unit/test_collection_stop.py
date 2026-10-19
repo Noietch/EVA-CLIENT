@@ -152,7 +152,8 @@ def test_collect_stop_advances_slot_after_episode_is_queued() -> None:
     session = SessionState(status=SessionStatus.RUNNING)
     session.collection_slot_id = "slot-1"
 
-    assert collect_stop(SimpleNamespace(), _runtime(True, synced), session)
+    config = SimpleNamespace(collection=ConfigDict(sim_recording_url=""))
+    assert collect_stop(config, _runtime(True, synced), session)
 
     assert session.status is SessionStatus.READY
     assert synced == ["slot-1"]
@@ -164,7 +165,8 @@ def test_collect_stop_keeps_slot_when_episode_has_no_frames() -> None:
     runtime = _runtime(False, synced)
     runtime.transport.collection_diagnostics = lambda: ""
 
-    assert not collect_stop(SimpleNamespace(), runtime, session)
+    config = SimpleNamespace(collection=ConfigDict(sim_recording_url=""))
+    assert not collect_stop(config, runtime, session)
 
     assert session.status is SessionStatus.READY
     assert synced == []

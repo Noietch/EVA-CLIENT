@@ -47,6 +47,7 @@ collection = dict(
         save_queue_max=15,
         image_skew_tolerance_sec=None,
     ),
+    sim_recording_url="",
     schema=dict(
         min_episode_frames=1,
         max_frame_dt_factor=3.0,

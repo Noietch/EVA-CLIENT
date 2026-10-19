@@ -20,6 +20,8 @@ collection = dict(
     storage=dict(
         log_dir="work_dirs/collection/eva_sim_dual_yam/",
     ),
+    sim_recording_url="http://127.0.0.1:8093",
+    schema=dict(cameras={}),
     render_service=dict(url="http://127.0.0.1:8430"),
 )
 

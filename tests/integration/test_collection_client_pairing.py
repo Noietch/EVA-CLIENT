@@ -127,7 +127,9 @@ def test_60hz_observations_with_30hz_actions_preserve_recording_duration(tmp_pat
             np.asarray([latest_time, latest_time, latest_time, 0.2], dtype=np.float32),
             timestamp=10000 + tick / 30,
         )
-        assert ingest_client_teleop_action(None, runtime, published)
+        assert ingest_client_teleop_action(
+            ConfigDict(collection=ConfigDict(sim_recording_url="")), runtime, published
+        )
         assert not pending
 
     assert logger.end_episode()

@@ -183,7 +183,10 @@ class DeviceWorkspace:
             )
         robot = ROBOT_REGISTRY.build(config.robot.type)
         options = self.hardware.options(selected["robot"])
-        if options["camera"][selected["camera"]].get("disabled"):
+        sim_recording = bool(
+            str((config.get("collection") or {}).get("sim_recording_url") or "").strip()
+        )
+        if sim_recording or options["camera"][selected["camera"]].get("disabled"):
             config.transport.disabled_cameras = [
                 camera.observation_key for camera in robot.observation_schema.cameras
             ]
