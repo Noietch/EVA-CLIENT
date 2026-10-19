@@ -7,6 +7,7 @@ from typing import Any
 import numpy as np
 import pyarrow.parquet as pq
 import pytest
+from mcap.writer import Writer
 
 import core.recorder.sim_collection as sim_collection
 from core.cfg import ConfigDict
@@ -90,9 +91,20 @@ def test_episode_logger_imports_sim_steps_without_sidecars(monkeypatch, tmp_path
                 },
                 {"type": "footer", "steps": 2, "complete": True},
             ]
-            path.write_text(
-                "".join(json.dumps(record) + "\n" for record in records), encoding="utf-8"
-            )
+            with path.open("wb") as stream:
+                writer = Writer(stream)
+                writer.start()
+                schema_id = writer.register_schema("sim_execution", "json", b"")
+                channel_id = writer.register_channel("/sim_execution", "json", schema_id)
+                for message_number, record in enumerate(records):
+                    writer.add_message(
+                        channel_id,
+                        log_time=message_number,
+                        publish_time=message_number,
+                sequence=message_number,
+                        data=json.dumps(record).encode("utf-8"),
+                    )
+                writer.finish()
             return _Response(
                 {
                     "ok": True,

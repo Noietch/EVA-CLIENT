@@ -5,6 +5,7 @@ from urllib.error import URLError
 
 import numpy as np
 import pytest
+from mcap.writer import Writer
 
 import core.recorder.collection as collection_module
 import core.recorder.sim_collection as sim_collection
@@ -39,7 +40,20 @@ def _write_execution(path: Path, *, steps: list[dict], footer: dict | None = Non
     ]
     if footer is not None:
         records.append(footer)
-    path.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+    with path.open("wb") as stream:
+        writer = Writer(stream)
+        writer.start()
+        schema_id = writer.register_schema("sim_execution", "json", b"")
+        channel_id = writer.register_channel("/sim_execution", "json", schema_id)
+        for message_number, record in enumerate(records):
+            writer.add_message(
+                channel_id,
+                log_time=message_number,
+                publish_time=message_number,
+                sequence=message_number,
+                data=json.dumps(record).encode("utf-8"),
+            )
+        writer.finish()
 
 
 def _step(step_id: int, *, sim_time: float | None = None) -> dict:
@@ -56,7 +70,7 @@ def _step(step_id: int, *, sim_time: float | None = None) -> dict:
 
 
 def test_sim_reader_uses_sim_time_and_initial_state_for_frame_zero(tmp_path: Path) -> None:
-    path = tmp_path / "episode.jsonl"
+    path = tmp_path / "episode.mcap"
     _write_execution(
         path,
         steps=[
@@ -77,7 +91,7 @@ def test_sim_reader_uses_sim_time_and_initial_state_for_frame_zero(tmp_path: Pat
 
 
 def test_sim_reader_rejects_missing_time_and_sequence_gap(tmp_path: Path) -> None:
-    missing_time = tmp_path / "missing-time.jsonl"
+    missing_time = tmp_path / "missing-time.mcap"
     _write_execution(
         missing_time,
         steps=[_step(0)],
@@ -86,7 +100,7 @@ def test_sim_reader_rejects_missing_time_and_sequence_gap(tmp_path: Path) -> Non
     with pytest.raises(SimRecordingError, match="sim_time"):
         read_sim_execution(missing_time, "episode-1", expected_steps=1)
 
-    gap = tmp_path / "gap.jsonl"
+    gap = tmp_path / "gap.mcap"
     _write_execution(
         gap,
         steps=[_step(1, sim_time=0.1)],
@@ -97,10 +111,23 @@ def test_sim_reader_rejects_missing_time_and_sequence_gap(tmp_path: Path) -> Non
 
 
 def test_sim_reader_rejects_incomplete_footer(tmp_path: Path) -> None:
-    path = tmp_path / "incomplete.jsonl"
+    path = tmp_path / "incomplete.mcap"
     _write_execution(path, steps=[_step(0, sim_time=0.1)])
 
     with pytest.raises(SimRecordingError, match="incomplete"):
+        read_sim_execution(path, "episode-1", expected_steps=1)
+
+
+def test_sim_reader_rejects_truncated_mcap(tmp_path: Path) -> None:
+    path = tmp_path / "truncated.mcap"
+    _write_execution(
+        path,
+        steps=[_step(0, sim_time=0.1)],
+        footer={"type": "footer", "steps": 1, "complete": True},
+    )
+    path.write_bytes(path.read_bytes()[:-32])
+
+    with pytest.raises(SimRecordingError, match="MCAP"):
         read_sim_execution(path, "episode-1", expected_steps=1)
 
 
@@ -108,7 +135,7 @@ def test_sim_recording_path_is_absolute_and_exclusive(tmp_path: Path) -> None:
     handle = create_sim_recording_handle(tmp_path, scene_revision=3)
 
     assert handle.path.is_absolute()
-    assert handle.path == (tmp_path / "raw" / f"{handle.episode_id}.jsonl").resolve()
+    assert handle.path == (tmp_path / "raw" / f"{handle.episode_id}.mcap").resolve()
     assert not handle.path.exists()
     handle.path.open("x", encoding="utf-8").close()
 
@@ -118,14 +145,14 @@ def test_sim_rpc_failure_is_rejected(monkeypatch: pytest.MonkeyPatch, tmp_path: 
         raise URLError("connection refused")
 
     monkeypatch.setattr(sim_collection._SIM_OPENER, "open", fail)
-    handle = SimRecordingHandle("episode-1", tmp_path / "episode.jsonl", 4)
+    handle = SimRecordingHandle("episode-1", tmp_path / "episode.mcap", 4)
 
     with pytest.raises(SimRecordingError, match="RPC failed"):
         SimRecordingClient("http://127.0.0.1:18093").stop(handle)
 
 
 def test_cancel_rpc_failure_keeps_sim_handle_for_retry(tmp_path: Path) -> None:
-    handle = SimRecordingHandle("episode-1", tmp_path / "episode.jsonl", 4)
+    handle = SimRecordingHandle("episode-1", tmp_path / "episode.mcap", 4)
 
     class _Client:
         def cancel(self, _handle):
@@ -163,7 +190,7 @@ def test_start_cancel_failure_keeps_uncertain_sim_handle(tmp_path: Path) -> None
 def test_sim_progress_uses_cached_status_steps_and_surfaces_rpc_error(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    handle = SimRecordingHandle("episode-1", tmp_path / "episode.jsonl", 4)
+    handle = SimRecordingHandle("episode-1", tmp_path / "episode.mcap", 4)
     calls = 0
 
     class _Client:

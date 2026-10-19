@@ -13,8 +13,12 @@ from urllib.error import HTTPError, URLError
 from urllib.request import ProxyHandler, Request, build_opener
 
 import numpy as np
+from mcap.exceptions import McapError
+from mcap.reader import make_reader
 
 _SIM_OPENER = build_opener(ProxyHandler({}))
+_SIM_EXECUTION_TOPIC = "/sim_execution"
+_SIM_EXECUTION_ENCODING = "json"
 
 
 class SimRecordingError(RuntimeError):
@@ -58,41 +62,42 @@ class SimExecutionRecord:
     initial_qpos: np.ndarray
 
     def iter_frames(self, expected_dim: int | None = None) -> Iterator[SimRecordingFrame]:
-        """Stream observe-before-action frames from the validated JSONL file."""
+        """Stream observe-before-action frames from the validated MCAP file."""
         previous_qpos = self.initial_qpos.copy()
         seen_steps = 0
         footer: dict[str, Any] | None = None
-        with self.path.open("r", encoding="utf-8") as stream:
-            header = _read_json_line(stream, 1)
-            _validate_header(header, self.episode_id)
-            for line_number, line in enumerate(stream, start=2):
-                payload = _parse_json(line, line_number)
-                payload_type = payload.get("type")
-                if payload_type == "step":
-                    if footer is not None:
-                        raise SimRecordingError("step found after footer")
-                    frame_state, action, sim_time = _validate_step(
-                        payload, seen_steps, self.control_dt
-                    )
-                    if expected_dim is not None:
-                        _validate_dimension(frame_state, expected_dim, "state.qpos")
-                        _validate_dimension(action, expected_dim, "action")
-                    yield SimRecordingFrame(
-                        step_id=seen_steps,
-                        sim_time=seen_steps * self.control_dt,
-                        state_qpos=previous_qpos.copy(),
-                        action_qpos=action,
-                    )
-                    previous_qpos = frame_state
-                    seen_steps += 1
-                elif payload_type == "footer":
-                    if footer is not None:
-                        raise SimRecordingError("duplicate footer")
-                    footer = payload
-                else:
-                    raise SimRecordingError(
-                        f"unexpected JSONL record type at line {line_number}"
-                    )
+        payloads = _iter_mcap_payloads(self.path)
+        header = next(payloads, None)
+        if header is None:
+            raise SimRecordingError("SIM recording is empty or missing a header")
+        _validate_header(header, self.episode_id)
+        for message_number, payload in enumerate(payloads, start=2):
+            payload_type = payload.get("type")
+            if payload_type == "step":
+                if footer is not None:
+                    raise SimRecordingError("step found after footer")
+                frame_state, action, sim_time = _validate_step(
+                    payload, seen_steps, self.control_dt
+                )
+                if expected_dim is not None:
+                    _validate_dimension(frame_state, expected_dim, "state.qpos")
+                    _validate_dimension(action, expected_dim, "action")
+                yield SimRecordingFrame(
+                    step_id=seen_steps,
+                    sim_time=seen_steps * self.control_dt,
+                    state_qpos=previous_qpos.copy(),
+                    action_qpos=action,
+                )
+                previous_qpos = frame_state
+                seen_steps += 1
+            elif payload_type == "footer":
+                if footer is not None:
+                    raise SimRecordingError("duplicate footer")
+                footer = payload
+            else:
+                raise SimRecordingError(
+                    f"unexpected MCAP record type at message {message_number}"
+                )
         _validate_footer(footer, seen_steps, self.steps)
 
 
@@ -199,7 +204,7 @@ def create_sim_recording_handle(dataset_dir: Path, scene_revision: int) -> SimRe
     raw_dir = dataset_dir.resolve() / "raw"
     raw_dir.mkdir(parents=True, exist_ok=True)
     episode_id = str(uuid.uuid4())
-    path = raw_dir / f"{episode_id}.jsonl"
+    path = raw_dir / f"{episode_id}.mcap"
     if path.exists():
         raise SimRecordingError(f"generated SIM recording path already exists: {path}")
     return SimRecordingHandle(episode_id, path, int(scene_revision))
@@ -210,33 +215,31 @@ def read_sim_execution(
     expected_episode_id: str,
     expected_steps: int | None = None,
 ) -> SimExecutionRecord:
-    """Validate JSONL framing and return only small header metadata."""
-    try:
-        with path.open("r", encoding="utf-8") as stream:
-            header = _read_json_line(stream, 1)
-            episode_id, control_dt, physics_dt, sim_metadata, initial_qpos = _validate_header(
-                header, expected_episode_id, include_values=True
+    """Validate MCAP framing and return only small header metadata."""
+    payloads = _iter_mcap_payloads(path)
+    header = next(payloads, None)
+    if header is None:
+        raise SimRecordingError("SIM recording is empty or missing a header")
+    episode_id, control_dt, physics_dt, sim_metadata, initial_qpos = _validate_header(
+        header, expected_episode_id, include_values=True
+    )
+    seen_steps = 0
+    footer: dict[str, Any] | None = None
+    for message_number, payload in enumerate(payloads, start=2):
+        payload_type = payload.get("type")
+        if payload_type == "step":
+            if footer is not None:
+                raise SimRecordingError("step found after footer")
+            _validate_step(payload, seen_steps, control_dt)
+            seen_steps += 1
+        elif payload_type == "footer":
+            if footer is not None:
+                raise SimRecordingError("duplicate footer")
+            footer = payload
+        else:
+            raise SimRecordingError(
+                f"unexpected MCAP record type at message {message_number}"
             )
-            seen_steps = 0
-            footer: dict[str, Any] | None = None
-            for line_number, line in enumerate(stream, start=2):
-                payload = _parse_json(line, line_number)
-                payload_type = payload.get("type")
-                if payload_type == "step":
-                    if footer is not None:
-                        raise SimRecordingError("step found after footer")
-                    _validate_step(payload, seen_steps, control_dt)
-                    seen_steps += 1
-                elif payload_type == "footer":
-                    if footer is not None:
-                        raise SimRecordingError("duplicate footer")
-                    footer = payload
-                else:
-                    raise SimRecordingError(
-                        f"unexpected JSONL record type at line {line_number}"
-                    )
-    except FileNotFoundError as error:
-        raise SimRecordingError(f"SIM recording file is missing: {path}") from error
     _validate_footer(footer, seen_steps, expected_steps)
     if seen_steps <= 0:
         raise SimRecordingError("SIM recording contains no control steps")
@@ -250,6 +253,44 @@ def read_sim_execution(
         sim_metadata=sim_metadata,
         initial_qpos=initial_qpos,
     )
+
+
+def _iter_mcap_payloads(path: Path) -> Iterator[dict[str, Any]]:
+    try:
+        with path.open("rb") as stream:
+            reader = make_reader(stream, validate_crcs=True)
+            for message_number, (_, channel, message) in enumerate(
+                reader.iter_messages(log_time_order=False), start=1
+            ):
+                if message.sequence != message_number - 1:
+                    raise SimRecordingError(
+                        f"MCAP message sequence gap at message {message_number}"
+                    )
+                if channel.topic != _SIM_EXECUTION_TOPIC:
+                    raise SimRecordingError(
+                        f"unexpected MCAP topic at message {message_number}"
+                    )
+                if channel.message_encoding != _SIM_EXECUTION_ENCODING:
+                    raise SimRecordingError(
+                        f"unexpected MCAP encoding at message {message_number}"
+                    )
+                try:
+                    payload = json.loads(message.data.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                    raise SimRecordingError(
+                        f"invalid MCAP JSON at message {message_number}"
+                    ) from error
+                if not isinstance(payload, dict):
+                    raise SimRecordingError(
+                        f"MCAP message {message_number} is not an object"
+                    )
+                yield payload
+    except FileNotFoundError as error:
+        raise SimRecordingError(f"SIM recording file is missing: {path}") from error
+    except SimRecordingError:
+        raise
+    except (McapError, EOFError, OSError, ValueError) as error:
+        raise SimRecordingError(f"invalid MCAP recording: {path}") from error
 
 
 def _decode_response(raw: bytes) -> Mapping[str, Any]:
@@ -336,23 +377,6 @@ def _check_scene_metadata(
                 f"SIM scene metadata mismatch for {actual_key}: "
                 f"{actual_value!r} != {expected_value!r}"
             )
-
-
-def _read_json_line(stream: Any, line_number: int) -> dict[str, Any]:
-    line = stream.readline()
-    if not line:
-        raise SimRecordingError("SIM recording is empty or missing a header")
-    return _parse_json(line, line_number)
-
-
-def _parse_json(line: str, line_number: int) -> dict[str, Any]:
-    try:
-        payload = json.loads(line)
-    except json.JSONDecodeError as error:
-        raise SimRecordingError(f"invalid JSONL at line {line_number}") from error
-    if not isinstance(payload, dict):
-        raise SimRecordingError(f"JSONL line {line_number} is not an object")
-    return payload
 
 
 def _validate_header(
@@ -444,8 +468,8 @@ def _validate_footer(
     if footer is None or footer.get("type") != "footer" or footer.get("complete") is not True:
         raise SimRecordingError("SIM recording is incomplete")
     if footer.get("steps") != seen_steps:
-        raise SimRecordingError("SIM footer step count does not match JSONL")
+        raise SimRecordingError("SIM footer step count does not match MCAP")
     if expected_steps is not None and expected_steps != seen_steps:
         raise SimRecordingError(
-            f"SIM stop reported {expected_steps} steps but JSONL has {seen_steps}"
+            f"SIM stop reported {expected_steps} steps but MCAP has {seen_steps}"
         )
