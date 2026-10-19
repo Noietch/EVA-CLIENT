@@ -101,7 +101,7 @@ def test_episode_logger_imports_sim_steps_without_sidecars(monkeypatch, tmp_path
                         channel_id,
                         log_time=message_number,
                         publish_time=message_number,
-                sequence=message_number,
+                        sequence=message_number,
                         data=json.dumps(record).encode("utf-8"),
                     )
                 writer.finish()
@@ -162,7 +162,6 @@ def test_episode_logger_imports_sim_steps_without_sidecars(monkeypatch, tmp_path
     logger.start_sim_recording({"scene_id": "test"})
     logger.stop_sim_recording()
     assert logger.end_episode()
-
     job = logger._last_save_job
     assert job is not None and job.collection_episode_row is not None
     dataset_dir = job.dataset_dir
