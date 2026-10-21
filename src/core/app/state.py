@@ -148,6 +148,8 @@ class RuntimeState:
         ik_solver: IK solver instance used for EEF-to-qpos conversion.
         selected_inference_strategy_key: Key of the active inference strategy.
         command_queue: Inter-thread queue carrying web/CLI commands to the main loop.
+        agent_command_queue: Typed coding-agent operations executed by the main loop.
+        agent_operation: Latest direct-control operation exposed over the control channel.
         prompt_ready: Event signaling that a prompt has been selected.
         infer_strategy: Active inference strategy instance.
         episode_logger: Logger writing teleop/collection episodes; None when not recording.
@@ -233,6 +235,9 @@ class RuntimeState:
     ik_solver: Any | None = None
     selected_inference_strategy_key: str | None = None
     command_queue: queue.Queue[str] | None = None
+    agent_command_queue: queue.Queue[Any] = dataclasses.field(default_factory=queue.Queue)
+    agent_operation: dict[str, Any] | None = None
+    agent_operation_lock: threading.Lock = dataclasses.field(default_factory=threading.Lock)
     prompt_ready: threading.Event | None = None
     infer_strategy: BaseInferStrategy | None = None  # pyright: ignore[reportGeneralTypeIssues]
     episode_logger: EpisodeLogger | None = None

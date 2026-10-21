@@ -33,6 +33,12 @@ tools/*
 !tools/__init__.py
 !tools/conversion/
 !tools/conversion/**
+!tools/mcp/
+!tools/mcp/**
+tools/mcp/.venv/
+tools/mcp/__pycache__/
+tools/mcp/*.egg-info/
+tools/mcp/uv.lock
 !tools/skills/
 !tools/skills/**
 tools/conversion/__pycache__/
