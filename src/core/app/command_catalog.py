@@ -5,6 +5,7 @@ from __future__ import annotations
 _COMMANDS = (
     ("bootstrap", "web:bootstrap", ()),
     ("warmup", "web:warmup", ("be-setup",)),
+    ("setup", "web:setup", ("b-setup-retry", "b-replay-setup-retry")),
     ("switch_task", "web:switch_task:{task}", ("prompt-list",)),
     ("rl_select_task", "web:rl_select_task:{task}", ("rl-task-list",)),
     ("rl_select_policy", "web:rl_select_policy:{slot}", ("rl-policy-list",)),
