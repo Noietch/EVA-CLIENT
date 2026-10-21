@@ -11,7 +11,7 @@ from collections.abc import Callable
 import numpy as np
 
 from core.app.collection_capture import stop_collection_capture
-from core.app.state import OutputTarget, RuntimeState, SessionMode, SessionState, SessionStatus
+from core.app.state import RuntimeState, SessionMode, SessionState, SessionStatus
 from core.config import ConfigDict
 from teleop_client import build_client
 from teleop_client.base import (
@@ -52,6 +52,7 @@ class TeleopExecutionState:
     published_actions: int = 0
     ik_prewarmed: bool = False
     last_safe_qpos: np.ndarray | None = None
+    world_instance_id: str | None = None
     last_fault: str = ""
     max_qpos_step: float = 0.08
     max_position_error_m: float = 0.08
@@ -146,8 +147,8 @@ def start_teleop_input(config: ConfigDict, runtime: RuntimeState) -> None:
         client.start()
 
 
-def _current_qpos(runtime: RuntimeState) -> np.ndarray:
-    qpos = runtime.transport.get_latest_qpos()
+def _current_feedback(runtime: RuntimeState) -> tuple[np.ndarray, str | None]:
+    qpos, world_instance_id = runtime.transport.get_control_feedback()
     if qpos is None:
         raise TeleopExecutionError("teleop requires current robot qpos feedback")
     value = np.asarray(qpos, dtype=np.float32).reshape(-1)
@@ -156,7 +157,7 @@ def _current_qpos(runtime: RuntimeState) -> np.ndarray:
         raise TeleopExecutionError(
             f"teleop qpos must be finite shape ({expected},), got {value.shape}"
         )
-    return value
+    return value, world_instance_id
 
 
 def _set_hil_relay_enabled(runtime: RuntimeState, enabled: bool) -> None:
@@ -556,7 +557,12 @@ def _step_active_teleop(
     *,
     still_active: Callable[[], bool] | None = None,
 ) -> PublishedTeleopAction | None:
-    current_qpos = _current_qpos(runtime)
+    current_qpos, world_instance_id = _current_feedback(runtime)
+    if world_instance_id != state.world_instance_id:
+        # Re-latch only from feedback belonging to the initialized world. A held
+        # grip must release before it can drive a different episode.
+        reset_teleop(runtime, require_neutral=state.world_instance_id is not None)
+        state.world_instance_id = world_instance_id
     try:
         measured_eef = np.asarray(
             forward_canonical_eef(config, runtime, current_qpos), dtype=np.float32
@@ -608,7 +614,7 @@ def _step_active_teleop(
         if not result_is_current:
             raise TeleopExecutionError("teleop input changed before publish")
     try:
-        runtime.transport.publish_action(action, target=OutputTarget.REAL.value)
+        runtime.transport.publish_teleop_action(action, world_instance_id)
     except Exception as error:
         raise TeleopExecutionError(f"teleop action publish failed: {error}") from error
     state.last_safe_qpos = action.copy()

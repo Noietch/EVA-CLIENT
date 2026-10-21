@@ -12,6 +12,7 @@ import json
 import os
 from collections.abc import Callable, Iterable
 from datetime import UTC, datetime, timedelta
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -21,6 +22,18 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from core.utils.dataset_lock import dataset_lock
+
+
+@lru_cache(maxsize=8)
+def _read_episode_file_stems(path: Path, signature: tuple[int, int, int]) -> dict[int, str]:
+    """Cache only episode identities; invalidate on metadata replacement or append."""
+    stems: dict[int, str] = {}
+    with path.open() as stream:
+        for line in stream:
+            if line.strip():
+                row = json.loads(line)
+                stems[int(row["episode_index"])] = str(row.get("file_stem") or "")
+    return stems
 
 
 def _write_jsonl_atomic(path: Path, rows: Iterable[dict[str, Any]]) -> None:
@@ -142,11 +155,16 @@ class LeRobotDatasetIO:
         return rows
 
     def episode_file_stem(self, episode_id: int) -> str:
-        row = self._episode_rows_by_index().get(episode_id, {})
-        stem = row.get("file_stem")
-        if stem:
-            return str(stem)
-        return f"episode_{episode_id:06d}"
+        stems = self._episode_file_stems()
+        return stems.get(episode_id) or f"episode_{episode_id:06d}"
+
+    def _episode_file_stems(self) -> dict[int, str]:
+        path = (self.root / "meta" / "episodes.jsonl").resolve()
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            return {}
+        return _read_episode_file_stems(path, (stat.st_ino, stat.st_mtime_ns, stat.st_size))
 
     def tasks_by_index(self) -> dict[int, str]:
         # tasks.jsonl maps task_index -> task text; a parquet's task_index column then
@@ -291,18 +309,9 @@ class LeRobotDatasetIO:
         so the read and the write hold the dataset lock: two stations reviewing at
         once would otherwise each drop the other's rows.
         """
-        path = self.root / "meta" / "episodes.jsonl"
         qc_path = self.root / "meta" / "qc.jsonl"
         with dataset_lock(self.root).acquire():
-            if not path.exists():
-                return False
-            rows = []
-            with path.open() as f:
-                for line in f:
-                    line = line.strip()
-                    if line:
-                        rows.append(json.loads(line))
-            if not any(int(row.get("episode_index", -1)) == episode for row in rows):
+            if episode not in self._episode_file_stems():
                 return False
             qc_by_episode = self._read_qc_by_episode(qc_path)
             qc_row: dict[str, Any] | None = qc_by_episode.get(episode)

@@ -5,6 +5,7 @@ _base_ = ["dual_yam.py"]
 
 collection = dict(
     task_set_dir=[
+        "datasets/data_collection/task_sets/larybenchv2.v1.2/train_v1.2",
         "datasets/data_collection/task_sets/larybenchv2.v1.2/larybench.v1.2.train.supplement",
         "datasets/data_collection/task_sets/larybenchv2.v1.2/larybench.v1.2.train.composite_01_logistics",
         "datasets/data_collection/task_sets/larybenchv2.v1.2/larybench.v1.2.train.composite_02_logistics",
@@ -22,7 +23,8 @@ collection = dict(
     ),
     sim_recording_url="http://127.0.0.1:8093",
     schema=dict(cameras={}),
-    render_service=dict(url="http://127.0.0.1:8430"),
+    # Preserve raw recordings for offline rendering on a dedicated machine.
+    render_service=dict(url=""),
 )
 
 

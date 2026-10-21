@@ -32,6 +32,7 @@ import threading
 import time
 import uuid
 from collections import deque
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -347,6 +348,26 @@ class EpisodeLogger:
         self._save_durations: list[float] = []
         self._pending_episode_meta_by_clip: dict[str, dict[str, Any]] = {}
         self._collection_qc = CollectionQcWorker(robot) if self._collection_writer else None
+        self._save_completion_callback: Callable[[SaveJob], None] | None = None
+
+    def set_save_completion_callback(
+        self, callback: Callable[[SaveJob], None] | None
+    ) -> None:
+        """Set the callback notified after one async save reaches a terminal state."""
+        with self._lock:
+            self._save_completion_callback = callback
+
+    def _notify_save_completion(self, job: SaveJob) -> None:
+        with self._lock:
+            callback = self._save_completion_callback
+        if callback is None:
+            return
+        try:
+            callback(job)
+        except Exception:
+            logger.exception(
+                "Save completion callback failed for episode %d", job.episode_index
+            )
 
     # -- episode lifecycle ------------------------------------------------------
 
@@ -781,6 +802,7 @@ class EpisodeLogger:
             job.finished_wall_time = time.time()
             self._remember_finished_job(job)
             self._record_completed_job(job)
+            self._notify_save_completion(job)
             return True
         if not self._has_raw_episode_samples():
             self._active = False
@@ -950,12 +972,14 @@ class EpisodeLogger:
                     job.error = str(exc)
                     job.finished_wall_time = time.time()
                     _release_failed_save_payload(job)
+                self._notify_save_completion(job)
             else:
                 with self._lock:
                     job.status = "saved"
                     job.finished_wall_time = time.time()
                     self._remember_finished_job(job)
                     self._save_jobs = [j for j in self._save_jobs if j is not job]
+                self._notify_save_completion(job)
                 self._request_render(job)
             del job
             with self._lock:
@@ -1753,7 +1777,7 @@ class EpisodeLogger:
             return index
 
     def _write_collection_job(self, job: SaveJob) -> None:
-        """Write one collection episode, exclusive against the dataset's other writers.
+        """Prepare locally, then assign final indices and commit under the dataset lock.
 
         Several stations record into the same dataset directory, so the index
         allocation and the whole data/meta transaction run under that directory's
@@ -1761,6 +1785,12 @@ class EpisodeLogger:
         committed rows reverted by this job's rollback.
         """
         dataset_dir = job.dataset_dir or self._log_dir
+        if job.collection_payload is not None:
+            if self._collection_writer is None:
+                raise ValueError("collection save job has payload but no collection writer")
+            self._collection_writer.prepare_save_job(job)
+        if job.collection_columns is None or job.collection_episode_row is None:
+            raise ValueError("collection save job missing columns or episode row")
         with dataset_lock(dataset_dir).acquire():
             overwrite = self._claim_collection_indices(job, dataset_dir)
             self._write_episode_job(job, dataset_dir, overwrite)
@@ -1798,14 +1828,8 @@ class EpisodeLogger:
                 return path
 
     def _write_episode_job(self, job: SaveJob, dataset_dir: Path, overwrite: bool) -> None:
-        if job.collection_payload is not None:
-            if self._collection_writer is None:
-                raise ValueError("collection save job has payload but no collection writer")
-            self._collection_writer.prepare_save_job(job)
-        columns = job.collection_columns
-        row = job.collection_episode_row
-        if columns is None or row is None:
-            raise ValueError("collection save job missing columns or episode row")
+        columns = cast(dict[str, Any], job.collection_columns)
+        row = cast(dict[str, Any], job.collection_episode_row)
         transaction_dir = dataset_dir / f".collection-save-{job.episode_index}-{uuid.uuid4().hex}"
         backups: dict[Path, Path] = {}
         absent_targets: list[Path] = []
@@ -2281,14 +2305,6 @@ class EpisodeLogger:
         self._write_info_json()
         self._write_stats_json()
 
-    def _steps_average_fps(self, steps: list[Observation]) -> float | None:
-        if len(steps) < 2:
-            return None
-        duration = cast(float, steps[-1].timestamp) - cast(float, steps[0].timestamp)
-        if duration <= 0.0:
-            return None
-        return (len(steps) - 1) / duration
-
     def _save_size(self) -> tuple[int, int] | None:
         h = self._save_image_height
         w = self._save_image_width
@@ -2336,33 +2352,6 @@ class EpisodeLogger:
             start += int(row.get("length", 0))
         return start if found else None
 
-    def _upsert_episode_row_locked(
-        self, episode_index: int, task: str, length: int, episode_meta: dict[str, Any]
-    ) -> None:
-        """Replace the episodes.jsonl row for episode_index in place, or append if absent.
-
-        A re-run rewrites the existing row entirely (no stale score/note carried over from
-        the previous take); a first run just appends.
-        """
-        row: dict[str, Any] = {"episode_index": episode_index, "tasks": [task], "length": length}
-        if episode_meta:
-            row.update(episode_meta)
-        path = self._meta_path("episodes.jsonl")
-        rows = _read_jsonl(path)
-        filtered: list[dict[str, Any]] = []
-        inserted = False
-        for existing in rows:
-            if int(existing.get("episode_index", -1)) == episode_index:
-                if not inserted:
-                    filtered.append(row)
-                    inserted = True
-                continue
-            filtered.append(existing)
-        if not inserted:
-            filtered.append(row)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        self._write_jsonl_atomic(path, filtered)
-
     def _upsert_episode_dict_row_locked(
         self, row: dict[str, Any], dataset_dir: Path | None = None
     ) -> None:
@@ -2396,17 +2385,6 @@ class EpisodeLogger:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a") as f:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
-
-    def _append_episode_stats_locked(
-        self, episode_index: int, stats: dict[str, Any], dataset_dir: Path | None = None
-    ) -> None:
-        path = self._meta_path("episodes_stats.jsonl", dataset_dir)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a") as f:
-            f.write(
-                json.dumps({"episode_index": episode_index, "stats": stats}, ensure_ascii=False)
-                + "\n"
-            )
 
     def _upsert_episode_stats_locked(
         self, episode_index: int, stats: dict[str, Any], dataset_dir: Path | None = None
@@ -2804,6 +2782,14 @@ class EpisodeLogger:
         job.global_index = self._claim_collection_global_index(dataset_dir, rows)
         job.task_index, job.task_to_index = self._resolve_collection_task(dataset_dir, job.task)
         job.episode_index, overwrite = self._claim_collection_episode_index(job, dataset_dir, rows)
+        columns = cast(dict[str, Any], job.collection_columns)
+        row = cast(dict[str, Any], job.collection_episode_row)
+        length = int(row["length"])
+        columns["episode_index"] = [job.episode_index] * length
+        columns["task_index"] = [job.task_index] * length
+        columns["index"] = list(range(job.global_index, job.global_index + length))
+        row["episode_index"] = job.episode_index
+        row["global_index_start"] = job.global_index
         return overwrite
 
     def _claim_collection_episode_index(

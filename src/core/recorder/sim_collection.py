@@ -60,45 +60,26 @@ class SimExecutionRecord:
     physics_dt: float
     sim_metadata: Mapping[str, Any]
     initial_qpos: np.ndarray
+    frames: tuple[SimRecordingFrame, ...]
+    final_state_qpos: np.ndarray
 
     def iter_frames(self, expected_dim: int | None = None) -> Iterator[SimRecordingFrame]:
-        """Stream observe-before-action frames from the validated MCAP file."""
-        previous_qpos = self.initial_qpos.copy()
-        seen_steps = 0
-        footer: dict[str, Any] | None = None
-        payloads = _iter_mcap_payloads(self.path)
-        header = next(payloads, None)
-        if header is None:
-            raise SimRecordingError("SIM recording is empty or missing a header")
-        _validate_header(header, self.episode_id)
-        for message_number, payload in enumerate(payloads, start=2):
-            payload_type = payload.get("type")
-            if payload_type == "step":
-                if footer is not None:
-                    raise SimRecordingError("step found after footer")
-                frame_state, action, sim_time = _validate_step(
-                    payload, seen_steps, self.control_dt
+        """Stream compact observe-before-action frames after MCAP validation."""
+        for frame in self.frames:
+            if expected_dim is not None:
+                next_state = (
+                    self.frames[frame.step_id + 1].state_qpos
+                    if frame.step_id + 1 < self.steps
+                    else self.final_state_qpos
                 )
-                if expected_dim is not None:
-                    _validate_dimension(frame_state, expected_dim, "state.qpos")
-                    _validate_dimension(action, expected_dim, "action")
-                yield SimRecordingFrame(
-                    step_id=seen_steps,
-                    sim_time=seen_steps * self.control_dt,
-                    state_qpos=previous_qpos.copy(),
-                    action_qpos=action,
-                )
-                previous_qpos = frame_state
-                seen_steps += 1
-            elif payload_type == "footer":
-                if footer is not None:
-                    raise SimRecordingError("duplicate footer")
-                footer = payload
-            else:
-                raise SimRecordingError(
-                    f"unexpected MCAP record type at message {message_number}"
-                )
-        _validate_footer(footer, seen_steps, self.steps)
+                _validate_dimension(next_state, expected_dim, "state.qpos")
+                _validate_dimension(frame.action_qpos, expected_dim, "action")
+            yield SimRecordingFrame(
+                step_id=frame.step_id,
+                sim_time=frame.sim_time,
+                state_qpos=frame.state_qpos.copy(),
+                action_qpos=frame.action_qpos.copy(),
+            )
 
 
 class SimRecordingClient:
@@ -215,7 +196,7 @@ def read_sim_execution(
     expected_episode_id: str,
     expected_steps: int | None = None,
 ) -> SimExecutionRecord:
-    """Validate MCAP framing and return only small header metadata."""
+    """Validate MCAP framing and retain only compact qpos/action frames."""
     payloads = _iter_mcap_payloads(path)
     header = next(payloads, None)
     if header is None:
@@ -225,12 +206,23 @@ def read_sim_execution(
     )
     seen_steps = 0
     footer: dict[str, Any] | None = None
+    previous_qpos = initial_qpos.copy()
+    frames: list[SimRecordingFrame] = []
     for message_number, payload in enumerate(payloads, start=2):
         payload_type = payload.get("type")
         if payload_type == "step":
             if footer is not None:
                 raise SimRecordingError("step found after footer")
-            _validate_step(payload, seen_steps, control_dt)
+            frame_state, action, _ = _validate_step(payload, seen_steps, control_dt)
+            frames.append(
+                SimRecordingFrame(
+                    step_id=seen_steps,
+                    sim_time=seen_steps * control_dt,
+                    state_qpos=previous_qpos.copy(),
+                    action_qpos=action,
+                )
+            )
+            previous_qpos = frame_state
             seen_steps += 1
         elif payload_type == "footer":
             if footer is not None:
@@ -252,6 +244,8 @@ def read_sim_execution(
         physics_dt=physics_dt,
         sim_metadata=sim_metadata,
         initial_qpos=initial_qpos,
+        frames=tuple(frames),
+        final_state_qpos=previous_qpos,
     )
 
 

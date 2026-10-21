@@ -199,8 +199,11 @@ class CollectionEpisodeWriter:
         if self._sim_client is None or self._sim_handle is None:
             return
         handle = self._sim_handle
-        self._sim_client.cancel(handle)
-        self._sim_handle = None
+        try:
+            self._sim_client.cancel(handle)
+        finally:
+            # Cancellation releases local ownership even if the SIM has exited.
+            self._sim_handle = None
 
     def ingest(self, snapshot: RawCollectionSnapshot, *, count_frame: bool = True) -> None:
         """Store one pre-decode snapshot. O(1), never decodes raw messages.
@@ -342,14 +345,6 @@ class CollectionEpisodeWriter:
                 if self._max_capture_time is None
                 else max(self._max_capture_time, sample.timestamp)
             )
-
-    def _has_raw_samples(self) -> bool:
-        return any(self._raw_batch.images.values()) or any(self._raw_batch.vectors.values())
-
-    def _raw_sample_count(self) -> int:
-        return sum(len(samples) for samples in self._raw_batch.images.values()) + sum(
-            len(samples) for samples in self._raw_batch.vectors.values()
-        ) + len(self._raw_batch.sim_states)
 
     def _decode_raw_snapshots(self, snapshots: Iterable[RawCollectionSnapshot]) -> None:
         for snapshot in snapshots:
@@ -554,8 +549,8 @@ class CollectionEpisodeWriter:
                 results.append(result.reshape(_FK_BATCH_SIZE, -1)[:count])
             return np.concatenate(results, axis=0)
 
-        state_eef = solve(state_qpos)
-        action_eef = solve(action_qpos)
+        eef = solve(np.concatenate((state_qpos, action_qpos), axis=0))
+        state_eef, action_eef = np.split(eef, [len(state_qpos)], axis=0)
         if state_eef.shape[1] < expected or action_eef.shape[1] < expected:
             raise ValueError(
                 f"FK returned too few EEF values: expected at least {expected}, "

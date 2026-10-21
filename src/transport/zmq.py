@@ -107,6 +107,7 @@ class WireAction:
     action: np.ndarray
     target: str = "real"
     mode: str | None = None
+    world_instance_id: str | None = None
 
 
 def pack_observation(obs: WireObservation) -> bytes:
@@ -222,6 +223,8 @@ def pack_action(action: WireAction) -> bytes:
     }
     if action.mode is not None:
         payload["mode"] = action.mode
+    if action.world_instance_id is not None:
+        payload["world_instance_id"] = action.world_instance_id
     with _PACKER_LOCK:
         return _PACKER.pack(payload)
 
@@ -234,6 +237,7 @@ def unpack_action(payload: bytes) -> WireAction:
         action=np.asarray(raw["action"], dtype=np.float32),
         target=str(raw.get("target", "real")),
         mode=None if raw.get("mode") is None else str(raw["mode"]),
+        world_instance_id=raw.get("world_instance_id"),
     )
 
 
@@ -640,9 +644,14 @@ class _ObservationReader:
         Returns:
             [qpos_dim] float32 joint position vector, or None.
         """
+        return self.get_control_feedback()[0]
+
+    def get_control_feedback(self) -> tuple[np.ndarray | None, str | None]:
+        """Read qpos and world identity from the same snapshot without decoding images."""
         wire_obs = self._drain_latest()
         if wire_obs is None:
-            return None
+            return None, None
+        world_id = (wire_obs.sim_state or {}).get("world_instance_id")
         parts: list[np.ndarray] = []
         for group in self._robot.actuator_groups:
             if group.name in self._disabled_groups:
@@ -650,9 +659,9 @@ class _ObservationReader:
                 continue
             part = wire_obs.state.get(group.name)
             if part is None:
-                return None
+                return None, world_id
             parts.append(np.asarray(part, dtype=np.float32))
-        return np.concatenate(parts, axis=0)
+        return np.concatenate(parts, axis=0), world_id
 
     def wait_action_applied(self, action_time: float, timeout: float) -> bool:
         """Wait for an observation echoing the published action timestamp."""
@@ -913,6 +922,10 @@ class ZmqTransport(TransportBridge):
         """Latest joint state [qpos_dim] float32 from the dedicated qpos reader."""
         return self._qpos_reader.get_latest_qpos()
 
+    def get_control_feedback(self) -> tuple[np.ndarray | None, str | None]:
+        """Return joint state and world identity from one dedicated-reader snapshot."""
+        return self._qpos_reader.get_control_feedback()
+
     def hil_status(self) -> HilStatus:
         """Return the latest HIL capability reported by the execution node."""
         return self._qpos_reader.hil_status()
@@ -1004,8 +1017,20 @@ class ZmqTransport(TransportBridge):
             action: [action_dim] float32 flat action vector.
             target: "real" or "sim" routing tag carried on the wire.
         """
+        self._publish_action(action, target, None)
+
+    def publish_teleop_action(self, action: np.ndarray, world_instance_id: str | None) -> None:
+        """Tag teleop motion with the world that supplied its feedback and IK seed."""
+        self._publish_action(action, "real", world_instance_id)
+
+    def _publish_action(
+        self, action: np.ndarray, target: str, world_instance_id: str | None
+    ) -> None:
         action_time = time.monotonic()
-        message = WireAction(t=action_time, action=np.asarray(action), target=target)
+        message = WireAction(
+            t=action_time, action=np.asarray(action), target=target,
+            world_instance_id=world_instance_id,
+        )
         self._pub.send(pack_action(message))
         wait_for_ack = bool(self._config.transport.get("wait_action_applied", False))
         if target == "real" and wait_for_ack:

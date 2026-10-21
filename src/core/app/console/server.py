@@ -653,7 +653,10 @@ class ConsoleContext:
     collection_save_revision: int = 0
     completed_collection_dataset: str = ""
     completed_collection_slot_id: str = ""
+    pending_collection_saves: dict[int, dict[str, Any]] = dataclasses.field(default_factory=dict)
     preview: Any = None  # EpisodePreview for RESULT-tab playback (lazily set)
+    collection_save_lock: threading.RLock = dataclasses.field(default_factory=threading.RLock)
+    collection_selection_lock: threading.RLock = dataclasses.field(default_factory=threading.RLock)
     quality_upload_lock: threading.RLock = dataclasses.field(default_factory=threading.RLock)
     dataset_manager: DatasetTransfer = dataclasses.field(
         default_factory=lambda: DatasetTransfer(_PROJECT_ROOT)
@@ -676,6 +679,55 @@ class ConsoleContext:
     def sync_collection_slot(self, completed_slot_id: str | None = None) -> dict[str, Any] | None:
         """Resolve the backend collection cursor after a confirmed save."""
         return _sync_collection_slot_session(self, completed_slot_id)
+
+    def register_collection_save_job(self, job: Any, dataset: str) -> None:
+        """Track one queued collection save without treating it as committed."""
+        key = id(job)
+        with self.collection_save_lock:
+            record = {
+                "dataset": dataset,
+                "slot_id": str((job.episode_meta or {}).get("slot_id") or ""),
+                "episode_index": int(job.episode_index),
+                "status": job.status,
+                "error": str(job.error or ""),
+            }
+            if not record["slot_id"]:
+                return
+            self.pending_collection_saves[key] = record
+            if job.status in {"saved", "failed"}:
+                self._finish_collection_save_locked(key, job.status)
+
+    def collection_save_job_finished(self, job: Any) -> None:
+        """Publish one async save result; failed jobs remain visible to slot polling."""
+        key = id(job)
+        status = str(job.status or "")
+        with self.collection_save_lock:
+            if key not in self.pending_collection_saves:
+                return
+            self.pending_collection_saves[key]["error"] = str(job.error or "")
+            self.pending_collection_saves[key]["episode_index"] = int(job.episode_index)
+            self._finish_collection_save_locked(key, status)
+
+    def _finish_collection_save_locked(self, key: int, status: str) -> None:
+        record = self.pending_collection_saves.get(key)
+        if record is None:
+            return
+        record["status"] = status
+        if status != "saved":
+            return
+        self.completed_collection_dataset = str(record["dataset"])
+        self.completed_collection_slot_id = str(record["slot_id"])
+        self.collection_save_revision += 1
+        del self.pending_collection_saves[key]
+
+    def collection_save_snapshot(self, dataset: str) -> list[dict[str, Any]]:
+        """Return queued/failed saves for one dataset for the slots API."""
+        with self.collection_save_lock:
+            return [
+                dict(record)
+                for record in self.pending_collection_saves.values()
+                if record.get("dataset") == dataset
+            ]
 
 
 def _run_quality_upload_scan(
@@ -848,13 +900,6 @@ def _serialize_prompt_config(prompt: Any) -> dict:
         "prompt_zh": prompt.get("prompt_zh"),
         "milestones": [{"id": mid, "label": label} for mid, label in milestones],
     }
-
-
-def _collection_set_for_prompt(config: ConfigDict, prompt: str) -> str | None:
-    for dataset_name, entries in config.collection.tasks.items():
-        if prompt in {str(entry[0]) for entry in entries}:
-            return str(dataset_name)
-    return None
 
 
 def _trim_finished_jobs(jobs: OrderedDict[str, Any], limit: int = _QUALITY_JOB_LIMIT) -> None:
@@ -1281,6 +1326,32 @@ def _collection_slots_snapshot(ctx: ConsoleContext, dataset: str) -> dict[str, A
             )
     slot_state = load_slot_state(slot_state_path(config, dataset))
     rows, active, counts = collection_slot_status(slots, episodes, queue, slot_state)
+    next_candidate = None
+    logger_collecting = bool(
+        getattr(logger_obj, "is_collection_enabled", False)
+        and getattr(logger_obj, "has_active_episode", False)
+    )
+    if (
+        logger_collecting
+        and str(ctx.session.selected_collect_set or "") == dataset
+        and ctx.session.collection_slot_id
+    ):
+        projected_queue = [*queue, {"slot_id": ctx.session.collection_slot_id, "status": "saving"}]
+        _, next_candidate, _ = collection_slot_status(
+            slots, episodes, projected_queue, slot_state
+        )
+        if next_candidate is not None:
+            next_candidate = dict(next_candidate)
+        elif any(
+            slot.slot_id == ctx.session.collection_slot_id and slot.unbounded for slot in slots
+        ):
+            next_candidate = next(
+                row
+                for row in rows
+                if row["slot_id"] == ctx.session.collection_slot_id
+            ).copy()
+            next_candidate["state"] = "active"
+            next_candidate["repair"] = False
     scenes: list[dict[str, str]] = []
     tasks: list[dict[str, str]] = []
     seen_scenes: set[str] = set()
@@ -1304,6 +1375,8 @@ def _collection_slots_snapshot(ctx: ConsoleContext, dataset: str) -> dict[str, A
         "dataset_dir": "" if dataset_dir is None else str(dataset_dir),
         "rows": rows,
         "active": active,
+        "next_candidate": next_candidate,
+        "pending_saves": ctx.collection_save_snapshot(dataset),
         "counts": counts,
         "scenes": scenes,
         "tasks": tasks,
@@ -1312,6 +1385,12 @@ def _collection_slots_snapshot(ctx: ConsoleContext, dataset: str) -> dict[str, A
 
 
 def _apply_collection_slot_session(session: SessionState, slot: dict[str, Any] | None) -> None:
+    if (
+        slot is None
+        or session.collection_slot_id != slot["slot_id"]
+        or session.selected_collect_set != slot["dataset"]
+    ):
+        session.collection_sim_metadata = None
     if slot is None:
         session.collection_scene_id = None
         session.collection_scene_round = None
@@ -1331,6 +1410,13 @@ def _sync_collection_slot_session(
     ctx: ConsoleContext, completed_slot_id: str | None = None
 ) -> dict[str, Any] | None:
     """Select the next unresolved slot without waiting for a browser poll."""
+    with ctx.collection_selection_lock:
+        return _sync_collection_slot_session_locked(ctx, completed_slot_id)
+
+
+def _sync_collection_slot_session_locked(
+    ctx: ConsoleContext, completed_slot_id: str | None
+) -> dict[str, Any] | None:
     dataset = str(ctx.session.selected_collect_set or "").strip()
     logger_obj = ctx.runtime.episode_logger
     if not dataset or logger_obj is None or bool(getattr(logger_obj, "has_active_episode", False)):
@@ -2356,6 +2442,8 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                 **plan_fields,
                 "dataset_dir": snapshot["dataset_dir"],
                 "active": snapshot["active"],
+                "next_candidate": snapshot.get("next_candidate"),
+                "pending_saves": snapshot.get("pending_saves", []),
                 "session_slot_id": self.ctx.session.collection_slot_id,
                 "session_dataset": self.ctx.session.selected_collect_set,
                 "save_revision": self.ctx.collection_save_revision,
@@ -3060,7 +3148,14 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             if handler is None:
                 self._send_empty(404)
                 return
-            handler(self, body)
+            if path in {
+                "/api/select_collect_task", "/api/select_collection_slot",
+                "/api/skip_collection_slot",
+            }:
+                with self.ctx.collection_selection_lock:
+                    handler(self, body)
+            else:
+                handler(self, body)
         except Exception as error:
             logger.exception("[HTTP_POST_ERROR] trace=%s path=%s", trace_id, path)
             if path.startswith("/api/hf/") and self._response_status is None:
@@ -3489,6 +3584,30 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             return
         if selected["state"] == "saving":
             self._send_json(409, {"ok": False, "error": "collection slot is not selectable"})
+            return
+        if body.get("metadata_only") is True:
+            if not has_sim_metadata:
+                self._send_json(400, {"ok": False, "error": "sim_metadata is required"})
+                return
+            active = snapshot["active"]
+            session = self.ctx.session
+            if (
+                active is None or active["slot_id"] != slot_id
+                or session.selected_collect_set != dataset
+                or session.collection_slot_id not in {None, slot_id}
+                or (
+                    session.collection_slot_id is None
+                    and session.selected_collect_task_index != active["task_index"]
+                )
+            ):
+                self._send_json(409, {"ok": False, "error": "collection selection changed"})
+                return
+            self._apply_collection_slot(active)
+            session.collection_sim_metadata = copy.deepcopy(sim_metadata)
+            self._send_json(200, {
+                "ok": True, "active": active, "counts": snapshot["counts"],
+                "sim_metadata_attached": session.collection_sim_metadata is not None,
+            })
             return
         config = self.ctx.runtime.active_config or self.ctx.config
         select_collection_slot(

@@ -1,7 +1,7 @@
-"""Ask the resident EVA-SIM render service to render a saved collection episode.
+"""Ask the configured EVA-SIM render service to render a saved collection episode.
 
 The service replays the episode in place on its own GPU and republishes the dataset's
-video metadata, so the console can replay a fresh episode while collection continues.
+video metadata. A dedicated server must share the collection machine's dataset paths.
 Collection must not depend on that service being up, so a failed request is reported
 once and dropped.
 """

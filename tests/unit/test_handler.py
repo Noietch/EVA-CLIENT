@@ -31,12 +31,21 @@ class _Transport:
         self.fail_relay = False
         self.fail_start = False
         self.fail_stop = False
+        self.world_instance_id = None
+        self.published_worlds = []
 
     def get_latest_qpos(self):
         return self.qpos.copy()
 
+    def get_control_feedback(self):
+        return self.get_latest_qpos(), self.world_instance_id
+
     def publish_action(self, action, target="real"):
         self.published.append((target, np.asarray(action).copy()))
+
+    def publish_teleop_action(self, action, world_instance_id):
+        self.published_worlds.append(world_instance_id)
+        self.publish_action(action)
 
     def supports_collection(self):
         return True
@@ -161,6 +170,41 @@ def test_handler_dispatches_qpos_and_limits_joint_step(monkeypatch) -> None:
     target, action = runtime.transport.published[0]
     assert target == "real"
     np.testing.assert_allclose(action, [0.1, 0.5, -0.1, 0.0])
+
+
+def test_world_change_resets_anchors_and_joint_limit_history(monkeypatch) -> None:
+    command = TeleopResult.from_command(QposCommand(np.asarray([0.8, 0.5, -0.8, 0.0])))
+    client = _Client([command, command])
+    runtime = _runtime(client)
+    runtime.transport.world_instance_id = "process-a:1"
+    monkeypatch.setattr(teleop, "forward_canonical_eef", lambda *_args: np.zeros(16))
+    session = SessionState(mode=SessionMode.COLLECT)
+
+    teleop.step_teleop(_config(), runtime, session, now=1.0)
+    assert client.resets == [False]
+    runtime.teleop_execution.last_safe_qpos = np.asarray([0.7, 0.5, -0.7, 0.0])
+    runtime.transport.world_instance_id = "process-b:0"
+    teleop.step_teleop(_config(), runtime, session, now=2.0)
+
+    assert client.resets == [False, True]
+    assert runtime.transport.published_worlds == ["process-a:1", "process-b:0"]
+    np.testing.assert_allclose(runtime.transport.published[-1][1], [0.1, 0.5, -0.1, 0.0])
+
+
+def test_action_keeps_feedback_world_when_reset_happens_during_ik(monkeypatch) -> None:
+    target = np.asarray([0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0] * 2, dtype=np.float32)
+    client = _Client([TeleopResult.from_command(CanonicalEefCommand(target, (True, True)))])
+    runtime = _runtime(client)
+    runtime.transport.world_instance_id = "process:1"
+    monkeypatch.setattr(teleop, "forward_canonical_eef", lambda *_args: target.copy())
+
+    def solve(*_args, **_kwargs):
+        runtime.transport.world_instance_id = "process:2"
+        return np.zeros(4, dtype=np.float32)
+
+    monkeypatch.setattr(teleop, "solve_canonical_eef", solve)
+    teleop.step_teleop(_config(), runtime, SessionState(mode=SessionMode.COLLECT), now=1.0)
+    assert runtime.transport.published_worlds == ["process:1"]
 
 
 def test_handler_rejects_result_when_worker_generation_changes_before_publish(monkeypatch) -> None:

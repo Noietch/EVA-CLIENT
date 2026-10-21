@@ -192,7 +192,10 @@ def test_real_robot_evaluation_presets_keep_checkpoint_and_task_contract(preset,
 def test_dual_yam_eva_sim_config_selects_multiple_task_sets():
     cfg = load_config(_CONFIGS_DIR / "02_collection" / "dual_yam_eva_sim.py")
 
-    assert len(cfg.collection.task_set_dir) == 11
+    assert len(cfg.collection.task_set_dir) == 12
+    assert "datasets/data_collection/task_sets/larybenchv2.v1.2/train_v1.2" in (
+        cfg.collection.task_set_dir
+    )
     assert (
         "datasets/data_collection/task_sets/larybenchv2.v1.2/larybench.v1.2.train.supplement"
     ) in (
@@ -211,14 +214,14 @@ def test_dual_yam_eva_sim_config_selects_multiple_task_sets():
     ]
 
 
-def test_dual_yam_composite_config_reuses_the_sim_transport_and_render_service():
+def test_dual_yam_composite_config_reuses_sim_transport_with_rendering_disabled():
     cfg = load_config(_CONFIGS_DIR / "02_collection/dual_yam_eva_sim_composite.py")
     assert len(cfg.collection.task_set_dir) == 10
     assert all(
         Path(path).name.startswith("larybench.v1.2.train.composite_")
         for path in cfg.collection.task_set_dir
     )
-    assert cfg.collection.render_service.url == "http://127.0.0.1:8430"
+    assert cfg.collection.render_service.url == ""
     assert cfg.transport.type == "zmq"
 
 

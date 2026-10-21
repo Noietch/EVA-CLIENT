@@ -60,6 +60,56 @@ def _record_station(root: Path, task: str, count: int, barrier) -> None:
         _record_episode(logger, task, start + index * 0.3, index)
 
 
+def _prepare_station(root: Path, task: str, barrier) -> None:
+    logger = _collection_logger(root, shared_dataset=True)
+    original = logger._collection_writer.prepare_save_job
+
+    def prepare(job):
+        barrier.wait(20.0)
+        original(job)
+
+    logger._collection_writer.prepare_save_job = prepare
+    _record_episode(logger, task, _STATION_START_SEC[task], 0)
+    logger.finalize()
+
+
+@pytest.mark.parametrize("same_slot", [False, True])
+def test_stations_prepare_without_holding_the_commit_lock(tmp_path, same_slot) -> None:
+    context = mp.get_context("fork")
+    barrier = context.Barrier(2)
+    tasks = ("a", "a" if same_slot else "b")
+    stations = [
+        context.Process(target=_prepare_station, args=(tmp_path, task, barrier))
+        for task in tasks
+    ]
+    for station in stations:
+        station.start()
+    for station in stations:
+        station.join(40.0)
+        assert station.exitcode == 0
+
+    dataset_dir = _collection_task_dir(tmp_path, _SHARED_DATASET)
+    episodes = _read_jsonl(dataset_dir / "meta/episodes.jsonl")
+    assert len(episodes) == (1 if same_slot else 2)
+    task_indices = {
+        row["task"]: row["task_index"]
+        for row in _read_jsonl(dataset_dir / "meta/tasks.jsonl")
+    }
+    for episode in episodes:
+        index = episode["episode_index"]
+        table = pq.read_table(dataset_dir / f"data/chunk-000/episode_{index:06d}.parquet")
+        assert set(table.column("episode_index").to_pylist()) == {index}
+        assert set(table.column("task_index").to_pylist()) == {
+            task_indices[episode["tasks"][0]]
+        }
+        assert table.column("index").to_pylist() == list(range(
+            episode["global_index_start"], episode["global_index_start"] + episode["length"]
+        ))
+    ranges = sorted(_index_ranges(tmp_path).values())
+    assert all(start >= 0 for start, _ in ranges)
+    assert all(end < start for (_, end), (start, _) in pairwise(ranges))
+
+
 def _index_ranges(root) -> dict[int, tuple[int, int]]:
     """``{episode_index: (first, last)}`` of the dataset's parquet frame indices."""
     dataset_dir = _collection_task_dir(root, _SHARED_DATASET)

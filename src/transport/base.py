@@ -133,6 +133,14 @@ class TransportBridge(abc.ABC):
         """
         return None
 
+    def get_control_feedback(self) -> tuple[np.ndarray | None, str | None]:
+        """Return joint feedback and its simulation world identity, when available."""
+        return self.get_latest_qpos(), None
+
+    def publish_teleop_action(self, action: np.ndarray, world_instance_id: str | None) -> None:
+        """Publish teleop motion derived from one control feedback snapshot."""
+        self.publish_action(action, target="real")
+
     def seconds_since_last_recv(self) -> float | None:
         """Wall time since the last inbound message, or None if not tracked.
 

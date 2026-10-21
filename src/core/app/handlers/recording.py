@@ -1329,6 +1329,13 @@ def collect_start(config: ConfigDict, runtime: RuntimeState, session: SessionSta
         if not session.collection_slot_id:
             session.last_error = "Select a collection slot before recording a planned episode"
             return False
+    sim_recording_url = (
+        _sim_recording_url(config) if runtime.episode_logger.is_collection_enabled else ""
+    )
+    if sim_recording_url and session.collection_sim_metadata is None:
+        session.last_error = "Simulator scene is not ready; wait for the next slot"
+        logger.warning("collect_start refused: simulator scene metadata is not bound")
+        return False
     target_meta = _collection_target_meta(session)
     runtime.collection_replay_qpos = None
     runtime.collection_replay_episode = None
@@ -1338,9 +1345,7 @@ def collect_start(config: ConfigDict, runtime: RuntimeState, session: SessionSta
         logger_obj = runtime.episode_logger
         try:
             collection_min_capture_time = (
-                None
-                if _sim_recording_url(config)
-                else runtime.transport.clear_collection_backlog()
+                None if sim_recording_url else runtime.transport.clear_collection_backlog()
             )
             logger_obj.start_episode(
                 task=format_task_label(session.selected_collect_task),
@@ -1349,12 +1354,12 @@ def collect_start(config: ConfigDict, runtime: RuntimeState, session: SessionSta
             )
             if target_meta:
                 logger_obj.set_episode_meta(**target_meta)
-            if _sim_recording_url(config):
+            if sim_recording_url:
                 logger_obj.start_sim_recording(target_meta or None)
             control_source = str(
                 (config.collection.teleop or {}).get("control_source", "transport")
             )
-            if control_source == "transport" and not _sim_recording_url(config):
+            if control_source == "transport" and not sim_recording_url:
                 start_collection_capture(
                     runtime,
                     fps=config.inference_cfg.publish_rate,
@@ -1481,11 +1486,15 @@ def collect_stop(config: ConfigDict, runtime: RuntimeState, session: SessionStat
     """End the collection episode and leave teleop active at its current pose."""
     saved = False
     save_error = ""
-    if runtime.episode_logger is not None and runtime.episode_logger.is_collection_enabled:
+    logger_obj = runtime.episode_logger
+    is_collection_episode = logger_obj is not None and logger_obj.is_collection_enabled
+    sim_recording_url = _sim_recording_url(config) if is_collection_episode else ""
+    console_ctx = getattr(runtime, "console_ctx", None)
+    if is_collection_episode:
         try:
             stop_collection_capture(runtime)
-            if _sim_recording_url(config):
-                runtime.episode_logger.stop_sim_recording()
+            if sim_recording_url:
+                logger_obj.stop_sim_recording()
         except Exception as error:
             cleanup_errors: list[Exception] = []
             try:
@@ -1505,20 +1514,37 @@ def collect_stop(config: ConfigDict, runtime: RuntimeState, session: SessionStat
             logger.exception("SIM recording stop failed; collection was not saved")
             return False
         try:
-            saved = runtime.episode_logger.end_episode()
-            if saved:
-                wait_for_saves = getattr(runtime.episode_logger, "wait_for_saves", None)
-                if callable(wait_for_saves):
-                    save_job = getattr(runtime.episode_logger, "_last_save_job", None)
-                    saved = bool(
-                        wait_for_saves(
-                            timeout=COLLECT_SAVE_WAIT_TIMEOUT_SEC,
-                            fail_on_error=True,
-                            job=save_job,
-                        )
+            callback = (
+                console_ctx.collection_save_job_finished
+                if sim_recording_url and console_ctx is not None
+                else None
+            )
+            logger_obj.set_save_completion_callback(callback)
+            saved = logger_obj.end_episode()
+            save_job = logger_obj._last_save_job
+            if saved and sim_recording_url:
+                if console_ctx is not None:
+                    console_ctx.register_collection_save_job(
+                        save_job, str(session.selected_collect_set or "")
                     )
-                    if not saved:
-                        save_error = "Episode save did not complete; check the save queue and logs"
+                job_failed = save_job.status == "failed"
+                if not job_failed and console_ctx is not None:
+                    try:
+                        console_ctx.sync_collection_slot()
+                    except Exception:
+                        logger.exception(
+                            "Failed to advance collection slot after queuing SIM episode"
+                        )
+            elif saved:
+                saved = bool(
+                    logger_obj.wait_for_saves(
+                        timeout=COLLECT_SAVE_WAIT_TIMEOUT_SEC,
+                        fail_on_error=True,
+                        job=save_job,
+                    )
+                )
+                if not saved:
+                    save_error = "Episode save did not complete; check the save queue and logs"
         finally:
             session.status = SessionStatus.READY
         if not saved:
@@ -1534,15 +1560,13 @@ def collect_stop(config: ConfigDict, runtime: RuntimeState, session: SessionStat
                     )
             logger.warning(session.last_error)
     else:
-        if runtime.episode_logger is not None:
-            saved = runtime.episode_logger.end_episode()
+        if logger_obj is not None:
+            saved = logger_obj.end_episode()
         session.status = SessionStatus.READY
-    if saved:
-        console_ctx = getattr(runtime, "console_ctx", None)
-        sync_collection_slot = getattr(console_ctx, "sync_collection_slot", None)
-        if callable(sync_collection_slot):
+    if saved and not sim_recording_url:
+        if console_ctx is not None:
             try:
-                sync_collection_slot(session.collection_slot_id)
+                console_ctx.sync_collection_slot(session.collection_slot_id)
             except Exception:
                 logger.exception("Failed to advance collection slot after queuing episode")
     logger.info("Collection episode stopped; leaving hardware at current pose")
@@ -1559,6 +1583,9 @@ def collect_cancel(runtime: RuntimeState, session: SessionState) -> None:
             cleanup_errors.append(error)
         try:
             runtime.episode_logger.cancel_sim_recording()
+        except Exception as error:
+            cleanup_errors.append(error)
+        try:
             runtime.episode_logger.cancel_episode("user cancel")
         except Exception as error:
             cleanup_errors.append(error)

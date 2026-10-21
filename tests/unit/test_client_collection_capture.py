@@ -166,3 +166,31 @@ def test_collection_start_records_metadata_from_automatic_slot_sync(monkeypatch)
         sim_metadata=sim_metadata,
     )
     assert session.collection_sim_metadata is None
+
+
+def test_sim_collection_start_requires_bound_scene_metadata(monkeypatch):
+    logger = SimpleNamespace(
+        is_collection_enabled=True,
+        is_queue_full=lambda: False,
+        start_episode=Mock(),
+        set_episode_meta=Mock(),
+        start_sim_recording=Mock(),
+    )
+    runtime = SimpleNamespace(
+        episode_logger=logger,
+        console_ctx=SimpleNamespace(),
+        transport=SimpleNamespace(clear_collection_backlog=Mock()),
+    )
+    session = SessionState(selected_collect_task="pick up the block")
+    config = ConfigDict(
+        collection=ConfigDict(
+            sim_recording_url="http://sim",
+            teleop=ConfigDict(control_source="client"),
+        )
+    )
+    monkeypatch.setattr(recording, "activate_teleop", Mock())
+
+    assert not collect_start(config, runtime, session)
+    assert "scene" in session.last_error.lower()
+    logger.start_episode.assert_not_called()
+    recording.activate_teleop.assert_not_called()
