@@ -147,10 +147,11 @@ def test_eval_cancel_discards_active_episode_and_is_idempotent(console):
 
 def test_completed_slot_retake_survives_polling_and_releases_after_save(tmp_path, monkeypatch):
     monkeypatch.setattr(
-        console_server, "_load_scene_plan", lambda *_args: {"scenes": [], "tasks": []}
+        console_server, "_load_scene_plan",
+        lambda *_args: {"scenes": [], "tasks": [], "version": "inline"}
     )
     episodes = [
-        {"slot_id": "INLINE-0:0", "episode_index": 0, "status": "saved", "quality": "green"}
+        {"slot_id": "INLINE-0:DEFAULT:0", "episode_index": 0, "status": "saved", "quality": "green"}
     ]
     monkeypatch.setattr(
         console_server, "load_episode_history", lambda *_args, **_kwargs: {"episodes": episodes}
@@ -163,12 +164,14 @@ def test_completed_slot_retake_survives_polling_and_releases_after_save(tmp_path
         def status_snapshot(self, *args, **kwargs):
             return {"dataset_dir": str(tmp_path), "queue": queue}
 
-    with serve_console(console_config()) as h:
+    config = console_config()
+    config.collection.storage.log_dir = str(tmp_path / "logs")
+    with serve_console(config) as h:
         h.runtime.episode_logger = cast(Any, Logger())
         sim_metadata = {"schema_version": 4, "scene": {"scene_id": "scene-01"}}
         body = {
             "dataset": "cup_set",
-            "slot_id": "INLINE-0:0",
+            "slot_id": "INLINE-0:DEFAULT:0",
             "sim_metadata": sim_metadata,
         }
         selected = h.post("/api/select_collection_slot", body)
@@ -178,7 +181,7 @@ def test_completed_slot_retake_survives_polling_and_releases_after_save(tmp_path
         assert h.session.collection_sim_metadata == sim_metadata
         for _ in range(2):
             snapshot = h.get("/api/collection_slots?dataset=cup_set&all=1").json
-            assert snapshot["active"]["slot_id"] == "INLINE-0:0"
+            assert snapshot["active"]["slot_id"] == "INLINE-0:DEFAULT:0"
             assert snapshot["slots"][0]["episode"]["episode_index"] == 0
 
         h.runtime.collection_teleop_armed = True
@@ -186,10 +189,10 @@ def test_completed_slot_retake_survives_polling_and_releases_after_save(tmp_path
         assert h.post("/api/collect_start", {}).json["ok"]
 
         for status in ("queued", "saving"):
-            queue[:] = [{"slot_id": "INLINE-0:0", "episode_index": 1, "status": status}]
+            queue[:] = [{"slot_id": "INLINE-0:DEFAULT:0", "episode_index": 1, "status": status}]
             snapshot = h.get("/api/collection_slots?dataset=cup_set&all=1").json
             assert snapshot["slots"][0]["state"] == "saving"
-            assert snapshot["active"]["slot_id"] == "INLINE-0:1"
+            assert snapshot["active"]["slot_id"] == "INLINE-0:DEFAULT:1"
             assert h.post("/api/select_collection_slot", body).status == 409
 
         queue.clear()
@@ -197,12 +200,12 @@ def test_completed_slot_retake_survives_polling_and_releases_after_save(tmp_path
         snapshot = h.get("/api/collection_slots?dataset=cup_set&all=1").json
         assert snapshot["slots"][0]["state"] == "complete"
         assert snapshot["slots"][0]["episode"]["episode_index"] == 1
-        assert snapshot["active"]["slot_id"] == "INLINE-0:1"
-        h.runtime.console_ctx.sync_collection_slot("INLINE-0:0")
+        assert snapshot["active"]["slot_id"] == "INLINE-0:DEFAULT:1"
+        h.runtime.console_ctx.sync_collection_slot("INLINE-0:DEFAULT:0")
         snapshot = h.get("/api/collection_slots?dataset=cup_set&all=1").json
-        assert snapshot["session_slot_id"] == "INLINE-0:1"
+        assert snapshot["session_slot_id"] == "INLINE-0:DEFAULT:1"
         assert snapshot["session_dataset"] == "cup_set"
-        assert snapshot["completed_slot_id"] == "INLINE-0:0"
+        assert snapshot["completed_slot_id"] == "INLINE-0:DEFAULT:0"
         assert snapshot["save_revision"] == 1
 
         # A later failed QC result must replace the earlier green attempt.
@@ -212,11 +215,11 @@ def test_completed_slot_retake_survives_polling_and_releases_after_save(tmp_path
         assert snapshot["slots"][0]["episode"]["quality"] == "red"
         assert snapshot["counts"]["complete"] == 0
         assert snapshot["slots"][0]["state"] == "rejected"
-        assert snapshot["active"]["slot_id"] == "INLINE-0:1"
+        assert snapshot["active"]["slot_id"] == "INLINE-0:DEFAULT:1"
         assert h.post("/api/select_collection_slot", body).json["active"]["repair"]
         assert (
             h.get("/api/collection_slots?dataset=cup_set&all=1").json["active"]["slot_id"]
-            == "INLINE-0:0"
+            == "INLINE-0:DEFAULT:0"
         )
 
 

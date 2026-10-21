@@ -26,7 +26,10 @@ def test_qc_changes_reuse_sources_and_new_episodes_invalidate_them(tmp_path):
         patch.object(dashboard, "_read_json", wraps=dashboard._read_json) as read_json,
     ):
         for verdict, valid in [("fail", False), ("pass", True)]:
-            qc_path.write_text(json.dumps({"episode_index": 0, "qc_verdict": verdict}) + "\n")
+            # Match the QC writer's atomic replacement, even on coarse-mtime filesystems.
+            replacement = meta / "qc.next"
+            replacement.write_text(json.dumps({"episode_index": 0, "qc_verdict": verdict}) + "\n")
+            replacement.replace(qc_path)
             _, _, records = dashboard._load_dataset_records(tmp_path, "collection")
             assert records[0]["valid"] is valid
         assert [call.args[0] for call in read_jsonl.call_args_list] == [qc_path, qc_path]

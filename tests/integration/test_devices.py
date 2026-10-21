@@ -82,7 +82,10 @@ def test_device_catalog_composes_and_restores_each_robot(tmp_path, monkeypatch):
             spec = restored.hardware.options(name)[kind][selected[kind]]["launch"]
             if "script" in spec:
                 assert command[0] == str(REPOSITORY_ROOT / spec["script"])
-                assert command[1:] == spec.get("fixed", [])
+                assert command[1:] == [
+                    *spec.get("fixed", []),
+                    "--camera-endpoint", values["robot"]["settings"]["camera_endpoint"],
+                ]
                 continue
             module = importlib.import_module(spec["module"])
             parser = getattr(module, spec.get("parser", "build_arg_parser"))()
