@@ -53,6 +53,10 @@ let collectItemsRenderKey = "";
 let rolloutItemsRenderKey = "";
 let collectionSlotClickTimer = null;
 let collectionQcTarget = null;
+const episodeQcPending = new Set();
+let collectionPipelineSnapshot = null;
+let collectionSaveRefreshPending = false;
+let collectionSaveRefreshInFlight = false;
 
 function scenePlanTasks() {
   return (S.SCENE_PLAN && Array.isArray(S.SCENE_PLAN.tasks)) ? S.SCENE_PLAN.tasks : [];
@@ -123,6 +127,35 @@ function collectionSlotQuery(dataset) {
   if (state.showAll) params.set("all", "1");
   if (state.scenePlanVersion) params.set("scene_plan_version", state.scenePlanVersion);
   return `/api/collection_slots?${params.toString()}`;
+}
+
+function collectionPipelineState(status) {
+  const collect = status || {};
+  return {
+    collecting: collect.collecting === true,
+    saving: collect.saving === true || collect.pipeline_state === "SAVING" ||
+      Number(collect.queued_jobs || 0) > 0,
+  };
+}
+
+function collectionSaveRefreshNeeded(previous, current) {
+  // This only schedules a slot read. The response's save_revision remains the
+  // authority for advancing after a confirmed save.
+  if (!previous || current.collecting) return false;
+  const stopped = previous.collecting && !current.collecting;
+  const drained = previous.saving && !current.saving;
+  return stopped || drained;
+}
+
+function requestCollectionSaveRefresh() {
+  if (!collectionSaveRefreshPending || collectionSaveRefreshInFlight ||
+      S.collectTaskSelectionPending || collectionSlotClickTimer !== null ||
+      collectionPipelineSnapshot?.collecting || collectionPipelineSnapshot?.saving) return;
+  collectionSaveRefreshInFlight = true;
+  pollCollectionSlots(true).finally(() => {
+    collectionSaveRefreshInFlight = false;
+  });
+  collectionSaveRefreshPending = false;
 }
 
 function applyCollectionSlotsPayload(payload) {
@@ -233,7 +266,7 @@ async function activateCollectionSlot(slot, { manual = false } = {}) {
   }
 }
 
-async function pollCollectionSlots(force = false, { autoActivate = true } = {}) {
+async function pollCollectionSlots(force = false, { autoActivate = true, preserveView = false } = {}) {
   const state = S.collectionSlots;
   const dataset = state.dataset || collectSetValue();
   if (!dataset) return;
@@ -246,7 +279,7 @@ async function pollCollectionSlots(force = false, { autoActivate = true } = {}) 
   state.lastAttemptAt = now;
   const controller = new AbortController();
   collectionSlotsController = controller;
-  state.loading = force || !state.loaded;
+  state.loading = (force && !preserveView) || !state.loaded;
   if (state.error) setCollectError();
   state.error = "";
   if (state.loading) {
@@ -1363,8 +1396,25 @@ function collectQualityReason(item) {
       item.qc_reason,
       ...issues,
       item.error,
-    ].map((value) => String(value || "").trim()).filter(Boolean);
-    return [...new Set(values)].join(" · ");
+      collectReplayFailureReason(item),
+    ];
+    return collectReasonText(values);
+  }
+
+function collectReplayFailureReason(item) {
+    if (!item || item.replay_verified !== false) return "";
+    const raw = String(item.replay_qc_reason || "").trim();
+    if (!raw) return "";
+    const key = {
+      replay_summary_failed: "collect.qc.replay_summary_failed",
+      replay_report_invalid: "collect.qc.replay_report_invalid",
+      replay_evaluation_missing: "collect.qc.replay_evaluation_missing",
+    }[raw];
+    return key ? t(key) : raw;
+  }
+
+function collectReasonText(values) {
+    return [...new Set(values.map((value) => String(value || "").trim()).filter(Boolean))].join(" · ");
   }
 
 function savedEpisodeId(item) {
@@ -1424,33 +1474,37 @@ function selectCollectionQcTarget(item) {
       dataset_dir: reviewDatasetFor("collect"),
       task: String(item.task || item.prompt || collectTaskValue()),
     };
-    if ($("collect-qc-note")) {
-      const note = item && item.qc_note || "";
-      const issues = item && collectQcState(item) === "failed"
-        ? (item.quality_issues || []).map((issue) => {
-          const detail = issue.detail || issue.message || issue.code || "";
-          return `${detail}${Number(issue.count || 1) > 1 ? ` ×${issue.count}` : ""}`;
-        }).filter(Boolean).join("\n") : "";
-      $("collect-qc-note").value = note || issues || (item && item.error) || "";
+    const note = $("collect-qc-note");
+    if (note) {
+      note.value = note.defaultValue = "";
+      syncCollectionQcNote(item);
     }
     if ($("collect-qc-status")) $("collect-qc-status").textContent = "";
   }
 
-function renderCollectionMachineFinding(episode) {
+function collectionMachineFinding(episode) {
     const saved = savedEpisodeId(episode) != null;
     const note = saved
       ? (episode.qc_auto_note || (episode.qc_auto ? episode.qc_note : "")) : "";
     const reason = saved
       ? (episode.qc_auto_reason || (episode.qc_auto ? episode.qc_reason : "")) : "";
-    const finding = $("collect-qc-machine");
-    finding.hidden = !note && !reason;
-    finding.textContent = `${t("collect.qc.machineFinding")}\n${note || reason}`;
+    const replayFinding = saved ? collectReplayFailureReason(episode) : "";
+    return collectReasonText([note || reason, replayFinding]);
+  }
+
+function syncCollectionQcNote(episode) {
+    const note = $("collect-qc-note");
+    if (note.value !== note.defaultValue) return;
+    note.value = note.defaultValue = episode && (
+      episode.qc_note || collectionMachineFinding(episode) || collectQualityReason(episode)
+    ) || "";
   }
 
 function renderCollectionQcControls(enabled, pending) {
+    pending = pending || episodeQcPending.has("collect");
     const episode = selectedCollectEpisodeItem();
     const saved = savedEpisodeId(episode) != null;
-    renderCollectionMachineFinding(episode);
+    syncCollectionQcNote(episode);
     $("collect-qc-target").textContent = saved
       ? `EPISODE ${episode.episode_index} · ${collectResultLabel(episode)}` : "--";
     $("b-collect-qc-pass").disabled = !enabled || !saved || pending;
@@ -1772,19 +1826,23 @@ function renderCollectTiles(items) {
       if (episode != null) tile.title += ` · ${t("collect.episodeLabel")} ${episode}`;
       tile.textContent = String(Number(slot.ordinal) + 1);
       const saved = episode != null;
+      const renderPending = !recording && !saving && saved &&
+        slot.episode.replay_required === true && slot.episode.replay_verified === null;
       const current = S.collectionSlots.active &&
         S.collectionSlots.active.slot_id === slot.slot_id;
       const visibleState = recording ? "unreviewed" : (slot.qc_state || collectQcState(slot.episode));
       if (recording) tile.title += " · RECORDING";
       else if (saving) tile.title += " · SAVING";
       else tile.title += ` · ${collectQcLabel(visibleState)}`;
+      if (renderPending) tile.title += ` · ${t("collect.renderPending")}`;
       if (!recording && !saving) {
         const reason = collectQualityReason(slot.episode);
         if (reason) tile.title += ` · ${reason}`;
       }
       tile.setAttribute("aria-label", tile.title);
-      tile.setAttribute("aria-busy", String(recording || saving));
+      tile.setAttribute("aria-busy", String(recording || saving || renderPending));
       tile.className = `collect-tile slot-${visibleState}` +
+        `${renderPending ? " slot-render-pending" : ""}` +
         `${saving ? " slot-saving" : ""}`;
       // One cursor: the armed slot is framed only while it is where the operator is.
       if (slot.slot_id === S.collectionSlots.selectedSlotId) tile.classList.add("selected");
@@ -2132,6 +2190,12 @@ function renderCollectionReplayStatus(selectedEpisodeSaved) {
 function renderCollect() {
     if (!$("collect-control-col")) return;
     const collect = S.STATUS.collect || {};
+    const pipeline = collectionPipelineState(collect);
+    if (collectionSaveRefreshNeeded(collectionPipelineSnapshot, pipeline)) {
+      collectionSaveRefreshPending = true;
+    }
+    collectionPipelineSnapshot = pipeline;
+    requestCollectionSaveRefresh();
     const history = historyFor("collect", collect);
     const slotPlan = S.collectionSlots;
     const enabled = collectEnabled();
@@ -2639,49 +2703,68 @@ async function reviewRolloutEpisode(item) {
   }
 
 async function submitEpisodeQc(kind, verdict) {
+    if (episodeQcPending.has(kind)) return false;
     if (kind === "collect" && (collectionSlotClickTimer !== null || S.collectTaskSelectionPending)) return false;
     const target = kind === "collect" && selectedCollectEpisodeItem() ? collectionQcTarget : null;
     const episode = kind === "rollout" ? S.rolloutSaveEpisode : target && target.item.episode_index;
     if (episode == null) return false;
     const datasetDir = target ? target.dataset_dir : reviewDatasetFor(kind);
-    clientTrace("review.qc.begin", { kind, episode, verdict, dataset_dir: datasetDir });
-    const r = await apiPost(episodeQcEndpoint(kind), {
-      dataset_dir: datasetDir,
-      task: target ? target.task : reviewTask,
-      dataset: target ? target.dataset : "",
-      episode: String(episode),
-      verdict,
-      note: reviewNoteFor(kind).value || "",
-    });
+    const note = reviewNoteFor(kind).value || "";
     const title = kind === "collect" ? $("collect-qc-target") : reviewTitleFor(kind);
     const status = kind === "rollout" ? $("rollout-save-err") : $("collect-qc-status");
-    clientTrace("review.qc.end", {
-      kind, episode, verdict, ok: !!r.ok, error: r.error || "",
-    });
-    if (!r.ok) {
-      if (title) title.textContent = `episode ${episode} · QC failed`;
-      if (status) status.textContent = `✗ ${r.error || "QC failed"}`;
-      return false;
-    }
-    if (target) {
-      const patch = (item) => {
-        if (item && item.episode_index === episode) item.qc_verdict = verdict;
-      };
-      patch(target.item);
-      if (target.dataset === S.collectionSlots.dataset) {
-        (S.collectionSlots.slots || []).forEach((slot) => patch(slot.episode));
-        const cache = S.episodeHistory && S.episodeHistory.collect;
-        if (cache && cache.collectionSet === target.dataset) (cache.episodes || []).forEach(patch);
-        renderCollect();
+    episodeQcPending.add(kind);
+    if (status) status.textContent = "saving…";
+    if (kind === "collect") renderCollect();
+    try {
+      clientTrace("review.qc.begin", { kind, episode, verdict, dataset_dir: datasetDir });
+      const r = await apiPost(episodeQcEndpoint(kind), {
+        dataset_dir: datasetDir,
+        task: target ? target.task : reviewTask,
+        dataset: target ? target.dataset : "",
+        episode: String(episode),
+        verdict,
+        note,
+      });
+      clientTrace("review.qc.end", {
+        kind, episode, verdict, ok: !!r.ok, error: r.error || "",
+      });
+      if (!r.ok) throw new Error(r.error || "QC failed");
+      if (target) {
+        const patch = (item) => {
+          if (!item || item.episode_index !== episode) return;
+          if (item.qc_auto === true) {
+            item.qc_auto_verdict = item.qc_verdict || "";
+            item.qc_auto_note = item.qc_note || "";
+            item.qc_auto_reason = item.qc_reason || "";
+          }
+          Object.assign(item, {qc_verdict: verdict, qc_auto: false, qc_note: note, qc_reason: ""});
+        };
+        patch(target.item);
+        if (target.dataset === S.collectionSlots.dataset) {
+          (S.collectionSlots.slots || []).forEach((slot) => {
+            if (savedEpisodeId(slot.episode) !== episode) return;
+            patch(slot.episode);
+            slot.qc_state = collectQcState(slot.episode);
+          });
+          const cache = S.episodeHistory && S.episodeHistory.collect;
+          if (cache && cache.collectionSet === target.dataset) (cache.episodes || []).forEach(patch);
+          // Refresh counts without blanking the selected tile or waiting on playback/status.
+          pollCollectionSlots(true, { preserveView: true });
+        }
       }
+      if (title) title.textContent = `episode ${episode} · ${verdict}`;
+      if (status) status.textContent = `episode ${episode} marked ${verdict}`;
+      invalidateEpisodeHistory(kind);
+      if (kind !== "collect") await pollEpisodeHistory(true);
+      return true;
+    } catch (error) {
+      if (title) title.textContent = `episode ${episode} · QC failed`;
+      if (status) status.textContent = `✗ ${error.message || error}`;
+      return false;
+    } finally {
+      episodeQcPending.delete(kind);
+      if (kind === "collect") renderCollect();
     }
-    if (title) title.textContent = `episode ${episode} · ${verdict}`;
-    if (status) status.textContent = `episode ${episode} marked ${verdict}`;
-    invalidateEpisodeHistory(kind);
-    await pollEpisodeHistory(true);
-    applyStatus(await apiGet("/api/status"));
-    if (kind === "collect") await pollCollectionSlots(true);
-    return true;
   }
 
 async function submitEpisodeNote(kind) {

@@ -31,6 +31,9 @@
     --qc-pending: #8795a8;
     --qc-pending-soft: #eef2f6;
     --qc-pending-ink: #65758a;
+    --render-pending: #8b5cf6;
+    --render-pending-soft: #ede9fe;
+    --render-pending-ink: #5b21b6;
     --radius:   10px;
     --radius-sm:7px;
     --shadow:   0 1px 2px rgba(28,25,23,0.04), 0 2px 8px rgba(28,25,23,0.06);
@@ -719,17 +722,17 @@
       flex: 0 0 auto; grid-template-columns: minmax(0, 1fr);
       grid-template-rows: auto auto;
     }
+    #view-debug.collect-mode .stage-top {
+      height: auto; min-height: 46vh;
+    }
     #view-debug.collect-mode .stage-top .col-canvas {
-      flex: 1 1 auto; height: auto; min-height: 0;
+      flex: 0 0 160px; height: 160px;
     }
     /* Let the scene card determine the review row height without using the
        WebGL canvas's intrinsic size to grow the row on each resize. */
     #view-debug.collect-mode .stage.collect-review .stage-top {
       display: grid; grid-template-columns: minmax(0, 8fr) minmax(0, 2fr);
       height: auto;
-    }
-    #view-debug.collect-mode .stage.collect-review .stage-top .col-canvas {
-      flex: 0 0 160px; height: 160px;
     }
   }
 
@@ -1444,6 +1447,7 @@
   .collect-tile.slot-pending { background: var(--qc-pending-soft); border-color: var(--qc-pending); color: var(--qc-pending-ink); }
   .collect-tile.slot-unreviewed { background: var(--qc-unreviewed-soft); border-color: var(--qc-unreviewed); color: var(--qc-unreviewed-ink); }
   .collect-tile.slot-passed, .collect-tile.slot-complete { background: var(--qc-passed); border-color: var(--qc-passed); color: #fff; }
+  .collect-tile.slot-render-pending { background: var(--render-pending-soft); border-color: var(--render-pending); color: var(--render-pending-ink); }
   .collect-tile.slot-saving {
     position: relative; overflow: hidden;
     background: var(--signal-soft); border-color: var(--accent); color: var(--ink);
@@ -1602,7 +1606,6 @@
     padding: 7px 9px; border: 1px solid var(--rule-strong); background: transparent; color: var(--ink);
   }
   .qc-status { font-size: 10px; color: var(--ink-dim); min-height: 12px; }
-  .qc-machine-finding { margin-top: 8px; font-size: 11px; white-space: pre-wrap; overflow-wrap: anywhere; }
   .quality-export-actions { display: grid; gap: 6px; }
   .quality-export-format {
     display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; align-items: center;

@@ -22,6 +22,79 @@ def test_automatic_repair_slot_stays_selected():
     assert "manual: manual || !!slot.repair" in handler
 
 
+def test_collection_save_refresh_waits_for_pipeline_boundary():
+    root = Path(__file__).resolve().parents[2]
+    source = (root / "src/core/app/console/static/js/collect.js").read_text()
+    handlers = source[
+        source.index("function collectionPipelineState(") : source.index(
+            "function applyCollectionSlotsPayload("
+        )
+    ]
+    script = r'''
+const assert = require("node:assert/strict");
+const S = {collectTaskSelectionPending: false,
+  collectionSlots: {active: {slot_id: "old"}}};
+let collectionSlotClickTimer = null;
+let collectionPipelineSnapshot = null;
+let collectionSaveRefreshPending = false;
+let collectionSaveRefreshInFlight = false;
+let calls = 0;
+const pollCollectionSlots = (force) => {
+  assert.equal(force, true);
+  calls++;
+  return Promise.resolve({ok: false, active: {slot_id: "new"}});
+};
+''' + handlers + r'''
+(async () => {
+  assert.deepEqual(collectionPipelineState({collecting: true}),
+    {collecting: true, saving: false});
+  assert.deepEqual(collectionPipelineState({pipeline_state: "SAVING", queued_jobs: 1}),
+    {collecting: false, saving: true});
+  assert.equal(collectionSaveRefreshNeeded(null, {collecting: false, saving: false}), false);
+  // Stopping a capture while its save is still running only arms the refresh.
+  assert.equal(collectionSaveRefreshNeeded(
+    {collecting: true, saving: false}, {collecting: false, saving: true}), true);
+  // The queue drain is the second boundary for a normal asynchronous save.
+  assert.equal(collectionSaveRefreshNeeded(
+    {collecting: false, saving: true}, {collecting: false, saving: false}), true);
+  // A running capture and an unchanged idle state cannot trigger it.
+  assert.equal(collectionSaveRefreshNeeded(
+    {collecting: true, saving: false}, {collecting: true, saving: false}), false);
+  assert.equal(collectionSaveRefreshNeeded(
+    {collecting: false, saving: false}, {collecting: false, saving: false}), false);
+
+  const flush = () => new Promise((resolve) => setImmediate(resolve));
+  collectionPipelineSnapshot = {collecting: false, saving: true};
+  collectionSaveRefreshPending = true;
+  requestCollectionSaveRefresh();
+  assert.equal(calls, 0);
+  collectionPipelineSnapshot = {collecting: false, saving: false};
+  requestCollectionSaveRefresh();
+  requestCollectionSaveRefresh();
+  assert.equal(calls, 1);
+  await flush();
+  assert.equal(collectionSaveRefreshInFlight, false);
+
+  collectionSaveRefreshPending = true;
+  S.collectTaskSelectionPending = true;
+  requestCollectionSaveRefresh();
+  assert.equal(calls, 1);
+  S.collectTaskSelectionPending = false;
+  collectionSlotClickTimer = {};
+  requestCollectionSaveRefresh();
+  assert.equal(calls, 1);
+  collectionSlotClickTimer = null;
+  collectionSaveRefreshPending = true;
+  requestCollectionSaveRefresh();
+  assert.equal(calls, 2);
+  await flush();
+  // A failed/cancelled read is observational only; it cannot advance the slot.
+  assert.equal(S.collectionSlots.active.slot_id, "old");
+})().catch((error) => {console.error(error); process.exitCode = 1;});
+'''
+    subprocess.run(["node", "-e", script], check=True, timeout=10)
+
+
 def test_review_cursor_and_qc_events():
     source = (
         Path(__file__).resolve().parents[2] / "src/core/app/console/static/js/collect.js"
@@ -270,68 +343,101 @@ const submitEpisodeQc = async (kind, verdict) => {
         assert "slot-current" not in (console / asset).read_text()
 
 
-def test_machine_failure_color_and_read_only_note():
+def test_machine_failure_color_and_editable_note():
     root = Path(__file__).resolve().parents[2]
     source = (root / "src/core/app/console/static/js/collect.js").read_text()
     handlers = (
         source[source.index("function collectQcState(") : source.index("function collectTone(")]
         + source[
-            source.index("function savedEpisodeId(") : source.index(
-                "function syncScenePlanToEpisode("
-            )
-        ]
-        + source[
-            source.index("function renderCollectionMachineFinding(") : source.index(
+            source.index("function collectQualityReason(") : source.index(
                 "function renderCollectionQcControls("
             )
         ]
     )
-    script = (
-        'const assert = require("node:assert/strict");\n'
-        'const finding = {hidden: true, textContent: ""};\n'
-        'const $ = (id) => {assert.equal(id, "collect-qc-machine"); return finding;};\n'
-        'const t = () => "Machine finding";\n'
-        + handlers
-        + r"""
+    script = r"""
+const assert = require("node:assert/strict");
+const note = {value: "", defaultValue: ""};
+const status = {};
+const $ = (id) => id === "collect-qc-note" ? note : status;
+const S = {collectionSlots: {dataset: "set"}};
+let collectionQcTarget = null;
+const reviewDatasetFor = () => "/dataset";
+const collectTaskValue = () => "task";
+const t = (key) => ({
+  "collect.qc.replay_summary_failed": "REPLAY FAILED",
+  "collect.qc.replay_report_invalid": "REPLAY REPORT INVALID",
+  "collect.qc.replay_evaluation_missing": "REPLAY EVALUATION MISSING",
+}[key] || key);
+""" + handlers + r"""
 const episode = {status: "saved", episode_index: 49, quality: "green",
   qc_verdict: "unreviewed", qc_note: "human note", qc_auto_verdict: "fail",
   qc_auto_reason: "joint_limit_exceeded", qc_auto_note: "joint4 exceeds its limit"};
 assert.equal(collectQcState(episode), "failed");
 assert.equal(collectResultLabel(episode), "QC FAILED");
-renderCollectionMachineFinding(episode);
-assert.equal(finding.hidden, false);
-assert.equal(finding.textContent, "Machine finding\njoint4 exceeds its limit");
-assert.equal(episode.qc_note, "human note");
-assert.equal(episode.qc_verdict, "unreviewed");
+selectCollectionQcTarget(episode);
+assert.equal(note.value, "human note");
+const automatic = {...episode, qc_note: ""};
+selectCollectionQcTarget(automatic);
+assert.equal(note.value, "joint4 exceeds its limit");
+assert.equal(automatic.qc_note, "");
+assert.equal(automatic.qc_verdict, "unreviewed");
+
+// New replay findings fill the selected episode's untouched text box on refresh.
+automatic.replay_required = true;
+automatic.replay_verified = false;
+automatic.replay_qc_reason = "replay_summary_failed";
+syncCollectionQcNote(automatic);
+assert.equal(note.value, "joint4 exceeds its limit · REPLAY FAILED");
+note.value = "unsaved human edit";
+syncCollectionQcNote({...automatic, replay_qc_reason: "updated machine finding"});
+assert.equal(note.value, "unsaved human edit");
+note.value = "";
+syncCollectionQcNote(automatic);
+assert.equal(note.value, "");
+selectCollectionQcTarget(automatic);
+assert.equal(note.value, "joint4 exceeds its limit · REPLAY FAILED");
+automatic.replay_verified = true;
+syncCollectionQcNote(automatic);
+assert.equal(note.value, "joint4 exceeds its limit");
+
+for (const [code, label] of [
+  ["replay_summary_failed", "REPLAY FAILED"],
+  ["replay_report_invalid", "REPLAY REPORT INVALID"],
+  ["replay_evaluation_missing", "REPLAY EVALUATION MISSING"],
+]) {
+  selectCollectionQcTarget({status: "saved", episode_index: 52,
+    replay_verified: false, replay_qc_reason: code});
+  assert.equal(note.value, label);
+}
+selectCollectionQcTarget({status: "saved", episode_index: 53,
+  qc_auto_note: "REPLAY FAILED", replay_verified: false,
+  replay_qc_reason: "replay_summary_failed"});
+assert.equal(note.value, "REPLAY FAILED");
+selectCollectionQcTarget({status: "saved", episode_index: 54,
+  qc_auto_reason: "joint_limit_exceeded"});
+assert.equal(note.value, "joint_limit_exceeded");
+selectCollectionQcTarget({status: "saved", episode_index: 55, qc_auto: true,
+  qc_reason: "primary machine reason"});
+assert.equal(note.value, "primary machine reason");
+selectCollectionQcTarget({status: "saved", episode_index: 56,
+  quality_issues: [{detail: "camera skew", count: 2}]});
+assert.equal(note.value, "camera skew ×2");
 episode.qc_verdict = "pass";
-assert.equal(collectQcState(episode), "passed");
 for (const verified of [undefined, null, false, true]) {
   const simEpisode = {...episode, replay_required: true, replay_verified: verified};
   assert.equal(collectQcState(simEpisode), "passed");
-  assert.equal(collectResultLabel(simEpisode), "QC PASSED");
   assert.equal(collectOutcome(simEpisode), "usable");
-  assert.equal(simEpisode.replay_verified, verified);
-  assert.equal(simEpisode.qc_auto_reason, "joint_limit_exceeded");
+  selectCollectionQcTarget(simEpisode);
+  assert.equal(note.value, "human note");
 }
-assert.equal(collectQcState({...episode, replay_verified: false}), "passed");
-assert.equal(collectQcState({...episode, qc_verdict: "unreviewed", replay_required: true,
-  replay_verified: true}), "failed");
-assert.equal(collectQcState({...episode, qc_verdict: "unreviewed", qc_auto_verdict: "",
-  replay_required: true, replay_verified: false}), "failed");
-assert.equal(collectQcState({...episode, qc_verdict: "fail", replay_required: true,
-  replay_verified: null}), "failed");
-renderCollectionMachineFinding(episode);
-assert.equal(finding.hidden, false);
-renderCollectionMachineFinding(null);
-assert.equal(finding.hidden, true);
-renderCollectionMachineFinding({status: "saved", episode_index: 50});
-assert.equal(finding.hidden, true);
-renderCollectionMachineFinding({status: "saved", episode_index: 51, qc_auto: true,
-  qc_note: "machine failure in primary fields", qc_reason: "joint_limit_exceeded"});
-assert.equal(finding.textContent, "Machine finding\nmachine failure in primary fields");
+selectCollectionQcTarget({status: "saved", episode_index: 50});
+assert.equal(note.value, "");
+selectCollectionQcTarget(null);
+assert.equal(note.value, "");
 """
-    )
     subprocess.run(["node", "-e", script], check=True, timeout=10)
+    template = (root / "src/core/app/console/static/index.html").read_text()
+    assert 'id="collect-qc-machine"' not in template
 
 
 def test_larybench_display_grid_maps_world_points_to_21_cells():
@@ -466,6 +572,8 @@ const S = {
 };
 const t = (key) => ({
   "collect.slot": "SLOT", "collect.round": "ROUND", "collect.episodeLabel": "EPISODE",
+  "collect.qc.replay_summary_failed": "REPLAY FAILED",
+  "collect.qc.replay_report_invalid": "REPLAY REPORT INVALID",
 }[key] || key);
 function classList() {
   const values = new Set();
@@ -515,6 +623,25 @@ const newResult = render(slot);
 assert.match(newResult.className, /slot-failed/);
 assert.match(newResult.title, /new note/);
 assert.match(newResult.title, /new reason/);
+
+// Replay failures join the machine reason, while a successful replay clears it.
+slot = {...slot, episode: {...slot.episode, replay_required: true,
+  replay_verified: false, replay_qc_reason: "replay_summary_failed"}};
+const replayFailure = render(slot);
+assert.match(replayFailure.title, /new note/);
+assert.match(replayFailure.title, /new reason/);
+assert.match(replayFailure.title, /REPLAY FAILED/);
+assert.equal((replayFailure.title.match(/REPLAY FAILED/g) || []).length, 1);
+slot = {...slot, episode: {...slot.episode, replay_verified: true}};
+const replayPassed = render(slot);
+assert.doesNotMatch(replayPassed.title, /REPLAY FAILED/);
+
+// A replay-only failure still has a readable reason when no auto-QC finding exists.
+slot = {...slot, episode: {status: "saved", episode_index: 7, quality: "green",
+  qc_verdict: "unreviewed", replay_required: true, replay_verified: false,
+  replay_qc_reason: "replay_report_invalid"}};
+const replayOnly = render(slot);
+assert.equal((replayOnly.title.match(/REPLAY REPORT INVALID/g) || []).length, 1);
 
 // Cancelling the retake leaves the previous failed state and reason visible.
 slot = {...slot, qc_state: "failed", episode: oldEpisode};

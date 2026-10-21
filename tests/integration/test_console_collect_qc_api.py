@@ -108,10 +108,15 @@ def test_sim_human_pass_survives_console_refresh_and_preserves_findings(tmp_path
     )
     original = episode_path.read_bytes()
     report_path = meta / "render_reports/episode_000044.json"
+    replay_failure = "第1次回放有问题：任务未成功"
     if replay_success is not None:
         report_path.parent.mkdir()
         report_path.write_text(
-            json.dumps({"task_evaluation": {"success": replay_success, "error": None}})
+            json.dumps({"task_evaluation": {
+                "success": replay_success,
+                "error": {"type": "ReplayFailed", "message": replay_failure}
+                if replay_success is False else None,
+            }})
         )
     io = LeRobotDatasetIO(dataset_dir)
     assert io.mark_qc(44, "fail", "joint4 exceeds its limit", "joint_limit_exceeded", auto=True)
@@ -140,12 +145,22 @@ def test_sim_human_pass_survives_console_refresh_and_preserves_findings(tmp_path
             assert saved["replay_verified"] is replay_success
             expected_reason = (
                 "replay_report_pending" if replay_success is None
-                else "replay_summary_failed" if replay_success is False else ""
+                else replay_failure if replay_success is False else ""
             )
             assert saved["replay_qc_reason"] == expected_reason
             assert saved["qc_auto_verdict"] == "fail"
             assert saved["qc_auto_reason"] == "joint_limit_exceeded"
             assert saved["qc_auto_note"] == "joint4 exceeds its limit"
+            assert saved["qc_note"] == "reviewed"
+            if replay_success is False:
+                report = json.loads(report_path.read_text())
+                report["task_evaluation"]["error"]["message"] = "更新后的回放诊断"
+                report_path.write_text(json.dumps(report))
+                refreshed = console.get(
+                    "/api/episodes?scope=collect&set=cup_set&task=pick%20up%20cup"
+                ).json["episodes"][0]
+                assert refreshed["replay_qc_reason"] == "更新后的回放诊断"
+                assert refreshed["qc_note"] == "reviewed"
             assert episode_path.read_bytes() == original
             response = console.post("/api/collect_qc_mark", {**body, "verdict": "unreviewed"})
             assert response.status == 200

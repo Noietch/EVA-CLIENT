@@ -101,5 +101,24 @@ def replay_validation(dataset_dir: Path, episode: dict[str, Any]) -> tuple[bool 
         or evaluation["success"] is not True
         or evaluation["error"] is not None
     ):
-        return False, "replay_summary_failed"
+        error = evaluation.get("error")
+        reason = str((error.get("message") if isinstance(error, dict) else error) or "")
+        result = evaluation.get("final_result")
+        diagnostics = result.get("diagnostics") if isinstance(result, dict) else None
+        if (
+            isinstance(diagnostics, dict)
+            and isinstance(diagnostics.get("joint"), str)
+            and all(
+                isinstance(diagnostics.get(key), (int, float))
+                for key in ("target_position", "joint_position", "target_error")
+            )
+        ):
+            joint_reason = (
+                f"关节 {diagnostics['joint']}："
+                f"目标 {diagnostics['target_position']:.5g}，"
+                f"实际 {diagnostics['joint_position']:.5g}，"
+                f"偏差 {diagnostics['target_error']:.5g}"
+            )
+            reason = f"{reason}；{joint_reason}" if reason else joint_reason
+        return False, reason or "replay_summary_failed"
     return True, ""

@@ -173,6 +173,28 @@ def test_sim_replay_gate_rejects_failed_summary(tmp_path, success, error):
     assert (verified, reason) == (False, "replay_summary_failed")
 
 
+@pytest.mark.parametrize("details", [
+    {"error": "replay crashed"},
+    {"final_result": "incomplete"},
+    {"final_result": {"diagnostics": ["target_error"]}},
+    {"final_result": {"diagnostics": {"target_error": 0.1}}},
+    {"final_result": {"diagnostics": {
+        "joint": "door", "target_error": 0.1,
+        "target_position": None, "joint_position": "unknown",
+    }}},
+])
+def test_failed_replay_with_incomplete_details_still_returns_a_verdict(tmp_path, details):
+    report_path = tmp_path / "report.json"
+    report_path.write_text(json.dumps({
+        "task_evaluation": {"success": False, "error": None, **details},
+    }))
+    verified, reason = replay_validation(
+        tmp_path, {"episode_index": 0, "render_report": "report.json"}
+    )
+    assert verified is False
+    assert reason == details.get("error", "replay_summary_failed")
+
+
 def test_sim_replay_gate_rejects_json_one_as_success(tmp_path):
     report_dir = tmp_path / "meta" / "render_reports"
     report_dir.mkdir(parents=True)
@@ -187,6 +209,30 @@ def test_sim_replay_gate_rejects_json_one_as_success(tmp_path):
         tmp_path, {"episode_index": 0, "sim_metadata": {"schema_version": 1}}
     )
     assert (verified, reason) == (False, "replay_summary_failed")
+
+
+@pytest.mark.parametrize("error", [None, {"type": "ReplayFailed", "message": "三次回放任务未成功"}])
+def test_failed_replay_exposes_joint_target_diagnostics(tmp_path, error):
+    report_path = tmp_path / "render/reports/episode_000001.json"
+    report_path.parent.mkdir(parents=True)
+    report_path.write_text(json.dumps({
+        "task_evaluation": {
+            "success": False,
+            "error": error,
+            "final_result": {"diagnostics": {
+                "joint": "left_door_slide",
+                "target_position": -0.15,
+                "joint_position": -0.1899999976158142,
+                "target_error": 0.039999997615814215,
+            }},
+        },
+    }))
+    verified, reason = replay_validation(
+        tmp_path, {"episode_index": 1, "render_report": str(report_path.relative_to(tmp_path))}
+    )
+    assert verified is False
+    detail = "关节 left_door_slide：目标 -0.15，实际 -0.19，偏差 0.04"
+    assert reason == (f"{error['message']}；{detail}" if error else detail)
 
 
 @pytest.mark.parametrize("verified", [None, False, True])
