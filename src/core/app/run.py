@@ -592,10 +592,12 @@ def _handle_web_command(
             and logger_obj.is_evaluation
             and logger_obj.has_active_episode
         )
-        starting_eval = bool(
-            config.eval and runtime.web_phase == "starting" and runtime.current_clip_id is not None
+        active_eval_run = bool(
+            config.eval
+            and runtime.current_clip_id is not None
+            and runtime.web_phase in {"starting", "running", "stopping", "cancelling"}
         )
-        if not active_eval_episode and not starting_eval:
+        if not active_eval_episode and not active_eval_run:
             logger.info("Ignored eval cancel: no active evaluation Episode")
             return
         # SIM cleanup/reset is owned by the Task Orchestrator and never happens here.

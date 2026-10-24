@@ -1603,7 +1603,11 @@ def _serialize_status(ctx: ConsoleContext, *, include_history: bool = False) -> 
                 format_task_label(s.selected_task),
                 include_history=include_history,
             )
-            if config.eval and r.episode_logger is not None
+            if (
+                config.eval
+                and bool((config.eval.get("storage") or {}).get("enabled", True))
+                and r.episode_logger is not None
+            )
             else None
         ),
         "collect": (
@@ -2048,6 +2052,8 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             getattr(self, "_active_trace_id", "none"),
             _command_summary(command),
         )
+        if command == "web:warmup" and self.ctx.runtime.web_phase == "ready":
+            self.ctx.session.is_setup_done = False
         self.ctx.runtime.command_queue.put(command)
 
     def _invalidate_scene_cache(self) -> None:

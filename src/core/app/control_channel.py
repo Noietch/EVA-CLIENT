@@ -204,6 +204,8 @@ def _handle_command(runtime: RuntimeState, message: dict) -> dict:
         )
 
     assert runtime.command_queue is not None
+    if verb == "warmup" and runtime.web_phase == "ready":
+        ctx.session.is_setup_done = False
     runtime.command_queue.put(command)
     return {"ok": True, "cmd": command}
 
