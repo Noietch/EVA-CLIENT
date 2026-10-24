@@ -892,9 +892,7 @@ def enable_default_recording(config: ConfigDict, output_dir: str) -> ConfigDict:
     prior episodes auto-resume. The computed dir lands in ``eval.storage.log_dir``.
     No-op for non-eval configs (collection/plain console manage their own storage).
     """
-    if not config.eval or not bool(
-        (config.eval.get("storage") or {}).get("enabled", True)
-    ):
+    if not config.eval or not bool((config.eval.get("storage") or {}).get("enabled", True)):
         return config
     new_config = copy.deepcopy(config)
     new_config.eval.storage.log_dir = str(

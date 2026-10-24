@@ -84,7 +84,8 @@ def test_device_catalog_composes_and_restores_each_robot(tmp_path, monkeypatch):
                 assert command[0] == str(REPOSITORY_ROOT / spec["script"])
                 assert command[1:] == [
                     *spec.get("fixed", []),
-                    "--camera-endpoint", values["robot"]["settings"]["camera_endpoint"],
+                    "--camera-endpoint",
+                    values["robot"]["settings"]["camera_endpoint"],
                 ]
                 continue
             module = importlib.import_module(spec["module"])

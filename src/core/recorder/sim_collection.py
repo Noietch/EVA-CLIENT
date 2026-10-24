@@ -106,9 +106,7 @@ class SimRecordingClient:
             raise SimRecordingError("SIM status response has no data object")
         return data
 
-    def resolve_scene_revision(
-        self, expected_metadata: Mapping[str, Any] | None = None
-    ) -> int:
+    def resolve_scene_revision(self, expected_metadata: Mapping[str, Any] | None = None) -> int:
         return _scene_revision(self.get_status(), expected_metadata)
 
     def recording_steps(self, episode_id: str) -> int:
@@ -229,9 +227,7 @@ def read_sim_execution(
                 raise SimRecordingError("duplicate footer")
             footer = payload
         else:
-            raise SimRecordingError(
-                f"unexpected MCAP record type at message {message_number}"
-            )
+            raise SimRecordingError(f"unexpected MCAP record type at message {message_number}")
     _validate_footer(footer, seen_steps, expected_steps)
     if seen_steps <= 0:
         raise SimRecordingError("SIM recording contains no control steps")
@@ -261,13 +257,9 @@ def _iter_mcap_payloads(path: Path) -> Iterator[dict[str, Any]]:
                         f"MCAP message sequence gap at message {message_number}"
                     )
                 if channel.topic != _SIM_EXECUTION_TOPIC:
-                    raise SimRecordingError(
-                        f"unexpected MCAP topic at message {message_number}"
-                    )
+                    raise SimRecordingError(f"unexpected MCAP topic at message {message_number}")
                 if channel.message_encoding != _SIM_EXECUTION_ENCODING:
-                    raise SimRecordingError(
-                        f"unexpected MCAP encoding at message {message_number}"
-                    )
+                    raise SimRecordingError(f"unexpected MCAP encoding at message {message_number}")
                 try:
                     payload = json.loads(message.data.decode("utf-8"))
                 except (UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -275,9 +267,7 @@ def _iter_mcap_payloads(path: Path) -> Iterator[dict[str, Any]]:
                         f"invalid MCAP JSON at message {message_number}"
                     ) from error
                 if not isinstance(payload, dict):
-                    raise SimRecordingError(
-                        f"MCAP message {message_number} is not an object"
-                    )
+                    raise SimRecordingError(f"MCAP message {message_number} is not an object")
                 yield payload
     except FileNotFoundError as error:
         raise SimRecordingError(f"SIM recording file is missing: {path}") from error
@@ -324,9 +314,7 @@ def _recording_reply(
     return SimRecordingReply(episode_id, path, status, steps)
 
 
-def _scene_revision(
-    status: Mapping[str, Any], expected_metadata: Mapping[str, Any] | None
-) -> int:
+def _scene_revision(status: Mapping[str, Any], expected_metadata: Mapping[str, Any] | None) -> int:
     _check_scene_metadata(status, expected_metadata)
     try:
         revision = int(status["scene_revision"])

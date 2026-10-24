@@ -289,9 +289,7 @@ def test_scene_metadata_accepts_canonical_composite_task_id() -> None:
         {
             "task_id": task_id,
             "scene_id": scene_id,
-            "sim_metadata": {
-                "task_item": {"task_item_id": f"{task_id}__{scene_id}"}
-            },
+            "sim_metadata": {"task_item": {"task_item_id": f"{task_id}__{scene_id}"}},
         },
     )
 
@@ -308,9 +306,7 @@ def test_scene_metadata_rejects_different_composite_task_id() -> None:
                 "task_id": "v12_eval_v12_EV1C-ACT02",
                 "scene_id": scene_id,
                 "sim_metadata": {
-                    "task_item": {
-                        "task_item_id": f"v12_eval_v12_EV1C-ACT02__{scene_id}"
-                    }
+                    "task_item": {"task_item_id": f"v12_eval_v12_EV1C-ACT02__{scene_id}"}
                 },
             },
         )

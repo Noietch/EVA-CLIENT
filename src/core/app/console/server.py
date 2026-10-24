@@ -1337,18 +1337,14 @@ def _collection_slots_snapshot(ctx: ConsoleContext, dataset: str) -> dict[str, A
         and ctx.session.collection_slot_id
     ):
         projected_queue = [*queue, {"slot_id": ctx.session.collection_slot_id, "status": "saving"}]
-        _, next_candidate, _ = collection_slot_status(
-            slots, episodes, projected_queue, slot_state
-        )
+        _, next_candidate, _ = collection_slot_status(slots, episodes, projected_queue, slot_state)
         if next_candidate is not None:
             next_candidate = dict(next_candidate)
         elif any(
             slot.slot_id == ctx.session.collection_slot_id and slot.unbounded for slot in slots
         ):
             next_candidate = next(
-                row
-                for row in rows
-                if row["slot_id"] == ctx.session.collection_slot_id
+                row for row in rows if row["slot_id"] == ctx.session.collection_slot_id
             ).copy()
             next_candidate["state"] = "active"
             next_candidate["repair"] = False
@@ -3155,7 +3151,8 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                 self._send_empty(404)
                 return
             if path in {
-                "/api/select_collect_task", "/api/select_collection_slot",
+                "/api/select_collect_task",
+                "/api/select_collection_slot",
                 "/api/skip_collection_slot",
             }:
                 with self.ctx.collection_selection_lock:
@@ -3598,7 +3595,8 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             active = snapshot["active"]
             session = self.ctx.session
             if (
-                active is None or active["slot_id"] != slot_id
+                active is None
+                or active["slot_id"] != slot_id
                 or session.selected_collect_set != dataset
                 or session.collection_slot_id not in {None, slot_id}
                 or (
@@ -3610,10 +3608,15 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                 return
             self._apply_collection_slot(active)
             session.collection_sim_metadata = copy.deepcopy(sim_metadata)
-            self._send_json(200, {
-                "ok": True, "active": active, "counts": snapshot["counts"],
-                "sim_metadata_attached": session.collection_sim_metadata is not None,
-            })
+            self._send_json(
+                200,
+                {
+                    "ok": True,
+                    "active": active,
+                    "counts": snapshot["counts"],
+                    "sim_metadata_attached": session.collection_sim_metadata is not None,
+                },
+            )
             return
         config = self.ctx.runtime.active_config or self.ctx.config
         select_collection_slot(

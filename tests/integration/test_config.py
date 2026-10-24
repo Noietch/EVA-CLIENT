@@ -198,9 +198,7 @@ def test_dual_yam_eva_sim_config_selects_multiple_task_sets():
     )
     assert (
         "datasets/data_collection/task_sets/larybenchv2.v1.2/larybench.v1.2.train.supplement"
-    ) in (
-        cfg.collection.task_set_dir
-    )
+    ) in (cfg.collection.task_set_dir)
     assert (
         "datasets/data_collection/task_sets/larybench2_20260908_eva_sim_dual_yam_pickplace_last200"
     ) not in cfg.collection.task_set_dir

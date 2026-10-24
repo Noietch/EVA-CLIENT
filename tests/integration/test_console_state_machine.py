@@ -147,8 +147,9 @@ def test_eval_cancel_discards_active_episode_and_is_idempotent(console):
 
 def test_completed_slot_retake_survives_polling_and_releases_after_save(tmp_path, monkeypatch):
     monkeypatch.setattr(
-        console_server, "_load_scene_plan",
-        lambda *_args: {"scenes": [], "tasks": [], "version": "inline"}
+        console_server,
+        "_load_scene_plan",
+        lambda *_args: {"scenes": [], "tasks": [], "version": "inline"},
     )
     episodes = [
         {"slot_id": "INLINE-0:DEFAULT:0", "episode_index": 0, "status": "saved", "quality": "green"}

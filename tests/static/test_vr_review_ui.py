@@ -30,7 +30,8 @@ def test_collection_save_refresh_waits_for_pipeline_boundary():
             "function applyCollectionSlotsPayload("
         )
     ]
-    script = r'''
+    script = (
+        r"""
 const assert = require("node:assert/strict");
 const S = {collectTaskSelectionPending: false,
   collectionSlots: {active: {slot_id: "old"}}};
@@ -44,7 +45,9 @@ const pollCollectionSlots = (force) => {
   calls++;
   return Promise.resolve({ok: false, active: {slot_id: "new"}});
 };
-''' + handlers + r'''
+"""
+        + handlers
+        + r"""
 (async () => {
   assert.deepEqual(collectionPipelineState({collecting: true}),
     {collecting: true, saving: false});
@@ -91,7 +94,8 @@ const pollCollectionSlots = (force) => {
   // A failed/cancelled read is observational only; it cannot advance the slot.
   assert.equal(S.collectionSlots.active.slot_id, "old");
 })().catch((error) => {console.error(error); process.exitCode = 1;});
-'''
+"""
+    )
     subprocess.run(["node", "-e", script], check=True, timeout=10)
 
 
@@ -354,7 +358,8 @@ def test_machine_failure_color_and_editable_note():
             )
         ]
     )
-    script = r"""
+    script = (
+        r"""
 const assert = require("node:assert/strict");
 const note = {value: "", defaultValue: ""};
 const status = {};
@@ -368,7 +373,9 @@ const t = (key) => ({
   "collect.qc.replay_report_invalid": "REPLAY REPORT INVALID",
   "collect.qc.replay_evaluation_missing": "REPLAY EVALUATION MISSING",
 }[key] || key);
-""" + handlers + r"""
+"""
+        + handlers
+        + r"""
 const episode = {status: "saved", episode_index: 49, quality: "green",
   qc_verdict: "unreviewed", qc_note: "human note", qc_auto_verdict: "fail",
   qc_auto_reason: "joint_limit_exceeded", qc_auto_note: "joint4 exceeds its limit"};
@@ -435,6 +442,7 @@ assert.equal(note.value, "");
 selectCollectionQcTarget(null);
 assert.equal(note.value, "");
 """
+    )
     subprocess.run(["node", "-e", script], check=True, timeout=10)
     template = (root / "src/core/app/console/static/index.html").read_text()
     assert 'id="collect-qc-machine"' not in template

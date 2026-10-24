@@ -19,10 +19,15 @@ pytestmark = pytest.mark.integration
 @pytest.mark.parametrize("complete_before_register", [False, True])
 def test_async_failure_preserves_reason_and_final_index(complete_before_register: bool) -> None:
     ctx = ConsoleContext(
-        config=ConfigDict(), runtime=SimpleNamespace(), session=SessionState(),
+        config=ConfigDict(),
+        runtime=SimpleNamespace(),
+        session=SessionState(),
     )
     job = SimpleNamespace(
-        episode_meta={"slot_id": "slot-A"}, episode_index=1, status="queued", error="",
+        episode_meta={"slot_id": "slot-A"},
+        episode_index=1,
+        status="queued",
+        error="",
     )
     if not complete_before_register:
         ctx.register_collection_save_job(job, "dataset")
@@ -32,10 +37,15 @@ def test_async_failure_preserves_reason_and_final_index(complete_before_register
     ctx.collection_save_job_finished(job)
     if complete_before_register:
         ctx.register_collection_save_job(job, "dataset")
-    assert ctx.collection_save_snapshot("dataset") == [{
-        "dataset": "dataset", "slot_id": "slot-A", "episode_index": 2,
-        "status": "failed", "error": "dataset commit failed",
-    }]
+    assert ctx.collection_save_snapshot("dataset") == [
+        {
+            "dataset": "dataset",
+            "slot_id": "slot-A",
+            "episode_index": 2,
+            "status": "failed",
+            "error": "dataset commit failed",
+        }
+    ]
     assert ctx.collection_save_revision == 0
 
 

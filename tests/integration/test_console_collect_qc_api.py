@@ -97,14 +97,17 @@ def test_sim_human_pass_survives_console_refresh_and_preserves_findings(tmp_path
     meta.mkdir(parents=True)
     episode_path = meta / "episodes.jsonl"
     episode_path.write_text(
-        json.dumps({
-            "episode_index": 44,
-            "tasks": ["pick up cup"],
-            "slot_id": slot_id,
-            "length": 30,
-            "quality": "red",
-            "sim_metadata": {"schema_version": 1},
-        }) + "\n"
+        json.dumps(
+            {
+                "episode_index": 44,
+                "tasks": ["pick up cup"],
+                "slot_id": slot_id,
+                "length": 30,
+                "quality": "red",
+                "sim_metadata": {"schema_version": 1},
+            }
+        )
+        + "\n"
     )
     original = episode_path.read_bytes()
     report_path = meta / "render_reports/episode_000044.json"
@@ -112,11 +115,16 @@ def test_sim_human_pass_survives_console_refresh_and_preserves_findings(tmp_path
     if replay_success is not None:
         report_path.parent.mkdir()
         report_path.write_text(
-            json.dumps({"task_evaluation": {
-                "success": replay_success,
-                "error": {"type": "ReplayFailed", "message": replay_failure}
-                if replay_success is False else None,
-            }})
+            json.dumps(
+                {
+                    "task_evaluation": {
+                        "success": replay_success,
+                        "error": {"type": "ReplayFailed", "message": replay_failure}
+                        if replay_success is False
+                        else None,
+                    }
+                }
+            )
         )
     io = LeRobotDatasetIO(dataset_dir)
     assert io.mark_qc(44, "fail", "joint4 exceeds its limit", "joint_limit_exceeded", auto=True)
@@ -144,8 +152,11 @@ def test_sim_human_pass_survives_console_refresh_and_preserves_findings(tmp_path
             assert saved["qc_verdict"] == "pass"
             assert saved["replay_verified"] is replay_success
             expected_reason = (
-                "replay_report_pending" if replay_success is None
-                else replay_failure if replay_success is False else ""
+                "replay_report_pending"
+                if replay_success is None
+                else replay_failure
+                if replay_success is False
+                else ""
             )
             assert saved["replay_qc_reason"] == expected_reason
             assert saved["qc_auto_verdict"] == "fail"

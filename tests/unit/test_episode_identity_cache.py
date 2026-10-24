@@ -15,15 +15,24 @@ def test_repeated_lookup_and_qc_do_not_reread_episode_metadata(tmp_path, monkeyp
     meta = tmp_path / "meta"
     meta.mkdir()
     path = meta / "episodes.jsonl"
-    original = json.dumps({
-        "episode_index": 7,
-        "file_stem": "capture-seven",
-        "sim_metadata": {"objects": [{"pose": [0] * 7}] * 1000},
-    }) + "\n"
+    original = (
+        json.dumps(
+            {
+                "episode_index": 7,
+                "file_stem": "capture-seven",
+                "sim_metadata": {"objects": [{"pose": [0] * 7}] * 1000},
+            }
+        )
+        + "\n"
+    )
     path.write_text(original)
-    (meta / "info.json").write_text(json.dumps({
-        "data_path": "data/{episode_file}.parquet",
-    }))
+    (meta / "info.json").write_text(
+        json.dumps(
+            {
+                "data_path": "data/{episode_file}.parquet",
+            }
+        )
+    )
     opens = 0
     original_open = Path.open
 
@@ -79,7 +88,8 @@ def test_identity_cache_is_scoped_to_dataset_and_keeps_last_duplicate(tmp_path):
         meta.mkdir(parents=True)
         (meta / "episodes.jsonl").write_text(
             '{"episode_index": 0, "file_stem": "old"}\n\n'
-            + json.dumps({"episode_index": 0, "file_stem": stem}) + "\n"
+            + json.dumps({"episode_index": 0, "file_stem": stem})
+            + "\n"
         )
     assert LeRobotDatasetIO(tmp_path / "a").episode_file_stem(0) == "first"
     assert LeRobotDatasetIO(tmp_path / "b").episode_file_stem(0) == "second"

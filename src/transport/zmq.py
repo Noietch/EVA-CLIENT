@@ -1028,7 +1028,9 @@ class ZmqTransport(TransportBridge):
     ) -> None:
         action_time = time.monotonic()
         message = WireAction(
-            t=action_time, action=np.asarray(action), target=target,
+            t=action_time,
+            action=np.asarray(action),
+            target=target,
             world_instance_id=world_instance_id,
         )
         self._pub.send(pack_action(message))

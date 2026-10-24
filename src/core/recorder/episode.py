@@ -350,9 +350,7 @@ class EpisodeLogger:
         self._collection_qc = CollectionQcWorker(robot) if self._collection_writer else None
         self._save_completion_callback: Callable[[SaveJob], None] | None = None
 
-    def set_save_completion_callback(
-        self, callback: Callable[[SaveJob], None] | None
-    ) -> None:
+    def set_save_completion_callback(self, callback: Callable[[SaveJob], None] | None) -> None:
         """Set the callback notified after one async save reaches a terminal state."""
         with self._lock:
             self._save_completion_callback = callback
@@ -365,9 +363,7 @@ class EpisodeLogger:
         try:
             callback(job)
         except Exception:
-            logger.exception(
-                "Save completion callback failed for episode %d", job.episode_index
-            )
+            logger.exception("Save completion callback failed for episode %d", job.episode_index)
 
     # -- episode lifecycle ------------------------------------------------------
 
@@ -418,9 +414,7 @@ class EpisodeLogger:
             return
         if not self._active or self._task is None:
             raise RuntimeError("cannot start SIM recording without an active episode")
-        dataset_dir = self._collection_dataset_dir(
-            self._task, self._active_collection_dataset
-        )
+        dataset_dir = self._collection_dataset_dir(self._task, self._active_collection_dataset)
         self._collection_writer.start_sim_recording(dataset_dir, expected_metadata)
 
     def stop_sim_recording(self) -> None:

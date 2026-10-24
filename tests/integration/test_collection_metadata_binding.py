@@ -16,9 +16,15 @@ pytestmark = pytest.mark.integration
 
 
 def select(console, slot_id, **fields):
-    return console.post("/api/select_collection_slot", {
-        "dataset": "cup_set", "slot_id": slot_id, "manual": True, **fields,
-    })
+    return console.post(
+        "/api/select_collection_slot",
+        {
+            "dataset": "cup_set",
+            "slot_id": slot_id,
+            "manual": True,
+            **fields,
+        },
+    )
 
 
 def test_metadata_update_cannot_reselect_an_obsolete_slot_or_dataset(tmp_path):
@@ -37,9 +43,17 @@ def test_metadata_update_cannot_reselect_an_obsolete_slot_or_dataset(tmp_path):
             assert select(console, first, metadata_only=True, sim_metadata=metadata).status == 409
             assert console.session.collection_slot_id == second
             assert console.session.collection_sim_metadata is None
-        assert console.post("/api/select_collect_task", {
-            "dataset": "pouring_set", "task": "pour soybean", "task_index": 0,
-        }).status == 200
+        assert (
+            console.post(
+                "/api/select_collect_task",
+                {
+                    "dataset": "pouring_set",
+                    "task": "pour soybean",
+                    "task_index": 0,
+                },
+            ).status
+            == 200
+        )
         stale = select(console, second, metadata_only=True, sim_metadata={"world": "b"})
         assert stale.status == 409
         assert console.session.selected_collect_set == "pouring_set"
@@ -78,8 +92,9 @@ def test_new_selection_waits_for_binding_then_clears_the_previous_metadata(tmp_p
             mock.patch.object(server.copy, "deepcopy", delayed_copy),
             ThreadPoolExecutor(2) as pool,
         ):
-            binding = pool.submit(select, console, first, metadata_only=True,
-                                  sim_metadata={"world": "delayed"})
+            binding = pool.submit(
+                select, console, first, metadata_only=True, sim_metadata={"world": "delayed"}
+            )
             try:
                 assert entered.wait(2)
                 selection = pool.submit(select, console, second)

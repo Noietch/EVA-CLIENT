@@ -182,8 +182,7 @@ def test_episode_logger_imports_sim_steps_without_sidecars(monkeypatch, tmp_path
     assert calls == ["GET", "GET", "POST", "POST"]
 
     metadata_before = {
-        name: (dataset_dir / "meta" / name).read_bytes()
-        for name in ("info.json", "episodes.jsonl")
+        name: (dataset_dir / "meta" / name).read_bytes() for name in ("info.json", "episodes.jsonl")
     }
     control_dt = 0.05
     logger.start_episode("task", collection_dataset="dataset")

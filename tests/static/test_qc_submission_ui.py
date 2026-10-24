@@ -12,16 +12,20 @@ def test_collection_qc_feedback_and_failure_recovery():
     source = (
         Path(__file__).resolve().parents[2] / "src/core/app/console/static/js/collect.js"
     ).read_text()
-    handlers = source[
-        source.index("async function submitEpisodeQc(") : source.index(
-            "async function submitEpisodeNote("
-        )
-    ] + source[
-        source.index("function renderCollectionQcControls(") : source.index(
-            "function selectedCollectEpisodeItem("
-        )
-    ]
-    script = r'''
+    handlers = (
+        source[
+            source.index("async function submitEpisodeQc(") : source.index(
+                "async function submitEpisodeNote("
+            )
+        ]
+        + source[
+            source.index("function renderCollectionQcControls(") : source.index(
+                "function selectedCollectEpisodeItem("
+            )
+        ]
+    )
+    script = (
+        r"""
 const assert = require("node:assert/strict");
 const episodeQcPending = new Set();
 const episode = {episode_index: 7, qc_verdict: "fail", qc_auto: true,
@@ -62,7 +66,9 @@ const pollCollectionSlots = (force, options) => {
   assert.equal(options.preserveView, true);
   return new Promise(() => {});
 };
-''' + handlers + r'''
+"""
+        + handlers
+        + r"""
 (async () => {
   const first = submitEpisodeQc("collect", "pass");
   assert.equal($("collect-qc-status").textContent, "saving…");
@@ -101,7 +107,8 @@ const pollCollectionSlots = (force, options) => {
   assert.equal(await retry, true);
   assert.equal(slot.qc_state, "failed");
 })().catch((error) => {console.error(error); process.exitCode = 1;});
-'''
+"""
+    )
     subprocess.run(["node", "-e", script], check=True, timeout=10)
 
 
@@ -114,7 +121,8 @@ def test_qc_slot_refresh_preserves_tiles_even_if_request_fails():
             "async function selectCollectionDataset("
         )
     ]
-    script = r'''
+    script = (
+        r"""
 const assert = require("node:assert/strict");
 const tiles = [{slot_id: "selected", episode: {episode_index: 7}}];
 const state = {dataset: "set", loaded: true, slots: tiles, active: null};
@@ -125,7 +133,9 @@ const setCollectError = () => {};
 const t = (key, values) => values.error;
 const collectionSlotQuery = () => "/slots";
 const apiGet = () => new Promise((resolve, reject) => {rejectGet = reject;});
-''' + handler + r'''
+"""
+        + handler
+        + r"""
 (async () => {
   const refresh = pollCollectionSlots(true, {preserveView: true});
   assert.equal(state.slots, tiles);
@@ -140,5 +150,6 @@ const apiGet = () => new Promise((resolve, reject) => {rejectGet = reject;});
   rejectGet(new Error("unavailable"));
   await navigation;
 })().catch((error) => {console.error(error); process.exitCode = 1;});
-'''
+"""
+    )
     subprocess.run(["node", "-e", script], check=True, timeout=10)

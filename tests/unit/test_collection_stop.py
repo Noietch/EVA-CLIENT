@@ -36,7 +36,8 @@ def test_cancel_releases_client_episode_when_sim_has_exited() -> None:
 
     session = SessionState(status=SessionStatus.RUNNING, collection_slot_id="slot-A")
     runtime = SimpleNamespace(
-        episode_logger=Logger(), collection_capture_runner=None,
+        episode_logger=Logger(),
+        collection_capture_runner=None,
         transport=SimpleNamespace(finish_collection_capture=lambda: None),
     )
     collect_cancel(runtime, session)
@@ -298,9 +299,7 @@ def test_sim_collect_stop_queues_without_waiting_and_keeps_two_jobs_separate() -
     logger_obj.jobs[0].status = "saved"
     logger_obj.callback(logger_obj.jobs[0])
     assert ctx.collection_save_revision == 1
-    assert [record["slot_id"] for record in ctx.collection_save_snapshot("dataset")] == [
-        "slot-B"
-    ]
+    assert [record["slot_id"] for record in ctx.collection_save_snapshot("dataset")] == ["slot-B"]
 
 
 def test_sim_collect_stop_does_not_advance_when_raw_stop_fails() -> None:

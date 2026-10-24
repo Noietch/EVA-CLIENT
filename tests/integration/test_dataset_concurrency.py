@@ -79,8 +79,7 @@ def test_stations_prepare_without_holding_the_commit_lock(tmp_path, same_slot) -
     barrier = context.Barrier(2)
     tasks = ("a", "a" if same_slot else "b")
     stations = [
-        context.Process(target=_prepare_station, args=(tmp_path, task, barrier))
-        for task in tasks
+        context.Process(target=_prepare_station, args=(tmp_path, task, barrier)) for task in tasks
     ]
     for station in stations:
         station.start()
@@ -92,19 +91,16 @@ def test_stations_prepare_without_holding_the_commit_lock(tmp_path, same_slot) -
     episodes = _read_jsonl(dataset_dir / "meta/episodes.jsonl")
     assert len(episodes) == (1 if same_slot else 2)
     task_indices = {
-        row["task"]: row["task_index"]
-        for row in _read_jsonl(dataset_dir / "meta/tasks.jsonl")
+        row["task"]: row["task_index"] for row in _read_jsonl(dataset_dir / "meta/tasks.jsonl")
     }
     for episode in episodes:
         index = episode["episode_index"]
         table = pq.read_table(dataset_dir / f"data/chunk-000/episode_{index:06d}.parquet")
         assert set(table.column("episode_index").to_pylist()) == {index}
-        assert set(table.column("task_index").to_pylist()) == {
-            task_indices[episode["tasks"][0]]
-        }
-        assert table.column("index").to_pylist() == list(range(
-            episode["global_index_start"], episode["global_index_start"] + episode["length"]
-        ))
+        assert set(table.column("task_index").to_pylist()) == {task_indices[episode["tasks"][0]]}
+        assert table.column("index").to_pylist() == list(
+            range(episode["global_index_start"], episode["global_index_start"] + episode["length"])
+        )
     ranges = sorted(_index_ranges(tmp_path).values())
     assert all(start >= 0 for start, _ in ranges)
     assert all(end < start for (_, end), (start, _) in pairwise(ranges))

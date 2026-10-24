@@ -299,9 +299,7 @@ class CollectionEpisodeWriter:
             return
         self._sim_status_checked_at = now
         try:
-            self._sim_status_steps = self._sim_client.recording_steps(
-                self._sim_handle.episode_id
-            )
+            self._sim_status_steps = self._sim_client.recording_steps(self._sim_handle.episode_id)
         except Exception as error:
             message = str(error)
             if message != self._sim_status_error:

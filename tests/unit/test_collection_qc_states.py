@@ -173,21 +173,34 @@ def test_sim_replay_gate_rejects_failed_summary(tmp_path, success, error):
     assert (verified, reason) == (False, "replay_summary_failed")
 
 
-@pytest.mark.parametrize("details", [
-    {"error": "replay crashed"},
-    {"final_result": "incomplete"},
-    {"final_result": {"diagnostics": ["target_error"]}},
-    {"final_result": {"diagnostics": {"target_error": 0.1}}},
-    {"final_result": {"diagnostics": {
-        "joint": "door", "target_error": 0.1,
-        "target_position": None, "joint_position": "unknown",
-    }}},
-])
+@pytest.mark.parametrize(
+    "details",
+    [
+        {"error": "replay crashed"},
+        {"final_result": "incomplete"},
+        {"final_result": {"diagnostics": ["target_error"]}},
+        {"final_result": {"diagnostics": {"target_error": 0.1}}},
+        {
+            "final_result": {
+                "diagnostics": {
+                    "joint": "door",
+                    "target_error": 0.1,
+                    "target_position": None,
+                    "joint_position": "unknown",
+                }
+            }
+        },
+    ],
+)
 def test_failed_replay_with_incomplete_details_still_returns_a_verdict(tmp_path, details):
     report_path = tmp_path / "report.json"
-    report_path.write_text(json.dumps({
-        "task_evaluation": {"success": False, "error": None, **details},
-    }))
+    report_path.write_text(
+        json.dumps(
+            {
+                "task_evaluation": {"success": False, "error": None, **details},
+            }
+        )
+    )
     verified, reason = replay_validation(
         tmp_path, {"episode_index": 0, "render_report": "report.json"}
     )
@@ -215,18 +228,24 @@ def test_sim_replay_gate_rejects_json_one_as_success(tmp_path):
 def test_failed_replay_exposes_joint_target_diagnostics(tmp_path, error):
     report_path = tmp_path / "render/reports/episode_000001.json"
     report_path.parent.mkdir(parents=True)
-    report_path.write_text(json.dumps({
-        "task_evaluation": {
-            "success": False,
-            "error": error,
-            "final_result": {"diagnostics": {
-                "joint": "left_door_slide",
-                "target_position": -0.15,
-                "joint_position": -0.1899999976158142,
-                "target_error": 0.039999997615814215,
-            }},
-        },
-    }))
+    report_path.write_text(
+        json.dumps(
+            {
+                "task_evaluation": {
+                    "success": False,
+                    "error": error,
+                    "final_result": {
+                        "diagnostics": {
+                            "joint": "left_door_slide",
+                            "target_position": -0.15,
+                            "joint_position": -0.1899999976158142,
+                            "target_error": 0.039999997615814215,
+                        }
+                    },
+                },
+            }
+        )
+    )
     verified, reason = replay_validation(
         tmp_path, {"episode_index": 1, "render_report": str(report_path.relative_to(tmp_path))}
     )
