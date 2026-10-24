@@ -401,6 +401,8 @@ def fetch_action_chunk(
         if "actions" not in response:
             raise KeyError(f"Response does not contain 'actions': {response}")
         original_chunk = normalize_action_chunk(response["actions"])
+        if len(original_chunk) == 0:
+            return original_chunk
         submit_rl_critic(runtime, observation, original_chunk, "policy")
         action_chunk = normalize_policy_action_chunk(
             config, runtime, original_chunk, response=response
@@ -589,7 +591,7 @@ def ensure_action_chunk(config: ConfigDict, runtime: RuntimeState, session: Sess
         logger.info("Action chunk preparation failed: %s", error)
         return False
     session.chunk_index = 0
-    if session.action_chunk is not None:
+    if session.action_chunk is not None and len(session.action_chunk) > 0:
         logger.info(
             "[CHUNK_READY] step=%d len=%d delta=%.4f first=%s last=%s",
             session.step_index,
@@ -598,7 +600,8 @@ def ensure_action_chunk(config: ConfigDict, runtime: RuntimeState, session: Sess
             _format_diag_vector(session.action_chunk[0]),
             _format_diag_vector(session.action_chunk[-1]),
         )
-    return True
+        return True
+    return False
 
 
 def _replay_total_frames(runtime: RuntimeState, replay: TransportBridge) -> int:
