@@ -62,23 +62,24 @@ from core.app.handlers import (
     teleop_status,
 )
 from core.app.handlers.io import load_replay_dataset
+from core.app.local_history import history_enabled, history_status, history_store
 from core.app.rl import build_rl_critic_observation, rl_live_series
 from core.app.state import (
     RuntimeState,
     SessionMode,
     SessionState,
+    SessionStatus,
     format_task_label,
     resolve_inference_strategy_label,
     set_phase,
 )
-from core.config import ConfigDict
+from core.config import ConfigDict, deployment_models
 from core.devices.service import DeviceSettings
 from core.utils.collection_paths import (
     dataset_location,
     discover_task_sets,
     resolve_task_set,
     slot_state_path,
-    task_set_root,
 )
 from core.utils.dataset_upload import (
     DatasetUploadPlan,
@@ -1134,50 +1135,26 @@ def _scene_plan_root(
         if not (root / "tasks.csv").is_file():
             raise ValueError(f"evaluation task-set is missing {root / 'tasks.csv'}")
         return root
-    task_set_dirs = (config.get("collection") or {}).get("task_set_dir") if config else None
-    if isinstance(task_set_dirs, (list, tuple)) and task_set_dirs:
-        root = (
-            task_set_root(config, dataset)
-            if dataset
-            else next(
-                iter(discover_task_sets(_resolve_runtime_path(str(task_set_dirs[0]))).values())
+    directories = (config.get("collection") or {}).get("task_set_dir") if config else None
+    if not directories:
+        raise ValueError("collection task-set directory is not configured")
+    if isinstance(directories, (str, Path)):
+        directories = [directories]
+    for directory in directories:
+        root = _resolve_runtime_path(str(directory)).expanduser().resolve()
+        if (root / "tasks.csv").is_file():
+            alias = (config.get("collection") or {}).get("task_set_name") or root.name
+            if dataset is None or dataset in {alias, root.name}:
+                return root
+        elif root.is_dir():
+            selected = (
+                resolve_task_set(root, dataset)
+                if dataset
+                else next(iter(discover_task_sets(root).values()), None)
             )
-        )
-        if root is None:
-            raise ValueError("unknown collection task-set directory")
-        if not root.is_dir():
-            raise ValueError(f"collection task-set directory is missing: {root}")
-        return root
-    configured = os.environ.get("EVA_SCENE_PLAN_DIR", "").strip()
-    if configured:
-        return Path(configured).expanduser().resolve()
-    if config is not None:
-        task_set_dirs = ((config.get("collection") or {}).get("task_set_dir", "")) or ""
-        if isinstance(task_set_dirs, (list, tuple)):
-            task_set_dir = str(task_set_dirs[0]).strip() if task_set_dirs else ""
-        else:
-            task_set_dir = str(task_set_dirs).strip()
-        if task_set_dir:
-            plan_parent = _resolve_runtime_path(task_set_dir).expanduser().resolve()
-            if plan_parent.is_dir():
-                if (plan_parent / "tasks.csv").is_file():
-                    return plan_parent
-                # A scalar task_set_dir may be the parent of multiple named
-                # task sets. Resolve the selected dataset before parsing its
-                # scene.csv and layout.yaml files.
-                if dataset:
-                    root = resolve_task_set(plan_parent, dataset)
-                    if root is None:
-                        raise ValueError("unknown collection task-set directory")
-                    return root
-                return next(iter(discover_task_sets(plan_parent).values()))
-    cwd_root = Path.cwd() / "work_dirs"
-    repo_root = Path(__file__).resolve().parents[4] / "work_dirs"
-    has_canonical_plan = any(
-        (cwd_root / filename).is_file()
-        for filename in ("layout.yaml", "scene.csv", "tasks.csv", "objects.csv")
-    )
-    return cwd_root if has_canonical_plan else repo_root
+            if selected is not None:
+                return selected
+    raise ValueError(f"unknown collection task-set directory: {dataset or '(none)'}")
 
 
 def _scene_plan_signature(root: Path) -> tuple[Any, ...]:
@@ -1316,6 +1293,11 @@ def _serialize_config(ctx: ConsoleContext) -> dict:
             "host": config.policy.host,
             "port": config.policy.port,
         },
+        "models": [
+            {"index": index, "name": model.name}
+            for index, model in enumerate(deployment_models(ctx.config))
+        ],
+        "local_history": history_status(config, ctx.runtime),
         "tasks": list(config.inference_cfg.debug_tasks),
         "scene_plan_sets": scene_plan_sets,
         "scene_plan_errors": scene_plan_errors,
@@ -1426,7 +1408,8 @@ def _cached_collection_slots(
 
 def _collection_transfer_path(config: ConfigDict, dataset: str) -> tuple[Path, str]:
     """The dataset's single directory and its remote path (one rule, both apps)."""
-    return dataset_location(config, dataset, plan_root=_scene_plan_root(config, dataset))
+    plan_root = _scene_plan_root(config, dataset) if config.collection.get("task_set_dir") else None
+    return dataset_location(config, dataset, plan_root=plan_root)
 
 
 def _collection_slots_snapshot(ctx: ConsoleContext, dataset: str) -> dict[str, Any]:
@@ -1434,7 +1417,11 @@ def _collection_slots_snapshot(ctx: ConsoleContext, dataset: str) -> dict[str, A
     config = ctx.runtime.active_config or ctx.config
     if dataset not in config.collection.tasks:
         raise ValueError("unknown collection dataset")
-    scene_plan = _load_scene_plan(config, dataset)
+    scene_plan = (
+        _load_scene_plan(config, dataset)
+        if config.collection.get("task_set_dir")
+        else {"tasks": [], "scenes": [], "positions": [], "objects": [], "version": "unconfigured"}
+    )
     slots = _cached_collection_slots(config, scene_plan, dataset)
     logger_obj = ctx.runtime.episode_logger
     dataset_dir: Path | None = None
@@ -1648,6 +1635,8 @@ def _serialize_status(ctx: ConsoleContext, *, include_history: bool = False) -> 
         "transport_connected": transport_connected,
         "image_min_hz": image_min_hz,
         "policy_connected": r.policy is not None,
+        "model_index": r.active_model_index,
+        "local_history": history_status(config, r),
         "policy_error": r.last_policy_error,
         "cli_mode": s.mode.value,
         "session_status": s.status.value,
@@ -1684,6 +1673,8 @@ def _serialize_status(ctx: ConsoleContext, *, include_history: bool = False) -> 
             None if s.manual_qpos is None else np.asarray(s.manual_qpos, dtype=float).tolist()
         ),
         "pending_chunk": None if s.pending_real_chunk is None else len(s.pending_real_chunk),
+        "step_operation": getattr(r, "step_operation", ""),
+        "step_preview_version": getattr(r, "step_preview_version", 0),
         "current_episode": getattr(r.replay_source or r.transport, "episode_id", None),
         "last_error": s.last_error,
         "replay_dataset_dir": r.replay_dataset_dir,
@@ -2642,7 +2633,12 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                 else format_task_label(self.ctx.session.selected_task)
             ) or None
             collection_set = self._query_str("set").strip() or None
-            if scope == "collect" and collection_set and task_filter:
+            if (
+                scope == "collect"
+                and collection_set
+                and task_filter
+                and config.collection.get("task_set_dir")
+            ):
                 plan = _load_scene_plan(config, collection_set)
                 linked = next(
                     (
@@ -2760,9 +2756,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
     def _dashboard_roots(self, config: ConfigDict | None = None) -> tuple[Path, ...]:
         active_config = config or self.ctx.runtime.active_config or self.ctx.config
         dashboard = active_config.get("dashboard") or {}
-        raw_roots_only = bool(dashboard.get("raw_roots_only", False))
-        work_root = Path(_resolve_dataset_dir(str(active_config.get("work_dir") or "work_dirs")))
-        roots = [] if raw_roots_only else [work_root]
+        roots = []
         raw_roots = dashboard.get("raw_roots") or []
         if isinstance(raw_roots, (str, Path)):
             raw_roots = [raw_roots]
@@ -2773,8 +2767,6 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             resolved = Path(_resolve_dataset_dir(value))
             if resolved not in roots:
                 roots.append(resolved)
-        if self.ctx.output_dir and not raw_roots_only:
-            roots.append(Path(self.ctx.output_dir))
         return tuple(roots)
 
     def _get_collect_quality_upload(self) -> None:
@@ -2866,10 +2858,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         self._sync_preview_to_active_model()
 
     def _get_results_all(self) -> None:
-        # Cross-model aggregation for the RESULT browser: one record list per model
-        # discovered under the eval run root, plus the eval prompt/milestone config.
-        # Each model's raw dataset lives at <output_dir>/<model>/episodes/raw.
-        # whose meta/episodes.jsonl exists so prior evals auto-load.
+        # Read only configured checkpoints and explicitly named historical models.
         from core.app.console.episode_preview import read_result_rows
         from core.recorder.episode import sanitize_path_component
 
@@ -2880,20 +2869,17 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             configured = [c.name for c in eval_cfg.checkpoints]
         elif eval_cfg is not None:
             configured = [self.ctx.active_model_name() or "model"]
+        if eval_cfg is not None:
+            configured.extend(eval_cfg.get("result_models") or [])
         seen: set[str] = set()
         models: list[dict] = []
         for name in configured:
-            seen.add(sanitize_path_component(name))
+            identity = sanitize_path_component(name)
+            if identity in seen:
+                continue
+            seen.add(identity)
             rows = read_result_rows(eval_episode_dir(str(root), name))
             models.append({"model_name": name, "records": rows})
-        # Pick up any other recorded model dirs (e.g. a renamed ckpt from a prior run).
-        if root.exists():
-            for sub in sorted(p for p in root.iterdir() if p.is_dir()):
-                if sub.name in seen or sub.name == "console":
-                    continue
-                rows = read_result_rows(sub / "episodes" / "raw")
-                if rows:
-                    models.append({"model_name": sub.name, "records": rows})
         tasks = []
         if eval_cfg is not None:
             tasks = [_serialize_prompt_config(t) for t in eval_cfg.tasks]
@@ -3492,6 +3478,125 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
     def _post_select_task(self, body: dict) -> None:
         self._enqueue_ok(f"web:switch_task:{body.get('task', '')}")
 
+    def _get_local_sessions(self) -> None:
+        config = self.ctx.runtime.active_config or self.ctx.config
+        enabled = history_enabled(config, self.ctx.runtime)
+        self._send_json(200, {
+            **history_status(config, self.ctx.runtime),
+            "sessions": history_store(config, self.ctx.runtime).list() if enabled else [],
+        })
+
+    def _get_local_session(self) -> None:
+        config = self.ctx.runtime.active_config or self.ctx.config
+        try:
+            data = history_store(config, self.ctx.runtime).read(self._query_str("id"))
+        except (OSError, ValueError, KeyError, TypeError):
+            self._send_json(404, {"ok": False, "error": "local session not found"})
+            return
+        self._send_json(200, {"ok": True, "session": data})
+
+    def _post_local_replay(self, body: dict) -> None:
+        runtime = self.ctx.runtime
+        if runtime.local_rollout_id or self.ctx.session.status is SessionStatus.RUNNING:
+            self._send_json(409, {"ok": False, "error": "stop the current run before reviewing"})
+            return
+        config = runtime.active_config or self.ctx.config
+        try:
+            store = history_store(config, runtime)
+            data = store.read(str(body.get("session_id", "")))
+            record = next(item for item in data["rollouts"] if item["id"] == body.get("rollout_id"))
+            if not record["playable"]:
+                raise ValueError("this execution has no saved recording")
+            dataset_dir = str(store.dataset_path(record["id"]))
+            cached = _cached_review_episode(self.ctx, dataset_dir, 0)
+            payload = {"ok": True, "dataset_dir": dataset_dir, "episode": 0,
+                       "frames": len(cached.scene_qpos), "fps": cached.fps,
+                       "task": cached.task, "video_keys": cached.video_keys, **cached.series}
+        except (OSError, ValueError, KeyError, TypeError, StopIteration) as error:
+            self._send_json(404, {"ok": False, "error": str(error)})
+            return
+        self._send_json(200, payload)
+
+    def _local_history_mutation_allowed(self) -> bool:
+        runtime = self.ctx.runtime
+        config = runtime.active_config or self.ctx.config
+        if not history_enabled(config, runtime):
+            self._send_json(409, {"ok": False, "error": "local session history is disabled"})
+            return False
+        if (
+            runtime.local_rollout_id or self.ctx.session.status is SessionStatus.RUNNING
+            or runtime.web_phase in {"starting", "running", "stopping", "resetting"}
+            or runtime.setup_stage or runtime.step_operation
+        ):
+            self._send_json(409, {"ok": False, "error": "finish the current execution first"})
+            return False
+        return True
+
+    def _post_debug_record(self, body: dict) -> None:
+        enabled = body.get("enabled")
+        if not isinstance(enabled, bool):
+            self._send_json(400, {"ok": False, "error": "enabled must be a boolean"})
+            return
+        if self._local_history_mutation_allowed():
+            self._enqueue_ok(f"web:debug_record:{int(enabled)}")
+
+    def _post_new_debug_run(self, _body: dict) -> None:
+        if self.ctx.active_tab != "debug":
+            self._send_json(409, {"ok": False, "error": "New run is available in Debug"})
+            return
+        if self._local_history_mutation_allowed():
+            self._enqueue_ok("web:new_debug_run")
+
+    def _set_local_run_deleted(self, body: dict, deleted: bool) -> None:
+        config = self.ctx.runtime.active_config or self.ctx.config
+        if not history_enabled(config, self.ctx.runtime):
+            self._send_json(409, {"ok": False, "error": "local session history is disabled"})
+            return
+        if deleted and self.ctx.runtime.local_rollout_id == body.get("rollout_id"):
+            self._send_json(409, {"ok": False, "error": "stop this run before deleting it"})
+            return
+        try:
+            history_store(config, self.ctx.runtime).set_deleted(
+                str(body.get("session_id", "")), str(body.get("rollout_id", "")), deleted
+            )
+            if deleted and self.ctx.runtime.local_current_rollout_id == body.get("rollout_id"):
+                self.ctx.runtime.local_current_rollout_id = None
+                self.ctx.runtime.local_session_id = None
+                self.ctx.runtime.debug_record_dataset_dir = ""
+        except (FileNotFoundError, KeyError):
+            self._send_json(404, {"ok": False, "error": "local run not found"})
+            return
+        except (ValueError, OSError) as error:
+            self._send_json(409, {"ok": False, "error": str(error)})
+            return
+        self._send_json(200, {"ok": True})
+
+    def _post_delete_local_run(self, body: dict) -> None:
+        self._set_local_run_deleted(body, True)
+
+    def _post_restore_local_run(self, body: dict) -> None:
+        self._set_local_run_deleted(body, False)
+
+    def _post_select_model(self, body: dict) -> None:
+        index = body.get("index")
+        if (
+            isinstance(index, bool)
+            or not isinstance(index, int)
+            or not 0 <= index < len(deployment_models(self.ctx.config))
+        ):
+            self._send_json(400, {"ok": False, "error": "invalid model index"})
+            return
+        if (
+            self.ctx.config.eval
+            or self.ctx.runtime.web_phase in {"starting", "running", "stopping", "resetting"}
+            or self.ctx.session.status is SessionStatus.RUNNING
+        ):
+            self._send_json(
+                409, {"ok": False, "error": "stop the operation before selecting a deploy model"}
+            )
+            return
+        self._enqueue_ok(f"web:select_model:{index}")
+
     def _get_dataset_manager(self) -> None:
         config = self.ctx.runtime.active_config or self.ctx.config
         rows = []
@@ -4019,12 +4124,15 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         side = body.get("side", "l")
         state = body.get("state")
         if state in {"open", "close"}:
-            lock = "1" if body.get("lock", True) else "0"
+            lock = "1" if body.get("lock", False) else "0"
             self._enqueue_ok(f"web:gripper:{side}:{state}:{lock}")
             return
         value = body.get("value")
         arg = f"{side}:{value}" if value is not None else side
         self._enqueue_ok(f"web:gripper:{arg}")
+
+    def _post_gripper_unlock(self, _body: dict) -> None:
+        self._enqueue_ok("web:gripper_unlock")
 
     def _post_haptic(self, body: dict) -> None:
         """Vibrate the controllers for one explicit request from the orchestrator."""
@@ -4497,6 +4605,8 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
 # do_GET because they own a path subtree). Values are unbound handler methods.
 _GET_ROUTES = {
     "/api/config": ConsoleRequestHandler._get_config,
+    "/api/local_sessions": ConsoleRequestHandler._get_local_sessions,
+    "/api/local_session": ConsoleRequestHandler._get_local_session,
     "/api/device_settings": ConsoleRequestHandler._get_device_settings,
     "/api/devices": ConsoleRequestHandler._get_devices,
     "/api/scene_plan": ConsoleRequestHandler._get_scene_plan,
@@ -4583,6 +4693,12 @@ _POST_ROUTES = {
     "/api/exit_collect_replay": ConsoleRequestHandler._post_exit_collection_replay,
     "/api/review_episode": ConsoleRequestHandler._post_review_episode,
     "/api/select_task": ConsoleRequestHandler._post_select_task,
+    "/api/select_model": ConsoleRequestHandler._post_select_model,
+    "/api/debug_record": ConsoleRequestHandler._post_debug_record,
+    "/api/new_debug_run": ConsoleRequestHandler._post_new_debug_run,
+    "/api/delete_local_run": ConsoleRequestHandler._post_delete_local_run,
+    "/api/restore_local_run": ConsoleRequestHandler._post_restore_local_run,
+    "/api/local_replay": ConsoleRequestHandler._post_local_replay,
     "/api/hf/task_set/sync": ConsoleRequestHandler._post_hf_task_set_sync,
     "/api/hf/assets/download": ConsoleRequestHandler._post_hf_assets_download,
     "/api/hf/dataset/upload": ConsoleRequestHandler._post_hf_dataset_upload,
@@ -4617,6 +4733,7 @@ _POST_ROUTES = {
     "/api/manual_send": ConsoleRequestHandler._post_manual_send,
     "/api/manual_dispatch": ConsoleRequestHandler._post_manual_dispatch,
     "/api/gripper": ConsoleRequestHandler._post_gripper,
+    "/api/gripper_unlock": ConsoleRequestHandler._post_gripper_unlock,
     "/api/haptic": ConsoleRequestHandler._post_haptic,
     "/api/collect_start": ConsoleRequestHandler._post_collect_start,
     "/api/select_ckpt": ConsoleRequestHandler._post_select_ckpt,

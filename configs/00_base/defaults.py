@@ -68,6 +68,9 @@ rollout = dict(
 # EVAL for evaluation configs, otherwise DEBUG.
 console = dict(
     initial_tab="auto",
+    session_history=True,
+    history_dir="~/.eva-client",
+    record_rollouts=False,
 )
 
 # ZMQ control channel: exposes every console button (web:* commands) + read-only
@@ -105,6 +108,9 @@ rl_cfg = {}
 # it are derived by convention; override per config to redirect output elsewhere.
 work_dir = "work_dirs"
 
+# Only these configured roots appear in the Dashboard; empty keeps it unconfigured.
+dashboard = dict(raw_roots=[])
+
 # All inference-runtime configuration in one section.
 # obs_space / action_space are dicts that load_config replaces with the
 # corresponding class instance (JointState / EEFPose) via transform.build_space.
@@ -124,11 +130,12 @@ inference_cfg = dict(
 #   sync/rtc: ignore_gripper_in_sync_wait=False
 #   async/naive/rtc: latency_k=<int>         # front-trim of new chunks, >=0
 #   act/async: exp_weight_m=0.01             # temporal-ensembling decay, >=0
+#   async/rtc: blend_gripper=False          # use new gripper commands without blending
 inference_strategies = {
     "sync": dict(type="BaseInferStrategy", args=dict(execute_horizon=5)),
     "async": dict(
         type="AsyncLinearOverlapInferStrategy",
-        args={},
+        args=dict(blend_gripper=False),
     ),
     "naive": dict(
         type="NaiveAsyncInferStrategy",

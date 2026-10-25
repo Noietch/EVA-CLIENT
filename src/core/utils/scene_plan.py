@@ -50,8 +50,8 @@ class PlanSlot:
 
 
 def evaluation_task_sets(config: ConfigDict) -> dict[str, Path]:
-    """Discover evaluation plans without recursing beyond current version folders."""
-    from core.utils.collection_paths import TASK_SET_VERSIONS, data_root
+    """Load evaluation plans only from explicitly configured evaluation roots."""
+    from core.utils.collection_paths import TASK_SET_VERSIONS
 
     def discover(root: Path) -> list[Path]:
         if (root / "tasks.csv").is_file():
@@ -67,10 +67,6 @@ def evaluation_task_sets(config: ConfigDict) -> dict[str, Path]:
 
     directories = (config.get("eval") or {}).get("task_set_dir") or []
     leaves = []
-    if not directories:
-        leaves = discover(data_root(config) / "task_sets")
-        if not leaves:
-            directories = (config.get("collection") or {}).get("task_set_dir") or []
     if isinstance(directories, (str, Path)):
         directories = [directories]
     for directory in directories:

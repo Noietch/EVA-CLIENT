@@ -25,10 +25,6 @@ from tools.datasets.hf_task_sets import publish_task_sets
 from tools.datasets.store import ConflictError, RecordNotFoundError
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_DATA_ROOT = PROJECT_ROOT / "datasets/data_collection"
-DEFAULT_PLANS_ROOT = DEFAULT_DATA_ROOT / "task_sets"
-DEFAULT_ASSETS_ROOT = DEFAULT_DATA_ROOT / "assets"
-DEFAULT_COLLECTION_ROOT = DEFAULT_DATA_ROOT
 CONSOLE_STATIC_ROOT = PROJECT_ROOT / "src/core/app/console/static"
 
 
@@ -390,9 +386,9 @@ class DatasetService:
 
 
 def create_app(
-    plans_root: str | Path = DEFAULT_PLANS_ROOT,
-    assets_root: str | Path = DEFAULT_ASSETS_ROOT,
-    collection_root: str | Path = DEFAULT_COLLECTION_ROOT,
+    plans_root: str | Path,
+    assets_root: str | Path,
+    collection_root: str | Path,
     read_only: bool = False,
     locale: str = "en",
 ) -> Flask:
@@ -404,9 +400,10 @@ def create_app(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Manage EVA collection plans and QC")
-    parser.add_argument("--plans-root", default=str(DEFAULT_PLANS_ROOT))
-    parser.add_argument("--assets-root", default=str(DEFAULT_ASSETS_ROOT))
-    parser.add_argument("--collection-root", default=str(DEFAULT_COLLECTION_ROOT))
+    parser.add_argument("--config", help="Python config containing dataset_browser settings")
+    parser.add_argument("--plans-root")
+    parser.add_argument("--assets-root")
+    parser.add_argument("--collection-root")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8412)
     parser.add_argument("--read-only", action="store_true")
@@ -419,10 +416,23 @@ def main() -> None:
         help="Interface language (default: en)",
     )
     args = parser.parse_args()
+    settings = {}
+    if args.config:
+        from core.cfg import Config
+
+        settings = Config.fromfile(str(Path(args.config).expanduser())).get("dataset_browser", {})
+    roots = {}
+    for name in ("plans_root", "assets_root", "collection_root"):
+        value = getattr(args, name) or settings.get(name)
+        if not value or not str(value).strip():
+            parser.error(
+                f"dataset_browser.{name} is not configured; set it in --config "
+                f"or pass --{name.replace('_', '-')}"
+            )
+        root = Path(value).expanduser()
+        roots[name] = root if root.is_absolute() else PROJECT_ROOT / root
     create_app(
-        args.plans_root,
-        args.assets_root,
-        args.collection_root,
+        **roots,
         read_only=args.read_only,
         locale=args.locale,
     ).run(host=args.host, port=args.port)

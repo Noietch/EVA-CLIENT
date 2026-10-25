@@ -104,7 +104,7 @@ function loadSceneMap(apiGet = async () => makePlan()) {
       },
       setPhase(value) { EVAL_LAST_PHASE = value; },
     };`, context);
-  return {api: context.sceneMap, nodes, calls};
+  return {api: context.sceneMap, nodes, calls, state};
 }
 
 function occupiedCell(nodes, positionId) {
@@ -203,4 +203,16 @@ test("异步旧任务集响应不会覆盖新任务集场景", async () => {
   assert.equal(occupiedCell(nodes, "P1").querySelector("b").textContent, "New cup");
   assert.equal(nodes.get("eval-scene-set-list").value, "set-b");
   assert.equal(nodes.get("eval-scene-status").textContent, "");
+});
+
+
+test("未配置评估任务集时保持空白，不请求默认场景计划", async () => {
+  const {api, nodes, calls, state} = loadSceneMap();
+  state.CFG.eval = {};
+  await api.load();
+  await api.load(true);
+  assert.equal(calls.length, 0);
+  assert.equal(api.state.plan, null);
+  assert.equal(nodes.get("eval-scene-grid").hidden, true);
+  assert.equal(nodes.get("eval-scene-status").textContent, "No evaluation task set configured");
 });

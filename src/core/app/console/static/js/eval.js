@@ -127,6 +127,12 @@ function restoreEvalAttempt() {
 async function loadEvalScenePlan(force = false) {
     if (force && evalBusy() && !EVAL_RESTORE) return;
     const taskSet = evalSceneTaskSet();
+    if (!taskSet) {
+      ++EVAL_SCENE_MAP.requestId;
+      Object.assign(EVAL_SCENE_MAP, {taskSet: null, plan: null, sceneId: "", loading: false, error: ""});
+      renderEvalSceneMap();
+      return;
+    }
     if (!force && EVAL_SCENE_MAP.taskSet === taskSet) {
       renderEvalSceneMap();
       return;
@@ -216,6 +222,7 @@ function renderEvalSceneMap() {
     $("eval-scene-task").textContent = task?.prompt_zh || selectedTask?.prompt_en || "—";
     $("eval-scene-status").textContent = state.loading ? "Loading scene map…"
       : state.error ? state.error
+      : !state.taskSet ? "No evaluation task set configured"
       : !task ? "No scene map linked to this evaluation task"
       : !scene ? "No scene layout found for this task" : "";
     $("eval-scene-refresh").disabled = state.loading || evalBusy();

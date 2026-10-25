@@ -213,88 +213,12 @@
 
     <!-- ---- DEBUG ---- -->
     <div class="view active" id="view-debug">
-
-      <!-- control column -->
-      <div class="col col-control" id="debug-control-col">
-        <div class="panel" id="panel-prompt">
-          <div class="panel-h"><span class="step-badge">1</span><span id="prompt-title">PROMPT</span> <span class="n" id="prompt-n"></span><span class="sel-chip" id="prompt-chip"></span></div>
-          <select class="choice-select task-select" id="prompt-list" aria-label="Task"></select>
-        </div>
-
-        <div class="panel" id="panel-config">
-          <div class="panel-h"><span class="step-badge">2</span>CONFIG</div>
-          <div class="card">
-            <div class="sub-h">MODE<span class="sel-chip" id="mode-chip"></span></div>
-            <div class="row-2" id="mode-list"></div>
-            <div class="sub-h" id="strategy-h">STRATEGY<span class="sel-chip" id="strategy-chip"></span></div>
-            <select class="choice-select strategy-select" id="strategy-list" aria-label="Strategy"></select>
-            <div class="lock-note">↑ select a task first</div>
-          </div>
-        </div>
-
-        <div class="panel setup-panel" id="panel-setup">
-          <div class="panel-h"><span class="step-badge">3</span>SETUP</div>
-          <div class="card">
-            <div class="auto-setup" id="auto-setup">
-              <div class="auto-setup-row">
-                <span class="auto-spinner"></span>
-                <span class="auto-setup-msg" id="auto-setup-msg">AUTO · PREPARING ROBOT…</span>
-              </div>
-              <div class="auto-bar"><i></i></div>
-            </div>
-            <div class="setup-ctl" style="margin-top:8px">
-              <button class="btn danger full" id="b-setup-pause" style="display:none">PAUSE ‖</button>
-              <button class="btn primary full" id="b-setup-resume" style="display:none">RESUME ▶</button>
-              <button class="btn danger full" id="b-setup-retry" style="display:none">RETRY ↻</button>
-            </div>
-            <div class="lock-note">↑ finish task &amp; config first</div>
-            <div class="errline" id="err"></div>
-          </div>
-        </div>
-
-        <div class="panel" id="panel-control">
-          <div class="panel-h"><span class="step-badge">4</span>CONTROL</div>
-          <div class="card">
-            <!-- continuous controls: shown for REAL / SIM modes -->
-            <div class="btn-grid" id="control-run">
-              <button class="btn primary full" id="b-run"><span class="rec-dot"></span><span class="rec-label">RUN ▶</span></button>
-              <button class="btn full" id="b-reset">RESET ⟲</button>
-            </div>
-            <!-- breakpoint controls: shown for STEP (sim_real) mode -->
-            <div id="control-step" style="display:none">
-              <div class="step-state" id="step-state">IDLE</div>
-              <div class="btn-grid">
-                <button class="btn primary" id="b-step">SIM ↻</button>
-                <button class="btn primary" id="b-commit">REAL ▶</button>
-                <button class="btn danger" id="b-step-halt">STOP ■</button>
-                <button class="btn" id="b-step-reset">RESET ⟲</button>
-              </div>
-            </div>
-            <div class="lock-note">↑ run SETUP first</div>
-          </div>
-        </div>
-
-        <div class="panel" id="panel-gripper">
-          <div class="panel-h">GRIPPER</div>
-          <div class="card">
-            <div class="btn-grid" id="gripper-buttons"></div>
-          </div>
-        </div>
-
-        <div class="panel" id="panel-tune">
-          <div class="panel-h">TUNING</div>
-          <div class="card">
-            <div class="sub-h">RATES</div>
-            <div class="tune-row"><span>inference rate Hz</span><input type="number" id="tune-inference-rate" min="0.1" step="0.1" /></div>
-            <div class="tune-row"><span>publish rate Hz</span><input type="number" id="tune-publish-rate" min="1" step="1" /></div>
-            <div class="sub-h" id="tune-strategy-h">STRATEGY · <span id="tune-strategy-key">—</span></div>
-            <div id="tune-strategy-args"></div>
-            <button class="btn primary full" id="b-tune-apply" style="margin-top:6px">APPLY ⤓</button>
-            <div class="tune-status" id="tune-status"></div>
-          </div>
-        </div>
-      </div>
-
+      <aside class="debug-history-sidebar" id="debug-history-sidebar" aria-label="Local sessions">
+        <div class="debug-history-heading"><span>Runs</span><button type="button" id="debug-new-run" class="debug-new-run" title="New run" aria-label="New run"><span aria-hidden="true">＋</span> New run</button></div>
+        <nav id="debug-session-list" aria-label="Executed sessions"></nav>
+        <div id="debug-history-status" role="status"></div>
+        <small class="debug-history-local" title="~/.eva-client/">On this device</small>
+      </aside>
       <!-- collection column -->
       <div class="col col-control" id="collect-control-col">
         <div class="panel" id="collect-panel-task">
@@ -445,6 +369,104 @@
               <div class="collect-scene-grid" id="eval-scene-grid" aria-label="Evaluation scene positions" hidden></div>
             </section>
             <div class="col-canvas" id="canvas-col">
+              <section class="debug-composer" aria-label="Debug prompt controls">
+                <div class="debug-status-above" aria-live="polite">
+        <div class="panel setup-panel" id="panel-setup" hidden>
+          <div class="panel-h"><span class="step-badge">3</span>SETUP</div>
+          <div class="card">
+            <div class="auto-setup" id="auto-setup">
+              <div class="auto-setup-row">
+                <span class="auto-spinner"></span>
+                <span class="auto-setup-msg" id="auto-setup-msg">AUTO · PREPARING ROBOT…</span>
+              </div>
+              <div class="auto-bar"><i></i></div>
+            </div>
+            <div class="setup-ctl" style="margin-top:8px">
+              <button type="button" class="btn danger full" id="b-setup-pause" style="display:none">PAUSE ‖</button>
+              <button type="button" class="btn primary full" id="b-setup-resume" style="display:none">RESUME ▶</button>
+              <button type="button" class="btn danger full" id="b-setup-retry" style="display:none">RETRY ↻</button>
+            </div>
+            <div class="lock-note">↑ finish task &amp; config first</div>
+            <div class="errline" id="err"></div>
+          </div>
+        </div>
+
+          <div id="debug-prompt-status" role="status" aria-live="polite" hidden></div>
+                  <div id="debug-execution-status" hidden></div>
+                </div>
+<div class="panel" id="panel-prompt">
+          <div class="panel-h" hidden><span id="prompt-title">PROMPT</span><span id="prompt-n"></span><span id="prompt-chip"></span></div>
+          <select class="choice-select task-select" id="prompt-list" aria-label="Task" hidden></select>
+          <form id="debug-prompt-form" class="debug-prompt-form">
+            <textarea id="debug-prompt-input" rows="2" maxlength="2000" aria-label="Custom prompt" placeholder="What should the robot do?"></textarea>
+<div class="debug-input-footer">
+<div class="debug-composer-controls" id="debug-control-col">
+        <button type="button" class="debug-record-toggle" id="debug-record-toggle" aria-label="Record rollout" aria-pressed="false" title="Record rollout"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3" fill="currentColor" stroke="none"/></svg></button>
+        <details class="debug-presets-menu debug-more"><summary aria-label="Preset prompts" title="Preset prompts"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 8h6M9 12h6M9 16h3"/></svg></summary><div id="debug-prompt-presets" aria-label="Preset prompts"></div></details>
+
+
+
+        <div class="panel" id="panel-config">
+          <div class="panel-h"><span class="step-badge">2</span>CONFIG</div>
+          <div class="card">
+            <div class="sub-h">MODE<span class="sel-chip" id="mode-chip"></span></div>
+            <details class="debug-mode-menu"><summary id="debug-mode-label" aria-label="Ask for approval" title="Ask for approval"></summary><div class="row-2" id="mode-list"></div></details>
+            <div class="sub-h" id="strategy-h">STRATEGY<span class="sel-chip" id="strategy-chip"></span></div>
+            <span class="debug-strategy-picker">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="5" r="2.5"/><circle cx="18" cy="7" r="2.5"/><circle cx="6" cy="19" r="2.5"/><path d="M6 7.5v9m0-5.5h7a5 5 0 0 0 5-1.5"/></svg>
+              <select class="choice-select strategy-select" id="strategy-list" aria-label="Strategy" title="Choose a strategy"></select>
+            </span>
+            <div class="lock-note">↑ select a task first</div>
+          </div>
+        </div>
+
+        <div class="panel" id="panel-control">
+          <div class="panel-h"><span class="step-badge">4</span>CONTROL</div>
+          <div class="card">
+            <!-- continuous controls: shown for REAL / SIM modes -->
+            <div class="btn-grid" id="control-run">
+              <button type="button" class="btn primary full" id="b-run"><span class="rec-dot"></span><span class="rec-label">RUN ▶</span></button>
+            </div>
+            <!-- breakpoint controls: shown for STEP (sim_real) mode -->
+            <div id="control-step" style="display:none">
+              <div class="step-state" id="step-state">IDLE</div>
+              <div class="btn-grid">
+                <button type="button" class="btn primary" id="b-step">Preview ↻</button>
+                <button type="button" class="btn primary" id="b-commit">Approve ✓</button>
+                <button type="button" class="btn danger" id="b-step-halt">STOP ■</button>
+                <button type="button" class="btn" id="b-step-reset">RESET ⟲</button>
+              </div>
+            </div>
+            <div class="lock-note">↑ run SETUP first</div>
+          </div>
+        </div>
+
+        <details class="panel debug-more" id="panel-tune">
+          <summary aria-label="Settings" title="Settings"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3" fill="white"/><circle cx="15" cy="17" r="3" fill="white"/></svg></summary>
+          <div class="card">
+            <div class="sub-h">RATES</div>
+            <div class="tune-row"><span>inference rate Hz</span><input type="number" id="tune-inference-rate" min="0.1" step="0.1" /></div>
+            <div class="tune-row"><span>publish rate Hz</span><input type="number" id="tune-publish-rate" min="1" step="1" /></div>
+            <div id="tune-strategy-args"></div>
+            <div class="panel" id="panel-gripper">
+              <div class="sub-h">GRIPPER</div>
+              <div class="btn-grid" id="gripper-buttons"></div>
+            </div>
+            <button type="button" class="btn primary full" id="b-tune-apply" style="margin-top:6px">APPLY ⤓</button>
+            <div class="tune-status" id="tune-status"></div>
+          </div>
+        </details>
+      </div>
+            <div class="debug-send-actions">
+              <span class="debug-model-picker"><select id="debug-model-list" aria-label="Model" title="Choose a model"></select></span>
+              <button type="button" class="btn" id="debug-approval-stop" title="Stop" aria-label="Stop" hidden><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg></button>
+              <button type="button" class="btn" id="b-reset" title="Reset" aria-label="Reset"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 10a9 9 0 1 1 2.5 8.2M3 4v6h6"/></svg></button>
+              <button class="btn primary" type="submit" id="debug-prompt-apply" aria-label="Run">↑</button>
+            </div>
+</div>
+          </form>
+        </div>
+              </section>
               <div class="ticks"><i></i></div>
               <span class="canvas-tag">3D · URDF</span>
               <canvas id="gl"></canvas>

@@ -142,11 +142,11 @@ enabled, set `control_channel.enabled=True` to expose the channel.
 The standalone dataset browser does not need a running robot or EVA console:
 
 ```bash
-bash tools/datasets/start.sh --read-only
+bash tools/datasets/start.sh --config configs/dataset_browser.py --read-only
 ```
 
-It defaults to `http://127.0.0.1:8412` and the shared collection root
-`datasets/data_collection`. Read-only mode disables editing and transfer actions;
+It defaults to `http://127.0.0.1:8412` and requires explicitly configured data sources in
+[`configs/dataset_browser.py`](../configs/dataset_browser.py). Read-only mode disables editing and transfer actions;
 the service can still create catalog directories and preview caches. See
 [Recording](recording.md) for the data layout and QC/export workflow.
 

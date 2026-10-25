@@ -73,6 +73,10 @@ def connect_ws(
                 f"/{max_retries}" if max_retries > 0 else "",
             )
             time.sleep(_CONNECT_RETRY_INTERVAL_SECONDS)
+        except websockets.exceptions.WebSocketException as error:
+            raise PolicyConnectionError(
+                f"Invalid WebSocket handshake from {server_label} {host}:{port}: {error}"
+            ) from error
 
 
 class WebSocketPolicyClient(PolicyClient):

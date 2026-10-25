@@ -70,3 +70,28 @@ def test_slot_pages_reuse_plan_and_reload_changed_task_counts(tmp_path):
         assert refreshed.json["scene_plan_version"] != version
         assert refreshed.json["counts"]["total"] == 121
         assert {"scene_plan", "scenes", "tasks"} <= refreshed.json.keys()
+
+
+def test_unconfigured_collection_plan_does_not_use_work_dirs_or_environment(tmp_path, monkeypatch):
+    work = tmp_path / "work_dirs"
+    work.mkdir()
+    (work / "tasks.csv").write_text("task_id,prompt_en\nTASK-1,put cup\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("EVA_SCENE_PLAN_DIR", str(work))
+    config = console_config()
+    with serve_console(config) as console:
+        response = console.get("/api/scene_plan")
+    assert response.status == 400
+    assert "not configured" in response.json["error"]
+
+
+def test_explicit_collection_roots_override_legacy_environment(tmp_path, monkeypatch):
+    root = tmp_path / "configured"
+    root.mkdir()
+    (root / "tasks.csv").write_text("task_id,prompt_en\nTASK-1,put cup\n")
+    monkeypatch.setenv("EVA_SCENE_PLAN_DIR", str(tmp_path / "other"))
+    config = console_config(collection={"task_set_dir": str(root)})
+    with serve_console(config) as console:
+        response = console.get("/api/scene_plan?set=configured")
+    assert response.status == 200
+    assert response.json["task_set"] == "configured"

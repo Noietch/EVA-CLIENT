@@ -506,6 +506,13 @@ def handle_motion_command(
     # is what lets a mode switch abort an in-progress setup instead of being dropped.
     raw_verb = command.strip().lower().removeprefix("web:")
     verb, _, arg = raw_verb.partition(":")
+    if (
+        verb == "select_mode"
+        and arg == session.mode.value
+        and session.mode in {SessionMode.REAL, SessionMode.STEP}
+        and getattr(runtime.console_ctx, "active_tab", None) == "debug"
+    ):
+        return False
     if verb == "operator_action":
         action, _, source = arg.partition(":")
         resolved_command = resolve_operator_action(
@@ -1092,6 +1099,10 @@ def publish_next_action(config: ConfigDict, runtime: RuntimeState, session: Sess
     else:
         publish_real_action_with_preview(config, runtime, action, session=session)
 
+    # The target has already been dispatched, even if a mode change interrupts
+    # its arrival wait. Count it before handling that interrupt.
+    session.chunk_index += 1
+    session.step_index += 1
     is_sync = strategy is not None and not strategy.runs_background_loop
     if (
         is_sync
@@ -1112,8 +1123,6 @@ def publish_next_action(config: ConfigDict, runtime: RuntimeState, session: Sess
             consume_motion_interrupt(session, SessionStatus.READY)
             return False
 
-    session.chunk_index += 1
-    session.step_index += 1
     return True
 
 
@@ -1232,6 +1241,10 @@ def run_one_chunk_on_sim(config: ConfigDict, runtime: RuntimeState, session: Ses
     remaining_chunk = session.action_chunk[session.chunk_index :].copy()
     rate = runtime.transport.create_rate(config.inference_cfg.publish_rate)
     for action in remaining_chunk:
+        if poll_motion_commands(config, runtime, session):
+            consume_motion_interrupt(session, SessionStatus.READY, clear_pending_real_chunk=True)
+            session.sim_preview_qpos = None
+            return False
         session.sim_preview_qpos = action.copy()
         publish_action(runtime, action, target=OutputTarget.SIM.value)
         rate.sleep()
@@ -1344,8 +1357,11 @@ def replace_inference_strategy(
     cls = STRATEGY_REGISTRY.get(spec["type"])
     # inference_rate is a global setting; inject only for classes that declare it
     # (background-loop strategies). Sync strategies don't have this field.
-    if "inference_rate" in {f.name for f in dataclasses.fields(cls)}:  # pyright: ignore[reportArgumentType]
+    strategy_fields = {f.name for f in dataclasses.fields(cls)}  # pyright: ignore[reportArgumentType]
+    if "inference_rate" in strategy_fields:
         args.setdefault("inference_rate", config.inference_cfg.inference_rate)
+    if "gripper_indices" in strategy_fields:
+        args["gripper_indices"] = runtime.robot.gripper_indices
     runtime.infer_strategy = STRATEGY_REGISTRY.build(spec["type"], **args)
 
 

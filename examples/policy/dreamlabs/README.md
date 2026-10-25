@@ -54,10 +54,11 @@ bash examples/policy/dreamlabs/serve.sh --robot yam
 ```
 
 ```bash
-.venv/bin/eva --config configs/01_deploy/dual_yam/dream.py
+.venv/bin/eva --config configs/01_deploy/dual_yam/dreamlabs.py
 ```
 
-The included EVA preset selects port 5555, joint observations/actions, 320 × 176
+Port 5558 keeps the policy separate from the YAM observation/action/camera ports
+5555–5557. The included EVA preset selects port 5558, joint observations/actions, 320 × 176
 HWC images, a 20 Hz publish rate, and one warmup chunk. Its sync execution horizon
 is 48 steps; async uses a 30-step horizon with `latency_k=0`.
 
@@ -68,7 +69,7 @@ model and needs working API credentials.
 | Launcher option | Default / behavior |
 | --- | --- |
 | `--host` | `POLICY_HOST`, otherwise `127.0.0.1` |
-| `--port` | `POLICY_PORT`, otherwise `5555` |
+| `--port` | `POLICY_PORT`, otherwise `5558` |
 | `--checkpoint` | `DREAM_CHECKPOINT`, otherwise `dreamlabs/dream-1-beta` |
 | `--robot` | `DREAM_ROBOT`, otherwise `yam`; choices come from the pinned SDK's `ARMS` |
 | `--head` | `joint` for YAM, `eef` for other robot selectors |
@@ -133,4 +134,4 @@ launcher; extending that interface requires a code change and measured tool
 geometry.
 
 Source of the bridge contract: [server.py](server.py), [serve.sh](serve.sh), and
-[the EVA preset](../../../configs/01_deploy/dual_yam/dream.py).
+[the EVA preset](../../../configs/01_deploy/dual_yam/dreamlabs.py).

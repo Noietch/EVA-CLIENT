@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import csv
 import math
 import posixpath
@@ -26,6 +27,7 @@ class StrategyYamlArgs(TypedDict, total=False):
     execute_horizon: int
     latency_k: int
     exp_weight_m: float
+    blend_gripper: bool
     sync_wait_ignore_gripper: bool
     sync_wait_threshold: float
     sync_wait_max_ticks: int
@@ -154,6 +156,7 @@ def load_config(path: str | Path, *, workspace: DeviceWorkspace | None = None) -
         cfg = HardwareCatalog().compose(cfg)
     else:
         cfg = workspace.configure(cfg)
+    _normalize_policy_models(cfg)
     _normalize_eval_cfg(cfg)
     _normalize_rl_cfg(cfg)
     _normalize_collection_task_set(cfg)
@@ -163,6 +166,58 @@ def load_config(path: str | Path, *, workspace: DeviceWorkspace | None = None) -
     _resolve_eval_checkpoints(cfg, p, workspace)
     _resolve_rl_policies(cfg, p, workspace)
     return cfg
+
+
+def _normalize_policy_models(cfg: ConfigDict) -> None:
+    """Keep authored policy choices while exposing the first policy to the runtime."""
+    authored = cfg.get("policy")
+    cfg.policy_models = []
+    if authored is None or isinstance(authored, dict):
+        return
+    if not isinstance(authored, list) or not authored:
+        raise ValueError("policy must be a dict or a non-empty list[dict]")
+    names: set[str] = set()
+    models = []
+    for index, entry in enumerate(authored):
+        prefix = f"policy[{index}]"
+        if not isinstance(entry, dict):
+            raise ValueError(f"{prefix} must be a dict")
+        name = entry.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError(f"{prefix}.name must be a non-empty string")
+        name = name.strip()
+        if name in names:
+            raise ValueError(f"duplicate policy model name: {name}")
+        names.add(name)
+        model = ConfigDict(type="openpi", host="127.0.0.1", port=9000, backend_options={})
+        model.update(entry)
+        model.name = name
+        if not isinstance(model.type, str) or not model.type.strip():
+            raise ValueError(f"{prefix}.type must be a non-empty string")
+        if not isinstance(model.host, str) or not model.host.strip():
+            raise ValueError(f"{prefix}.host must be a non-empty string")
+        if (
+            isinstance(model.port, bool)
+            or not isinstance(model.port, int)
+            or not 1 <= model.port <= 65535
+        ):
+            raise ValueError(f"{prefix}.port must be an integer in [1, 65535]")
+        if not isinstance(model.backend_options, dict):
+            raise ValueError(f"{prefix}.backend_options must be a dict")
+        models.append(copy.deepcopy(model))
+    cfg.policy_models = models
+    cfg.policy = copy.deepcopy(
+        ConfigDict({key: value for key, value in models[0].items() if key != "name"})
+    )
+
+
+def deployment_models(cfg: ConfigDict) -> list[ConfigDict]:
+    """Return named deploy policy choices, including legacy single-policy configs."""
+    models = cfg.get("policy_models")
+    if models:
+        return models
+    policy = cfg.get("policy") or {}
+    return [ConfigDict({**policy, "name": policy.get("name") or policy.get("type", "Model")})]
 
 
 def _normalize_collection_task_set(cfg: ConfigDict) -> None:
@@ -293,6 +348,9 @@ def _apply_derived(cfg: ConfigDict, path: Path) -> None:
 
 def _validate(cfg: ConfigDict) -> None:
     """Validate configured transport, collection, and RL storage contracts."""
+    default_strategy = cfg.inference_cfg.get("default_strategy")
+    if default_strategy is not None and default_strategy not in cfg.inference_strategies:
+        raise ValueError("inference_cfg.default_strategy must name a configured strategy")
     transport = cfg.get("transport") or {}
     image_mode = str(transport.get("image_mode", "stream"))
     if image_mode not in {"stream", "on_demand"}:
@@ -559,6 +617,7 @@ __all__ = [
     "ConfigDict",
     "StrategyYamlArgs",
     "StrategyYamlSpec",
+    "deployment_models",
     "load_config",
     "resolve_video_key",
 ]

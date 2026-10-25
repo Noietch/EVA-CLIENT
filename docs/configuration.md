@@ -54,6 +54,25 @@ specified in full when replacing them.
 `mock`, or `replay`. `host` and `port` select the server; `backend_options` holds
 protocol-specific fields. See [core concepts](concepts.md#policy-backends).
 
+Deploy presets also accept `policy` as a non-empty `list[dict]`. Each entry needs
+a unique `name`; the first entry is selected at startup. The DEBUG input toolbar
+lists these names and lets you switch models while idle:
+
+```python
+policy = [
+    dict(name="Model A", type="openpi", host="127.0.0.1", port=5555),
+    dict(name="Model B", type="openpi", host="127.0.0.1", port=5556,
+         backend_options=dict()),
+]
+```
+
+Each entry can override its backend type, endpoint, and `backend_options`.
+Robot, image preprocessing, and inference strategy settings are shared by the
+listed models. Switching clears the old policy connection, preview chunks, and
+setup state; the next send prepares the selected model. Switching is blocked
+while running or preparing. The existing single `policy = dict(...)` format
+continues to work. Restart after changing the configured model list.
+
 | Preset | Model contract |
 | --- | --- |
 | [`dual_yam/dream.py`](../configs/01_deploy/dual_yam/dream.py) | DreamLabs bridge via `openpi`, port 5555, 320 × 176 HWC images, joint actions at 20 Hz |
@@ -136,9 +155,9 @@ eval_cfg = dict(
 
 `task_set_dir` accepts a directory or list of directories. Relative paths resolve
 from the repository root. A directory may contain `tasks.csv` directly, task-set
-children, or known version folders. Without an explicit evaluation path, EVAL
-discovers plans under `<collection.storage.data_root>/task_sets` and falls back
-to `collection.task_set_dir` when none are found. Versioned plans keep their
+children, or known version folders. EVAL only loads paths explicitly configured
+in `eval_cfg.task_set_dir`. Without that setting, no evaluation task sets are loaded;
+the data root and collection task sets are not used as fallbacks. Versioned plans keep their
 version in the displayed name, for example `v1.2/<task_set>`.
 
 The console combines plan tasks with matching authored `eval_cfg.tasks`
@@ -152,3 +171,19 @@ See [scene plans](collection_scene_plan.md) for CSV/YAML files and
 Startup merges the preset chain and hardware defaults, loads task sets, builds
 control spaces, derives paths, validates settings, and resolves evaluation/RL
 policy configs. An empty `eval_cfg` or `rl_cfg` disables that workflow.
+
+
+## Dataset browsing sources
+
+```python
+dashboard = dict(raw_roots=["work_dirs/my_eval", "datasets/my_collection"])
+
+# Historical model directories below the evaluation output directory to show in RESULT.
+eval_cfg = dict(result_models=["previous_model"])
+```
+
+With `dashboard.raw_roots=[]`, Dashboard stays empty. It does not automatically
+include `work_dir` or the current run directory. RESULT reads configured checkpoints
+and explicitly listed `result_models`; unrelated model directories are ignored.
+For the standalone dataset browser, edit `configs/dataset_browser.py` and launch
+`bash tools/datasets/start.sh --config configs/dataset_browser.py`.

@@ -196,10 +196,10 @@ Author the required scene IDs and counts explicitly when changing coverage.
 
 ## Evaluation scene identity
 
-`eval_cfg.task_set_dir` can select evaluation roots independently. With no explicit
-root, evaluation discovers plans under `<data_root>/task_sets` and falls back to
-the collection roots when none are found. Version-qualified names distinguish
-evaluation leaves when needed.
+`eval_cfg.task_set_dir` explicitly selects evaluation roots. Without that setting,
+no evaluation task sets are loaded. Collection scene plans likewise require
+`collection.task_set_dir`; the runtime does not search `work_dirs` or use
+`EVA_SCENE_PLAN_DIR`. Version-qualified names distinguish evaluation leaves when needed.
 
 EVAL selects a task and one of its referenced scenes. Start requests supply
 `task_set`, `task_id`, and `scene_id` together; the server validates the prompt,

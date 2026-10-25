@@ -14,7 +14,6 @@ collection = dict(
 
 dashboard = dict(
     raw_roots=["datasets/data_collection/datasets/real_robot/agilex_piper"],
-    raw_roots_only=True,
 )
 
 robot = dict(type="agilex_piper")

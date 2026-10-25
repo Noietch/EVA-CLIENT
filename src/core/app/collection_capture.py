@@ -236,6 +236,10 @@ def start_collection_capture(
         if rollout_logger is not None and rollout_logger.has_active_episode
         else runtime.episode_logger
     )
+    if logger_obj is rollout_logger and rollout_logger is not None:
+        # Recording cadence must not slow down with robot action publishing.
+        # A 10 Hz control loop still needs fresh samples for a 30 fps video.
+        fps = max(float(fps), float(getattr(logger_obj, "_fps", fps)))
     prepare_collection_capture(runtime, logger_obj)
     _suspend_cyclic_gc()
     try:
@@ -266,6 +270,13 @@ def stop_collection_capture(runtime: Any) -> None:
 
 def prepare_collection_capture(runtime: Any, logger_obj: Any) -> None:
     """Point transport scratch storage at the active logger's filesystem."""
+    latest_only = getattr(runtime.transport, "set_collection_capture_latest_only", None)
+    if latest_only is not None:
+        latest_only(
+            logger_obj is not None
+            and logger_obj is getattr(runtime, "rollout_episode_logger", None)
+            and not getattr(logger_obj, "is_collection_enabled", False)
+        )
     prepare = getattr(runtime.transport, "prepare_collection_capture", None)
     if prepare is not None:
         directory = getattr(logger_obj, "_log_dir", None)

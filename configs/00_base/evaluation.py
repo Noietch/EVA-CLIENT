@@ -3,6 +3,7 @@
 eval_cfg = dict(
     task_set_dir="",
     checkpoints=[],
+    result_models=[],  # Explicit historical model names to include in RESULT.
     tasks=[],
     storage=dict(enabled=True, fps=30, save_queue_max=15),
     trials_per_prompt=5,

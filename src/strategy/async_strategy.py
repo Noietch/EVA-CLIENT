@@ -11,18 +11,19 @@ import logging
 from typing import ClassVar
 
 from core.registry import STRATEGY_REGISTRY
-from strategy.base_strategy import BackgroundLoopInferStrategy
+from strategy.base_strategy import LinearOverlapInferStrategy
 
 logger = logging.getLogger(__name__)
 
 
 @STRATEGY_REGISTRY.register("AsyncLinearOverlapInferStrategy")
 @dataclasses.dataclass
-class AsyncLinearOverlapInferStrategy(BackgroundLoopInferStrategy):
+class AsyncLinearOverlapInferStrategy(LinearOverlapInferStrategy):
     """Async inference strategy with fixed-Hz continuous inference loop and
     StreamActionBuffer linear-overlap smoothing.
 
     YAML keys (in addition to BaseInferStrategy + BackgroundLoopInferStrategy):
+    blend_gripper (False by default; new gripper targets bypass linear weighting),
     exp_weight_m (>= 0, decay for the temporal-ensembling variant).
 
     Reference: arXiv:2602.09021 (https://arxiv.org/abs/2602.09021).

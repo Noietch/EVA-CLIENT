@@ -79,7 +79,7 @@ branch; the dated releases below are historical announcements.
   reviews and transfers datasets, with LeRobot v3.0, MCAP, and HDF5 exports.
 * **Device and dataset workflows.** Start `eva` without a config to open DEVICE,
   use `eva device` for command-line device management, or open the standalone
-  dataset browser with `bash tools/datasets/start.sh --read-only`.
+  dataset browser with `bash tools/datasets/start.sh --config configs/dataset_browser.py --read-only`.
 
 ---
 

@@ -550,6 +550,15 @@ def maybe_build_episode_logger(config: ConfigDict, runtime: RuntimeState) -> Non
 def _rollout_storage(config: ConfigDict, runtime: RuntimeState | None = None) -> ConfigDict:
     if runtime is not None and runtime.rl_active and config.rl is not None:
         return config.rl.data.storage
+    if (
+        runtime is not None
+        and getattr(runtime, "local_history_store", None) is not None
+        and not config.eval
+    ):
+        storage = ConfigDict(dict(config.rollout.storage))
+        storage.enabled = bool(runtime.debug_record_enabled)
+        storage.log_dir = runtime.debug_record_dataset_dir
+        return storage
     return config.rollout.storage
 
 

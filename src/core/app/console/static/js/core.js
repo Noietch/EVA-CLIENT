@@ -8,10 +8,17 @@ export function setCommandMetadata(node, command, template = false) {
   else node.dataset.command = command;
 }
 
+export function releaseCameraImage(image) {
+  if (image._cameraAbort) { image._cameraAbort.abort(); image._cameraAbort = null; }
+  const source = image.getAttribute("src");
+  image.removeAttribute("src");
+  if (source && source.startsWith("blob:")) URL.revokeObjectURL(source);
+}
+
 function replaceCamStripContent(html) {
   const strip = $("cam-strip");
   if (!strip) return;
-  strip.querySelectorAll("img.cam").forEach(image => image.removeAttribute("src"));
+  strip.querySelectorAll("img.cam").forEach(releaseCameraImage);
   strip.querySelectorAll("video.cam").forEach((v) => {
     v.pause();
     v.removeAttribute("src");

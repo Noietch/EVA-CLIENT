@@ -1,14 +1,15 @@
 // main.js: app entry — wires DOM events, exposes inline handlers, boots polling
 // (main); tab switching + active-tab thumb + per-tab render dispatch (tabs).
-import { $, LIVE, S, apiGet, apiPost, setCommandMetadata } from "./core.js";
+import { $, LIVE, S, apiGet, apiPost, releaseCameraImage, setCommandMetadata } from "./core.js";
 import { initLocale } from "./i18n.js";
 import { closeChartModal, drawLiveCharts, liveDimsAll, onScrubInput, openChartModal, resetLiveSeries } from "./charts.js";
-import { applyTune, applyManualTune, renderConfig, manualConnect, manualDisconnect, manualDispatchToggle, enterManualSim, applyStatus, pauseSetup, replayIsLocalMode, resumeSetup, retrySetup, startRunFromDebug, updateGuide } from "./run.js";
+import { cancelDebugIntent, applyTune, applyManualTune, renderConfig, manualConnect, manualDisconnect, manualDispatchToggle, enterManualSim, applyStatus, pauseSetup, replayIsLocalMode, resumeSetup, retrySetup, startRunFromDebug, updateGuide } from "./run.js";
 import { handleCollectionReviewInput, resetCollectionReviewInput, changeCollectionExportFormat, changeCollectionSlotFilter, changeCollectionSlotPage, clearReviewPlayback, collectConfigured, downloadCollectionAssetsFromHf, downloadCollectionTaskSetFromHf, exportCollectionQuality, installCollectKeyboardControls, pollEpisodeHistory, renderCollect, renderCollectControls, renderRolloutSave, returnReviewToLive, reviewActiveInCurrentTab, saveAnnotation, startCollectFromTab, submitEpisodeNote, submitEpisodeQc, submitQc, toggleCollectionSlotAll, uploadCollectionDatasetToHf, uploadCollectionQuality } from "./collect.js";
 import { evalReset, evalSetup, evalRunToggle, evalResumeOnEnter, submitEvalScore, loadEvalResults, renderEvalSelectors, loadResultsAll, tpSeek, tpToggle, trialPopClose } from "./eval.js";
 import { handleVisibilityChange, replayPlay, replayStop, replayToggle, seekReplay, loop, pollFrame, pollScene, refreshCameraStreams, exitReplayMode } from "./replay.js";
 import { pollRlSeries, renderRlConfig, renderRlStatus } from "./rl.js";
 import { initDashboard, loadDashboard } from "./dashboard.js";
+import { closeLocalHistoryView } from "./local_history.js";
 
 const FIXED_COMMANDS = {
   "b-run": "web:run",
@@ -59,6 +60,13 @@ function annotateFixedCommands() {
 }
 
 initLocale();
+
+// Capture outside presses before the 3D canvas handles its pointer events.
+document.addEventListener("pointerdown", (event) => {
+  document.querySelectorAll(".debug-composer details[open]").forEach((menu) => {
+    if (!menu.contains(event.target)) menu.open = false;
+  });
+}, true);
 
 // ===== tabs =====
 function moveTabThumb() {
@@ -121,9 +129,7 @@ function afterWindowLoad(fn) {
 
 function closeMediaStreams() {
     closeTeleopFeedbackStream();
-    document.querySelectorAll("img.cam").forEach((img) => {
-      img.removeAttribute("src");
-    });
+    document.querySelectorAll("img.cam").forEach(releaseCameraImage);
     document.querySelectorAll("video.cam, video.tp-cam").forEach((video) => {
       video.pause();
       video.removeAttribute("src");
@@ -175,6 +181,7 @@ function relocateTrialPop(tab) {
   }
 
 function setActiveTab(tab) {
+    if (tab !== "debug") closeLocalHistoryView();
     if (tab !== "collect") disarmCollectArm();
     const leavingCollectReview = S.ACTIVE_TAB === "collect" && tab !== "collect" &&
       LIVE.replayOwner === "collect";
@@ -341,9 +348,23 @@ async function boot() {
     loop(async () => {
       try {
         const status = await apiGet("/api/status", { timeoutMs: STATUS_REQUEST_TIMEOUT_MS });
+        const connectionError = $("debug-prompt-status");
+        if (connectionError?.dataset.connectionLost === "1") {
+          connectionError.dataset.connectionLost = "";
+          connectionError.hidden = true;
+          connectionError.textContent = "";
+        }
         applyStatus(status);
         renderRlStatus(status);
-      } catch {}
+      } catch {
+        if (S.ACTIVE_TAB === "debug") {
+          cancelDebugIntent();
+          const error = $("debug-prompt-status");
+          error.dataset.connectionLost = "1";
+          error.textContent = "Connection lost. Reconnecting…";
+          error.hidden = false;
+        }
+      }
     }, STATUS_POLL_MS);
     // The loader itself enforces a 5s minimum interval; this lightweight scheduler
     // notices tab switches without adding another high-rate request stream.
@@ -357,28 +378,39 @@ document.querySelectorAll(".tab").forEach((t) => {
     t.addEventListener("click", async () => {
       if (t.classList.contains("disabled")) return;
       const tab = t.dataset.tab;
-      if (tab === S.ACTIVE_TAB) return;
-      // A direct tab click is plain browsing, so clear QC mode here.
-      S.qcMode = false;
-      S.pendingQcLoad = null;
-      // Soft reset on every tab switch. COLLECT teleop is armed only after the
-      // local motion gate is switched on; START RECORD still controls recording.
-      if (tab !== "collect") disarmCollectArm();
-      await apiPost("/api/tab_switch", { tab });
-      // Leaving MANUAL: drop both the SIM-debug flag and any real-robot link so
-      // re-entering starts fresh (SIM debug auto-arms, REAL needs CONNECT again).
-      S.manualActive = false;
-      S.realRequested = false;
-      S.realConnected = false;
-      S.manualDispatching = false;
-      S.manualDispatchStopPending = false;
-      // Switching away mid-setup: abort the in-flight setup (halt interrupts the running
-      // reset/warmup motion and clears it) so the new tab starts from a clean idle state
-      // instead of finishing a setup for the tab we just left. _setupFired stays true so
-      // it doesn't immediately re-fire; clear any pause latch so the new tab can auto-setup.
-      if (S.STATUS && S.STATUS.setup_stage) { apiPost("/api/halt"); S._setupFired = true; }
-      S._setupPaused = false;
-      setActiveTab(tab);
+      if (tab === S.ACTIVE_TAB || S.tabSwitchPending) return;
+      // Release MJPEG slots before the switch POST needs a browser connection.
+      S.tabSwitchPending = true;
+      cancelDebugIntent();
+      closeMediaStreams();
+      try {
+        // A direct tab click is plain browsing, so clear QC mode here.
+        S.qcMode = false;
+        S.pendingQcLoad = null;
+        // Soft reset on every tab switch. COLLECT teleop is armed only after the
+        // local motion gate is switched on; START RECORD still controls recording.
+        if (tab !== "collect") disarmCollectArm();
+        const switched = await apiPost("/api/tab_switch", { tab });
+        if (switched && switched.ok === false) throw new Error(switched.error || "Tab switch failed");
+        // Leaving MANUAL: drop both the SIM-debug flag and any real-robot link so
+        // re-entering starts fresh (SIM debug auto-arms, REAL needs CONNECT again).
+        S.manualActive = false;
+        S.realRequested = false;
+        S.realConnected = false;
+        S.manualDispatching = false;
+        S.manualDispatchStopPending = false;
+        // Switching away mid-setup: abort the in-flight setup (halt interrupts the running
+        // reset/warmup motion and clears it) so the new tab starts from a clean idle state
+        // instead of finishing a setup for the tab we just left. _setupFired stays true so
+        // it doesn't immediately re-fire; clear any pause latch so the new tab can auto-setup.
+        if (S.STATUS && S.STATUS.setup_stage) { apiPost("/api/halt"); S._setupFired = true; }
+        S._setupPaused = false;
+        setActiveTab(tab);
+      } catch (error) {
+        $("gb-msg").textContent = "切换失败：" + error.message;
+      } finally {
+        S.tabSwitchPending = false;
+      }
     });
   });
 $("b-run").onclick    = () => {
@@ -395,7 +427,7 @@ $("b-run").onclick    = () => {
     }
     return live ? apiPost("/api/operator_action", { intent: "start" }) : startRunFromDebug();
   };
-$("b-reset").onclick  = () => apiPost("/api/reset");
+$("b-reset").onclick  = () => { cancelDebugIntent(); return apiPost("/api/reset"); };
 $("b-step").onclick   = () => apiPost("/api/step_infer");
 $("b-tune-apply").onclick = applyTune;
 $("b-commit").onclick = () => apiPost("/api/step_commit");

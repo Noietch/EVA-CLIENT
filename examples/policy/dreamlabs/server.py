@@ -146,7 +146,7 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=5555)
+    parser.add_argument("--port", type=int, default=5558)
     parser.add_argument("--checkpoint", default="dreamlabs/dream-1-beta")
     parser.add_argument("--robot", choices=ARMS, default="yam")
     parser.add_argument("--head", choices=("joint", "eef"))

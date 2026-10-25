@@ -363,3 +363,25 @@ class BackgroundLoopInferStrategy(BaseInferStrategy):  # pyright: ignore[reportG
         self._missing_observation_started = None
         self._missing_observation_polls = 0
         super().reset()
+
+
+@dataclasses.dataclass
+class LinearOverlapInferStrategy(BackgroundLoopInferStrategy):
+    """Linear overlap for arm joints, with optional gripper blending.
+
+    The app supplies joint-space gripper indices from the active robot.
+    Grippers use the latest latency-aligned command unless blend_gripper is enabled.
+    """
+
+    blend_gripper: bool = False
+    gripper_indices: tuple[int, ...] = dataclasses.field(default=(), repr=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.blend_gripper, bool):
+            raise ValueError("blend_gripper must be a boolean")
+        super().__post_init__()
+
+    def _make_buffer(self) -> StreamActionBuffer:
+        return StreamActionBuffer(
+            gripper_indices=self.gripper_indices, blend_gripper=self.blend_gripper
+        )

@@ -136,7 +136,9 @@ def test_dataset_upload_route_names_selected_set_instead_of_raw(tmp_path, monkey
     (plan / "info.yaml").write_text("collection_dir: datasets/real_robot/dual_yam/set_a\n")
     dataset = tmp_path / "set_a" / "raw"
     dataset.mkdir(parents=True)
-    config = ConfigDict(collection=dict(tasks={"set_a": [("task a", 1)]}, storage={}))
+    config = ConfigDict(
+        collection=dict(task_set_dir=str(plan), tasks={"set_a": [("task a", 1)]}, storage={})
+    )
     captured = {}
     handler = SimpleNamespace(
         ctx=SimpleNamespace(config=config, runtime=SimpleNamespace(active_config=None)),
@@ -160,7 +162,9 @@ def test_qc_download_route_targets_selected_collection_dir_without_raw(tmp_path,
     plan = tmp_path / "data_collection/task_sets/set_a"
     plan.mkdir(parents=True)
     (plan / "info.yaml").write_text("collection_dir: datasets/real_robot/dual_yam/set_a\n")
-    config = ConfigDict(collection=dict(tasks={"set_a": [("task a", 1)]}, storage={}))
+    config = ConfigDict(
+        collection=dict(task_set_dir=str(plan), tasks={"set_a": [("task a", 1)]}, storage={})
+    )
     captured = {}
     handler = SimpleNamespace(
         ctx=SimpleNamespace(config=config, runtime=SimpleNamespace(active_config=None)),

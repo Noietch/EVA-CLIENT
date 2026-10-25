@@ -47,7 +47,7 @@ def test_catalog_distinguishes_versions_and_bounds_discovery(tmp_path):
     unique = _task_set(tmp_path / "task_sets/train")
     _task_set(tmp_path / "task_sets/larybenchv2.v1.0/eval")
     _task_set(tmp_path / "task_sets/nested/deeper/hidden")
-    catalog = evaluation_task_sets(_config(tmp_path))
+    catalog = evaluation_task_sets(_config(tmp_path, evaluation=str(tmp_path / "task_sets")))
 
     assert catalog == {
         "larybenchv2.v1.1/eval": first,
@@ -67,12 +67,12 @@ def test_explicit_parent_root_discovers_its_task_sets(tmp_path):
 
 
 @pytest.mark.parametrize("as_list", [False, True], ids=["scalar", "list"])
-def test_catalog_falls_back_to_mounted_collection_sets(tmp_path, as_list):
+def test_catalog_does_not_fall_back_to_mounted_collection_sets(tmp_path, as_list):
     mounted = _task_set(tmp_path / "mounted/train")
     configured = [str(mounted)] if as_list else str(mounted)
     catalog = evaluation_task_sets(_config(tmp_path, collection=configured))
 
-    assert catalog == {"train": mounted}
+    assert catalog == {}
 
 
 def test_missing_explicit_directory_is_listed_without_blocking_other_sets(tmp_path):
@@ -96,8 +96,13 @@ def test_explicit_duplicate_names_use_parent_and_reject_remaining_ambiguity(tmp_
         evaluation_task_sets(_config(tmp_path, evaluation=[str(first), str(conflicting)]))
 
 
-def test_unconfigured_empty_catalog_returns_no_sets(tmp_path):
-    assert evaluation_task_sets(_config(tmp_path)) == {}
+@pytest.mark.parametrize("evaluation", [None, "", []])
+def test_unconfigured_catalog_ignores_available_local_sets(tmp_path, evaluation):
+    _task_set(tmp_path / "task_sets/available")
+    assert evaluation_task_sets(_config(tmp_path, evaluation=evaluation)) == {}
+    config = _config(tmp_path)
+    config.eval = None
+    assert evaluation_task_sets(config) == {}
 
 
 def test_relative_explicit_paths_are_relative_to_the_repository(tmp_path):

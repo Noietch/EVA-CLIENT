@@ -6,6 +6,9 @@ _COMMANDS = (
     ("bootstrap", "web:bootstrap", ()),
     ("warmup", "web:warmup", ("be-setup",)),
     ("switch_task", "web:switch_task:{task}", ("prompt-list",)),
+    ("select_model", "web:select_model:{index}", ("debug-model-list",)),
+    ("debug_record", "web:debug_record:{enabled}", ("debug-record-toggle",)),
+    ("new_debug_run", "web:new_debug_run", ("debug-new-run",)),
     ("rl_select_task", "web:rl_select_task:{task}", ("rl-task-list",)),
     ("rl_select_policy", "web:rl_select_policy:{slot}", ("rl-policy-list",)),
     ("rl_select_critic", "web:rl_select_critic:{slot}", ("rl-critic-list",)),
@@ -58,6 +61,7 @@ _COMMANDS = (
     ("collect_stop", "web:collect_stop", ()),
     ("collect_cancel", "web:collect_cancel", ("b-collect-cancel",)),
     ("haptic", "web:haptic", ()),
+    ("gripper_unlock", "web:gripper_unlock", ()),
     (
         "gripper",
         "web:gripper:{side}:{state}:{lock}",

@@ -532,3 +532,35 @@ def test_task_set_round_trips_into_production_loader(tmp_path):
     assert state["issues"] == []
     production_tasks = load_collection_task_set(imported.root)
     assert sum(target for _, target in production_tasks[imported.root.name]) == 2
+
+
+def test_dataset_browser_requires_configured_roots(monkeypatch, capsys):
+    from tools.datasets import app as dataset_app
+
+    monkeypatch.setattr("sys.argv", ["dataset-browser"])
+    with pytest.raises(SystemExit) as error:
+        dataset_app.main()
+    assert error.value.code == 2
+    assert "dataset_browser.plans_root is not configured" in capsys.readouterr().err
+
+
+def test_dataset_browser_loads_roots_from_config(tmp_path, monkeypatch):
+    from unittest.mock import Mock
+
+    from tools.datasets import app as dataset_app
+
+    config = tmp_path / "browser.py"
+    config.write_text(
+        "dataset_browser = dict(plans_root='custom/plans', assets_root='custom/assets', "
+        "collection_root='custom/data')\n"
+    )
+    factory = Mock()
+    monkeypatch.setattr(dataset_app, "create_app", factory)
+    monkeypatch.setattr("sys.argv", ["dataset-browser", "--config", str(config), "--read-only"])
+    dataset_app.main()
+    settings = factory.call_args.kwargs
+    assert settings["plans_root"] == dataset_app.PROJECT_ROOT / "custom/plans"
+    assert settings["assets_root"] == dataset_app.PROJECT_ROOT / "custom/assets"
+    assert settings["collection_root"] == dataset_app.PROJECT_ROOT / "custom/data"
+    assert settings["read_only"] is True
+    factory.return_value.run.assert_called_once()

@@ -252,6 +252,7 @@ def console_config(**overrides: Any) -> ConfigDict:
     transport/policy and any per-test overrides on top.
     """
     cfg = load_config(_DEFAULTS_PATH)
+    cfg.console.session_history = False
     cfg.transport.type = "debug"
     cfg.policy.type = "mock"
     cfg.policy.backend_options = ConfigDict(dict(chunk_size=8))

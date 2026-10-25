@@ -72,3 +72,20 @@ def test_prepare_warmup_chunk_remains_available_for_immediate_publish(strategy_t
     finally:
         strategy.stop_loop()
         strategy.close()
+
+
+@pytest.mark.parametrize("strategy_type", ["AsyncLinearOverlapInferStrategy", "RtcInferStrategy"])
+@pytest.mark.parametrize("blend_gripper", [False, True])
+def test_warmup_blends_arms_but_only_blends_grippers_when_enabled(strategy_type, blend_gripper):
+    strategy = STRATEGY_REGISTRY.build(
+        strategy_type, gripper_indices=(1,), blend_gripper=blend_gripper
+    )
+    try:
+        strategy.seed_buffer(np.array([0, 1], dtype=np.float32))
+        strategy.prepare_warmup_chunk(
+            "pick", lambda *_: np.tile([12, 0], (4, 1)).astype(np.float32)
+        )
+        first = strategy.pop_next_action()
+        np.testing.assert_allclose(first, [0, 1 if blend_gripper else 0])
+    finally:
+        strategy.close()

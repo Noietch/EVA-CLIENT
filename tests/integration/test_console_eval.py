@@ -112,15 +112,17 @@ def test_eval_scene_plan_and_photos_use_the_evaluation_task_set(tmp_path):
         assert h.get("/api/scene_plan?scope=unknown").status == 400
 
 
-def test_eval_scene_plan_reuses_mounted_collection_plan_without_an_override(tmp_path):
+def test_eval_scene_plan_requires_explicit_evaluation_configuration(tmp_path):
     _scene_plan(tmp_path / "batch", "CUP", "pick up the cup", b"photo")
     cfg = _eval_config()
     cfg.collection.task_set_dir = str(tmp_path / "batch")
     cfg.collection.storage.data_root = str(tmp_path)
     with serve_console(cfg) as h:
         response = h.get("/api/scene_plan?scope=eval")
-        assert response.status == 200
-        assert response.json["tasks"][0]["task_id"] == "CUP"
+        assert response.status == 400
+        config = h.get("/api/config").json
+        assert config["scene_plan_sets"]["eval"] == []
+        assert config["eval"]["scene_plan_sets"] == []
 
 
 def test_dashboard_and_eval_can_select_an_unmounted_evaluation_task_set(tmp_path):
@@ -130,6 +132,7 @@ def test_dashboard_and_eval_can_select_an_unmounted_evaluation_task_set(tmp_path
     _scene_plan(eval_root, "EVAL-CUP", "pick up the cup", b"eval-photo")
     cfg = _eval_config()
     cfg.collection.storage.data_root = str(tmp_path)
+    cfg.eval.task_set_dir = str(tmp_path / "task_sets")
     cfg.collection.task_set_dir = [str(train_root)]
     cfg.collection.tasks = {"train": [("collect the cup", 1)]}
     with serve_console(cfg) as h:
@@ -151,7 +154,8 @@ def test_version_task_set_identity_survives_catalog_growth(tmp_path):
     _scene_plan(older, "CUP", "pick up the cup", b"old-photo")
     cfg = _eval_config()
     cfg.collection.storage.data_root = str(tmp_path)
-    cfg.dashboard = ConfigDict(raw_roots_only=True, raw_roots=[str(tmp_path / "run")])
+    cfg.eval.task_set_dir = str(tmp_path / "task_sets")
+    cfg.dashboard = ConfigDict(raw_roots=[str(tmp_path / "run")])
     with serve_console(cfg, tmp_path / "run") as h:
         original = h.get("/api/config").json["scene_plan_sets"]["eval"]
         assert original == ["larybenchv2.v1.1/eval"]
@@ -203,6 +207,7 @@ def test_scene_catalog_and_photos_do_not_change_with_checkpoint_config(tmp_path)
     _scene_plan(active / "other", "OTHER", "other prompt", b"wrong photo")
     cfg = _eval_config()
     cfg.collection.storage.data_root = str(base.parent)
+    cfg.eval.task_set_dir = str(base)
     with serve_console(cfg) as h:
         changed = _eval_config()
         changed.collection.storage.data_root = str(active.parent)
@@ -294,3 +299,42 @@ def test_eval_scene_start_records_identity_and_score_binds_to_the_saved_attempt(
             assert h.post("/api/eval_start", {**body, **invalid}).status == 400
             assert h.runtime.current_clip_id is None
         assert h.runtime.command_queue.empty()
+
+
+def test_results_only_include_configured_models(tmp_path):
+    for model in ("selected", "unconfigured"):
+        meta = tmp_path / model / "episodes/raw/meta"
+        meta.mkdir(parents=True)
+        (meta / "episodes.jsonl").write_text(
+            json.dumps({"episode_index": 0, "clip_id": model, "length": 30}) + "\n"
+        )
+    cfg = _eval_config()
+    cfg.eval.result_models = ["selected", "selected"]
+    with serve_console(cfg, tmp_path) as console:
+        models = console.get("/api/results_all").json["models"]
+    assert [entry["model_name"] for entry in models].count("selected") == 1
+    assert "unconfigured" not in [entry["model_name"] for entry in models]
+    assert next(entry for entry in models if entry["model_name"] == "selected")["records"]
+    cfg.eval = None
+    with serve_console(cfg, tmp_path) as console:
+        assert console.get("/api/results_all").json["models"] == []
+
+
+def test_dashboard_requires_explicit_roots_even_when_work_and_output_have_records(tmp_path):
+    root = tmp_path / "work"
+    meta = root / "old_model/episodes/raw/meta"
+    meta.mkdir(parents=True)
+    (meta / "episodes.jsonl").write_text(
+        json.dumps({"episode_index": 0, "clip_id": "old", "length": 30}) + "\n"
+    )
+    cfg = _eval_config()
+    cfg.work_dir = str(root)
+    cfg.collection.storage.data_root = str(root)
+    with serve_console(cfg, root) as console:
+        payload = console.get("/api/dashboard").json
+        assert payload["sources"] == []
+        assert payload["upload_candidates"] == []
+        cfg.dashboard = ConfigDict(raw_roots=str(root))
+        payload = console.get("/api/dashboard").json
+        assert len(payload["sources"]) == 1
+        assert payload["views"]["eval"]["episodes"] == 1

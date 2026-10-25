@@ -34,7 +34,7 @@ const REPLAY_VIDEO_PREBUFFER_SECONDS = 5;
 const LIVE_STAGE_TABS = new Set(["debug", "manual", "collect", "eval", "rl"]);
 
 function liveStageActive() {
-    return !document.hidden && LIVE_STAGE_TABS.has(S.ACTIVE_TAB);
+    return !document.hidden && !S.tabSwitchPending && LIVE_STAGE_TABS.has(S.ACTIVE_TAB);
   }
 
 let replayVideoFps = REPLAY_DEFAULT_FPS;
@@ -1059,6 +1059,61 @@ function drawReplayCharts(force = false) {
 
 let framePolling = false;
 
+// Read a single JPEG from the existing MJPEG endpoint, then release its HTTP
+// connection. Three permanent streams can starve control requests on HTTP/1.1.
+async function readCameraJpeg(response) {
+  if (!response.ok || !response.body) throw new Error("Camera feed unavailable");
+  const reader = response.body.getReader();
+  let bytes = new Uint8Array(0);
+  let start = -1;
+  try {
+    while (bytes.length < 4 * 1024 * 1024) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      const previousLength = bytes.length;
+      const next = new Uint8Array(previousLength + chunk.value.length);
+      next.set(bytes);
+      next.set(chunk.value, previousLength);
+      bytes = next;
+      if (start < 0) {
+        for (let i = Math.max(0, previousLength - 1); i < bytes.length - 1; i++) {
+          if (bytes[i] === 255 && bytes[i + 1] === 216) { start = i; break; }
+        }
+      }
+      if (start >= 0) {
+        for (let i = Math.max(start + 2, previousLength - 1); i < bytes.length - 1; i++) {
+          if (bytes[i] === 255 && bytes[i + 1] === 217) return bytes.slice(start, i + 2);
+        }
+      }
+    }
+    throw new Error("Camera returned no complete JPEG");
+  } finally {
+    await reader.cancel().catch(() => {});
+  }
+}
+
+async function refreshLiveCameraImage(img, key) {
+  if (img._cameraAbort || !liveStageActive()) return;
+  const controller = new AbortController();
+  img._cameraAbort = controller;
+  const timeout = setTimeout(() => controller.abort(), 3000);
+  try {
+    const response = await fetch(`/api/camera/${encodeURIComponent(key)}`, { signal: controller.signal, cache: "no-store" });
+    const jpeg = await readCameraJpeg(response);
+    if (controller.signal.aborted || !img.isConnected || !liveStageActive() || LIVE.replayMode) return;
+    const previous = img.getAttribute("src");
+    img.src = URL.createObjectURL(new Blob([jpeg], { type: "image/jpeg" }));
+    img.onload = () => { img.closest(".cam-cell")?.classList.add("has-frame"); };
+    if (previous && previous.startsWith("blob:")) URL.revokeObjectURL(previous);
+  } catch {
+    // Keep the most recent valid frame through a transient reconnect.
+  } finally {
+    clearTimeout(timeout);
+    controller.abort();
+    if (img._cameraAbort === controller) img._cameraAbort = null;
+  }
+}
+
 function refreshCameraStreams() {
     // Never replace replay <video> elements while their owner is active. On a tab
     // switch away from replay, exitReplayMode() has already dropped them. For live
@@ -1118,9 +1173,7 @@ async function pollFrame() {
         }
         strip.querySelectorAll("img.cam").forEach((img) => {
           const key = img.dataset.key;
-          if (!img.hasAttribute("src")) {
-            img.src = `/api/camera/${encodeURIComponent(key)}`;
-          }
+          void refreshLiveCameraImage(img, key);
         });
       }
       // DEVICE owns the manual controls. The backend mode can briefly lag behind

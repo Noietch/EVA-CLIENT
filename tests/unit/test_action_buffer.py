@@ -64,3 +64,32 @@ def test_stream_vector_blending_does_not_hold_pop_lock(monkeypatch):
     release.set()
     writer.join(timeout=1.0)
     reader.join(timeout=1.0)
+
+
+@pytest.mark.parametrize("blend_gripper", [False, True])
+def test_linear_overlap_can_keep_both_grippers_out_of_the_joint_weights(blend_gripper):
+    buf = StreamActionBuffer(gripper_indices=(1, 4), blend_gripper=blend_gripper)
+    old = np.tile([0, 1, 0, 0, 0], (4, 1)).astype(np.float32)
+    new = np.tile([12, 0, 12, 12, 1], (4, 1)).astype(np.float32)
+    buf.integrate_new_chunk(old)
+    buf.integrate_new_chunk(new, min_m=4)
+    actual = np.stack([buf.pop_next_action() for _ in range(4)])
+    np.testing.assert_allclose(actual[:, 0], [0, 4, 8, 12], atol=1e-6)
+    np.testing.assert_allclose(actual[:, 2], actual[:, 0])
+    if blend_gripper:
+        np.testing.assert_allclose(actual[:, 1], [1, 2 / 3, 1 / 3, 0], atol=1e-6)
+        np.testing.assert_allclose(actual[:, 4], [0, 1 / 3, 2 / 3, 1], atol=1e-6)
+    else:
+        np.testing.assert_array_equal(actual[:, (1, 4)], new[:, (1, 4)])
+
+
+def test_unblended_grippers_follow_the_latency_trimmed_prediction():
+    buf = StreamActionBuffer(gripper_indices=(1,))
+    buf.integrate_new_chunk(np.zeros((6, 2), dtype=np.float32))
+    buf.pop_next_action()
+    buf.pop_next_action()
+    new = np.column_stack(([12] * 6, [0, 0, 1, 1, 0, 1])).astype(np.float32)
+    buf.integrate_new_chunk(new, max_k=2, min_m=4)
+    actual = np.stack([buf.pop_next_action() for _ in range(4)])
+    np.testing.assert_allclose(actual[:, 0], [0, 4, 8, 12], atol=1e-6)
+    np.testing.assert_array_equal(actual[:, 1], [1, 1, 0, 1])

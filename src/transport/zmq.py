@@ -33,7 +33,13 @@ from openpi_client import msgpack_numpy
 
 from core.config import ConfigDict
 from core.registry import TRANSPORT_REGISTRY
-from core.types import CollectionRawBatch, CollectionRawSample, Observation, RawCollectionSnapshot
+from core.types import (
+    CollectionRawBatch,
+    CollectionRawImage,
+    CollectionRawSample,
+    Observation,
+    RawCollectionSnapshot,
+)
 from transport.base import HilStatus, TransportBridge
 from transport.utils import ImageRateTracker, StreamFreshness
 
@@ -357,6 +363,7 @@ class _ObservationReader:
         self._image_revision = 0
         self._latest_images: dict[str, np.ndarray] = {}
         self._preserve_collection_backlog = preserve_collection_backlog
+        self._capture_latest_only = False
         self._collection_queue: collections.deque[WireObservation] = collections.deque()
         self._raw_collection_queue: collections.deque[bytes] = collections.deque()
         self._freshness = StreamFreshness()
@@ -728,7 +735,9 @@ class _ObservationReader:
     def _drain_raw_collection(self) -> bytes | None:
         """Return one raw payload while honoring the collection backlog mode."""
         with self._lock:
-            if getattr(self, "_preserve_collection_backlog", False):
+            if getattr(self, "_preserve_collection_backlog", False) and not getattr(
+                self, "_capture_latest_only", False
+            ):
                 if self._raw_collection_queue:
                     payload = self._raw_collection_queue.popleft()
                 else:
@@ -776,13 +785,23 @@ class _ObservationReader:
             journal = _WireCaptureJournal(getattr(self, "_collection_journal_dir", None))
             self._collection_journal = journal
         entry = journal.append(payload)
+        latest_only = self._capture_latest_only
 
         def decode_raw(entry: _WireJournalEntry = entry) -> CollectionRawBatch:
             wire_obs = unpack_observation(entry.read())
             batch = CollectionRawBatch()
             for key, image in wire_obs.images.items():
+                value = (
+                    CollectionRawImage(
+                        decoder=lambda key=key, entry=entry: np.asarray(
+                            unpack_observation(entry.read()).images[key]
+                        )
+                    )
+                    if latest_only
+                    else np.asarray(image)
+                )
                 batch.images.setdefault(key, []).append(
-                    CollectionRawSample(timestamp=wire_obs.t, value=np.asarray(image))
+                    CollectionRawSample(timestamp=wire_obs.t, value=value)
                 )
             for group_name, state in wire_obs.state.items():
                 batch.vectors.setdefault(f"state_qpos:{group_name}", []).append(
@@ -831,9 +850,15 @@ class _ObservationReader:
         with self._lock:
             self._collection_journal_dir = Path(directory)
 
+    def set_collection_capture_latest_only(self, enabled: bool) -> None:
+        """Sample live policy video without accumulating a slower consumer's backlog."""
+        with self._lock:
+            self._capture_latest_only = enabled
+
     def finish_collection_capture(self) -> None:
         """Detach the active journal; queued snapshots retain it until save completes."""
         with self._lock:
+            self._capture_latest_only = False
             journal = self._collection_journal
             self._collection_journal = None
             if journal is not None:
@@ -913,6 +938,10 @@ class ZmqTransport(TransportBridge):
     def prepare_collection_capture(self, directory: str | None) -> None:
         """Place the next raw wire journal on the active recorder's filesystem."""
         self._collection_reader.prepare_collection_capture(directory)
+
+    def set_collection_capture_latest_only(self, enabled: bool) -> None:
+        """Select live sampling for policy video or complete FIFO capture for collection."""
+        self._collection_reader.set_collection_capture_latest_only(enabled)
 
     def finish_collection_capture(self) -> None:
         """Release the reader's reference to the completed raw wire journal."""

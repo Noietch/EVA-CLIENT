@@ -351,7 +351,7 @@ class EpisodeLogger:
         self._save_completion_callback: Callable[[SaveJob], None] | None = None
 
     def set_save_completion_callback(self, callback: Callable[[SaveJob], None] | None) -> None:
-        """Set the callback notified after one async save reaches a terminal state."""
+        """Set the callback notified after a save reaches a terminal state."""
         with self._lock:
             self._save_completion_callback = callback
 
@@ -879,6 +879,7 @@ class EpisodeLogger:
         job.finished_wall_time = time.time()
         self._record_completed_job(job)
         self._remember_finished_job(job)
+        self._notify_save_completion(job)
         return True
 
     def cancel_episode(self, reason: str = "cancelled") -> None:
