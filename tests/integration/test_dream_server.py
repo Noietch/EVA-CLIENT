@@ -43,6 +43,7 @@ class _Gateway:
         self.requests: list[tuple[str, dict]] = []
         self.actions: dict = dict(_ACTIONS)
         self.status = {"code": "DA-0000"}
+        self.responses: list[dict] = []
         gateway = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -57,6 +58,8 @@ class _Gateway:
                         session_id="test-session",
                         actions=gateway.actions,
                     )
+                    if gateway.responses:
+                        response.update(gateway.responses.pop(0))
                 elif self.path != "/v1/end_session":
                     self.send_error(404)
                     return
@@ -230,6 +233,69 @@ def test_sdk_failure_reaches_client_and_reset_allows_recovery(gateway, client, c
     assert client.infer(_observation())["actions"].shape == (2, 14)
     requests = [body for path, body in gateway.requests if path == "/v1/get_action"]
     assert [request["session_id"] for request in requests] == [None, None]
+
+
+def test_expired_session_retries_current_observation_and_reset_releases_replacement(
+    gateway, client
+):
+    client.infer(_observation())
+    gateway.responses = [
+        {
+            "status": {"code": "DA-0001", "reason": "expired"},
+            "session_id": "replacement-session",
+            "actions": {},
+        },
+        {"session_id": "replacement-session"},
+    ]
+    current = _observation(state_offset=20)
+    actions = client.infer(current)["actions"]
+    expected = np.concatenate([_ACTIONS["q_l_chunk"], _ACTIONS["q_r_chunk"]], axis=1)
+    np.testing.assert_array_equal(actions, expected)
+    assert actions.dtype == np.float32
+    assert [path for path, _ in gateway.requests] == ["/v1/get_action"] * 3
+    requests = [body for _, body in gateway.requests]
+    assert [request["session_id"] for request in requests] == [
+        None, "test-session", "replacement-session"
+    ]
+    assert requests[1]["observation"] == requests[2]["observation"]
+    for key, (start, end) in _STATE_SPANS.items():
+        assert requests[2]["observation"][key] == current["state"][start:end].tolist()
+    assert all(len(requests[2]["observation"][key]) == 2 for key in _VIDEO_KEYS.values())
+
+    client.reset()
+    assert gateway.requests[-1] == (
+        "/v1/end_session",
+        {"checkpoint": "test/checkpoint", "session_id": "replacement-session"},
+    )
+    client.infer(_observation(state_offset=40))
+    restarted = gateway.requests[-1][1]
+    assert restarted["session_id"] is None
+    assert all(len(restarted["observation"][key]) == 1 for key in _VIDEO_KEYS.values())
+    assert gateway.responses == []
+
+
+def test_repeated_session_expiry_stops_after_one_retry(gateway, client):
+    client.infer(_observation())
+    gateway.responses = [
+        {
+            "status": {"code": "DA-0001", "reason": "expired"},
+            "session_id": session_id,
+            "actions": {},
+        }
+        for session_id in ("replacement-1", "replacement-2")
+    ]
+    # Any extra retry would receive the gateway's successful default and fail this assertion.
+    with pytest.raises(PolicyRequestError) as caught:
+        client.infer(_observation(state_offset=20))
+    assert "replacement-2" in str(caught.value.__cause__)
+    assert "expired" in str(caught.value.__cause__)
+    assert [path for path, _ in gateway.requests] == ["/v1/get_action"] * 3
+    requests = [body for _, body in gateway.requests]
+    assert [request["session_id"] for request in requests] == [
+        None, "test-session", "replacement-1"
+    ]
+    assert requests[1]["observation"] == requests[2]["observation"]
+    assert gateway.responses == []
 
 
 @pytest.mark.parametrize(

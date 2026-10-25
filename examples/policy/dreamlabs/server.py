@@ -73,7 +73,12 @@ class DreamPolicy:
             self._client.policy(self._config)
             self._initialized = True
         self._client.set_observation(frames, request)
-        response = self._client.get_action()
+        try:
+            response = self._client.get_action()
+        except dream.DreamSessionExpired as error:
+            # The SDK adopts the replacement session and clears its action smoother.
+            logger.warning("Dream session replaced; requesting a fresh action: %s", error)
+            response = self._client.get_action()
         parts = [np.asarray(response[key], dtype=np.float32) for key in ("q_l_chunk", "q_r_chunk")]
         for key, part, dim in zip(("q_l_chunk", "q_r_chunk"), parts, self._arm_dims, strict=True):
             if part.ndim != 2 or part.shape[1] != dim + 1:
@@ -142,7 +147,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=5555)
-    parser.add_argument("--checkpoint", default="dreamlabs/dream-1")
+    parser.add_argument("--checkpoint", default="dreamlabs/dream-1-beta")
     parser.add_argument("--robot", choices=ARMS, default="yam")
     parser.add_argument("--head", choices=("joint", "eef"))
     args = parser.parse_args()

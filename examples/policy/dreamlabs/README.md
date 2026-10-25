@@ -37,7 +37,7 @@ to run YAM's EEF head. Dream-1 on another robot requires the EEF head.
 
 The script also accepts `--host`, `--port`, and `--checkpoint`. Environment defaults
 are `POLICY_HOST=127.0.0.1`, `POLICY_PORT=5555`, `DREAM_ROBOT=yam`, and
-`DREAM_CHECKPOINT=dreamlabs/dream-1`. Command-line arguments override them.
+`DREAM_CHECKPOINT=dreamlabs/dream-1-beta`. Command-line arguments override them.
 
 The WebSocket listener starts before model lookup or IK compilation. Those happen
 on the first inference request, which requires a valid API key. Metadata and reset
@@ -66,8 +66,11 @@ each episode. Use one server process per EVA-CLIENT.
 
 This example updates observations once per inference request, so camera history
 sampling depends on the client request rate. It has no separate camera streaming
-endpoint. Model warmup, rate limits, and API errors are returned to the client
-without automatic retries.
+endpoint. If DreamLabs replaces an expired inference session, the SDK adopts the
+new session and clears its action smoother. The bridge requests a fresh action
+once using the current observation; the WebSocket and robot episode stay open.
+If that request also fails, the error reaches the client. Model warmup, rate
+limits, and other API errors are returned without automatic retries.
 
 ## Dream IK robot support
 
