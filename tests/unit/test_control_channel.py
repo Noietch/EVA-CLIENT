@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import queue
+import threading
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -13,9 +14,11 @@ pytestmark = pytest.mark.unit
 
 
 def _runtime(*, teleop_client: object | None = None) -> SimpleNamespace:
-    return SimpleNamespace(
+    runtime = SimpleNamespace(
         console_ctx=SimpleNamespace(
             active_tab="debug",
+            eval_start_lock=threading.Lock(),
+            active_model_name=lambda: "model",
             session=SimpleNamespace(
                 selected_collect_task=None,
                 selected_collect_set=None,
@@ -28,8 +31,11 @@ def _runtime(*, teleop_client: object | None = None) -> SimpleNamespace:
         collection_teleop_armed=False,
         current_clip_id=None,
         current_cell=None,
+        web_phase="ready",
         teleop_client=teleop_client,
     )
+    runtime.console_ctx.runtime = runtime
+    return runtime
 
 
 def test_channel_rejects_unknown_commands_without_queueing() -> None:

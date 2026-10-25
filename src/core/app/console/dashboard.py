@@ -240,6 +240,12 @@ def _episode_record(
         "dataset": _dataset_name(raw_dir, source_mode),
         "dataset_dir": str(raw_dir),
         "task": task,
+        "task_set": str(
+            row.get("task_set")
+            or (_dataset_name(raw_dir, source_mode) if mode == "collection" else "")
+        ),
+        "task_id": str(row.get("task_id") or ""),
+        "scene_id": str(row.get("scene_id") or ""),
         "required_episodes": requirements.get(task, 0),
         "robot_id": robot_id,
         "started_at": _iso(started),
@@ -420,19 +426,33 @@ def _date_filter(value: str | None) -> dt.date | None:
 
 
 def build_dashboard(
-    roots: Iterable[Path], *, start_date: str | None = None, end_date: str | None = None
+    roots: Iterable[Path],
+    *,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    scene_scope: str = "",
+    task_set: str = "",
+    task_id: str = "",
+    scene_id: str = "",
 ) -> dict[str, Any]:
     """Aggregate collection/eval metrics from explicit raw datasets under roots."""
     roots = tuple(Path(root) for root in roots)
     episodes: list[dict[str, Any]] = []
     sources: list[dict[str, Any]] = []
+    scene_mode = {"collect": "collection", "eval": "eval"}.get(scene_scope)
+    scene_filters = {"task_set": task_set, "task_id": task_id, "scene_id": scene_id}
     for raw_dir, mode in discover_raw_datasets(roots):
         _, _, records = _load_dataset_records(raw_dir, mode)
         uploaded_indices = uploaded_source_episode_indices(raw_dir)
         dataset_records = [
-            {**row, "uploaded": row["episode_index"] in uploaded_indices} for row in records
+            {**row, "uploaded": row["episode_index"] in uploaded_indices}
+            for row in records
+            if row["mode"] != scene_mode
+            or all(not value or row[key] == value for key, value in scene_filters.items())
         ]
         episodes.extend(dataset_records)
+        if not dataset_records and records and scene_mode is not None:
+            continue
         sources.append(
             {
                 "dataset": _dataset_name(raw_dir, mode),
@@ -470,6 +490,8 @@ def build_dashboard(
         "filters": {
             "start": start.isoformat() if start else "",
             "end": end.isoformat() if end else "",
+            "scene_scope": scene_scope,
+            **scene_filters,
         },
         "sources": sources,
         "upload_candidates": discover_dashboard_upload_candidates(roots),

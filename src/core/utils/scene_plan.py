@@ -16,18 +16,21 @@ import logging
 import math
 import re
 import threading
-from collections import OrderedDict
+from collections import Counter, OrderedDict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
+
+if TYPE_CHECKING:
+    from core.config import ConfigDict
 
 logger = logging.getLogger(__name__)
 _YAML_CACHE_MAX = 32
 _YAML_CACHE_LOCK = threading.RLock()
-_YAML_CACHE: OrderedDict[Path, tuple[tuple[int, int, int], dict[str, Any]]] = OrderedDict()
+_YAML_CACHE: OrderedDict[Path, tuple[bytes, dict[str, Any]]] = OrderedDict()
 
 
 @dataclass(frozen=True)
@@ -46,6 +49,50 @@ class PlanSlot:
     round_total: int
 
 
+def evaluation_task_sets(config: ConfigDict) -> dict[str, Path]:
+    """Discover evaluation plans without recursing beyond current version folders."""
+    from core.utils.collection_paths import TASK_SET_VERSIONS, data_root
+
+    def discover(root: Path) -> list[Path]:
+        if (root / "tasks.csv").is_file():
+            return [root]
+        if not root.is_dir():
+            return []
+        directories = sorted(path for path in root.iterdir() if path.is_dir())
+        candidates = list(directories)
+        for directory in directories:
+            if directory.name in TASK_SET_VERSIONS and not (directory / "tasks.csv").is_file():
+                candidates.extend(child for child in sorted(directory.iterdir()) if child.is_dir())
+        return [path for path in candidates if (path / "tasks.csv").is_file()]
+
+    directories = (config.get("eval") or {}).get("task_set_dir") or []
+    leaves = []
+    if not directories:
+        leaves = discover(data_root(config) / "task_sets")
+        if not leaves:
+            directories = (config.get("collection") or {}).get("task_set_dir") or []
+    if isinstance(directories, (str, Path)):
+        directories = [directories]
+    for directory in directories:
+        root = Path(directory).expanduser()
+        if not root.is_absolute():
+            root = Path(__file__).resolve().parents[3] / root
+        leaves.extend(discover(root) or [root])
+    leaves = list(dict.fromkeys(leaves))
+    counts = Counter(leaf.name for leaf in leaves)
+    roots = {}
+    for leaf in leaves:
+        name = (
+            f"{leaf.parent.name}/{leaf.name}"
+            if leaf.parent.name in TASK_SET_VERSIONS or counts[leaf.name] > 1
+            else leaf.name
+        )
+        if name in roots:
+            raise ValueError(f"duplicate evaluation task-set name {name}: {roots[name]}, {leaf}")
+        roots[name] = leaf
+    return roots
+
+
 def read_plan_csv(root: Path, filename: str) -> list[dict[str, str]]:
     path = root / filename
     if not path.is_file():
@@ -60,15 +107,13 @@ def read_plan_csv(root: Path, filename: str) -> list[dict[str, str]]:
 
 def load_plan_yaml(path: Path) -> dict[str, Any]:
     """Cache parsed plan metadata, retaining file and parse errors for callers."""
-    stat = path.stat()
-    signature = (stat.st_ino, stat.st_mtime_ns, stat.st_size)
+    signature = path.read_bytes()
     with _YAML_CACHE_LOCK:
         cached = _YAML_CACHE.get(path)
         if cached is not None and cached[0] == signature:
             _YAML_CACHE.move_to_end(path)
             return cached[1]
-        with path.open("r", encoding="utf-8") as handle:
-            payload = yaml.load(handle, Loader=yaml.CSafeLoader)
+        payload = yaml.load(signature.decode("utf-8"), Loader=yaml.CSafeLoader)
         result = payload if isinstance(payload, dict) else {}
         _YAML_CACHE[path] = (signature, result)
         _YAML_CACHE.move_to_end(path)

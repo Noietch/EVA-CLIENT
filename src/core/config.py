@@ -242,6 +242,9 @@ def _normalize_eval_cfg(cfg: ConfigDict) -> None:
         eval_cfg = legacy_eval
     if eval_cfg == {}:
         eval_cfg = None
+    if eval_cfg is not None:
+        eval_cfg.setdefault("checkpoints", [])
+        eval_cfg.setdefault("tasks", [])
     cfg.eval_cfg = eval_cfg
     cfg.eval = eval_cfg
 

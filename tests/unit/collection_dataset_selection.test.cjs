@@ -176,6 +176,7 @@ async function loadCollectModule({apiPost, apiGet, state = makeState()} = {}) {
     replayStop: () => () => {},
   });
   synthetic("./main.js", {setActiveTab: () => () => {}});
+  synthetic("./scene_map.js", {renderSceneGrid: () => () => {}});
 
   const module = new vm.SourceTextModule(COLLECT_SOURCE, {
     context,

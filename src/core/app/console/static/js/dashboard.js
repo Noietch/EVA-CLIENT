@@ -1,9 +1,11 @@
 // dashboard.js: stacked raw-only collection and eval operations overview.
-import { $, apiGet, apiPost } from "./core.js";
+import { $, S, apiGet, apiPost } from "./core.js";
 import { initDatasetManager, loadDatasetManager } from "./dataset_manager.js";
+import { renderSceneGrid } from "./scene_map.js";
 
 let dashboardData = null;
 let dashboardLoading = null;
+let dashboardRequestId = 0;
 let dateRangeInitialized = false;
 let dateRangeApplied = false;
 const selectedTrendDay = {collection: "", eval: ""};
@@ -26,6 +28,148 @@ const dashboardUpload = {
   error: "",
   posting: false,
 };
+
+const dashboardSceneMap = {
+  scope: "collect", taskSet: "", taskId: "", sceneId: "", plan: null,
+  loading: false, error: "", requestId: 0,
+  filterActive: false,
+};
+
+function dashboardSceneOptions(id, entries, value) {
+  const selector = $(id);
+  selector.replaceChildren(...entries.map(([id, label]) => {
+    const option = document.createElement("option");
+    option.value = id;
+    option.textContent = label;
+    return option;
+  }));
+  selector.value = value;
+  selector.disabled = !entries.length;
+}
+
+function renderDashboardSceneMap() {
+  const state = dashboardSceneMap;
+  const sets = S.CFG.scene_plan_sets?.[state.scope] || [];
+  $("dashboard-scene-scope").value = state.scope;
+  dashboardSceneOptions("dashboard-scene-set", sets.map((name) => [name, name]), state.taskSet);
+  const tasks = state.plan?.tasks || [];
+  const task = tasks.find((entry) => entry.task_id === state.taskId) || tasks[0];
+  const scenes = (task?.scene_ids || []).map((id) => (
+    state.plan.scenes.find((entry) => entry.scene_id === id)
+  )).filter(Boolean);
+  const scene = scenes.find((entry) => entry.scene_id === state.sceneId) || scenes[0];
+  if (state.plan) {
+    state.taskId = task?.task_id || "";
+    state.sceneId = scene?.scene_id || "";
+  }
+  dashboardSceneOptions("dashboard-scene-task", tasks.map((entry) => (
+    [entry.task_id, entry.prompt_zh || entry.prompt_en || entry.task_id]
+  )), task?.task_id || "");
+  dashboardSceneOptions("dashboard-scene-list", scenes.map((entry) => (
+    [entry.scene_id, entry.scene_id]
+  )), scene?.scene_id || "");
+  $("dashboard-scene-status").textContent = state.loading ? "Loading scene map…"
+    : state.error ? state.error
+    : !sets.length && S.CFG.scene_plan_errors?.[state.scope] ? S.CFG.scene_plan_errors[state.scope]
+    : !sets.length ? "No scene task sets configured"
+    : !task ? "No tasks found in this scene map"
+    : !scene ? "No scene layout found for this task" : "";
+  $("dashboard-scene-refresh").disabled = state.loading || !sets.length;
+  $("dashboard-scene-all").disabled = !state.filterActive;
+  const selectedScope = state.scope === "collect" ? "COLLECTION" : "EVALUATION";
+  const otherScope = state.scope === "collect" ? "EVALUATION" : "COLLECTION";
+  $("dashboard-scene-filter-label").textContent = !state.filterActive
+    ? "Statistics: ALL DATA · scene preview"
+    : state.loading ? "Loading selected scene statistics…"
+    : `${selectedScope}: ${[state.taskSet, state.taskId, state.sceneId].filter(Boolean).join(" / ") || "ALL DATA"} · ${otherScope}: ALL DATA`;
+  const host = $("dashboard-scene-grid");
+  host.hidden = !scene;
+  if (scene) renderSceneGrid(host, state.plan, scene, task);
+  else {
+    host.replaceChildren();
+    delete host.dataset.layoutKey;
+  }
+}
+
+async function loadDashboardScenePlan() {
+  const state = dashboardSceneMap;
+  const sets = S.CFG.scene_plan_sets?.[state.scope] || [];
+  if (!sets.includes(state.taskSet)) state.taskSet = sets[0] || "";
+  const requestId = ++state.requestId;
+  state.plan = null;
+  state.error = "";
+  state.loading = Boolean(state.taskSet);
+  renderDashboardSceneMap();
+  if (!state.taskSet) {
+    if (state.filterActive) return loadDashboard(true);
+    return;
+  }
+  try {
+    const query = new URLSearchParams({scope: state.scope, set: state.taskSet});
+    const plan = await apiGet(`/api/scene_plan?${query}`);
+    if (requestId !== state.requestId) return;
+    state.plan = plan;
+  } catch (error) {
+    if (requestId !== state.requestId) return;
+    state.error = error.message;
+  }
+  if (requestId !== state.requestId) return;
+  state.loading = false;
+  renderDashboardSceneMap();
+  if (state.filterActive) return loadDashboard(true);
+}
+
+function selectDashboardSceneFilter() {
+  dashboardSceneMap.filterActive = true;
+  dashboardData = null;
+  dashboardLoading = null;
+  dashboardRequestId += 1;
+  selectedTrendDay.collection = "";
+  selectedTrendDay.eval = "";
+}
+
+function initDashboardSceneMap() {
+  const state = dashboardSceneMap;
+  if (!S.CFG.scene_plan_sets?.collect?.length && S.CFG.scene_plan_sets?.eval?.length) {
+    state.scope = "eval";
+  }
+  $("dashboard-scene-scope").onchange = (event) => {
+    state.scope = event.target.value;
+    state.taskSet = "";
+    state.taskId = "";
+    state.sceneId = "";
+    selectDashboardSceneFilter();
+    return loadDashboardScenePlan();
+  };
+  $("dashboard-scene-set").onchange = (event) => {
+    state.taskSet = event.target.value;
+    state.taskId = "";
+    state.sceneId = "";
+    selectDashboardSceneFilter();
+    return loadDashboardScenePlan();
+  };
+  $("dashboard-scene-task").onchange = (event) => {
+    state.taskId = event.target.value;
+    state.sceneId = "";
+    selectDashboardSceneFilter();
+    renderDashboardSceneMap();
+    return loadDashboard(true);
+  };
+  $("dashboard-scene-list").onchange = (event) => {
+    state.sceneId = event.target.value;
+    selectDashboardSceneFilter();
+    renderDashboardSceneMap();
+    return loadDashboard(true);
+  };
+  $("dashboard-scene-refresh").onclick = loadDashboardScenePlan;
+  $("dashboard-scene-all").onclick = () => {
+    selectDashboardSceneFilter();
+    state.filterActive = false;
+    renderDashboardSceneMap();
+    return loadDashboard(true);
+  };
+  return loadDashboardScenePlan();
+}
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -480,6 +624,7 @@ function renderDashboard() {
 
 export function initDashboard() {
   initDatasetManager();
+  initDashboardSceneMap();
   $("collection-overview-scope").addEventListener("click", () => selectTrendDay("collection", ""));
   $("dash-date-apply").addEventListener("click", () => {
     selectedTrendDay.collection = "";
@@ -505,14 +650,23 @@ export async function loadDashboard(force = false) {
     renderDashboard();
     return dashboardData;
   }
-  if (dashboardLoading) return dashboardLoading;
+  if (dashboardLoading && !force) return dashboardLoading;
+  const requestId = ++dashboardRequestId;
   $("dashboard-error").style.display = "none";
   const params = new URLSearchParams();
   if (dateRangeInitialized && dateRangeApplied && $("dash-date-from").value) params.set("from", $("dash-date-from").value);
   if (dateRangeInitialized && dateRangeApplied && $("dash-date-to").value) params.set("to", $("dash-date-to").value);
+  if (dashboardSceneMap.filterActive) {
+    params.set("scene_scope", dashboardSceneMap.scope);
+    for (const [key, value] of [["task_set", dashboardSceneMap.taskSet],
+      ["task_id", dashboardSceneMap.taskId], ["scene_id", dashboardSceneMap.sceneId]]) {
+      if (value) params.set(key, value);
+    }
+  }
   const endpoint = `/api/dashboard${params.size ? `?${params.toString()}` : ""}`;
   dashboardLoading = apiGet(endpoint)
     .then((data) => {
+      if (requestId !== dashboardRequestId) return data;
       dashboardData = data;
       if (!dateRangeInitialized || !dateRangeApplied) {
         $("dash-date-from").value = data.available_range?.start || "";
@@ -523,10 +677,11 @@ export async function loadDashboard(force = false) {
       return data;
     })
     .catch((error) => {
+      if (requestId !== dashboardRequestId) return;
       $("dashboard-error").textContent = error.message || "Dashboard data is unavailable";
       $("dashboard-error").style.display = "block";
       throw error;
     })
-    .finally(() => { dashboardLoading = null; });
+    .finally(() => { if (requestId === dashboardRequestId) dashboardLoading = null; });
   return dashboardLoading;
 }

@@ -499,7 +499,7 @@ def _handle_web_command(
         return
 
     if verb == "start":
-        if runtime.web_phase != "ready":
+        if runtime.web_phase not in {"ready", "starting"}:
             logger.warning("Ignored start: phase=%s (must be ready)", runtime.web_phase)
             return
         # Bind this trial's task NOW (from the cell stamped by /api/eval_start), before
@@ -512,6 +512,7 @@ def _handle_web_command(
             select_task(cell_prompt, config, session, runtime)
         if session.selected_task is None:
             logger.warning("Ignored start: no task selected")
+            set_phase(runtime, "ready")
             return
         logger.info("[START] task=%r", session.selected_task)
         # The separate web:switch_task the
@@ -546,12 +547,9 @@ def _handle_web_command(
             if runtime.episode_logger is not None and runtime.current_clip_id is not None:
                 cell = runtime.current_cell or {}
                 episode_meta = {
-                    "prompt": cell.get("prompt"),
-                    "trial": cell.get("trial"),
+                    **cell,
                     "clip_id": runtime.current_clip_id,
                 }
-                if cell.get("sim_metadata") is not None:
-                    episode_meta["sim_metadata"] = cell["sim_metadata"]
                 runtime.episode_logger.set_episode_meta(**episode_meta)
         else:
             set_phase(runtime, "ready")

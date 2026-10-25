@@ -1092,6 +1092,33 @@
     background: var(--paper); box-shadow: var(--shadow);
   }
   #view-debug.collect-mode .collect-current-slot { display: grid; }
+  .eval-scene-map {
+    display: none; flex: 0 0 auto; width: 100%; padding: 12px 14px;
+    border: 1px solid var(--rule); border-radius: var(--radius);
+    background: var(--paper); box-shadow: var(--shadow);
+  }
+  #view-eval .eval-scene-map { display: grid; gap: 8px; }
+  #view-eval .stage-visual-stack {
+    flex: 8 1 0; max-width: none; height: auto; aspect-ratio: auto;
+  }
+  #view-eval .cam-strip { flex: 2 1 0; }
+  #view-eval .stage-top { height: auto; }
+  #view-eval .stage-top .col-canvas { flex: 0 0 160px; height: 160px; }
+  #eval-scene-grid[hidden], #eval-scene-set-list[hidden] { display: none; }
+  #eval-scene-status { color: var(--ink-dim); font: 11px/1.4 var(--sans); }
+  #eval-scene-status:empty { display: none; }
+  .dashboard-scene-selectors {
+    display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px;
+    margin-bottom: 12px;
+  }
+  .dashboard-scene-selectors label { display: grid; gap: 5px; font: 10px/1.3 var(--mono); }
+  .dashboard-scene-selectors select { width: 100%; min-width: 0; }
+  #dashboard-scene-grid { max-width: 900px; }
+  #dashboard-scene-grid[hidden] { display: none; }
+  #dashboard-scene-status { color: var(--ink-dim); font: 11px/1.4 var(--sans); }
+  #dashboard-scene-status:empty { display: none; }
+  #tp-scene-grid { width: min(100%, 900px); margin: 0 auto 12px; }
+  #tp-scene-grid[hidden] { display: none; }
   .collect-current-copy {
     display: grid; grid-template-columns: minmax(0, 1fr) auto;
     align-content: start; gap: 6px 12px; min-width: 0;

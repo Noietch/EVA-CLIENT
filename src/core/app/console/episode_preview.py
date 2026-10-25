@@ -90,6 +90,17 @@ def read_result_rows(dataset_root: Path) -> list[dict[str, Any]]:
                     "note": row.get("note", ""),
                     "scored_at": row.get("scored_at"),
                     "duration_ms": row.get("duration_ms"),
+                    **{
+                        field: row[field]
+                        for field in (
+                            "task_set",
+                            "task_id",
+                            "scene_id",
+                            "sim_metadata",
+                            "scene_map",
+                        )
+                        if field in row
+                    },
                 }
                 if cid not in by_clip:
                     order.append(cid)

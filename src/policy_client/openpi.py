@@ -34,7 +34,7 @@ _RETRY_ERRORS = (ConnectionRefusedError, OSError, websockets.exceptions.InvalidM
 
 @POLICY_REGISTRY.register_client("openpi")
 class OpenPiPolicyClient(WebSocketPolicyClient):
-    """Stateless OpenPI policy client over WebSocket.
+    """OpenPI policy client over WebSocket, with optional server-side episode reset.
 
     Connects to an OpenPI-compatible policy server, sends observations serialized
     via msgpack (including images, joint state, and prompt), and receives action
@@ -59,6 +59,7 @@ class OpenPiPolicyClient(WebSocketPolicyClient):
             retry_errors=_RETRY_ERRORS,
             client=client,
         )
+        self._io_lock = threading.Lock()
 
     @classmethod
     def from_config(cls, config: ConfigDict, ctx: PolicyBuildContext) -> OpenPiPolicyClient:
@@ -82,19 +83,34 @@ class OpenPiPolicyClient(WebSocketPolicyClient):
         attached to the request for server-side conditioning. Returns the decoded
         response dict, typically ``{"actions": ndarray[T, action_dim] float32}``.
         """
+        data_to_send = dict(observation)
+        if prev_action is not None:
+            data_to_send["prev_action"] = prev_action
+        if rtc_params is not None:
+            data_to_send["rtc_params"] = rtc_params
+        return self._request(data_to_send)
+
+    def _request(self, payload: dict) -> dict:
+        """Serialize inference and reset exchanges on the shared WebSocket."""
         try:
-            data_to_send = dict(observation)
-            if prev_action is not None:
-                data_to_send["prev_action"] = prev_action
-            if rtc_params is not None:
-                data_to_send["rtc_params"] = rtc_params
-            self._ws.send(self._packer.pack(data_to_send))
-            response = self._ws.recv()
+            with self._io_lock:
+                self._ws.send(self._packer.pack(payload))
+                response = self._ws.recv()
             if isinstance(response, str):
                 raise RuntimeError(response)
             return msgpack_numpy.unpackb(response)
-        except Exception as error:
+        except (
+            OSError,
+            websockets.exceptions.WebSocketException,
+            RuntimeError,
+            ValueError,
+        ) as error:
             raise PolicyRequestError("Policy request failed") from error
+
+    def reset(self) -> None:
+        """Reset a stateful server when its handshake advertises that capability."""
+        if self._server_metadata.get("supports_reset", False):
+            self._request({"type": "reset"})
 
 
 @POLICY_REGISTRY.register_client("openpi_rtc")

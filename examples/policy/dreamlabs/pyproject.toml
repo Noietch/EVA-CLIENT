@@ -1,0 +1,16 @@
+[project]
+name = "eva-dreamlabs-policy-example"
+version = "0.1.0"
+description = "A lightweight DreamLabs API bridge for EVA-CLIENT over WebSocket."
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "dreamlabs-client==1.0.9",
+    "dream-ik @ git+https://github.com/dreamlabs-co/dreamlabs.git@2d2f5239eb737c9271e15054637fe952758d5823#subdirectory=dream_library/vendor/dream_ik/packages/dream_ik",
+    "msgpack==1.1.2",
+    "numpy==1.26.4",
+    "pillow>=10",
+    "openpi-client==0.1.2",
+]
+
+[tool.uv]
+package = false

@@ -452,7 +452,7 @@ def test_larybench_display_grid_maps_world_points_to_21_cells():
     node = shutil.which("node")
     assert node is not None, "Install Node.js to run JavaScript validation"
     source = (
-        Path(__file__).resolve().parents[2] / "src/core/app/console/static/js/collect.js"
+        Path(__file__).resolve().parents[2] / "src/core/app/console/static/js/scene_map.js"
     ).read_text()
     chunk = source[
         source.index("function scenePlanGridPositions(") : source.index(
@@ -461,7 +461,7 @@ def test_larybench_display_grid_maps_world_points_to_21_cells():
     ]
     chunk += source[
         source.index("function renderSceneGridCells(") : source.index(
-            "function renderCurrentSceneGrid("
+            "export function renderSceneGrid("
         )
     ]
     labels = [
@@ -506,10 +506,11 @@ def test_larybench_display_grid_maps_world_points_to_21_cells():
         }
     )
     script = f"""
-const scope = {{SCENE_PLAN: {payload}}};
-const functions = new Function("S", {json.dumps(chunk)} +
-  "; return {{scenePlanGridPositions, scenePlanGridGeometry, renderSceneGridCells}};")(scope);
-const geometry = functions.scenePlanGridGeometry(functions.scenePlanGridPositions(null));
+const plan = {payload};
+const functions = new Function({json.dumps(chunk)} +
+  "; return {{scenePlanGridPositions, scenePlanGridGeometry, renderSceneGridCells}};")();
+const positions = functions.scenePlanGridPositions(plan, null);
+const geometry = functions.scenePlanGridGeometry(plan, positions);
 if (geometry.columns !== 7 || geometry.rows !== 3 || geometry.cells.length !== 21) {{
   throw new Error("grid");
 }}
@@ -527,11 +528,11 @@ const host = {{
   dataset: {{}}, style: {{setProperty() {{}}}}, renders: 0,
   replaceChildren(...cells) {{this.cells = cells; this.renders++;}},
 }};
-functions.renderSceneGridCells(host, null);
-functions.renderSceneGridCells(host, null);
+functions.renderSceneGridCells(host, plan, null);
+functions.renderSceneGridCells(host, plan, null);
 if (host.renders !== 1) throw new Error("unchanged grid rebuilt");
-scope.SCENE_PLAN.positions[0].x += 0.001;
-functions.renderSceneGridCells(host, null);
+plan.positions[0].x += 0.001;
+functions.renderSceneGridCells(host, plan, null);
 if (host.renders !== 2 || !host.cells[0].title.includes("0.5610")) {{
   throw new Error("updated coordinates not rendered");
 }}

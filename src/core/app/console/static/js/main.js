@@ -286,13 +286,13 @@ async function boot() {
     }
     initDashboard();
     installCollectKeyboardControls();
-    renderConfig();
     startTeleopFeedbackStream();
     // EVAL/RESULT use inline onclick handlers; expose them.
     window.tpToggle = tpToggle; window.tpSeek = tpSeek;
     window.trialPopClose = trialPopClose;
     const s = await waitForBootApi("/api/status");
     applyStatus(s);
+    renderConfig();
     renderRlStatus(s);
     if (!collectConfigured()) {
       document.querySelector('.tab[data-tab="collect"]').classList.add("disabled");
@@ -354,7 +354,7 @@ async function boot() {
   }
 
 document.querySelectorAll(".tab").forEach((t) => {
-    t.addEventListener("click", () => {
+    t.addEventListener("click", async () => {
       if (t.classList.contains("disabled")) return;
       const tab = t.dataset.tab;
       if (tab === S.ACTIVE_TAB) return;
@@ -364,7 +364,7 @@ document.querySelectorAll(".tab").forEach((t) => {
       // Soft reset on every tab switch. COLLECT teleop is armed only after the
       // local motion gate is switched on; START RECORD still controls recording.
       if (tab !== "collect") disarmCollectArm();
-      apiPost("/api/tab_switch", { tab });
+      await apiPost("/api/tab_switch", { tab });
       // Leaving MANUAL: drop both the SIM-debug flag and any real-robot link so
       // re-entering starts fresh (SIM debug auto-arms, REAL needs CONNECT again).
       S.manualActive = false;

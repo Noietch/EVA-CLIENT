@@ -183,17 +183,13 @@ def _handle_command(runtime: RuntimeState, message: dict) -> dict:
 
     # Bind trial metadata before starting evaluation
     if verb == "start" and message.get("clip_id"):
-        sim_metadata = message.get("sim_metadata")
-        if sim_metadata is not None and not isinstance(sim_metadata, dict):
-            return _reject("sim_metadata must be an object")
-        clip_id = str(message["clip_id"])
-        runtime.current_clip_id = clip_id
-        runtime.current_cell = {
-            "prompt": message.get("prompt"),
-            "trial": message.get("trial"),
-        }
-        if sim_metadata is not None:
-            runtime.current_cell["sim_metadata"] = deepcopy(sim_metadata)
+        from core.app.console.server import _enqueue_eval_start
+
+        try:
+            _enqueue_eval_start(ctx, message)
+        except (OSError, RuntimeError, ValueError) as error:
+            return _reject(str(error))
+        return {"ok": True, "cmd": command}
 
     if verb == "collect_start" and "sim_metadata" in message:
         sim_metadata = message.get("sim_metadata")

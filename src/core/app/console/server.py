@@ -46,6 +46,7 @@ from core.app.console.collection_slots import (
     select_collection_slot,
 )
 from core.app.console.dashboard import build_dashboard, discover_dashboard_upload_candidates
+from core.app.console.episode_preview import read_result_rows
 from core.app.console.transform_worker import build_transform_blob
 from core.app.control_channel import _haptic_request
 from core.app.handlers import (
@@ -68,6 +69,7 @@ from core.app.state import (
     SessionState,
     format_task_label,
     resolve_inference_strategy_label,
+    set_phase,
 )
 from core.config import ConfigDict
 from core.devices.service import DeviceSettings
@@ -87,7 +89,12 @@ from core.utils.dataset_upload import (
     upload_dataset_directory,
 )
 from core.utils.lerobot import LeRobotDatasetIO
-from core.utils.scene_plan import read_plan_csv, read_plan_yaml, scene_plan_from_dir
+from core.utils.scene_plan import (
+    evaluation_task_sets,
+    read_plan_csv,
+    read_plan_yaml,
+    scene_plan_from_dir,
+)
 from core.utils.upload_plan import UploadProgress
 from tools.conversion import (
     DATASET_EXPORT_FORMATS,
@@ -657,6 +664,7 @@ class ConsoleContext:
     preview: Any = None  # EpisodePreview for RESULT-tab playback (lazily set)
     collection_save_lock: threading.RLock = dataclasses.field(default_factory=threading.RLock)
     collection_selection_lock: threading.RLock = dataclasses.field(default_factory=threading.RLock)
+    eval_start_lock: threading.Lock = dataclasses.field(default_factory=threading.Lock)
     quality_upload_lock: threading.RLock = dataclasses.field(default_factory=threading.RLock)
     dataset_manager: DatasetTransfer = dataclasses.field(
         default_factory=lambda: DatasetTransfer(_PROJECT_ROOT)
@@ -899,7 +907,88 @@ def _serialize_prompt_config(prompt: Any) -> dict:
         "prompt_en": prompt.prompt_en,
         "prompt_zh": prompt.get("prompt_zh"),
         "milestones": [{"id": mid, "label": label} for mid, label in milestones],
+        **{key: prompt[key] for key in ("task_id", "task_set") if key in prompt},
     }
+
+
+def _eval_attempt_cell(ctx: ConsoleContext, body: dict) -> dict[str, Any]:
+    """Bind the requested task and scene to one immutable evaluation attempt."""
+    prompt, trial = body.get("prompt"), body.get("trial")
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise ValueError("evaluation prompt must be non-empty")
+    if type(trial) is not int or trial < 1:
+        raise ValueError("evaluation trial must be a positive integer")
+    cell: dict[str, Any] = {"prompt": prompt, "trial": trial}
+    sim_metadata = body.get("sim_metadata")
+    if sim_metadata is not None:
+        if not isinstance(sim_metadata, dict):
+            raise ValueError("sim_metadata must be an object")
+        for key in ("scene", "task_item"):
+            if key in sim_metadata and not isinstance(sim_metadata[key], dict):
+                raise ValueError(f"sim_metadata.{key} must be an object")
+        cell["sim_metadata"] = copy.deepcopy(sim_metadata)
+    identity = {key: body.get(key) for key in ("task_set", "task_id", "scene_id")}
+    if not any(identity.values()):
+        return cell
+    if any(not isinstance(value, str) or not value.strip() for value in identity.values()):
+        raise ValueError("task_set, task_id and scene_id must be supplied together")
+    plan = _load_scene_plan(ctx.config, identity["task_set"], scope="eval")
+    task = next((row for row in plan["tasks"] if row["task_id"] == identity["task_id"]), None)
+    scene = next((row for row in plan["scenes"] if row["scene_id"] == identity["scene_id"]), None)
+    if task is None or scene is None or identity["scene_id"] not in task["scene_ids"]:
+        raise ValueError("evaluation task and scene do not belong to the selected task set")
+    prompts = {task["prompt_en"], task["runtime_prompt"]}
+    for authored in (ctx.config.eval or {}).get("tasks", []):
+        if authored.get("task_id") == task["task_id"] and authored.get("task_set") in {
+            None,
+            "",
+            identity["task_set"],
+        }:
+            prompts.add(authored.prompt_en)
+    if prompt not in prompts:
+        raise ValueError("evaluation prompt does not match the selected task")
+    if sim_metadata is not None:
+        actual_scene = (sim_metadata.get("scene") or {}).get("scene_id")
+        actual_task = (sim_metadata.get("task_item") or {}).get("task_item_id")
+        if actual_scene is not None and actual_scene != identity["scene_id"]:
+            raise ValueError("simulator scene does not match the selected evaluation scene")
+        if actual_task is not None and actual_task not in {
+            identity["task_id"],
+            f"{identity['task_id']}__{identity['scene_id']}",
+        }:
+            raise ValueError("simulator task does not match the selected evaluation task")
+    cell.update(identity)
+    cell["scene_map"] = {
+        "task_set": identity["task_set"],
+        "layout_id": plan["layout_id"],
+        "coordinate_frame": plan["coordinate_frame"],
+        "positions": plan["positions"],
+        "display_grid": plan["display_grid"],
+        "tasks": [task],
+        "scenes": [scene],
+    }
+    return cell
+
+
+def _enqueue_eval_start(ctx: ConsoleContext, body: dict) -> str:
+    with ctx.eval_start_lock:
+        runtime = ctx.runtime
+        if runtime.web_phase != "ready":
+            raise RuntimeError("evaluation is not ready to start")
+        clip_id = body.get("clip_id")
+        if not isinstance(clip_id, str) or not clip_id.strip():
+            raise ValueError("clip_id required")
+        if body.get("model_name") not in (None, "", ctx.active_model_name()):
+            raise RuntimeError("evaluation model has changed")
+        cell = _eval_attempt_cell(ctx, body)
+        runtime.current_clip_id = clip_id
+        runtime.current_cell = cell
+        # Reserve the run before returning to either control client. The main loop
+        # may not consume the command until another HTTP request has arrived.
+        set_phase(runtime, "starting")
+        assert runtime.command_queue is not None
+        runtime.command_queue.put("web:start")
+        return clip_id
 
 
 def _trim_finished_jobs(jobs: OrderedDict[str, Any], limit: int = _QUALITY_JOB_LIMIT) -> None:
@@ -915,7 +1004,7 @@ def _quality_job_payload(jobs: OrderedDict[str, Any], job_id: str) -> dict[str, 
     return None if job is None else job.payload()
 
 
-def _serialize_eval(ctx: ConsoleContext) -> dict:
+def _serialize_eval(ctx: ConsoleContext, scene_plan_sets: list[str]) -> dict:
     # Eval block for the EVAL/RESULT tabs. Empty dict when the config carries no eval,
     # which the frontend reads as "disable those tabs". Each checkpoint exposes its
     # anonymized slot label (Model A/B/...) plus its real ckpt name for the MODEL picker.
@@ -932,6 +1021,7 @@ def _serialize_eval(ctx: ConsoleContext) -> dict:
         "trials_per_prompt": eval_cfg.trials_per_prompt,
         "cli_mode": eval_cfg.cli_mode,
         "init_pose_enabled": init_pose_enabled,
+        "scene_plan_sets": scene_plan_sets,
         "tasks": [
             {
                 **_serialize_prompt_config(t),
@@ -1031,7 +1121,19 @@ def _resolve_dataset_dir(dataset_dir: str) -> str:
     return str(_resolve_runtime_path(dataset_dir))
 
 
-def _scene_plan_root(config: ConfigDict | None = None, dataset: str | None = None) -> Path:
+def _scene_plan_root(
+    config: ConfigDict | None = None, dataset: str | None = None, *, scope: str = "collect"
+) -> Path:
+    if scope not in {"collect", "eval"}:
+        raise ValueError("scene plan scope must be collect or eval")
+    if scope == "eval" and config is not None:
+        roots = evaluation_task_sets(config)
+        root = roots.get(dataset) if dataset else next(iter(roots.values()), None)
+        if root is None:
+            raise ValueError(f"unknown evaluation task-set directory: {dataset or '(none)'}")
+        if not (root / "tasks.csv").is_file():
+            raise ValueError(f"evaluation task-set is missing {root / 'tasks.csv'}")
+        return root
     task_set_dirs = (config.get("collection") or {}).get("task_set_dir") if config else None
     if isinstance(task_set_dirs, (list, tuple)) and task_set_dirs:
         root = (
@@ -1086,39 +1188,52 @@ def _scene_plan_signature(root: Path) -> tuple[Any, ...]:
     paths.append(root / objects_file)
     for path in paths:
         try:
-            stat = path.stat()
-            signature.extend((int(stat.st_ino), int(stat.st_mtime_ns), int(stat.st_size)))
-        except OSError:
-            signature.extend((0, 0, 0))
+            signature.append(path.read_bytes())
+        except FileNotFoundError:
+            signature.append(None)
     return tuple(signature)
 
 
-def _build_scene_plan(root: Path) -> dict[str, Any]:
+def _build_scene_plan(
+    root: Path, scope: str = "collect", task_set: str | None = None
+) -> dict[str, Any]:
     """Parse one normalized scene catalog directory for the console UI."""
 
     def photo_url(object_id: str, photo_name: str) -> str:
         return (
             f"/api/scene_plan/object-photo/{quote(object_id)}/{quote(photo_name)}"
-            f"?set={quote(root.name)}"
+            f"?set={quote(task_set or root.name, safe='')}&scope={scope}"
         )
 
     return scene_plan_from_dir(root, photo_url)
 
 
 def _load_scene_plan(
-    config: ConfigDict | None = None, dataset: str | None = None
+    config: ConfigDict | None = None, dataset: str | None = None, *, scope: str = "collect"
 ) -> dict[str, Any]:
-    """Load and signature-cache the optional normalized collection scene plan."""
-    root = _scene_plan_root(config, dataset)
+    """Load and signature-cache the workspace's normalized scene plan."""
+    root = (
+        _scene_plan_root(config, dataset)
+        if scope == "collect"
+        else _scene_plan_root(config, dataset, scope=scope)
+    )
     collection = (config.get("collection") or {}) if config is not None else {}
-    bindings = (collection.get("task_prompt_bindings") or {}).get(dataset) or {}
-    signature = (*_scene_plan_signature(root), tuple(sorted(bindings.items())))
+    bindings = (
+        ((collection.get("task_prompt_bindings") or {}).get(dataset) or {})
+        if scope == "collect"
+        else {}
+    )
+    task_set = dataset or root.name
+    if scope == "eval" and dataset is None and config is not None:
+        task_set = next(iter(evaluation_task_sets(config)))
+    signature = (*_scene_plan_signature(root), scope, task_set, tuple(sorted(bindings.items())))
     with _SCENE_PLAN_CACHE_LOCK:
         cached = _SCENE_PLAN_CACHE.get(signature)
         if cached is not None:
             _SCENE_PLAN_CACHE.move_to_end(signature)
             return cached
-        payload = _build_scene_plan(root)
+        payload = _build_scene_plan(root, scope, task_set)
+        payload["task_set"] = task_set
         payload["version"] = uuid.uuid4().hex
         for task in payload["tasks"]:
             task["runtime_prompt"] = bindings.get(task["task_id"], task["prompt_en"])
@@ -1180,6 +1295,17 @@ def _serialize_config(ctx: ConsoleContext) -> dict:
             )
     collection_storage = config.collection.storage
     collection_sftp = collection_storage.get("sftp") or {}
+    scene_plan_sets = {
+        "collect": list(ctx.config.collection.tasks)
+        if ctx.config.collection.get("task_set_dir")
+        else [],
+        "eval": [],
+    }
+    scene_plan_errors = {}
+    try:
+        scene_plan_sets["eval"] = list(evaluation_task_sets(ctx.config))
+    except (OSError, ValueError) as error:
+        scene_plan_errors["eval"] = str(error)
     return {
         "initial_tab": _resolve_initial_tab(ctx.config),
         "robot_type": config.robot.type,
@@ -1191,6 +1317,8 @@ def _serialize_config(ctx: ConsoleContext) -> dict:
             "port": config.policy.port,
         },
         "tasks": list(config.inference_cfg.debug_tasks),
+        "scene_plan_sets": scene_plan_sets,
+        "scene_plan_errors": scene_plan_errors,
         "collect_tasks": {
             str(dataset_name): [[str(prompt), int(target)] for prompt, target in entries]
             for dataset_name, entries in config.collection.tasks.items()
@@ -1247,7 +1375,7 @@ def _serialize_config(ctx: ConsoleContext) -> dict:
                 "remote_dir": str(collection_sftp.get("remote_dir", "")),
             },
         },
-        "eval": _serialize_eval(ctx),
+        "eval": _serialize_eval(ctx, scene_plan_sets["eval"]),
         "rl": _serialize_rl(ctx),
         "run_id": Path(ctx.output_dir).name,
     }
@@ -2136,19 +2264,14 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         # recorded lerobot episode itself owns the trial identity — no separate
         # results.jsonl. An unrun trial simply has no episode row yet (and so can't be
         # scored), which is the gate we want.
-        runtime = self.ctx.runtime
-        clip_id = body.get("clip_id") or None
-        prompt = body.get("prompt")
-        trial = body.get("trial")
-        sim_metadata = body.get("sim_metadata")
-        if sim_metadata is not None and not isinstance(sim_metadata, dict):
-            self._send_json(400, {"ok": False, "error": "sim_metadata must be an object"})
+        try:
+            clip_id = _enqueue_eval_start(self.ctx, body)
+        except RuntimeError as error:
+            self._send_json(409, {"ok": False, "error": str(error)})
             return
-        runtime.current_clip_id = clip_id
-        runtime.current_cell = {"prompt": prompt, "trial": trial} if clip_id else None
-        if runtime.current_cell is not None and sim_metadata is not None:
-            runtime.current_cell["sim_metadata"] = copy.deepcopy(sim_metadata)
-        self._enqueue("web:start")
+        except (OSError, ValueError) as error:
+            self._send_json(400, {"ok": False, "error": str(error)})
+            return
         self._send_json(200, {"ok": True, "clip_id": clip_id})
 
     def _eval_score(self, body: dict) -> None:
@@ -2161,15 +2284,32 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         if not clip_id:
             self._send_json(400, {"ok": False, "error": "clip_id required"})
             return
+        model_name = self.ctx.active_model_name()
+        if body.get("model_name") not in {None, "", model_name}:
+            self._send_json(409, {"ok": False, "error": "evaluation model has changed"})
+            return
         if runtime.episode_logger is None:
             self._send_json(
                 409,
                 {"ok": False, "error": "no recorded episode for this trial yet — run it first"},
             )
             return
+        recorder = runtime.episode_logger
+        target = eval_episode_dir(self.ctx.output_dir, model_name)
+        if Path(recorder._log_dir) != target:
+            self._send_json(409, {"ok": False, "error": "evaluation recorder is changing models"})
+            return
+        record = next((row for row in read_result_rows(target) if row["clip_id"] == clip_id), None)
+        if record is None:
+            self._send_json(409, {"ok": False, "error": "evaluation attempt is not saved yet"})
+            return
+        identity_fields = ("prompt", "trial", "task_set", "task_id", "scene_id")
+        if any(
+            key in body and (body[key] or "") != (record.get(key) or "") for key in identity_fields
+        ):
+            self._send_json(409, {"ok": False, "error": "evaluation attempt identity mismatch"})
+            return
         fields = dict(
-            prompt=body.get("prompt"),
-            trial=body.get("trial"),
             score=body.get("score"),
             max_score=body.get("max_score"),
             milestones=body.get("milestones", {}),
@@ -2177,21 +2317,13 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             scored_at=_dt.datetime.now().isoformat(timespec="seconds"),
             duration_ms=body.get("duration_ms", 0),
         )
-        ep = runtime.episode_logger.patch_episode_meta_by_clip(
+        ep = recorder.patch_episode_meta_by_clip(
             str(clip_id),
             **fields,
         )
         if ep is None:
-            self._sync_preview_to_active_model()
-            if self.ctx.preview is not None:
-                ep = self.ctx.preview.episode_index_by_clip().get(clip_id)
-            if ep is None:
-                self._send_json(
-                    409,
-                    {"ok": False, "error": "no recorded episode for this trial yet — run it first"},
-                )
-                return
-            runtime.episode_logger.patch_episode_meta(int(ep), **fields)
+            self._send_json(409, {"ok": False, "error": "evaluation attempt is not saved yet"})
+            return
         self._send_json(200, {"ok": True, "episode_index": ep})
 
     def _stream_camera(self, key: str) -> None:
@@ -2354,10 +2486,11 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
     def _get_scene_plan(self) -> None:
         try:
             plan = _load_scene_plan(
-                self.ctx.runtime.active_config or self.ctx.config,
+                self.ctx.config,
                 self._query_str("set").strip() or None,
+                scope=self._query_str("scope").strip() or "collect",
             )
-        except ValueError as error:
+        except (OSError, ValueError) as error:
             self._send_json(400, {"ok": False, "error": str(error)})
             return
         self._send_json(200, plan)
@@ -2369,10 +2502,11 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             return
         try:
             root = _scene_plan_root(
-                self.ctx.runtime.active_config or self.ctx.config,
+                self.ctx.config,
                 self._query_str("set").strip() or None,
+                scope=self._query_str("scope").strip() or "collect",
             ).resolve()
-        except ValueError:
+        except (OSError, ValueError):
             self._send_empty(404)
             return
         info = read_plan_yaml(root, "info.yaml")
@@ -2596,12 +2730,20 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         )
 
     def _get_dashboard(self) -> None:
-        config = self.ctx.runtime.active_config or self.ctx.config
+        config = self.ctx.config
         roots = self._dashboard_roots(config)
+        scene_scope = self._query_str("scene_scope")
+        if scene_scope not in {"", "collect", "eval"}:
+            self._send_json(400, {"ok": False, "error": "invalid dashboard scene scope"})
+            return
         payload = build_dashboard(
             roots,
             start_date=self._query_str("from"),
             end_date=self._query_str("to"),
+            scene_scope=scene_scope,
+            task_set=self._query_str("task_set"),
+            task_id=self._query_str("task_id"),
+            scene_id=self._query_str("scene_id"),
         )
         payload["upload"] = _collection_upload_payload(config)
         for candidate in payload["upload_candidates"]:

@@ -16,8 +16,8 @@ and expects ``{"status": "ok", "data": {"actions": ndarray[B, T, D]}}``. The
 action dimension is inferred from the request's state vector, with a CLI fallback.
 
 Usage:
-  bash examples/fake_policy/run_fake_policy.sh            # POLICY_PORT/CHUNK_SIZE env-overridable
-  python examples/fake_policy/fake_policy_server.py --port 9000
+  bash examples/policy/fake_policy/run_fake_policy.sh     # POLICY_PORT/CHUNK_SIZE env-overridable
+  python examples/policy/fake_policy/fake_policy_server.py --port 9000
   # then, in another shell:
   eva --config configs/01_deploy/ur5e/openpi_qpos.py
 """
@@ -156,6 +156,7 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=9000)
     parser.add_argument("--chunk-size", type=int, default=50)
+    parser.add_argument("--robot", help="EVA robot name; selects the fallback action dimension.")
     parser.add_argument(
         "--action-dim",
         type=int,
@@ -164,8 +165,14 @@ def main() -> None:
     )
     parser.add_argument("--action-mode", default="qpos", choices=["qpos", "eef"])
     args = parser.parse_args()
+    action_dim = args.action_dim
+    if args.robot is not None:
+        import robots  # noqa: F401
+        from core.registry import ROBOT_REGISTRY
+
+        action_dim = ROBOT_REGISTRY.build(args.robot).total_action_dim
     try:
-        serve(args.host, args.port, args.chunk_size, args.action_dim, args.action_mode)
+        serve(args.host, args.port, args.chunk_size, action_dim, args.action_mode)
     except KeyboardInterrupt:
         logger.info("[FAKE-POLICY] shutting down")
 

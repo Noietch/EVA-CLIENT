@@ -88,6 +88,18 @@
 
         <div class="dashboard-error" id="dashboard-error" style="display:none"></div>
 
+        <section class="dashboard-section dashboard-scene-map" aria-label="Scene map">
+          <div class="dashboard-section-head"><div><span class="dashboard-section-label">SCENE MAP</span><h2>Scene layouts</h2></div><span id="dashboard-scene-filter-label">ALL DATA</span><button class="btn" id="dashboard-scene-all" type="button">ALL DATA</button><button class="btn" id="dashboard-scene-refresh" type="button">RELOAD</button></div>
+          <div class="dashboard-scene-selectors">
+            <label>WORKSPACE<select id="dashboard-scene-scope" aria-label="Scene workspace"><option value="collect">COLLECTION</option><option value="eval">EVALUATION</option></select></label>
+            <label>TASK SET<select id="dashboard-scene-set" aria-label="Scene task set"></select></label>
+            <label>TASK<select id="dashboard-scene-task" aria-label="Scene task"></select></label>
+            <label>SCENE<select id="dashboard-scene-list" aria-label="Scene layout"></select></label>
+          </div>
+          <div id="dashboard-scene-status" role="status" aria-live="polite"></div>
+          <div class="collect-scene-grid" id="dashboard-scene-grid" aria-label="Scene positions" hidden></div>
+        </section>
+
         <section class="dashboard-mode-panel" id="dashboard-collection">
           <div class="dashboard-mode-head"><span class="dashboard-mode-index">01</span><div><h2>Dataset overview</h2><p>Raw data output, efficiency, and task demand</p></div><button class="dashboard-overview-scope" id="collection-overview-scope" disabled>ALL DATA</button></div>
           <section class="dashboard-metrics" aria-label="Collection metrics">
@@ -421,6 +433,17 @@
               </div>
               <div class="collect-scene-grid" id="collect-current-scene-grid" aria-label="Current scene positions"></div>
             </div>
+            <section class="eval-scene-map" aria-label="Evaluation scene map">
+              <div class="collect-current-copy">
+                <div class="collect-current-head">SCENE MAP</div>
+                <div class="collect-current-foot"><button class="btn" id="eval-scene-refresh" type="button">RELOAD</button></div>
+                <div class="collect-current-field"><b id="eval-scene-task">—</b></div>
+              </div>
+              <select class="choice-select task-select" id="eval-scene-set-list" aria-label="Evaluation scene task set" hidden></select>
+              <select class="choice-select task-select" id="eval-scene-list" aria-label="Evaluation scene"></select>
+              <div id="eval-scene-status" role="status" aria-live="polite"></div>
+              <div class="collect-scene-grid" id="eval-scene-grid" aria-label="Evaluation scene positions" hidden></div>
+            </section>
             <div class="col-canvas" id="canvas-col">
               <div class="ticks"><i></i></div>
               <span class="canvas-tag">3D · URDF</span>
@@ -860,6 +883,8 @@
     <!-- shared trial replay (RESULT tab): docked into #rv-detail-replay by relocateTrialPop(),
          floats over .workspace otherwise. EVAL no longer uses it (its right column is live). -->
     <div class="trial-pop" id="trial-pop">
+      <div id="tp-scene-label"></div>
+      <div class="collect-scene-grid" id="tp-scene-grid" hidden></div>
       <!-- REPLAY-style stage: 3D URDF + all camera views laid out in one row -->
       <div class="rt-top">
         <div class="rt-pane" id="tp-urdf">

@@ -3,10 +3,11 @@
 import { $, RT_COLORS, S, apiGet, apiPost, setCommandMetadata } from "./core.js";
 import { drawSeriesChart } from "./charts.js";
 import { renderEvalGripper, setPanel, syncChip } from "./run.js";
+import { renderSceneGrid } from "./scene_map.js";
 
 // ===== eval =====
 
-let EVAL_PROMPT = null;
+let EVAL_TASK = null;
 
 let EVAL_TRIAL = null;
 
@@ -34,18 +35,201 @@ let EVAL_SETUP_FIRED = false;
 
 let EVAL_PREV_SETUP_DONE = false;
 
+let EVAL_RESULTS_REQUEST = 0;
+
+let EVAL_RESULTS_LOADING = false;
+
+let EVAL_SCORE_PENDING = false;
+
+let EVAL_OBSERVED_CLIP = null;
+
+let EVAL_RESTORE = null;
+
+const EVAL_SCENE_MAP = {
+  taskSet: null, plan: null, sceneId: "", loading: false, error: "", requestId: 0,
+};
+
+const EVAL_TASK_CATALOG = {plan: null, authored: null, taskSet: null, tasks: [], byKey: new Map()};
+
 const EVAL_PHASE_LABEL = { idle: "not ready", ready: "ready", starting: "starting", running: "running",
     stopping: "stopping", resetting: "resetting", warming: "warming up" };
 
 function evalCfg() { return (S.CFG && S.CFG.eval) || {}; }
 
-function evalEnabled() { return !!(evalCfg().tasks && evalCfg().tasks.length); }
+function evalEnabled() { return !!evalCfg().tasks; }
 
 function evalCurPhase() { return EVAL_PENDING || EVAL_LAST_PHASE || "idle"; }
 
 function evalBusy() { return ["starting","running","stopping","resetting","warming"].includes(evalCurPhase()); }
 
-function evalHasTrial() { return !!EVAL_PROMPT && EVAL_TRIAL != null; }
+function evalTasks() {
+    const authored = evalCfg().tasks || [];
+    const plan = EVAL_SCENE_MAP.plan;
+    const catalog = EVAL_TASK_CATALOG;
+    if (catalog.plan === plan && catalog.authored === authored
+        && catalog.taskSet === EVAL_SCENE_MAP.taskSet) return catalog.tasks;
+    const tasks = (plan?.tasks || []).map((task) => {
+      const configured = authored.find((entry) => (
+        (!entry.task_set || entry.task_set === EVAL_SCENE_MAP.taskSet)
+        && (entry.task_id ? entry.task_id === task.task_id : entry.prompt_en === task.prompt_en)
+      ));
+      return {...task, ...configured, task_id: task.task_id, task_set: EVAL_SCENE_MAP.taskSet,
+        milestones: configured?.milestones || [{id: "success", label: "Task completed"}]};
+    });
+    const selected = plan ? tasks.concat(authored.filter((entry) => !entry.task_set
+      && !tasks.some((task) => entry.task_id ? task.task_id === entry.task_id
+        : task.prompt_en === entry.prompt_en))) : authored;
+    Object.assign(catalog, {plan, authored, taskSet: EVAL_SCENE_MAP.taskSet, tasks: selected,
+      byKey: new Map(selected.map((task) => [evalTaskKey(task), task]))});
+    return selected;
+  }
+
+function evalTaskKey(task) { return JSON.stringify([task.task_set || "", task.task_id || task.prompt_en]); }
+
+function evalTask(key = EVAL_TASK) { evalTasks(); return EVAL_TASK_CATALOG.byKey.get(key); }
+
+function evalCellKey(task, sceneId, trial) {
+    return JSON.stringify([task.task_set || "", task.task_id || task.prompt_en || task.prompt,
+      sceneId || "", trial]);
+  }
+
+function evalSceneTaskSet() {
+    return EVAL_SCENE_MAP.taskSet ?? evalTask()?.task_set ?? evalCfg().scene_plan_sets?.[0] ?? "";
+  }
+
+function selectEvalTask(key, sceneId = "") {
+    EVAL_TASK = key;
+    EVAL_SCENE_MAP.sceneId = sceneId;
+    renderEvalSceneMap();
+    EVAL_TRIAL = firstUntestedTrial(key);
+    EVAL_CLIP = null;
+    EVAL_SETUP_FIRED = false;
+    const task = evalTask();
+    if (task && !evalBusy()) apiPost("/api/select_task", {task: task.prompt_en});
+  }
+
+function restoreEvalAttempt() {
+    if (!EVAL_RESTORE) return false;
+    const {cell, clip} = EVAL_RESTORE;
+    if (cell.scene_id && !EVAL_SCENE_MAP.plan) return false;
+    const key = evalTaskKey({task_set: cell.task_set || "", task_id: cell.task_id || "", prompt_en: cell.prompt});
+    if (!evalTask(key)) return false;
+    EVAL_TASK = key;
+    EVAL_TRIAL = cell.trial;
+    EVAL_CLIP = clip;
+    EVAL_SCENE_MAP.sceneId = cell.scene_id || "";
+    EVAL_SETUP_FIRED = true;
+    EVAL_RESTORE = null;
+    renderEvalSceneMap();
+    return true;
+  }
+
+async function loadEvalScenePlan(force = false) {
+    if (force && evalBusy() && !EVAL_RESTORE) return;
+    const taskSet = evalSceneTaskSet();
+    if (!force && EVAL_SCENE_MAP.taskSet === taskSet) {
+      renderEvalSceneMap();
+      return;
+    }
+    const requestId = ++EVAL_SCENE_MAP.requestId;
+    Object.assign(EVAL_SCENE_MAP, {taskSet, loading: true, error: ""});
+    renderEvalSceneMap();
+    try {
+      const query = new URLSearchParams({scope: "eval"});
+      if (taskSet) query.set("set", taskSet);
+      const plan = await apiGet(`/api/scene_plan?${query}`);
+      if (requestId !== EVAL_SCENE_MAP.requestId) return;
+      EVAL_SCENE_MAP.plan = plan;
+      const tasks = evalTasks();
+      if (EVAL_RESTORE) {
+        if (!restoreEvalAttempt()) EVAL_SCENE_MAP.error = "Active evaluation task is not in this task set";
+      } else if (!evalTask()) selectEvalTask(tasks.length ? evalTaskKey(tasks[0]) : null);
+    } catch (error) {
+      if (requestId !== EVAL_SCENE_MAP.requestId) return;
+      EVAL_SCENE_MAP.error = error.message;
+    }
+    if (requestId !== EVAL_SCENE_MAP.requestId) return;
+    EVAL_SCENE_MAP.loading = false;
+    renderEvalSceneMap();
+    renderEvalPromptList(); renderEvalTrialRow(); renderEvalConsole();
+  }
+
+function renderEvalSceneMap() {
+    const host = $("eval-scene-grid");
+    if (!host) return;
+    const state = EVAL_SCENE_MAP;
+    const selectedTask = evalTask();
+    const task = (state.plan?.tasks || []).find((entry) => selectedTask?.task_id
+      ? entry.task_id === selectedTask.task_id
+      : (entry.runtime_prompt || entry.prompt_en) === selectedTask?.prompt_en);
+    const scenes = (task?.scene_ids || []).map((id) => (
+      (state.plan?.scenes || []).find((scene) => scene.scene_id === id)
+    )).filter(Boolean);
+    if (!scenes.some((scene) => scene.scene_id === state.sceneId)) {
+      state.sceneId = scenes[0]?.scene_id || "";
+    }
+    const selector = $("eval-scene-list");
+    const sceneKey = scenes.map((scene) => scene.scene_id).join("|");
+    if (selector.dataset.scenes !== sceneKey) {
+      selector.dataset.scenes = sceneKey;
+      selector.replaceChildren(...scenes.map((scene) => {
+        const option = document.createElement("option");
+        option.value = scene.scene_id;
+        option.textContent = scene.scene_id;
+        return option;
+      }));
+    }
+    selector.value = state.sceneId;
+    selector.disabled = evalBusy() || scenes.length < 2;
+    selector.onchange = () => {
+      if (evalBusy()) { selector.value = state.sceneId; return; }
+      state.sceneId = selector.value;
+      EVAL_CLIP = null;
+      EVAL_TRIAL = firstUntestedTrial(EVAL_TASK);
+      renderEvalPromptList(); renderEvalTrialRow(); renderEvalConsole();
+    };
+    const sets = evalCfg().scene_plan_sets || [];
+    const setSelector = $("eval-scene-set-list");
+    const setsKey = JSON.stringify(sets);
+    if (setSelector.dataset.sets !== setsKey) {
+      setSelector.dataset.sets = setsKey;
+      setSelector.replaceChildren(...sets.map((name) => {
+        const option = document.createElement("option");
+        option.value = name;
+        option.textContent = name;
+        return option;
+      }));
+    }
+    setSelector.hidden = sets.length < 2;
+    setSelector.value = state.taskSet || "";
+    setSelector.disabled = evalBusy();
+    setSelector.onchange = () => {
+      if (evalBusy()) { setSelector.value = state.taskSet || ""; return; }
+      state.taskSet = setSelector.value;
+      state.plan = null;
+      state.sceneId = "";
+      EVAL_TASK = null;
+      EVAL_CLIP = null;
+      loadEvalScenePlan(true);
+    };
+    const scene = scenes.find((entry) => entry.scene_id === state.sceneId);
+    $("eval-scene-task").textContent = task?.prompt_zh || selectedTask?.prompt_en || "—";
+    $("eval-scene-status").textContent = state.loading ? "Loading scene map…"
+      : state.error ? state.error
+      : !task ? "No scene map linked to this evaluation task"
+      : !scene ? "No scene layout found for this task" : "";
+    $("eval-scene-refresh").disabled = state.loading || evalBusy();
+    $("eval-scene-refresh").onclick = () => loadEvalScenePlan(true);
+    host.hidden = !scene;
+    if (scene) renderSceneGrid(host, state.plan, scene, task);
+    else {
+      host.replaceChildren();
+      delete host.dataset.layoutKey;
+    }
+  }
+
+function evalHasTrial() { return !!evalTask() && EVAL_TRIAL != null
+    && !EVAL_SCENE_MAP.loading && !EVAL_RESTORE; }
 
 function evalSetupReady() {
     return evalHasTrial() && evalCurPhase() === "ready";
@@ -89,15 +273,13 @@ function maybeAutoEvalSetup() {
   }
 
 function renderEvalSelectors() {
+    EVAL_SETUP_FIRED = false;
     $("eval-run-id").textContent = "run " + ((S.CFG && S.CFG.run_id) || "—");
     renderEvalModelList();
     // default to the first prompt's first untested trial
-    const prompts = evalCfg().tasks || [];
-    if (prompts.length && (EVAL_PROMPT == null || !prompts.some((p) => p.prompt_en === EVAL_PROMPT))) {
-      EVAL_PROMPT = prompts[0].prompt_en;
-      EVAL_TRIAL = firstUntestedTrial(EVAL_PROMPT);
-      EVAL_SETUP_FIRED = false;
-      apiPost("/api/select_task", { task: EVAL_PROMPT });
+    const prompts = evalTasks();
+    if (prompts.length && !evalBusy() && !EVAL_RESTORE && (EVAL_TASK == null || !evalTask())) {
+      selectEvalTask(evalTaskKey(prompts[0]));
     }
     renderEvalGripper();
     renderEvalPromptList(); renderEvalTrialRow(); renderEvalConsole();
@@ -124,7 +306,7 @@ function renderEvalModelList() {
       });
       list.onchange = () => {
         const slot = Number(list.value);
-        if (evalBusy() || EVAL_SWITCHING) {
+        if (evalBusy() || EVAL_SWITCHING || EVAL_SCORE_PENDING) {
           list.value = String(EVAL_ACTIVE_SLOT ?? Number(cks[0].slot));
           syncChip("eval-model-list");
           return;
@@ -150,9 +332,12 @@ function renderEvalModelList() {
 
 function evalSwitchCkpt(slot) {
     slot = Number(slot);
-    if (slot === EVAL_ACTIVE_SLOT || EVAL_SWITCHING) return;
+    if (slot === EVAL_ACTIVE_SLOT || EVAL_SWITCHING || EVAL_SCORE_PENDING) return;
     if (["running","starting","stopping"].includes(evalCurPhase())) return;
     EVAL_SWITCHING = true;
+    EVAL_RESULTS_REQUEST++;
+    EVAL_RESULTS_LOADING = false;
+    EVAL_CLIP = null;
     EVAL_SETUP_FIRED = false;
     setEvalActivePill(slot);
     const list = $("eval-model-list");
@@ -181,39 +366,50 @@ function setEvalActivePill(slot) {
     syncChip("eval-model-list");
   }
 
-function activateEvalCell(promptEn, trial) {
+function activateEvalCell(taskKey, trial) {
     if (evalBusy()) return;
-    const rec = EVAL_RECORDS[evalRecKey(promptEn, trial)];
-    if (trial > firstUntestedTrial(promptEn) && !(rec && rec.score != null)) return;
-    if (promptEn !== EVAL_PROMPT) { EVAL_PROMPT = promptEn; EVAL_SETUP_FIRED = false; apiPost("/api/select_task", { task: promptEn }); }
+    const rec = EVAL_RECORDS[evalRecKey(taskKey, trial)];
+    if (trial > firstUntestedTrial(taskKey) && !(rec && rec.score != null)) return;
+    if (taskKey !== EVAL_TASK) selectEvalTask(taskKey);
+    if (EVAL_TRIAL !== trial) EVAL_CLIP = null;
     EVAL_TRIAL = trial;
     EVAL_SHOW_UNSCORABLE_HINT = true;
-    if (trial === firstUntestedTrial(promptEn)) EVAL_SETUP_FIRED = false;
+    if (trial === firstUntestedTrial(taskKey)) EVAL_SETUP_FIRED = false;
     renderEvalPromptList(); renderEvalTrialRow(); renderEvalConsole();
   }
 
-function evalRecKey(promptEn, trial) { return promptEn + "|" + trial; }
+function evalRecKey(taskKey, trial) {
+    const task = evalTask(taskKey);
+    if (!task) return "";
+    const sceneId = taskKey === EVAL_TASK ? EVAL_SCENE_MAP.sceneId : task.scene_ids?.[0] || "";
+    return evalCellKey(task, sceneId, trial);
+  }
 
-function promptMilestones(promptEn) {
-    const p = (evalCfg().tasks || []).find((x) => x.prompt_en === promptEn);
+function promptMilestones(taskKey) {
+    const p = evalTask(taskKey);
     return (p && p.milestones) || [];
   }
 
-function firstUntestedTrial(promptEn) {
+function firstUntestedTrial(taskKey) {
     const n = evalCfg().trials_per_prompt || 5;
-    for (let t = 1; t <= n; t++) { const r = EVAL_RECORDS[evalRecKey(promptEn, t)]; if (!r || r.score == null) return t; }
+    for (let t = 1; t <= n; t++) { const r = EVAL_RECORDS[evalRecKey(taskKey, t)]; if (!r || r.score == null) return t; }
     return 1;
   }
 
 // First task (in config order) that still has any unscored trial; falls back to the first
 // task when every trial is scored. Drives resume so re-entering EVAL lands on real work.
 function firstUntestedTaskPrompt() {
-    const prompts = evalCfg().tasks || [];
+    const tasks = evalTasks();
     const n = evalCfg().trials_per_prompt || 5;
-    for (const p of prompts) {
-      for (let t = 1; t <= n; t++) { const r = EVAL_RECORDS[evalRecKey(p.prompt_en, t)]; if (!r || r.score == null) return p.prompt_en; }
+    for (const task of tasks) {
+      for (const sceneId of task.scene_ids?.length ? task.scene_ids : [""]) {
+        for (let trial = 1; trial <= n; trial++) {
+          const record = EVAL_RECORDS[evalCellKey(task, sceneId, trial)];
+          if (!record || record.score == null) return {key: evalTaskKey(task), sceneId};
+        }
+      }
     }
-    return prompts.length ? prompts[0].prompt_en : null;
+    return tasks.length ? {key: evalTaskKey(tasks[0]), sceneId: tasks[0].scene_ids?.[0] || ""} : null;
   }
 
 // Re-entering EVAL resumes at the first untested task+trial, using the on-disk scores that
@@ -222,17 +418,15 @@ function evalResumeOnEnter() {
     if (evalBusy()) return;
     const p = firstUntestedTaskPrompt();
     if (!p) return;
-    EVAL_PROMPT = p;
-    EVAL_TRIAL = firstUntestedTrial(p);
+    selectEvalTask(p.key, p.sceneId);
     EVAL_SHOW_UNSCORABLE_HINT = false;
     EVAL_SETUP_FIRED = false;
-    apiPost("/api/select_task", { task: p });
     renderEvalPromptList(); renderEvalTrialRow(); renderEvalConsole();
   }
 
 function renderEvalPromptList() {
     const list = $("eval-prompt-list"); if (!list) return;
-    const prompts = evalCfg().tasks || [];
+    const prompts = evalTasks();
     const n = evalCfg().trials_per_prompt || 5;
     list.innerHTML = "";
     if (list.tagName === "SELECT") {
@@ -243,34 +437,34 @@ function renderEvalPromptList() {
       list.appendChild(placeholder);
       prompts.forEach((p, pi) => {
         let sc = 0, mx = 0, te = 0;
-        for (let t = 1; t <= n; t++) { const r = EVAL_RECORDS[evalRecKey(p.prompt_en, t)]; if (r && r.score != null) { sc += r.score; mx += r.max_score; te++; } }
+        for (let t = 1; t <= n; t++) { const r = EVAL_RECORDS[evalRecKey(evalTaskKey(p), t)]; if (r && r.score != null) { sc += r.score; mx += r.max_score; te++; } }
         const rate = te ? sc + "/" + mx : "—";
-        const label = p.prompt_zh || p.prompt_en;
+        const label = (p.task_id ? p.task_id + " · " : "") + (p.prompt_zh || p.prompt_en);
         const opt = document.createElement("option");
-        opt.value = p.prompt_en;
+        opt.value = evalTaskKey(p);
         opt.dataset.label = label;
         opt.textContent = String(pi + 1).padStart(2, "0") + " " + label + " · " + rate;
         list.appendChild(opt);
       });
       list.onchange = () => {
-        if (evalBusy()) { list.value = EVAL_PROMPT || ""; syncChip("eval-prompt-list"); return; }
-        const promptEn = list.value;
-        if (!promptEn) return;
-        activateEvalCell(promptEn, firstUntestedTrial(promptEn));
+        if (evalBusy()) { list.value = EVAL_TASK || ""; syncChip("eval-prompt-list"); return; }
+        const taskKey = list.value;
+        if (!taskKey) return;
+        activateEvalCell(taskKey, firstUntestedTrial(taskKey));
       };
-      list.value = EVAL_PROMPT || "";
+      list.value = EVAL_TASK || "";
       syncChip("eval-prompt-list");
       return;
     }
     prompts.forEach((p, pi) => {
       let sc = 0, mx = 0, te = 0;
-      for (let t = 1; t <= n; t++) { const r = EVAL_RECORDS[evalRecKey(p.prompt_en, t)]; if (r && r.score != null) { sc += r.score; mx += r.max_score; te++; } }
+      for (let t = 1; t <= n; t++) { const r = EVAL_RECORDS[evalRecKey(evalTaskKey(p), t)]; if (r && r.score != null) { sc += r.score; mx += r.max_score; te++; } }
       const rate = te ? sc + "/" + mx : "—";
       const seg = document.createElement("div");
-      seg.className = "seg" + (p.prompt_en === EVAL_PROMPT ? " active" : "");
+      seg.className = "seg" + (evalTaskKey(p) === EVAL_TASK ? " active" : "");
       seg.innerHTML = '<span class="mk">' + String(pi + 1).padStart(2, "0") + '</span><span>'
-        + (p.prompt_zh || p.prompt_en) + '</span><span class="epb-rate">' + rate + '</span>';
-      seg.onclick = () => activateEvalCell(p.prompt_en, firstUntestedTrial(p.prompt_en));
+        + (p.task_id ? p.task_id + ' · ' : '') + (p.prompt_zh || p.prompt_en) + '</span><span class="epb-rate">' + rate + '</span>';
+      seg.onclick = () => activateEvalCell(evalTaskKey(p), firstUntestedTrial(evalTaskKey(p)));
       list.appendChild(seg);
     });
     syncChip("eval-prompt-list");
@@ -280,33 +474,34 @@ function renderEvalTrialRow() {
     const row = $("eval-trial-row"); if (!row) return;
     const n = evalCfg().trials_per_prompt || 5;
     row.innerHTML = "";
-    if (!EVAL_PROMPT) return;
-    const ms = promptMilestones(EVAL_PROMPT);
-    const firstOpen = firstUntestedTrial(EVAL_PROMPT);
+    if (!EVAL_TASK) return;
+    const ms = promptMilestones(EVAL_TASK);
+    const firstOpen = firstUntestedTrial(EVAL_TASK);
     for (let t = 1; t <= n; t++) {
-      const rec = EVAL_RECORDS[evalRecKey(EVAL_PROMPT, t)];
+      const rec = EVAL_RECORDS[evalRecKey(EVAL_TASK, t)];
       const scored = rec && rec.score != null;
       const locked = !scored && t > firstOpen;
       const cell = document.createElement("div");
       cell.className = "eval-trial" + (scored ? " scored" : "") + (EVAL_TRIAL === t ? " active" : "") + (locked ? " locked" : "");
       if (scored) { const m2 = rec.max_score || ms.length || 1; if (rec.score === 0) cell.classList.add("zero"); else cell.style.setProperty("--score-pct", (100 * rec.score / m2) + "%"); }
       cell.innerHTML = "<span>" + (scored ? rec.score + "/" + (rec.max_score || ms.length) : t) + "</span>";
-      if (!locked) cell.onclick = () => activateEvalCell(EVAL_PROMPT, t);
+      if (!locked) cell.onclick = () => activateEvalCell(EVAL_TASK, t);
       row.appendChild(cell);
     }
   }
 
 function renderEvalConsole() {
-    if (!EVAL_PROMPT) {
+    loadEvalScenePlan();
+    if (!EVAL_TASK) {
       $("ctx-trial").textContent = "—/—";
       $("ms-nodes").innerHTML = ""; updateMsFill(); $("eval-note").value = "";
       applyEvalPhase(); return;
     }
     const n = evalCfg().trials_per_prompt || 5;
     $("ctx-trial").textContent = (EVAL_TRIAL || 1) + "/" + n;
-    const rec = EVAL_RECORDS[evalRecKey(EVAL_PROMPT, EVAL_TRIAL)] || {};
+    const rec = EVAL_RECORDS[evalRecKey(EVAL_TASK, EVAL_TRIAL)] || {};
     const checks = rec.milestones || {};
-    const ms = promptMilestones(EVAL_PROMPT);
+    const ms = promptMilestones(EVAL_TASK);
     let level = 0; for (let i = 0; i < ms.length; i++) { if (checks[ms[i].id]) level = i + 1; else break; }
     const nodes = $("ms-nodes"); nodes.innerHTML = "";
     ms.forEach((m, i) => {
@@ -341,18 +536,19 @@ function updateMsFill() {
     const total = nodes.length, done = nodes.filter((nn) => nn.classList.contains("done")).length;
     const fill = $("ms-rail-fill"), score = $("ms-score");
     if (!total) { fill.style.height = "0%"; score.textContent = "0/0"; return; }
-    fill.style.height = (done === 0 ? 0 : ((done - 1) / (total - 1)) * 100) + "%";
+    fill.style.height = (done === 0 ? 0 : total === 1 ? 100 : ((done - 1) / (total - 1)) * 100) + "%";
     score.textContent = done + "/" + total;
   }
 
 function readMilestoneLevel() { return document.querySelectorAll("#ms-nodes .ms-node.done").length; }
 
 function evalTrialScorable(t) {
-    const rec = EVAL_RECORDS[evalRecKey(EVAL_PROMPT, t)];
-    return !!(rec && rec.episode_index != null);
+    const rec = EVAL_RECORDS[evalRecKey(EVAL_TASK, t)];
+    return !!(rec && rec.episode_index != null && (!EVAL_CLIP || rec.clip_id === EVAL_CLIP));
   }
 
 function applyEvalPhase() {
+    renderEvalSceneMap();
     const phase = evalCurPhase();
     const run = $("be-run"), reset = $("be-reset"), save = $("be-submit");
     if (!run) return;
@@ -369,7 +565,7 @@ function applyEvalPhase() {
     run.classList.toggle("recording", running);
     run.classList.toggle("primary", !running);
     reset.classList.remove("attention"); reset.textContent = "RESET ⟲"; reset.disabled = true;
-    const hasPrompt = !!EVAL_PROMPT;
+    const hasPrompt = !!EVAL_TASK;
     const hasTrial = evalHasTrial();
     const setupDone = !!((S.STATUS || {}).is_setup_done) && phase !== "warming";
     const setupErrored = evalSetupErrored();
@@ -378,15 +574,16 @@ function applyEvalPhase() {
     else if (phase === "stopping") label.textContent = "STOPPING…";
     else if (phase === "resetting") { label.textContent = "RUN ▶"; reset.classList.add("attention"); reset.textContent = "RESETTING…"; }
     else { label.textContent = "RUN ▶"; reset.disabled = !(setupDone && phase === "ready"); }
-    const clickable = running || (phase === "ready" && hasTrial && setupDone);
+    const clickable = running || (phase === "ready" && hasTrial && setupDone
+      && !EVAL_SWITCHING && !EVAL_SCORE_PENDING);
     run.disabled = busy || !clickable;
     renderEvalSetupState();
-    const lockCkpt = EVAL_SWITCHING || ["warming","starting","running","stopping","resetting"].includes(phase);
+    const lockCkpt = EVAL_SWITCHING || EVAL_SCORE_PENDING || ["warming","starting","running","stopping","resetting"].includes(phase);
     const modelList = $("eval-model-list");
     if (modelList && modelList.tagName === "SELECT") modelList.disabled = lockCkpt;
     else document.querySelectorAll("#eval-model-list .seg").forEach((b) => { b.classList.toggle("locked", lockCkpt); });
     const scorable = evalTrialScorable(EVAL_TRIAL);
-    const scoreLocked = !scorable || ["warming","starting","running","stopping"].includes(phase);
+    const scoreLocked = EVAL_SCORE_PENDING || EVAL_SWITCHING || !scorable || ["warming","starting","running","stopping"].includes(phase);
     save.disabled = scoreLocked;
     $("eval-note").disabled = scoreLocked;
     document.querySelectorAll("#ms-nodes .ms-node").forEach((nn) => nn.classList.toggle("locked", scoreLocked));
@@ -400,7 +597,7 @@ function applyEvalPhase() {
     setPanel("eval-panel-score", scorable ? "active" : "pending");
     maybeAutoEvalSetup();
     const hint = $("eval-gate-hint");
-    if (hint) hint.textContent = (EVAL_SHOW_UNSCORABLE_HINT && EVAL_PROMPT && !scorable) ? "Run this trial before scoring" : "";
+    if (hint) hint.textContent = (EVAL_SHOW_UNSCORABLE_HINT && EVAL_TASK && !scorable) ? "Run this trial before scoring" : "";
   }
 
 function setEvalPending(p) { EVAL_PENDING = p; EVAL_PENDING_TICKS = 0; applyEvalPhase(); }
@@ -428,15 +625,18 @@ function evalSetup(force) {
 
 function evalRun() {
     if (!evalHasTrial()) { $("be-err").textContent = "select a trial first"; return; }
-    if (evalCurPhase() !== "ready") return;
+    if (evalCurPhase() !== "ready" || EVAL_SWITCHING || EVAL_SCORE_PENDING) return;
     if (!((S.STATUS || {}).is_setup_done)) { evalSetup(true); return; }
-    const t = EVAL_TRIAL || firstUntestedTrial(EVAL_PROMPT);
+    const t = EVAL_TRIAL || firstUntestedTrial(EVAL_TASK);
     EVAL_TRIAL = t;
     EVAL_SHOW_UNSCORABLE_HINT = false;
     EVAL_CLIP = "eval-" + Date.now() + "-" + Math.floor(performance.now());
+    EVAL_OBSERVED_CLIP = EVAL_CLIP;
     setEvalPending("starting");
-    apiPost("/api/eval_start", { clip_id: EVAL_CLIP, prompt: EVAL_PROMPT, trial: t })
-      .catch(() => { EVAL_PENDING = null; applyEvalPhase(); });
+    const task = evalTask();
+    apiPost("/api/eval_start", {clip_id: EVAL_CLIP, prompt: task.prompt_en, trial: t,
+      task_set: task.task_set || "", task_id: task.task_id || "", scene_id: EVAL_SCENE_MAP.sceneId})
+      .catch(() => { EVAL_PENDING = null; EVAL_CLIP = null; applyEvalPhase(); });
     renderEvalTrialRow();
   }
 
@@ -446,56 +646,71 @@ function evalReset() {
     apiPost("/api/eval_reset").catch(() => { EVAL_PENDING = null; applyEvalPhase(); });
   }
 
-function submitEvalScore() {
-    if (!EVAL_PROMPT || EVAL_TRIAL == null) return;
+async function submitEvalScore() {
+    if (EVAL_SCORE_PENDING || EVAL_SWITCHING || !evalHasTrial()
+        || ["warming", "starting", "running", "stopping"].includes(evalCurPhase())) return;
     if (!evalTrialScorable(EVAL_TRIAL)) {
       EVAL_SHOW_UNSCORABLE_HINT = true;
-      const hint = $("eval-gate-hint");
-      if (hint) hint.textContent = "Run this trial before scoring";
-      maybeAutoEvalSetup();
+      applyEvalPhase();
       return;
     }
-    const ms = promptMilestones(EVAL_PROMPT);
+    const task = evalTask();
+    const trial = EVAL_TRIAL;
+    const key = EVAL_TASK;
+    const sceneId = EVAL_SCENE_MAP.sceneId;
+    const rec = EVAL_RECORDS[evalRecKey(key, trial)];
+    const model = S.EVAL_MODEL_NAME;
+    const ms = task.milestones || [];
     const level = readMilestoneLevel();
-    const milestones = {}; ms.forEach((m, i) => { milestones[m.id] = i < level; });
-    const clip = (EVAL_RECORDS[evalRecKey(EVAL_PROMPT, EVAL_TRIAL)] || {}).clip_id || EVAL_CLIP;
-    if (!clip) { $("eval-saved").textContent = "no clip: RUN this trial once first"; return; }
-    apiPost("/api/score", {
-      clip_id: clip, prompt: EVAL_PROMPT, trial: EVAL_TRIAL,
-      score: level, max_score: ms.length, milestones, note: $("eval-note").value,
-    }).then((r) => {
-      if (r && r.ok === false) { $("eval-saved").textContent = r.error || "score rejected"; return; }
-      const btn = $("be-submit"); btn.classList.add("saved"); btn.textContent = "SAVED ✓";
-      setTimeout(() => { btn.classList.remove("saved"); btn.textContent = "SAVE SCORE · NEXT"; }, 1200);
-      const saved = EVAL_TRIAL;
-      loadEvalResults().then(() => {
-        // Advance to the next trial of this prompt (sequential). If the just-saved trial
-        // was the last one, stay on it.
-        const n = evalCfg().trials_per_prompt || 5;
-        EVAL_SHOW_UNSCORABLE_HINT = false;
-        EVAL_TRIAL = saved < n ? saved + 1 : saved;
-        renderEvalPromptList(); renderEvalTrialRow(); renderEvalConsole();
-        if (saved < n) evalSetup(true);
+    const milestones = {};
+    ms.forEach((milestone, index) => { milestones[milestone.id] = index < level; });
+    EVAL_SCORE_PENDING = true;
+    applyEvalPhase();
+    try {
+      const response = await apiPost("/api/score", {
+        clip_id: rec.clip_id, prompt: task.prompt_en, trial, model_name: model,
+        task_set: task.task_set || "", task_id: task.task_id || "", scene_id: sceneId,
+        score: level, max_score: ms.length, milestones, note: $("eval-note").value,
       });
-    });
+      if (response?.ok === false) { $("eval-saved").textContent = response.error || "score rejected"; return; }
+      await loadEvalResults();
+      if (EVAL_TASK !== key || EVAL_TRIAL !== trial || EVAL_SCENE_MAP.sceneId !== sceneId
+          || S.EVAL_MODEL_NAME !== model || EVAL_SWITCHING
+          || ["warming", "starting", "running", "stopping"].includes(evalCurPhase())
+          || EVAL_RECORDS[evalRecKey(key, trial)]?.clip_id !== rec.clip_id) return;
+      EVAL_SHOW_UNSCORABLE_HINT = false;
+      const n = evalCfg().trials_per_prompt || 5;
+      EVAL_TRIAL = Math.min(trial + 1, n);
+      EVAL_CLIP = null;
+      renderEvalPromptList(); renderEvalTrialRow(); renderEvalConsole();
+      if (trial < n) evalSetup(true);
+    } catch (error) {
+      $("eval-saved").textContent = error.message;
+    } finally {
+      EVAL_SCORE_PENDING = false;
+      applyEvalPhase();
+    }
   }
 
 async function loadEvalResults() {
+    const requestId = ++EVAL_RESULTS_REQUEST;
+    const slot = EVAL_ACTIVE_SLOT;
+    EVAL_RESULTS_LOADING = true;
     try {
       const data = await apiGet("/api/results");
+      if (requestId !== EVAL_RESULTS_REQUEST || slot !== EVAL_ACTIVE_SLOT || EVAL_SWITCHING) return;
       S.EVAL_MODEL_NAME = data.model_name || "";
       EVAL_RECORDS = {};
-      // A (prompt, trial) cell may have several recorded episodes (e.g. a re-run appends a
-      // fresh unscored row). Collapse to one per cell, preferring a SCORED episode so a
-      // later unscored re-run never hides an earlier saved score; among equals, last wins.
-      (data.records || []).forEach((r) => {
-        if (r.prompt == null || r.trial == null) return;
-        const key = evalRecKey(r.prompt, r.trial);
-        const prev = EVAL_RECORDS[key];
-        if (!prev || r.score != null || prev.score == null) EVAL_RECORDS[key] = r;
-      });
+      for (const record of data.records || []) {
+        if (record.prompt == null || record.trial == null) continue;
+        EVAL_RECORDS[evalCellKey(record, record.scene_id, record.trial)] = record;
+      }
       if (S.ACTIVE_TAB === "eval") { renderEvalPromptList(); renderEvalTrialRow(); renderEvalConsole(); }
-    } catch (e) {}
+    } catch (error) {
+      $("be-err").textContent = error.message;
+    } finally {
+      if (requestId === EVAL_RESULTS_REQUEST) EVAL_RESULTS_LOADING = false;
+    }
   }
 
 function applyEvalStatus(s) {
@@ -525,6 +740,7 @@ function applyEvalStatus(s) {
     // ckpt swap + logger rebuild are async, completing a few polls after select_ckpt),
     // reload this model's results so the trial scores refresh without a manual reload.
     if (s.ckpt_slot != null && s.ckpt_slot !== EVAL_ACTIVE_SLOT) {
+      EVAL_RESULTS_REQUEST++; EVAL_RESULTS_LOADING = false; EVAL_CLIP = null;
       EVAL_ACTIVE_SLOT = s.ckpt_slot; EVAL_SWITCHING = false; setEvalActivePill(EVAL_ACTIVE_SLOT);
       EVAL_SETUP_FIRED = false;
       EVAL_RECORDS = {};
@@ -535,14 +751,24 @@ function applyEvalStatus(s) {
     const timer = $("be-elapsed");
     timer.style.display = S.ACTIVE_TAB === "eval" ? "" : "none";
     if (phase === "running") { timer.classList.add("running"); timer.textContent = "⏱ " + (EVAL_ELAPSED_MS / 1000).toFixed(1) + "s"; }
-    else { timer.classList.remove("running"); const rec = EVAL_RECORDS[evalRecKey(EVAL_PROMPT, EVAL_TRIAL)]; timer.textContent = "⏱ " + (((rec && rec.duration_ms) || 0) / 1000).toFixed(1) + "s"; }
+    else { timer.classList.remove("running"); const rec = EVAL_RECORDS[evalRecKey(EVAL_TASK, EVAL_TRIAL)]; timer.textContent = "⏱ " + (((rec && rec.duration_ms) || 0) / 1000).toFixed(1) + "s"; }
     $("be-err").textContent = s.last_error || "";
     // trial finished -> reload so it becomes scorable
     const settled = phase === "ready" || phase === "idle";
-    if (EVAL_LAST_PHASE === "running" || EVAL_LAST_PHASE === "stopping") {
-      if (settled && EVAL_CLIP) loadEvalResults();
-    }
+    const record = EVAL_RECORDS[evalRecKey(EVAL_TASK, EVAL_TRIAL)];
+    if (settled && EVAL_CLIP && record?.clip_id !== EVAL_CLIP && !EVAL_RESULTS_LOADING) loadEvalResults();
     EVAL_LAST_PHASE = phase;
+    if (s.clip_id && s.cell && s.clip_id !== EVAL_OBSERVED_CLIP
+        && ["starting", "running", "stopping", "resetting"].includes(phase)) {
+      EVAL_OBSERVED_CLIP = s.clip_id;
+      EVAL_RESTORE = {clip: s.clip_id, cell: s.cell};
+      EVAL_TASK = null;
+      const taskSet = s.cell.task_set || "";
+      const sameSet = EVAL_SCENE_MAP.taskSet === taskSet;
+      if (!sameSet) EVAL_SCENE_MAP.plan = null;
+      EVAL_SCENE_MAP.taskSet = taskSet;
+      if (!restoreEvalAttempt() && (!sameSet || !EVAL_SCENE_MAP.loading)) loadEvalScenePlan(true);
+    }
     applyEvalPhase();
   }
 
@@ -559,25 +785,49 @@ let rvOpenPrompt = null;
 
 let rvActiveKey = null;
 
-function rvTrialMs(promptEn) {
-    const p = RV.tasks.find((x) => x.prompt_en === promptEn);
-    return (p && p.milestones) || [];
+function rvTaskKey(task) {
+    return JSON.stringify([task.task_set || "", task.task_id || task.prompt_en || task.prompt,
+      task.scene_id || ""]);
   }
 
-function rvModel(name) { return RV.models.find((m) => m.model_name === name); }
+function rvTasks() {
+    const tasks = new Map();
+    for (const model of RV.models) {
+      for (const record of model.records) {
+        const key = rvTaskKey(record);
+        const authored = RV.tasks.find((task) => task.task_id
+          ? task.task_id === record.task_id && (!task.task_set || task.task_set === record.task_set)
+          : task.prompt_en === record.prompt);
+        const snapshotTask = record.scene_map?.tasks?.find((task) => task.task_id === record.task_id);
+        tasks.set(key, {...snapshotTask, ...authored, ...record, prompt_en: record.prompt,
+          milestones: authored?.milestones || [{id: "success", label: "Task completed"}]});
+      }
+    }
+    for (const task of RV.tasks) {
+      if (![...tasks.values()].some((entry) => task.task_id
+        ? entry.task_id === task.task_id && (!task.task_set || task.task_set === entry.task_set)
+        : entry.prompt_en === task.prompt_en)) tasks.set(rvTaskKey(task), task);
+    }
+    return [...tasks.values()];
+  }
+
+function rvTrialMs(record) {
+    if (!record) return [];
+    const task = rvTasks().find((entry) => rvTaskKey(entry) === rvTaskKey(record));
+    return task?.milestones || [];
+  }
+
+function rvModel(name) { return RV.models.find((model) => model.model_name === name); }
 
 function rvBuildMatrix(records) {
-    const m = {};
-    for (const p of RV.tasks) m[p.prompt_en] = Array(RV.trials).fill(null);
-    for (const r of records) {
-      const arr = m[r.prompt]; if (!arr) continue;
-      const idx = (r.trial || 1) - 1;
-      if (idx < 0 || idx >= RV.trials) continue;
-      // prefer a scored episode for the cell so a later unscored re-run can't hide a score
-      const prev = arr[idx];
-      if (!prev || r.score != null || prev.score == null) arr[idx] = r;
+    const matrix = {};
+    for (const task of rvTasks()) matrix[rvTaskKey(task)] = Array(RV.trials).fill(null);
+    for (const record of records) {
+      const trials = matrix[rvTaskKey(record)];
+      const index = Number(record.trial) - 1;
+      if (trials && index >= 0 && index < RV.trials) trials[index] = record;
     }
-    return m;
+    return matrix;
   }
 
 function rvStats(records) {
@@ -595,7 +845,7 @@ async function loadResultsAll() {
       RV = Object.assign(RV, await apiGet("/api/results_all"));
       if (RV.trials_per_prompt != null) RV.trials = RV.trials_per_prompt;
       // also refresh which model is active (for popup score editability)
-      try { const d = await apiGet("/api/results"); S.EVAL_MODEL_NAME = d.model_name || ""; } catch (e) {}
+      await loadEvalResults();
       renderResultTree();
     } catch (e) {
       $("rv-tree").innerHTML = '<div class="rv-empty">load failed: ' + e.message + '</div>';
@@ -638,7 +888,7 @@ function renderResultTree() {
     host.innerHTML = "";
     RV.models.forEach((m) => {
       const matrix = rvBuildMatrix(m.records);
-      const s = rvStats(m.records);
+      const s = rvStats(Object.values(matrix).flat().filter(Boolean));
       const mOpen = rvOpenModel === m.model_name;
       const node = document.createElement("div");
       node.className = "rv-node rv-model" + (mOpen ? " open" : "");
@@ -653,17 +903,18 @@ function renderResultTree() {
       node.appendChild(head);
       if (mOpen) {
         const tasks = document.createElement("div"); tasks.className = "rv-tasks";
-        RV.tasks.forEach((p, pi) => {
-          const arr = matrix[p.prompt_en];
+        rvTasks().forEach((p, pi) => {
+          const arr = matrix[rvTaskKey(p)];
           const st = rvTaskStats(arr);
-          const key = m.model_name + "||" + p.prompt_en;
+          const key = JSON.stringify([m.model_name, rvTaskKey(p)]);
           const tOpen = rvOpenPrompt === key;
           const t = document.createElement("div");
           t.className = "rv-node rv-task" + (tOpen ? " open" : "");
           const th = document.createElement("div");
           th.className = "rv-node-head";
           th.innerHTML = '<span class="caret">▸</span><span class="pn">P' + (pi + 1) + '</span>'
-            + '<span class="rv-name pt">' + (p.prompt_zh || p.prompt_en) + '</span>'
+            + '<span class="rv-name pt">' + (p.task_id ? p.task_id + ' · ' : '') + (p.prompt_zh || p.prompt_en)
+            + (p.scene_id ? ' · ' + p.task_set + ' / ' + p.scene_id : '') + '</span>'
             + '<div class="rings">'
             + rvRing(st.scorePct, "score", "score")
             + rvRing(st.succPct, "succ", "succ")
@@ -684,7 +935,7 @@ function rvTrialGrid(modelName, p, arr) {
     const grid = document.createElement("div"); grid.className = "rv-trials eval-trial-row";
     for (let i = 0; i < RV.trials; i++) {
       const rec = arr[i];
-      const key = modelName + "|" + p.prompt_en + "|" + i;
+      const key = JSON.stringify([modelName, rvTaskKey(p), i]);
       const cell = document.createElement("div"); cell.className = "eval-trial";
       if (rec && rec.score != null) {
         cell.classList.add("scored");
@@ -696,7 +947,13 @@ function rvTrialGrid(modelName, p, arr) {
           if (rvActiveKey === key) cell.classList.add("active");
           cell.onclick = () => { rvActiveKey = key; renderResultTree(); trialPopOpen(rec, modelName); };
         }
-      } else { cell.innerHTML = "<span>trial " + (i + 1) + "</span>"; cell.style.opacity = "0.5"; }
+      } else {
+        cell.innerHTML = "<span>trial " + (i + 1) + "</span>";
+        cell.style.opacity = "0.5";
+        if (rec?.episode_index != null) cell.onclick = () => {
+          rvActiveKey = key; renderResultTree(); trialPopOpen(rec, modelName);
+        };
+      }
       grid.appendChild(cell);
     }
     return grid;
@@ -765,6 +1022,13 @@ function tpResultDock() { const c = document.getElementById("rv-detail-replay");
 function trialPopOpen(rec, modelName) {
     TP_REC = rec; TP_MODEL = modelName || "";
     tpRenderSteps();
+    const grid = $("tp-scene-grid");
+    const scene = rec.scene_map?.scenes?.find((entry) => entry.scene_id === rec.scene_id);
+    $("tp-scene-label").textContent = rec.scene_id ? `${rec.task_set} / ${rec.task_id} / ${rec.scene_id}` : "";
+    grid.hidden = !scene;
+    if (scene) renderSceneGrid(grid, rec.scene_map, scene,
+      rec.scene_map.tasks.find((task) => task.task_id === rec.task_id));
+    else { grid.replaceChildren(); delete grid.dataset.layoutKey; }
     const note = $("tp-note");
     if (note) { note.textContent = rec.note || "(no note)"; note.classList.toggle("empty", !rec.note); }
     if (tpResultDock()) { const e = $("rv-replay-empty"); if (e) e.style.display = "none"; }
@@ -782,7 +1046,7 @@ function trialPopClose() {
   }
 
 function tpRenderSteps() {
-    const ms = rvTrialMs(TP_REC ? TP_REC.prompt : null);
+    const ms = rvTrialMs(TP_REC);
     const host = $("tp-steps"); if (!host) return;
     const score = (TP_REC && TP_REC.score != null)
       ? TP_REC.score

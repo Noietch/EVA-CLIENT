@@ -651,6 +651,10 @@ class EpisodeLogger:
         the matching row in place. Scores live ONLY in meta/episodes.jsonl (never in the
         parquet data table). Returns False when the episode index is not found.
         """
+        with self._lock:
+            return self._patch_episode_meta_locked(episode_index, fields)
+
+    def _patch_episode_meta_locked(self, episode_index: int, fields: dict[str, Any]) -> bool:
         path = self._meta_path("episodes.jsonl")
         rows = _read_jsonl(path)
         patched = False
@@ -709,11 +713,11 @@ class EpisodeLogger:
         """
         if not clip_id:
             return None
-        episode_index = self._episode_index_for_clip_id(clip_id)
-        if episode_index is not None:
-            self.patch_episode_meta(episode_index, **fields)
-            return episode_index
         with self._lock:
+            episode_index = self._episode_index_for_clip_id(clip_id)
+            if episode_index is not None:
+                self._patch_episode_meta_locked(episode_index, fields)
+                return episode_index
             job = self._queued_job_for_clip_id_locked(clip_id)
             if job is None:
                 return None
@@ -823,19 +827,7 @@ class EpisodeLogger:
                 len(segment.frames) for segment in intervention_segments
             )
 
-        # Eval re-run: if this (prompt, trial) cell already has a recorded episode, reuse
-        # its index and overwrite that episode's data IN PLACE (parquet + video + meta row)
-        # instead of appending a new episode. Otherwise advance the dataset-wide counters so
-        # the next episode can start while this one is still being written in the background.
-        reuse_index = self._eval_existing_episode_index(episode_meta) if self._eval_mode else None
-        if reuse_index is not None:
-            episode_index = reuse_index
-            global_index = self._existing_episode_global_start(episode_index)
-            if global_index is None:
-                global_index = -1
-        else:
-            global_index = -1
-            self._episode_index += 1
+        self._episode_index += 1
         self._active = False
         raw_batch = self._copy_raw_episode_batch(self._raw_episode_batch)
         frame_labels = list(self._raw_episode_frame_labels)
@@ -861,7 +853,7 @@ class EpisodeLogger:
             episode_index=episode_index,
             task=task,
             task_index=task_index,
-            global_index=global_index,
+            global_index=-1,
             steps=[],
             episode_meta=episode_meta,
             task_to_index=dict(self._task_to_index),
@@ -1212,12 +1204,9 @@ class EpisodeLogger:
         finally:
             job.raw_video_samples = None
         with self._lock:
-            if self._eval_mode:
-                self._upsert_episode_dict_row_locked(row)
-            else:
-                self._append_episode_dict_row_locked(row)
+            self._append_episode_dict_row_locked(row)
             self._write_tasks_jsonl_from(job.task_to_index)
-        self._write_info_json()
+            self._write_info_json()
         self._write_stats_json()
         self._clear_pending_episode_meta_for_job(job)
 
@@ -2307,44 +2296,6 @@ class EpisodeLogger:
         return int(h), int(w)
 
     # -- meta writers -----------------------------------------------------------
-
-    def _eval_existing_episode_index(self, episode_meta: dict[str, Any]) -> int | None:
-        """Episode index of a prior recording of this (prompt, trial) cell, or None.
-
-        Used so an eval RE-RUN overwrites the same trial's data in place instead of
-        appending. Matches on (prompt, trial) — the cell identity the operator scores —
-        scanning meta/episodes.jsonl. Returns None when prompt/trial are absent (non-eval
-        recordings) or the cell has no prior episode.
-        """
-        prompt = episode_meta.get("prompt")
-        trial = episode_meta.get("trial")
-        if prompt is None or trial is None:
-            return None
-        match: int | None = None
-        for row in _read_jsonl(self._meta_path("episodes.jsonl")):
-            if row.get("prompt") == prompt and row.get("trial") == trial:
-                idx = row.get("episode_index")
-                if idx is not None:
-                    match = int(idx)  # last matching row wins
-        return match
-
-    def _existing_episode_global_start(self, episode_index: int) -> int | None:
-        """Global frame offset (`index` col start) for an existing episode, or None.
-
-        Sum of the lengths of all episodes recorded before this one, so a re-run's parquet
-        `index` column resumes from the same dataset-global position the original used.
-        """
-        start = 0
-        found = False
-        for row in _read_jsonl(self._meta_path("episodes.jsonl")):
-            idx = row.get("episode_index")
-            if idx is None:
-                continue
-            if int(idx) == episode_index:
-                found = True
-                break
-            start += int(row.get("length", 0))
-        return start if found else None
 
     def _upsert_episode_dict_row_locked(
         self, row: dict[str, Any], dataset_dir: Path | None = None
