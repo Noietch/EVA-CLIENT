@@ -23,7 +23,7 @@ from core.config import load_config
 from core.registry import ROBOT_REGISTRY
 from core.types import Observation, RolloutInterventionSegment
 from policy_client.base import PolicyBuildContext
-from policy_client.xpolicylab import XPolicyLabPolicyClient, _load_robot_codec
+from policy_client.xpolicylab import XPolicyLabPolicyClient
 
 pytestmark = pytest.mark.integration
 
@@ -162,7 +162,8 @@ def test_pi05_piper_config_owns_joint_qpos_contract():
     robot = ROBOT_REGISTRY.build(cfg.robot.type)
 
     assert cfg.robot.type == "agilex_piper"
-    assert cfg.policy.backend_options.env_cfg_type == "piper"
+    assert cfg.policy.backend_options.arm_dims == [6, 6]
+    assert cfg.policy.backend_options.gripper_dims == [1, 1]
     assert cfg.policy.backend_options.action_type == "joint"
     assert cfg.inference_cfg.obs_space.type == "JointState"
     assert cfg.inference_cfg.action_space.type == "JointState"
@@ -322,9 +323,9 @@ class _TcpEchoPolicy:
     not (ROOT.parent / "eva-xpolicylab/XPolicyLab.py").is_file(),
     reason="requires the sibling eva-xpolicylab checkout",
 )
-def test_yam_tcp_eval_round_trip_through_actual_xpolicylab_server():
+def test_yam_tcp_eval_round_trip_through_actual_xpolicylab_server(monkeypatch):
     config = load_config(ROOT / "configs/03_evaluation/dual_yam_eva_sim_eval.py")
-    _load_robot_codec(str(ROOT / config.policy.backend_options.xpolicylab_root))
+    monkeypatch.syspath_prepend(str(ROOT.parent / "eva-xpolicylab"))
     from client_server.ws.model_server import PolicyServer, PolicyServerConfig
 
     robot = ROBOT_REGISTRY.build(config.robot.type)
@@ -345,20 +346,33 @@ def test_yam_tcp_eval_round_trip_through_actual_xpolicylab_server():
     try:
         asyncio.run_coroutine_threadsafe(server.start(), loop).result(timeout=5)
         config.policy.port = int(server.url.rsplit(":", 1)[1])
-        config.policy.backend_options.xpolicylab_root = str(ROOT.parent / "eva-xpolicylab")
         context = PolicyBuildContext(action_dim=robot.total_action_dim, retry_until_connected=False)
         with XPolicyLabPolicyClient.from_config(config.policy, context) as client:
-            client.reset()
             runtime.policy_metadata = client.metadata
-            observation = build_policy_observation(
-                Observation(images={}, state_qpos=qpos), "pick the cup", config, runtime
-            )
-            response = client.infer(observation)
-            assert response["action_mode"] == "eef"
-            assert client.metadata["action_dim"] == 16
-            np.testing.assert_allclose(response["actions"], np.tile(tcp, (2, 1)), atol=1e-6)
-            assert model.observation["state"]["left_ee_pose"].shape == (7,)
-            assert model.observation["state"]["right_ee_pose"].shape == (7,)
+            for episode in range(2):
+                client.reset()
+                assert model.observation is None
+                for step in range(3):
+                    images = {
+                        camera.observation_key: np.full(
+                            (32, 40, 3), 60 * index + 3 * episode + step, dtype=np.uint8
+                        )
+                        for index, camera in enumerate(robot.observation_schema.cameras)
+                    }
+                    observation = build_policy_observation(
+                        Observation(images=images, state_qpos=qpos), "pick the cup", config, runtime
+                    )
+                    response = client.infer(observation)
+                    assert response["action_mode"] == "eef"
+                    assert client.metadata["action_dim"] == 16
+                    np.testing.assert_allclose(response["actions"], np.tile(tcp, (2, 1)), atol=1e-6)
+                    assert model.observation["state"]["left_ee_pose"].shape == (7,)
+                    assert model.observation["state"]["right_ee_pose"].shape == (7,)
+                    assert list(model.observation["vision"]) == list(images)
+                    for key, image in observation["images"].items():
+                        np.testing.assert_array_equal(
+                            model.observation["vision"][key]["color"], image
+                        )
             solved = normalize_policy_action_chunk(config, runtime, response["actions"], response)
             np.testing.assert_allclose(solved, np.tile(qpos, (2, 1)), atol=1e-4)
     finally:

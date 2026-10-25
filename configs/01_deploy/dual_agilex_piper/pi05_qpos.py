@@ -4,7 +4,6 @@ _base_ = ["xpolicylab.py"]
 
 policy = dict(
     backend_options=dict(
-        env_cfg_type="piper",
         action_type="joint",
     ),
 )

@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import logging
-import sys
 import threading
 import time
 from collections.abc import Mapping, Sequence
-from pathlib import Path
 from typing import Any, Protocol
 from uuid import uuid4
 
@@ -43,28 +41,6 @@ class _Connection(Protocol):
     def close(self) -> None: ...
 
 
-def _load_robot_codec(xpolicylab_root: str | None):
-    if xpolicylab_root is not None:
-        root = Path(xpolicylab_root).expanduser().resolve()
-        if not (root / "XPolicyLab.py").is_file():
-            raise ValueError(f"invalid XPolicyLab repository root: {root}")
-        if str(root) not in sys.path:
-            sys.path.insert(0, str(root))
-    try:
-        from XPolicyLab.utils.process_data import (
-            get_robot_action_dim_info,
-            pack_robot_state,
-            unpack_robot_state,
-        )
-    except ModuleNotFoundError as error:
-        if error.name != "XPolicyLab" and not str(error.name).startswith("XPolicyLab."):
-            raise
-        raise PolicyConnectionError(
-            "XPolicyLab must be installed or provided through xpolicylab_root"
-        ) from error
-    return get_robot_action_dim_info, pack_robot_state, unpack_robot_state
-
-
 @POLICY_REGISTRY.register_client("xpolicylab")
 class XPolicyLabPolicyClient(PolicyClient):
     """Synchronous client for XPolicyLab's standard websocket protocol."""
@@ -74,9 +50,9 @@ class XPolicyLabPolicyClient(PolicyClient):
         host: str,
         port: int,
         *,
-        env_cfg_type: str,
         action_type: str,
-        xpolicylab_root: str | None = None,
+        arm_dims: list[int],
+        gripper_dims: list[int],
         evaluation_id: str | None = None,
         request_timeout_s: float = 120.0,
         connect_timeout_s: float = 30.0,
@@ -87,21 +63,37 @@ class XPolicyLabPolicyClient(PolicyClient):
     ) -> None:
         self._host = host
         self._port = int(port)
-        self._env_cfg_type = env_cfg_type
         self._action_type = action_type
-        get_dim_info, self._pack_robot_state, self._unpack_robot_state = _load_robot_codec(
-            xpolicylab_root
+        if action_type not in {"joint", "ee"}:
+            raise ValueError("XPolicyLab action_type must be 'joint' or 'ee'")
+        if len(arm_dims) not in {1, 2} or len(arm_dims) != len(gripper_dims):
+            raise ValueError("XPolicyLab requires matching arm_dims/gripper_dims for 1 or 2 arms")
+        if any(dim <= 0 for dim in (*arm_dims, *gripper_dims)):
+            raise ValueError("XPolicyLab arm and gripper dimensions must be positive")
+        if action_type == "ee" and any(dim != 7 for dim in arm_dims):
+            raise ValueError("XPolicyLab ee arm_dims must be 7 (xyz + wxyz)")
+        arm_keys = (
+            ("joint_state",)
+            if len(arm_dims) == 1
+            else ("left_arm_joint_state", "right_arm_joint_state")
         )
-        self._robot_action_dim_info = get_dim_info(env_cfg_type)
         if action_type == "ee":
-            # Robot metadata describes arm joints; TCP poses use xyz + wxyz.
-            self._robot_action_dim_info = {
-                **self._robot_action_dim_info,
-                "arm_dim": [7] * len(self._robot_action_dim_info["arm_dim"]),
-            }
-        self._action_dim = sum(self._robot_action_dim_info["arm_dim"]) + sum(
-            self._robot_action_dim_info["ee_dim"]
+            arm_keys = ("ee_pose",) if len(arm_dims) == 1 else ("left_ee_pose", "right_ee_pose")
+        gripper_keys = (
+            ("ee_joint_state",)
+            if len(arm_dims) == 1
+            else ("left_ee_joint_state", "right_ee_joint_state")
         )
+        # Wire order matches EVA: arm, gripper, then the next arm and gripper.
+        self._state_dims = {
+            key: dim
+            for arm_key, gripper_key, arm_dim, gripper_dim in zip(
+                arm_keys, gripper_keys, arm_dims, gripper_dims, strict=True
+            )
+            for key, dim in ((arm_key, arm_dim), (gripper_key, gripper_dim))
+        }
+        self._state_offsets = np.cumsum(list(self._state_dims.values()))[:-1]
+        self._action_dim = sum(self._state_dims.values())
         self._evaluation_id = evaluation_id or f"eva-{uuid4()}"
         self._trial_id = f"trial-{uuid4()}"
         self._request_timeout_s = float(request_timeout_s)
@@ -134,9 +126,9 @@ class XPolicyLabPolicyClient(PolicyClient):
         return cls(
             config.host,
             config.port,
-            env_cfg_type=str(opts["env_cfg_type"]),
             action_type=str(opts["action_type"]),
-            xpolicylab_root=opts.get("xpolicylab_root"),
+            arm_dims=list(opts["arm_dims"]),
+            gripper_dims=list(opts["gripper_dims"]),
             evaluation_id=opts.get("evaluation_id"),
             request_timeout_s=float(opts.get("request_timeout_s", 120.0)),
             connect_timeout_s=float(opts.get("connect_timeout_s", 30.0)),
@@ -243,27 +235,30 @@ class XPolicyLabPolicyClient(PolicyClient):
         return response_payload
 
     def _build_observation(self, observation: dict) -> dict[str, Any]:
+        state = np.asarray(observation["state"], dtype=np.float32)
+        if state.shape != (self._action_dim,):
+            raise ValueError(
+                f"XPolicyLab state must have shape [{self._action_dim}], got {state.shape}"
+            )
         return {
             "instruction": str(observation["prompt"]),
             "vision": {
                 name: {"color": np.asarray(image)} for name, image in observation["images"].items()
             },
-            "state": self._unpack_robot_state(
-                np.asarray(observation["state"], dtype=np.float32),
-                self._action_type,
-                self._robot_action_dim_info,
-                source_type="obs",
-            ),
+            "state": dict(zip(self._state_dims, np.split(state, self._state_offsets), strict=True)),
         }
 
     def _flatten_action(self, action: Mapping[str, Any]) -> np.ndarray:
         try:
-            return self._pack_robot_state(
-                {"state": action},
-                self._action_type,
-                self._robot_action_dim_info,
-                source_type="obs",
-            )
+            parts = []
+            for key, dim in self._state_dims.items():
+                part = np.asarray(action[key], dtype=np.float32)
+                if part.shape[-1:] != (dim,):
+                    raise ValueError(
+                        f"field {key!r} must have last dimension {dim}, got {part.shape}"
+                    )
+                parts.append(part)
+            return np.concatenate(parts, axis=-1)
         except (KeyError, ValueError) as error:
             raise PolicyRequestError(f"invalid XPolicyLab action: {error}") from error
 
