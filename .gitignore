@@ -67,3 +67,7 @@ configs/02_collection/*.local.py
 configs/local/
 configs/04_rl/*.local.py
 /configs/02_collection/dual_yam_tasks_set.py
+/configs/02_collection/dual_yam_eva_sim.py
+/configs/02_collection/dual_yam_eva_sim_composite.py
+/configs/02_collection/dual_yam_eva_sim_v1_2_eval.py
+/configs/02_collection/dual_yam_eva_sim_v1_2_train.py
