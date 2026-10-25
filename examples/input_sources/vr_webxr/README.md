@@ -6,20 +6,33 @@ Client over ZMQ. The example below uses page port `43876` and ZMQ ports
 
 ## Start the Server
 
-```bash
-cd "$CLIENT_ROOT"
-source .venv/bin/activate
+In EVA's DEVICE page, select `VR` under Operation, apply the selection, and
+press Operation Start. The detached device service starts this node and provides
+the authenticated page through the WebXR button. Robot and Camera have separate
+Start controls. Closing EVA does not stop the device service; use Operation Stop
+to release the VR listener.
 
-python examples/input_sources/vr_webxr/node.py \
+For a standalone bridge, run from the repository root using its existing
+environment. Supply the token through standard input:
+
+```bash
+cd /path/to/EVA-CLIENT
+read -rsp 'VR access token: ' VR_TOKEN
+printf '\n'
+export VR_TOKEN
+printf '%s\n' "$VR_TOKEN" | .venv/bin/python \
+  examples/input_sources/vr_webxr/node.py \
+  --token-stdin \
   --host 127.0.0.1 \
   --port 43876 \
   --endpoint tcp://127.0.0.1:8765 \
   --ack-endpoint tcp://127.0.0.1:8766
 ```
 
-Keep the process running. The WebXR URL and PICO command printed in the logs
-can be used directly. If `--token` is omitted, the node generates a random
-token; use the URL from the logs.
+Keep the process running. The node logs its address without the token; the
+launcher below must receive the same `VR_TOKEN` from its own shell. If the token
+is omitted, the node generates one but does not print an authenticated URL, so
+use DEVICE or supply a known token through standard input.
 
 ## Input Protocol
 
@@ -41,14 +54,27 @@ When ARM is OFF or teleop is reset, the client clears the accumulated deltas
 and reference poses for both hands. After each grip long-press toggle, the node
 sends a short haptic feedback signal for the corresponding controller to the
 WebXR page. The actual vibration effect depends on WebXR Gamepad haptics support
-in the device browser. The PICO launcher opens the page explicitly in Wolvic,
-whose OpenXR backend includes WebXR haptic support.
+in the device browser. The PICO launcher defaults to PICO Browser; set
+`WOLVIC_PACKAGE` to an installed Wolvic package to use its OpenXR backend.
 
 The right-hand B button (WebXR gamepad button 5) emits the `arm_toggle` event
-immediately on press, once per press; `client/app` still owns the global ARM
+immediately on press, once per press; the EVA app still owns the global ARM
 state.
 Pressing B does not calibrate the controllers. Grip authorization and the
 B-button ARM state are independent data streams.
+
+The remaining controller gestures map to operator intents:
+
+| Gesture | Intent |
+| --- | --- |
+| Right A short press/release | `record_toggle` |
+| Right A hold (default 1 second) | `record_cancel`, suppressing release toggle |
+| Left X release | `home` |
+| Left Y release | `intervention_toggle` (collection QC outside RL) |
+| Left stick direction | review navigation with delayed repeat |
+| Left stick press | `review_select` |
+
+The host node's `--long-press-ms` option controls the hold duration.
 
 ## Native PICO client
 
@@ -84,8 +110,8 @@ ordinary `frame` messages do not vibrate the controller. The wire message is:
 {"type":"haptic","hand":"left","intensity":0.6,"duration_ms":80}
 ```
 
-Only the native PICO APK handles device-specific vibration. The WebSocket
-server remains portable across Mac and Linux.
+The native APK handles haptics through OpenXR; the WebXR page uses the browser's
+Gamepad haptics API where available. The WebSocket server runs on Mac and Linux.
 
 ## Ubuntu Port Forwarding
 
@@ -98,7 +124,7 @@ ssh -N \
   -o ServerAliveInterval=30 \
   -o ServerAliveCountMax=3 \
   -L 43876:127.0.0.1:43876 \
-  <remote-user>@<remote-host>
+  "<remote-user>@<remote-host>"
 ```
 
 ## Open or Refresh the PICO Page on Ubuntu
@@ -114,7 +140,9 @@ When only one authorized device is present, run the script to identify it,
 create the ADB reverse port forwarding, and open the WebXR page:
 
 ```bash
-export VR_TOKEN="<TOKEN_FROM_NODE_LOG>"
+read -rsp 'VR access token: ' VR_TOKEN
+printf '\n'
+export VR_TOKEN
 ./examples/input_sources/vr_webxr/open_pico.sh
 ```
 
@@ -125,24 +153,24 @@ variable:
 ./examples/input_sources/vr_webxr/open_pico.sh "<PICO_SERIAL>"
 
 export PICO_SERIAL="<PICO_SERIAL>"
-export VR_TOKEN="<TOKEN_FROM_NODE_LOG>"
+read -rsp 'VR access token: ' VR_TOKEN
+printf '\n'
+export VR_TOKEN
 ./examples/input_sources/vr_webxr/open_pico.sh
 ```
 
-Force a page refresh (`-S` first stops the browser application hosting the URL):
+To reopen or refresh the page, run the same launcher again:
 
 ```bash
-VR_URL="http://127.0.0.1:43876/?token=<TOKEN_FROM_NODE_LOG>&mode=ar&reload=$(date +%s)"
-adb -s "$PICO_SERIAL" shell "am start -S -a android.intent.action.VIEW -d '$VR_URL'"
+./examples/input_sources/vr_webxr/open_pico.sh "$PICO_SERIAL"
 ```
 
-After opening the page, click `ENTER MR`. The launcher targets the mainland
-Wolvic package `com.cn.igalia.wolvic` and activity
-`com.igalia.wolvic.VRBrowserActivity`. For an overseas Wolvic build, override
-the package if needed:
+After opening the page, click `ENTER MR`. The launcher defaults to PICO Browser
+(`com.pico.browser`). To use Wolvic, select its installed package explicitly:
 
 ```bash
 WOLVIC_PACKAGE=com.igalia.wolvic ./examples/input_sources/vr_webxr/open_pico.sh
+# Mainland Wolvic builds may use com.cn.igalia.wolvic instead.
 ```
 
 The example uses `127.0.0.1` through SSH/ADB. Directly accessing the node

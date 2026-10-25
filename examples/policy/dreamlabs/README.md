@@ -1,114 +1,136 @@
 # DreamLabs API example
 
-This is a lightweight Dream-1 API bridge:
-`EVA-CLIENT -> WebSocket -> this example -> DreamLabs HTTP API`.
-The official SDK manages sessions, camera history, and robot kinematics.
-EVA-CLIENT reuses the existing `openpi` WebSocket backend, including episode reset
-when the server advertises `supports_reset`.
+This bridge connects EVA-CLIENT to Dream-1:
+`EVA-CLIENT → OpenPI WebSocket → server.py → DreamLabs HTTP API`.
+The official SDK manages the API session, camera history, and Dream IK.
+EVA-CLIENT uses `policy.type="openpi"`; the server advertises `supports_reset`
+so episode resets reach the API session.
 
-## Isolated environment
+## Environment and credentials
 
-Dependencies are configured in [pyproject.toml](pyproject.toml). This example uses
-its own Python 3.11 environment, including JAX/JAXlib 0.7.1 for Dream IK and
-NumPy 1.26.4. EVA-CLIENT's environment stays separate.
+The launcher always invokes `examples/policy/dreamlabs/.venv/bin/python`.
+Dependencies are declared in [pyproject.toml](pyproject.toml), including Python
+3.11, `dreamlabs-client==1.0.9`, a pinned Dream IK revision, and NumPy 1.26.4.
+Keep this environment separate from EVA-CLIENT's root `.venv`.
 
-From the repository root, create the environment once; reuse it if it exists:
+If the example environment is absent, create it once from the repository root:
 
 ```bash
 uv venv --python 3.11 examples/policy/dreamlabs/.venv
+```
+
+Reuse an existing environment as-is. Before adding dependencies, inspect the
+installation plan:
+
+```bash
+uv pip install --dry-run --python examples/policy/dreamlabs/.venv/bin/python \
+  -r examples/policy/dreamlabs/pyproject.toml
+```
+
+Proceed with installation only when the plan adds missing packages and preserves
+all installed package versions and files. If it proposes a replacement,
+reinstallation, upgrade, or downgrade, stop and resolve the conflict before
+installation. For an additions-only plan, apply the same request without
+`--dry-run`:
+
+```bash
 uv pip install --python examples/policy/dreamlabs/.venv/bin/python \
   -r examples/policy/dreamlabs/pyproject.toml
 ```
 
-The server reads its API key from `DREAM_API_KEY` or `~/.dreamlabs/credentials`.
-Keep credentials on the server, outside EVA configuration files.
+Do not recreate an existing environment. Invoke Python directly;
+`uv run` is prohibited in this repository.
 
-Start directly with Bash; the script selects the isolated interpreter:
+The server reads its API key through the SDK from `DREAM_API_KEY` or
+`~/.dreamlabs/credentials`. Keep the credential in the server's existing secret
+channel or credential store, outside EVA configuration files and command arguments.
+
+## Start the bridge and client
+
+From the repository root, use separate terminals:
 
 ```bash
-cd examples/policy/dreamlabs
-bash serve.sh --robot yam
+bash examples/policy/dreamlabs/serve.sh --robot yam
 ```
-
-YAM is the default, so `bash serve.sh` also works. Select another built-in arm with
-`--robot metal`, `--robot ai_worker_faas`, or any selector in the table below.
-The head defaults to `joint` for YAM and `eef` for other robots. Use `--head eef`
-to run YAM's EEF head. Dream-1 on another robot requires the EEF head.
-
-The script also accepts `--host`, `--port`, and `--checkpoint`. Environment defaults
-are `POLICY_HOST=127.0.0.1`, `POLICY_PORT=5555`, `DREAM_ROBOT=yam`, and
-`DREAM_CHECKPOINT=dreamlabs/dream-1-beta`. Command-line arguments override them.
-
-The WebSocket listener starts before model lookup or IK compilation. Those happen
-on the first inference request, which requires a valid API key. Metadata and reset
-are available without credentials.
-
-From the repository root, in EVA-CLIENT's environment:
 
 ```bash
 .venv/bin/eva --config configs/01_deploy/dual_yam/dream.py
 ```
 
-For a remote server, update `policy.host` in the client configuration and bind the
-server to the corresponding network interface.
+The included EVA preset selects port 5555, joint observations/actions, 320 × 176
+HWC images, a 20 Hz publish rate, and one warmup chunk. Its sync execution horizon
+is 48 steps; async uses a 30-step horizon with `latency_k=0`.
+
+The listener starts before model lookup and IK compilation. Metadata and reset
+are available before the first inference; the first inference initializes the
+model and needs working API credentials.
+
+| Launcher option | Default / behavior |
+| --- | --- |
+| `--host` | `POLICY_HOST`, otherwise `127.0.0.1` |
+| `--port` | `POLICY_PORT`, otherwise `5555` |
+| `--checkpoint` | `DREAM_CHECKPOINT`, otherwise `dreamlabs/dream-1-beta` |
+| `--robot` | `DREAM_ROBOT`, otherwise `yam`; choices come from the pinned SDK's `ARMS` |
+| `--head` | `joint` for YAM, `eef` for other robot selectors |
+
+Explicit arguments override launcher environment defaults. For a remote bridge,
+set `policy.host` in the EVA preset and bind the bridge to an interface reachable
+from that client.
 
 ## Observation and action contract
 
-The input contains three HWC RGB cameras (`cam_high`, `cam_left_wrist`, and
-`cam_right_wrist`) and a flat state vector: left-arm joints, left gripper,
-right-arm joints, right gripper. The selected robot determines each arm's joint
-count; held joints are excluded. YAM has a 14-value state vector. Joints use radians;
-grippers use 0 for closed and 1 for open. Images are encoded as 320 x 176 JPEGs at
-quality 85. Actions execute at 20 Hz.
+The bridge requires all three cameras: `cam_high`, `cam_left_wrist`, and
+`cam_right_wrist`. Each must be an HWC RGB uint8 array. They map to Dream's
+`video.overhead`, `video.wrist_l`, and `video.wrist_r`, and are resized to 320 × 176
+and encoded as JPEG at quality 85 for the API request.
 
-The `reset` message ends the previous episode and clears its history. Reset before
-each episode. Use one server process per EVA-CLIENT.
+State order is left-arm joints, left gripper, right-arm joints, right gripper.
+The selected robot's IK specification determines the arm widths, excluding held
+joints. YAM uses 14 values. Joint values are radians; each gripper uses one value,
+0 closed and 1 open. The bridge supplies YAM grippers as `state.left_gripper` and
+`state.right_gripper`; other selectors use `state.left_grip` and `state.right_grip`.
 
-This example updates observations once per inference request, so camera history
-sampling depends on the client request rate. It has no separate camera streaming
-endpoint. If DreamLabs replaces an expired inference session, the SDK adopts the
-new session and clears its action smoother. The bridge requests a fresh action
-once using the current observation; the WebSocket and robot episode stay open.
-If that request also fails, the error reaches the client. Model warmup, rate
-limits, and other API errors are returned without automatic retries.
+The API's `q_l_chunk` and `q_r_chunk` are concatenated in that same arm/gripper
+order and returned as nonempty finite float32 `[T, D]` joint targets. Even when
+`--head eef` selects the model head, the bridge returns joint targets after SDK
+kinematics. Keep the EVA action space set to `JointState`.
 
-## Dream IK robot support
+## Episode and session behavior
 
-The pinned `dreamlabs-client==1.0.9` exposes these built-in `ik.arm` selectors:
+Use one server process per EVA-CLIENT. Reset before each episode; reset ends the
+previous API episode and clears its history when the model has been initialized.
+Disconnecting the WebSocket also resets the episode.
 
-| Selector | Robot |
-| --- | --- |
-| `yam` | YAM |
-| `metal` | MakerMods Metal |
-| `makers` | Makers Arm |
-| `ai_worker_faas` | AI Worker |
-| `trossen_wb_faas` | Trossen WidowX AI |
-| `mantis_faas` | Mantis |
-| `robo_t_faas` | RoboT |
-| `openarm2_faas` | OpenArm2 |
-| `bracketbot_faas` | BracketBot |
-| `so101_faas` | SO-101 |
-| `galaxea_faas` | Galaxea |
-| `seeed_faas` | Seeed reBot B601-DM |
-| `unitree_r1_faas` | Unitree R1 |
+Observations update once per inference request. SDK history therefore depends on
+client request timing; the bridge has no separate camera streaming endpoint. Its
+API configuration requests a 9-frame observation window at 5 FPS, actions at
+20 Hz, and a 30-second timeout.
 
-The SDK also accepts a custom arm JSON file describing its URDF, base and flange
-links, TCP, approach and jaw axes, and rest pose. The tool geometry must be measured
-and confirmed on the real gripper. An arm file describes kinematics; it does not
-establish compatibility with every model.
+If the SDK reports `DreamSessionExpired`, it adopts the replacement session and
+clears its smoother; the bridge requests an action once more from the current
+observation. This keeps the WebSocket episode open. A second failure reaches the
+client. Other API errors, including warmup and rate limits, are returned without
+automatic retries.
 
-For Dream-1 on YAM, this example uses `ik={"arm": "yam", "head": "joint"}`:
-the SDK computes the hand poses and runs the model's joint targets. Dream-1 on
-another embodiment requires the EEF head and its own arm configuration. The
-lower-level `dream_ik` package also contains simulation robot specifications;
-those are distinct from the API client's accepted built-in selectors.
+## Other robot selectors
 
-The launcher selects among these built-in arms and derives their state/action
-widths from the official IK specifications. The included EVA deployment preset
-is for **dual YAM**. For another robot, use its own EVA robot configuration with
-`policy.type="openpi"`, matching joint/gripper units, HWC RGB cameras, and a 20 Hz
-action rate. The SDK's custom JSON arm-file interface is not exposed by this launcher.
+Use `--robot` with a selector accepted by the pinned SDK; inspect the installed
+choices with:
 
-References: [DreamLabs documentation](https://platform.dreamlabs.ai/docs/),
-[pinned SDK arm selectors](https://github.com/dreamlabs-co/dreamlabs/blob/2d2f5239eb737c9271e15054637fe952758d5823/dream_library/dream_client/src/dream/client_ik.py),
-and [arm file format](https://github.com/dreamlabs-co/dreamlabs/blob/2d2f5239eb737c9271e15054637fe952758d5823/dream_library/dream_client/src/dream/arm_file.py).
+```bash
+examples/policy/dreamlabs/.venv/bin/python examples/policy/dreamlabs/server.py --help
+```
+
+`--head eef` is available for YAM and required for other selectors. The launcher
+uses the selected SDK specification to derive both arm widths and one gripper
+value per arm. An SDK selector describes kinematics; it does not establish model
+compatibility or a matching EVA hardware configuration.
+
+For another robot, supply its EVA robot/hardware preset, matching joint order,
+gripper units, all three HWC RGB cameras, and a 20 Hz publish rate. The included
+client preset is for dual YAM only. Custom arm JSON files are not exposed by this
+launcher; extending that interface requires a code change and measured tool
+geometry.
+
+Source of the bridge contract: [server.py](server.py), [serve.sh](serve.sh), and
+[the EVA preset](../../../configs/01_deploy/dual_yam/dream.py).

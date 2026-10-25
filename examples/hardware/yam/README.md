@@ -23,10 +23,9 @@ This normal shutdown sequence is not an emergency stop. Use the physical emergen
 stop when immediate intervention is necessary; do not wait for a parking move.
 
 This adapter connects a two-follower YAM Cell-style pair (`dual_yam`) to
-EVA through the existing ZMQ transport. The overhead and two wrist Orbbec
-cameras are bound by serial number so camera roles remain stable across reboots.
-An Intel RealSense D405 remains available as an optional alternative overhead
-camera. The adapter
+EVA through ZMQ. The default camera combination uses a RealSense D405 overhead
+and two Orbbec Gemini 305 wrist cameras, bound by serial number. An Orbbec
+Gemini 355 is available as an alternative overhead camera. The adapter
 intentionally targets the base YAM arm; YAM Pro, YAM Ultra, and Big YAM need
 their own limits and robot descriptions before they can be enabled safely.
 
@@ -35,18 +34,14 @@ dependencies therefore live in this directory's own `pyproject.toml` and its
 environment is created under `examples/hardware/yam/.venv`; the two processes
 exchange only ZMQ messages.
 
-## 1. One-time SDK setup
+## 1. Runtime and SDK
 
-From the EVA Client root:
-
-```bash
-bash examples/hardware/yam/setup_sdk.sh
-```
-
-The SDK is a Git submodule pinned to the tested `Noietch/i2rt` fork
-(`main`, commit `70a053b`), based on the official v1.2.4 release. The fork
-contains the reviewed EVA compatibility and safety changes, so setup initializes
-that exact revision directly and runs `uv sync --project examples/hardware/yam`.
+Reuse the existing Python 3.11 environment at `examples/hardware/yam/.venv`.
+The SDK is a Git submodule at `SDK/i2rt`; the repository's Git submodule entry
+defines its revision. The legacy `setup_sdk.sh` synchronizes dependencies and
+also checks a separate hardcoded SDK revision, so it is not a repair command
+for an existing environment. Add only missing dependencies after confirming
+that the plan preserves installed versions and files.
 The subproject declares `i2rt`, `pyrealsense2`, `pyorbbecsdk2`, OpenCV, `pyzmq`,
 the EVA PyRoki/JAX FK stack, and the SDK's NumPy/build constraints. The hardware node uses the same
 registered EVA kinematics model as inference, replay, and visualization.
@@ -82,6 +77,13 @@ sh examples/hardware/yam/SDK/i2rt/scripts/reset_all_can.sh
 
 ## 3. Run dual YAM followers
 
+The DEVICE workflow defaults to `VR`, independently of the standalone shell
+launcher's dual-leader default below. Select `Dual YAM`, a camera combination,
+and `VR`, `EVA-VR (PICO)`, or `Leader` under Operation, then apply. Robot,
+Camera, and Operation have separate Start controls; Leader adds the teaching
+handle parameters to the robot process. Stop device processes explicitly from
+DEVICE when finished, because they survive EVA client exit.
+
 `run_hardware.sh` defaults to the dual-YAM layout, enables both teaching-handle
 leaders, and maps followers/leaders to `can0` through `can3` when persistent CAN
 names are unavailable. No robot or leader enable switch is required:
@@ -102,7 +104,7 @@ stops. A verified `YAM_GRIPPER_LIMITS=CLOSED,OPEN` override skips calibration.
 Then launch EVA:
 
 ```bash
-eva --config configs/01_deploy/dual_yam/openpi_qpos.py --web-port 8080
+.venv/bin/eva --config configs/01_deploy/dual_yam/openpi_qpos.py --web-port 8080
 ```
 
 The default three-camera combination is:
@@ -189,7 +191,7 @@ LEFT_LEADER_CAN=can_leader_l \
 RIGHT_LEADER_CAN=can_leader_r \
   bash examples/hardware/yam/run_hardware.sh
 
-eva --config configs/02_collection/dual_yam.py --web-port 8080
+.venv/bin/eva --config configs/02_collection/dual_yam.py --web-port 8080
 ```
 
 The real node publishes leader positions as `action.qpos` while commanding the

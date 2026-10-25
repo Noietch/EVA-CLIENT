@@ -1,49 +1,71 @@
 [← Back to README](../README.md)
 
-# 📦 Install
+# Installation
 
-Requirements:
+The EVA application requires **Python 3.11** (`>=3.11,<3.12`). Its environment
+is separate from the hardware SDK environments under `examples/hardware/`.
+The project's `uv` platform configuration targets Linux x86_64.
 
-- Python 3.11 (the main project is intentionally separate from hardware-specific runtimes)
-- [uv](https://github.com/astral-sh/uv) for dependency management
-- ROS Noetic — **only** for the `ros1` transport; `ros2` / `zmq` / `dataset`
-  need no ROS
+## First installation in a new checkout
+
+Install [uv](https://github.com/astral-sh/uv) first, then run:
 
 ```bash
 git clone https://github.com/Noietch/EVA-CLIENT.git
 cd EVA-CLIENT
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Standard install (non-ROS backends)
 uv venv --python 3.11 .venv
-source .venv/bin/activate
-uv pip install -e ".[dev]"
+uv pip install --python .venv/bin/python -e ".[dev]"
 ```
 
-<details>
-<summary><b>ROS1 install</b> — expose the system ROS install to the venv</summary>
+These commands assume `.venv` does not exist yet. For an existing checkout,
+reuse its environment. Do not rebuild it or run synchronization, upgrade, or
+reinstallation commands. Before adding a missing dependency, inspect the
+installation plan and proceed only if existing packages and versions stay intact.
+Run EVA and checks through `.venv/bin/` directly.
+
+The only root-project extras currently declared in `pyproject.toml` are:
+
+| Extra | Contents |
+|-------|----------|
+| `dev` | pytest, pytest-cov, Ruff, Pyright |
+| `viz` | `fast-simplification` for mesh simplification |
+
+Hardware SDKs, CAN drivers, ROS packages, and camera SDKs belong to their
+respective hardware environments. See the [hardware guide](../examples/hardware/SUPPOTED_HARDWARE.md)
+and each robot's README before configuring a launcher. The root project has no
+`franka`, `arx`, `ur5e`, or `camera` extras.
+
+## Transport requirements
+
+| Transport | Requirements |
+|-----------|--------------|
+| `zmq` | A robot, fake-hardware, or simulator node speaking EVA's wire protocol; no ROS |
+| `dataset` | A local compatible dataset; no ROS or hardware node |
+| `ros1` | A compatible ROS 1 installation and access to its Python modules |
+| `ros2` | A compatible ROS 2 installation and access to `rclpy` and message packages |
+
+ROS requirements depend on the selected transport even when the robot SDK runs
+in another process. Do not assume a system ROS Python installation is compatible
+with Python 3.11; use the robot-specific setup instructions.
+
+## Open the application
+
+From the repository root:
 
 ```bash
-uv venv --python 3.11 --system-site-packages .venv
+.venv/bin/eva --language en
 ```
 
-</details>
+With no `--config`, EVA loads `configs/00_base/defaults.py` and opens DEVICE.
+The default browser address is `http://127.0.0.1:8080`. This starts the application;
+hardware readiness and policy inference require their own setup.
 
-Optional hardware extras:
-
-| Extra    | Use it for                                                                    |
-|----------|-------------------------------------------------------------------------------|
-| `dev`    | test / lint / type-check tooling — always recommended                         |
-| `franka` | Franka arms (`dual_franka`)                                                   |
-| `arx`    | ARX R5 arm (`arx_r5`); vendored driver in-tree                                |
-| `ur5e`   | UR5e arm with DH gripper; vendored driver in-tree                             |
-| `camera` | Orbbec depth cameras (Linux x86_64/aarch64 + macOS arm64 wheels; Python 3.11) |
-| `viz`    | Faster 3D robot-model loading in the web view                                 |
-
-Extras stack: `uv pip install -e ".[dev,ur5e]"`.
-
-Verify the install with no ROS and no policy server:
+For an offline dataset workflow, use the bundled sample preset:
 
 ```bash
-eva --config configs/00_openloop/dual_agilex_piper_openloop.py
+.venv/bin/eva --config configs/00_openloop/dual_agilex_piper_openloop.py
 ```
+
+The preset points to `examples/agilex_dataset`. Inspect recorded data through
+REPLAY; policy inference in DEBUG uses the configured policy backend. Continue
+with [Quick start](quick-start.md) for devices, business presets, and headless control.

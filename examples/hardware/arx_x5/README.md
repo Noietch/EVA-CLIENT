@@ -43,37 +43,25 @@ the saturated region. X5 therefore disables auto exposure by default to avoid
 overexposing the board and desk. Recalibrate the corresponding day/night camera
 definitions in `config.yaml` when the collection environment changes.
 
-## Initial Installation
+## Runtime and SDK
 
-X5 uses an independent Python 3.12 project and virtual environment without
-modifying the repository root environment or R5. Run:
+X5 uses an independent Python 3.12 project and the existing environment at
+`examples/hardware/arx_x5/.venv`. Dependencies are declared in this directory's
+`pyproject.toml`. The root EVA runtime and the R5 environment are separate.
 
-```bash
-git submodule update --init --recursive
-bash examples/hardware/arx_x5/setup_env.sh
-```
+`run_hardware.sh` and `run_fake.sh` use
+`examples/hardware/arx_x5/.venv/bin/python`; the fake launcher accepts
+`ARX_X5_VENV_DIR` as an override. They do not use the repository root `.venv`.
+The real adapter uses the official bundled
+[ARARX_X5_beta SDK-V2](https://github.com/ARXroboticsX/ARARX_X5_beta), pinned to
+`1aa8a7d2ddefced2229f953feffc248be1c0b44d` at `SDK/X5`, with its CPython 3.12
+`SingleArm` binary. Runtime dependencies include `pyrealsense2`, `pin`,
+`python-can`, and `ruckig`.
 
-`run_hardware.sh` and `run_fake.sh` use only
-`examples/hardware/arx_x5/.venv/bin/python`; they neither activate nor read the
-repository root `.venv`. If `python3.12` is not in `PATH`, specify the
-interpreter during installation:
-
-```bash
-ARX_X5_PYTHON=/path/to/python3.12 bash examples/hardware/arx_x5/setup_env.sh
-```
-
-The script performs the following steps:
-
-1. Create `examples/hardware/arx_x5/.venv`.
-2. Install `pyrealsense2` and the X5 hardware-node dependencies.
-3. Use the official bundled
-   [ARARX_X5_beta SDK-V2](https://github.com/ARXroboticsX/ARARX_X5_beta),
-   currently pinned to `1aa8a7d2ddefced2229f953feffc248be1c0b44d` at
-   `examples/hardware/arx_x5/SDK/X5`.
-4. Validate the official CPython 3.12 binary and `SingleArm` interface, then
-   install dependencies required by vendor imports, including `pin`,
-   `python-can`, and `ruckig`. Installation does not run FK/IK calculations or
-   connect to the robot.
+The legacy `setup_env.sh` recreates its target environment and upgrades packages.
+Do not use it on an existing environment under the repository policy. Add only
+missing dependencies after confirming that installed versions and files remain
+unchanged.
 
 The new X5 integration code in EVA Client follows the repository root's
 Apache-2.0 license. `ARARX_X5_beta` is an independent third-party submodule
@@ -87,7 +75,12 @@ repository's `src/robots/kinematics/pyroki.py` and X5A URDF.
 
 ## Start X5 Hardware
 
-After initial installation, run one command:
+For the DEVICE workflow, select `ARX X5`, choose `Real`, a three-camera
+combination, and `VR` or `EVA-VR (PICO)` under Operation; apply the selection.
+Robot, Camera, and Operation have separate Start controls. Device processes
+remain running when the EVA client exits; stop them explicitly from DEVICE.
+
+For a standalone hardware launch, run:
 
 ```bash
 bash examples/hardware/arx_x5/run_hardware.sh
@@ -95,7 +88,8 @@ bash examples/hardware/arx_x5/run_hardware.sh
 
 The script starts only the dual-arm motors, three D405 cameras, and the
 hardware ZMQ node. On `Ctrl-C`, the arms enter protective mode and camera and
-ZMQ ports are released. Start WebXR and EVA separately in two other terminals:
+ZMQ ports are released. Start EVA separately and use Operation Start for the VR
+host node:
 
 At each startup, the SDK-V2 CAN bus first sends a vendor `clear error` frame
 only to X5-2025 gripper motor ID 8 and verifies that the fault code is 0. It
@@ -104,22 +98,14 @@ motors at this stage. If the gripper fault remains or no feedback is received,
 the hardware node does not continue startup.
 
 ```bash
-python examples/input_sources/vr_webxr/node.py \
-  --host 127.0.0.1 \
-  --port 43876 \
-  --endpoint tcp://127.0.0.1:8765 \
-  --ack-endpoint tcp://127.0.0.1:8766
-```
-
-```bash
-eva --config configs/02_collection/arx_x5_vr.py
+.venv/bin/eva --config configs/02_collection/arx_x5.py
 ```
 
 Open `http://127.0.0.1:8080` in a browser. The headset accesses the WebXR page
 through the local host or ADB forwarding:
 
 ```text
-http://127.0.0.1:43876/?token=<TOKEN_FROM_NODE_LOG>&mode=ar
+http://127.0.0.1:43876/?token=<TOKEN_FROM_DEVICE_WEBXR_LINK>&mode=ar
 ```
 
 ## Hardware-Free Fake X5
@@ -146,10 +132,12 @@ Enter `r` followed by Return to reset qpos, velocity, and the action target to
 the X5 initial values; enter `q` followed by Return to exit. The fake-plant
 iteration lifecycle is independent of EVA ARM, Collect, and recording states.
 
-In another terminal, start the WebXR node as described above, then start EVA:
+In DEVICE apply Robot `Fake` so EVA uses the matching fake transport. If the
+fake node is already running from the shell, use only Operation Start for VR.
+In another terminal, start EVA:
 
 ```bash
-eva --config configs/02_collection/arx_x5_vr.py
+.venv/bin/eva --config configs/02_collection/arx_x5.py
 ```
 
 This configuration keeps all three camera streams, and collection output is

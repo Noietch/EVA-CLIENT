@@ -1,210 +1,186 @@
 [← Back to README](../README.md)
 
-# 🎮 Control channel (ZMQ)
+# Control channel (ZMQ)
 
-The control channel exposes **every console button** to an external process — a
-simulator, a script, another service — over a ZMQ **REP** socket, so evaluation
-can run headless without a browser.
+The ZMQ control channel lets scripts, simulators, and shortcut clients send
+operator commands to EVA's state machine. It shares the command queue and live
+session with the browser. It exposes the allow-listed command catalog and three
+read-only queries; dataset transfer, QC writes, scoring, device configuration,
+and other HTTP-only APIs are separate interfaces.
 
-## Why one channel = all buttons
-
-Every command-bearing console button collapses, on the backend, to one action: putting a `web:*`
-string onto the internal command queue, dispatched by
-[`core.app.run.handle_command`](../src/core/app/run.py). The HTTP console
-(`core/app/console/server.py`) is just an "HTTP endpoint → command queue"
-translator. The control channel forwards any allow-listed `web:*` command onto
-that same queue — so a single socket exposes the full button surface. It shares
-the console's `ConsoleContext`, so state driven over ZMQ and state driven from the
-browser stay in lockstep. Browser-only QC/scoring controls remain HTTP-local
-because they write review metadata rather than motion commands.
-
-## Enable it
-
-Off by default. In your config:
+## Enable the channel
 
 ```python
 control_channel = dict(
     enabled=True,
-    host="127.0.0.1",   # localhost only; set "0.0.0.0" to accept remote callers
+    host="127.0.0.1",
     port=5757,
 )
 ```
 
-> ⚠️ **Security:** this channel can drive a real robot. `0.0.0.0` exposes that to
-> the network. Keep it on `127.0.0.1` unless the simulator runs on another host
-> (and then prefer an SSH tunnel).
+It is disabled by default and enabled automatically by `eva --headless`.
+`127.0.0.1` binds locally; use an SSH tunnel for another host, or configure the
+bind address deliberately. The channel can issue robot motion commands.
 
-## Wire protocol
+The control socket is independent of the robot transport (`zmq`, `ros1`, `ros2`,
+or `dataset`). Observations/actions continue over that transport; sparse operator
+commands do not add a request/reply round trip to each inference step.
 
-JSON request → JSON reply (REQ/REP). Every reply carries `ok: true|false`.
+## Wire protocol and completion
 
-| Request | Reply |
-|---|---|
-| `{"cmd": "web:run"}` | `{"ok": true, "cmd": "web:run"}` |
-| `{"cmd": "web:tab_switch:collect", "armed": true}` | `{"ok": true, "tab": "collect", "armed": true}` |
-| `{"cmd": "web:select_collect_task", "dataset": "pick_place", "task": "pick apple"}` | `{"ok": true, "selected_collect_dataset": "pick_place", "selected_collect_task": "pick apple"}` |
-| `{"cmd": "web:haptic", "hand": "right", "intensity": 0.6, "duration_ms": 80}` | `{"ok": true, "cmd": "web:haptic", "hands": ["right"], "intensity": 0.6, "duration_ms": 80}` |
-| `{"query": "status"}` | `{"ok": true, "data": { …status… }}` |
-| unknown / disallowed | `{"ok": false, "error": "…"}` |
+Send JSON objects over ZMQ REQ/REP. Every reply contains `ok`. Ordinary command
+replies acknowledge queueing, not completion or successful motion. State gates
+are applied later by the main loop; poll status and inspect `last_error`.
 
-## Commands (`web:*`)
+| Request | Reply shape |
+| --- | --- |
+| `{"cmd":"web:run"}` | `{"ok":true,"cmd":"web:run"}` |
+| `{"cmd":"web:tab_switch:collect"}` | `{"ok":true,"tab":"collect"}` |
+| `{"query":"status"}` | `{"ok":true,"data":{...}}` |
+| Invalid request or disallowed verb | `{"ok":false,"error":"..."}` |
 
-Most commands are gated by the current `web_phase` / `session_status` — a command
-invalid in the current state is ignored (check `last_error` / logs). The haptic
-request is the exception: it is a direct VR feedback request and does not change
-robot session state. Preconditions below come from
-[`_handle_web_command`](../src/core/app/run.py).
+Only `web:*` verbs in
+[`command_catalog.py`](../src/core/app/command_catalog.py) are allowed.
+`tab_switch` updates the active console tab and queues its transition. Haptics are sent directly to
+the VR client. `web:start` with `clip_id` validates/binds an evaluation attempt
+before queueing it. Other supported commands enter the shared queue.
 
-### Session / run
-| Command | Arg | Web button | Notes |
-|---|---|---|---|
-| `web:select_mode:<mode>` | `real`/`sim`/`step`/`manual` | mode picker | pick before setup |
-| `web:select_task:<task>` | task string | DEBUG task picker | blocked while running |
-| `web:select_strategy:<key>` | strategy key | strategy picker | must exist in config |
-| `web:setup` | — | SETUP | needs task + mode selected |
-| `web:run` | — | RUN / START | REAL/SIM start; STEP previews a chunk |
-| `web:halt` | — | HALT | stop continuous publishing |
-| `web:console_reset` | — | RESET | reset arm to home |
-| `web:connect` / `web:disconnect` | — | connect toggle | policy connection |
+## Commands
 
-### Single-step (STEP mode)
-| Command | Web button |
-|---|---|
-| `web:step_infer` | infer one chunk on sim |
-| `web:step_commit` | replay pending chunk on real |
-| `web:step_cancel` | drop pending chunk |
+`<...>` denotes a value to substitute. Mode, policy, task, and strategy selections
+must match the loaded workflow and current state.
 
-### Gripper
-| Command | Meaning |
-|---|---|
-| `web:gripper:<side>:<open\|close>:<0\|1>` | drive side (`l`/`r`) to state; `1` locks it during RUN |
-| `web:gripper:<side>:<value>` | lock to a numeric value |
-| `web:gripper:<side>` | toggle |
+| Workflow | Commands |
+| --- | --- |
+| DEBUG / session | `web:select_mode:<real\|sim\|step\|manual>`, `web:switch_task:<task>`, `web:select_strategy:<key>`, `web:connect`, `web:disconnect`, `web:run`, `web:halt`, `web:console_reset` |
+| STEP | `web:step_infer`, `web:step_commit`, `web:step_cancel` |
+| Manual | `web:manual_qpos:<comma-separated-qpos>`, `web:manual_dispatch:<dispatch>`, `web:manual_send`, `web:manual_home` |
+| Collection | `web:tab_switch:collect`, `web:collect_arm:<0\|1>`, `web:collect_home`, `web:collect_start`, `web:collect_stop`, `web:collect_cancel` |
+| Evaluation | `web:tab_switch:eval`, `web:switch_ckpt:<slot>`, `web:switch_task:<task>`, `web:warmup`, `web:start`, `web:stop`, `web:eval_cancel`, `web:reset` |
+| RL | `web:tab_switch:rl`, `web:rl_select_task:<task>`, `web:rl_select_policy:<slot>`, `web:rl_select_critic:<slot>`, `web:rl_setup`, `web:run`, `web:halt`, `web:console_reset` |
+| Rollout / HIL | `web:rollout_stop`, `web:rollout_save`, `web:rollout_intervention_enabled:<0\|1>`, `web:rollout_intervention_abandon` |
+| Replay | `web:load_replay_dataset:<payload>`, `web:clear_replay`, `web:select_episode:<index>`, `web:set_replay_fps:<fps>`, `web:replay_seek:<frame>` |
 
-### VR haptics
+`web:select_task` is not a catalog verb: use `web:switch_task:<task>`. The current
+catalog also omits `web:setup` and `web:select_collect_task`. DEBUG setup must be
+completed through the browser or in-process headless CLI before ZMQ starts a run;
+collection dataset/task selection uses the HTTP console API. Gripper
+commands support `web:gripper:<side>:<open|close>:<0|1>` (the final value controls
+locking), a numeric value, or a side-only toggle. The catalog also includes
+bootstrap, initialization, operator-action, and inference-parameter commands;
+use its templates for those specialized flows.
 
-The control channel can send an explicit vibration to the native EVA-VR app. The
-request is delivered immediately to the active VR client's outbound queue and does
-not enter the robot motion command queue:
+Browser mode publishes the complete catalog at `GET /api/config` under
+`control_channel.commands`, including canonical command templates and related
+DOM controls. The `config` query exposes the same metadata in headless mode.
+An allow-listed verb is not a guarantee that every payload or state is valid.
+
+## Collection and SIM metadata
+
+Select a dataset/task and slot through the browser or HTTP collection APIs,
+then enter COLLECT and enable teleop with an explicit command:
+
+```json
+{"cmd":"web:tab_switch:collect"}
+{"cmd":"web:collect_arm:1"}
+{"cmd":"web:collect_start"}
+{"cmd":"web:collect_stop"}
+```
+
+Send each line as a separate request and poll status between dependent steps.
+An `armed` key on `tab_switch` does not arm motion. STOP finishes the take and
+leaves teleop active; use `web:collect_arm:0` to disable it before HOME.
+
+A mounted scene plan requires a selected collection slot. Slot selection and
+skip/defer are provided by the HTTP collection APIs. A dataset/task selection
+alone does not replace slot binding. Poll `status.collect` for capture/save state.
+
+For `collection.sim_recording_url` configs, pass a `sim_metadata` object on
+`web:collect_start` containing the selected simulator scene/task metadata.
+The recorder validates it against the simulator status and pins
+`scene_revision`. A non-object metadata value is rejected. The snapshot is
+consumed by that recording; bind the next scene again for the next take. See
+[Recording](./recording.md#eva-sim-execution-recording).
+
+## Evaluation attempts
+
+`web:start` supports the same attempt-binding path as the HTTP start API when
+`clip_id` is provided:
 
 ```json
 {
-  "cmd": "web:haptic",
-  "hand": "right",
-  "intensity": 0.6,
-  "duration_ms": 80
+  "cmd": "web:start",
+  "clip_id": "unique-attempt-id",
+  "prompt": "pick cup",
+  "trial": 1,
+  "model_name": "configured-model-name",
+  "task_set": "configured-task-set",
+  "task_id": "TASK-001",
+  "scene_id": "SC-001"
 }
 ```
 
-`hand` accepts `left`, `right`, or `both` (`all` is an alias). Intensity is clamped
-to `0..1`; duration is clamped to `1..1000` milliseconds. If the EVA-VR session is
-not connected, the channel returns `{"ok": false, "error": "VR headset is not connected"}`.
-The native app receives the same `type: "haptic"` message and applies it through
-OpenXR controller haptics.
+EVA must be in the `ready` phase. Trial numbers are positive integers.
+`model_name` is optional but, when supplied, must match the active model.
+`task_set`, `task_id`, and `scene_id` are either supplied together or omitted
+for a prompt-only attempt. The prompt and scene must belong to the selected
+plan. Optional `sim_metadata` is checked for matching scene/task identity.
+A successful reply reserves the attempt and moves its phase to `starting`.
 
-The positional form is also supported:
+Use `web:stop` to finish an evaluation attempt and wait for its saved record.
+Milestone scoring remains an HTTP/browser operation (`/api/score`), tied to the
+recorded clip and model. The control channel does not expose a score command.
+DEBUG's `web:run`/`web:halt` and evaluation's `web:start`/`web:stop` serve their
+respective state-machine flows.
+
+## VR haptics
+
+```json
+{"cmd":"web:haptic","hand":"right","intensity":0.6,"duration_ms":80}
+```
+
+`hand` accepts `left`, `right`, `both`, or alias `all` (default `both`). Intensity
+is clamped to `0..1`; duration is clamped to `1..1000` ms. Defaults are `0.6` and
+`80` ms. Numeric values must be finite. The positional form is also accepted:
 
 ```text
 web:haptic:right:0.6:80
 ```
 
-### Collection (COLLECT) — full teleop capture
-| Command | Extra keys | Notes |
-|---|---|---|
-| `web:select_collect_task` | `{"dataset": "...", "task": "..."}` | sets the collect dataset and task (mirrors HTTP; no queue) |
-| `web:tab_switch:collect` | `{"armed": true}` | enter COLLECT and arm teleop (required before start) |
-| `web:collect_start` | — | begin recording an episode (needs armed COLLECT) |
-| `web:collect_stop` | — | finish + save the episode |
-| `web:collect_cancel` | — | discard the in-flight episode |
+The response reports the hands actually sent to the native EVA-VR client's
+outbound queue. A disconnected headset returns `ok:false`. The native app applies
+the feedback through OpenXR; the command does not change robot session state.
 
-### Manual
-`web:manual_qpos:<c,s,v>` · `web:manual_send` · `web:manual_home` · `web:manual_dispatch`
+## Queries and CLI client
 
-### Eval / checkpoint
-`web:switch_ckpt:<slot>` (0→Model A…) · `web:warmup` · `web:tab_switch:eval`
+| Query | Contents |
+| --- | --- |
+| `status` | Live session/phase, policy/transport health, collection and rollout state, history, and last error |
+| `config` | Robot/transport, tasks, modes, strategies, evaluation/RL configuration, and command metadata |
+| `frame` | Latest visualization frame, qpos, and camera keys |
 
-> **Scoring stays manual** — `eval_start` (bind trial identity) and `score` (write
-> to the dataset) are intentionally **not** exposed here; do those in the browser.
-
-### Rollout / intervention / replay
-`web:rollout_stop` · `web:rollout_save` · `web:rollout_intervention_enabled:<0|1>`
-· `web:rollout_intervention_abandon` · `web:load_replay_dataset` · `web:clear_replay`
-· `web:set_replay_fps:<n>` · `web:replay_seek:<frame>` · `web:select_episode:<n>`
-
-## Queries (read-only)
-
-| Query | Returns |
-|---|---|
-| `status` | live snapshot — `session_status`, `cli_mode`, `step_index`, `chunk_index`, `policy_connected`, `transport_connected`, `collect`, `rollout`, `last_error`, … (full shape: `_serialize_status`) |
-| `config` | static config — robot/transport type, tasks, strategies, modes (`_serialize_config`) |
-| `frame` | latest qpos + camera keys (`_serialize_frame`) |
-
-## CLI client
-
-[`examples/control_channel/eva_ctl.py`](../examples/control_channel/eva_ctl.py) is a thin REQ client:
+[`eva_ctl.py`](../examples/control_channel/eva_ctl.py) provides a REQ client:
 
 ```bash
-python examples/control_channel/eva_ctl.py cmd web:select_mode:sim
-python examples/control_channel/eva_ctl.py cmd web:run
-python examples/control_channel/eva_ctl.py query status
-python examples/control_channel/eva_ctl.py wait-idle          # block until the run finishes
-python examples/control_channel/eva_ctl.py cmd web:tab_switch:collect --json '{"armed": true}'
-python examples/control_channel/eva_ctl.py haptic right --intensity 0.6 --duration-ms 80
+.venv/bin/python examples/control_channel/eva_ctl.py query config
+.venv/bin/python examples/control_channel/eva_ctl.py cmd web:switch_task:pick_cup
+.venv/bin/python examples/control_channel/eva_ctl.py cmd web:run
+.venv/bin/python examples/control_channel/eva_ctl.py query status
+.venv/bin/python examples/control_channel/eva_ctl.py wait-idle
+.venv/bin/python examples/control_channel/eva_ctl.py haptic right --intensity 0.6 --duration-ms 80
 ```
 
-## Automated evaluation loop
+Use a configured task string in place of `pick_cup`. `wait-idle` polls until
+`session_status` is no longer `running`; because commands are queued, it is not
+a start acknowledgement. Observe the expected running/phase transition first
+when automating a run. Headless also offers a TTY-only REAL inference prompt;
+see [Console](./console.md#headless--low-power-mode).
 
-A simulator can import `send` directly and run a closed loop (add
-`examples/control_channel/` to your path, or copy `eva_ctl.py` next to your script):
+## Extending the catalog
 
-```python
-import time
-from eva_ctl import send, wait_idle
-
-send(cmd="web:select_mode:sim")
-send(cmd="web:setup")
-for task in tasks:
-    send(cmd=f"web:select_task:{task}")
-    send(cmd="web:run")
-    final = wait_idle()          # polls status until session_status != "running"
-    send(cmd="web:console_reset")
-    # inspect `final` (step_index, last_error, …) to record the trial outcome
-```
-
-## Headless / low-power mode
-
-Running `eva --headless` starts this channel automatically (no web server) and adds
-an in-process interactive CLI. See [Console → Headless / low-power mode](./console.md#-headless--low-power-mode).
-
-
-## Adding a new command
-
-The canonical registry in
-[`core.app.command_catalog`](../src/core/app/command_catalog.py) is shared by
-the channel allow-list and `/api/config.control_channel.commands`. When a new
-branch is added to `run.py::_handle_web_command`, add one registry entry so the
-channel and shortcut metadata stay aligned.
-
-## Transport separation
-
-The control channel is a separate control plane from the robot transport. It
-remains available with transport.type set to zmq, ros1, ros2, or dataset; the
-transport still carries observations/actions while this channel carries sparse
-operator commands. It never sends per-frame actions and therefore does not add a
-per-step network hop to inference.
-
-Web mode exposes command metadata at GET /api/config under
-control_channel.commands. Each entry contains a canonical web:* command template
-and the DOM controls that expose it, such as web:rl_select_policy:{slot} or
-web:gripper:{side}:{state}:{lock}. A shortcut client substitutes template fields
-and sends the resulting command over the same channel.
-
-## RL
-
-web:tab_switch:rl, web:rl_select_task:<task>, web:rl_select_policy:<slot>,
-web:rl_setup, web:rl_select_critic:<slot>, web:run, web:halt,
-web:console_reset, web:rollout_save,
-web:rollout_intervention_enabled:<0|1>, and
-web:rollout_intervention_abandon are the RL commands. Critic selection is
-optional: setup and rollout only require the policy; selecting a critic after
-setup enables critic telemetry for live rollout and replay.
+Implement the state-machine branch in
+[`run.py`](../src/core/app/run.py) and add its entry to the shared command catalog.
+The catalog supplies both the ZMQ allow-list and console shortcut metadata.
+Commands needing HTTP-style context mutation must also implement that binding in
+[`control_channel.py`](../src/core/app/control_channel.py); queueing a string
+alone does not reproduce an HTTP handler's metadata writes.

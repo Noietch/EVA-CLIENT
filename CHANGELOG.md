@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased (`dev/eva-sim`)
+
+- Unified device selection, hardware YAML defaults, workstation overrides, and detached device-process management through DEVICE and `eva device`; EVA can start without a business preset.
+- Added DASHBOARD and shared task-set/dataset management, including a standalone dataset browser, scene filters, episode review, QC, and transfer workflows.
+- Consolidated collection storage under one data root with task sets, datasets, and assets; added scene/task identity binding and editable task descriptions.
+- Added EVA-SIM recording with simulator-owned MCAP capture, asynchronous native episode export, and world-bound teleoperation.
+- Added scene-aware evaluation, attempt tracking, simulator clip identity through the control channel, and evaluation without client recording.
+- Added the in-tree XPolicyLab policy client and DreamLabs policy bridge with isolated SDK dependencies, episode reset, and replaced-session recovery.
+- Preserved all configured camera inputs in policy requests and improved camera readiness, safe homing/stop, collection feedback, replay, and QC responsiveness.
+- Refreshed installation, quick start, console, configuration, recording, control-channel, policy, and hardware documentation against the current branch.
+
 ## 0.2.0
 
 - Added PICO-first VR/WebXR teleoperation with protocol version 3, absolute hand poses, controller retargeting, grip authorization, haptic feedback, and reconnect-aware pose deltas.

@@ -34,6 +34,14 @@
 
 ## 🔥 What's NEW!
 
+**Current development branch (`dev/eva-sim`).** The console now includes DEVICE
+and DASHBOARD, shared task-set and dataset management, EVA-SIM collection with
+asynchronous recording/export, and scene-aware evaluation. Policy deployment
+also supports XPolicyLab and a local DreamLabs bridge over OpenPI. Start with the updated
+[quick start](./docs/quick-start.md), [scene-plan guide](./docs/collection_scene_plan.md),
+and [policy examples](./examples/policy/README.md). These describe the checked-in
+branch; the dated releases below are historical announcements.
+
 <p align="center">
   <video src="https://github.com/user-attachments/assets/caeabb2f-7896-4863-848d-21f9a5a38dcb" controls muted></video>
 </p>
@@ -42,7 +50,7 @@
 
 * **[2026-08-28] EVA-MHS Preview.** Inspired by Anthropic's [Model Hardware Standard (MHS) research preview](https://www.anthropic.com/news/model-hardware-standard-research-preview), EVA-MHS explores an MHS-style agent-to-hardware interface for robotics. Its MCP service allows coding agents to inspect runtime state, call policy models, and directly control robots. EVA-MHS is available on the `dev/mcp_preview` branch and will be formally released in a future update.
 
-* **[2026-07-22] New RL Workspace.** EVA-Client now supports human-in-the-loop (HIL) intervention during policy rollouts and real-time value-curve visualization. See the [RL workspace and HIL intervention demo](./docs/console.md#rl-workspace-and-hil-intervention).
+* **[2026-07-22] New RL Workspace.** EVA-Client now supports human-in-the-loop (HIL) intervention during policy rollouts and real-time value-curve visualization. See the [RL workspace and HIL intervention demo](./docs/console.md#rl-and-human-intervention).
 
 * **[2026-07-18] Headless CLI + ZMQ control channel.** Drive the full deploy / eval / RL / collect loop from a single `.py` config without the browser — every console button (incl. HIL takeover) mirrored on a ZMQ socket. See [`docs/console.md`](./docs/console.md) and [`docs/control-channel.md`](./docs/control-channel.md).
 * **[2026-07-03] EVA-Client is open-sourced!**
@@ -52,21 +60,26 @@
 
 ## ✨ What you get
 
-* **🚀 Deployment.** One command brings up a real-robot closed loop:
+* **Deployment.** Python workflow presets compose with hardware YAML defaults
+  and saved workstation device selections:
   `.py` config → transport ([ROS1](https://github.com/ros/ros) / [ROS2](https://github.com/ros2/ros2) / [ZeroMQ](https://github.com/zeromq/pyzmq) / offline dataset) → policy
-  backend ([OpenPI](https://github.com/Physical-Intelligence/openpi), [OpenPI-RTC](https://www.pi.website/research/real_time_chunking), [StarVLA](https://github.com/starVLA/starVLA), [GR00T](https://github.com/Nvidia/Isaac-GR00T), mock, replay) → inference
+  backend ([OpenPI](https://github.com/Physical-Intelligence/openpi), [OpenPI-RTC](https://www.pi.website/research/real_time_chunking), [StarVLA](https://github.com/starVLA/starVLA), [GR00T](https://github.com/Nvidia/Isaac-GR00T), XPolicyLab, mock, replay) → inference
   strategy (sync / [async](https://github.com/OpenDriveLab/kai0#train-deploy-alignment) / naive / [ACT-ensemble](https://github.com/tonyzhaozh/act) / RTC) with live latency
-  compensation. **8 robots already** — joint-space or EEF-space (PyRoki IK),
-  all live-switchable from the DEBUG tab.
-* **📊 Evaluation.** Multi-checkpoint sweeps with per-trial records: every
-  rollout captures camera video, 3D URDF scene, per-dimension state charts,
-  and per-prompt milestone scores into dataset metadata, then replays
-  synchronously in the RESULT tab. Prompt shuffling, and remote
-  policy servers over SSH port-forward are first-class.
-* **🎥 Data collection.** Teleop capture straight into [LeRobot](https://github.com/huggingface/lerobot) v2.1 episodes
-  from the COLLECT tab — background saver, in-tab QC PASS/FAIL replay, camera
-  streams encoded to mp4, per-frame green/red quality flags. Teleop demos and
-  model rollouts share one on-disk layout.
+  compensation. Eight robot adapters support joint-space and EEF-space
+  deployment with PyRoki IK. DEVICE manages robot, teleoperation, and camera
+  processes; DEBUG operates the configured model.
+* **Evaluation.** Multi-checkpoint sweeps track prompts, milestones, attempts,
+  and scene/task identity. Client recording is optional. Recorded trials can
+  include camera video, robot state/action traces, and metadata for synchronized
+  review in RESULT. SSH forwarding connects remote policy servers.
+* **Data collection.** COLLECT supports leader and VR teleoperation, task/scene
+  plans, asynchronous saves, and episode QC. Real collection uses the native
+  [LeRobot](https://github.com/huggingface/lerobot) v2.1 layout; EVA-SIM captures
+  MCAP and asynchronously exports native episode tables. The dataset manager
+  reviews and transfers datasets, with LeRobot v3.0, MCAP, and HDF5 exports.
+* **Device and dataset workflows.** Start `eva` without a config to open DEVICE,
+  use `eva device` for command-line device management, or open the standalone
+  dataset browser with `bash tools/datasets/start.sh --read-only`.
 
 ---
 
@@ -105,6 +118,8 @@
 | Policy backend | OpenPI-RTC | WebSocket + msgpack (Real-Time Chunking) | ✅ |
 | Policy backend | StarVLA | WebSocket + msgpack (typed envelope) | ✅ |
 | Policy backend | GR00T | ZeroMQ REQ/REP + msgpack-numpy (Isaac-GR00T) | ✅ |
+| Policy backend | XPolicyLab | WebSocket + msgpack-numpy; in-tree client | ✅ |
+| Policy bridge | DreamLabs | Local OpenPI-compatible server → DreamLabs inference session | ✅ |
 | Policy backend | Mock | Local (smooth random actions) | ✅ |
 | Policy backend | Replay | Local (recorded trajectory replay) | ✅ |
 
@@ -120,16 +135,20 @@
 
 ## 📚 Documentation
 
-Full guides live in [`docs/`](./docs). Start here:
+The checked-in guides describe this branch. Online documentation and the
+technical report may describe an earlier release. Start with [`docs/`](./docs):
 
 | Guide | What's inside |
 |-------|---------------|
-| [📦 Installation](./docs/installation.md) | Requirements, `uv` setup, hardware extras, verify |
-| [🚀 Quick start](./docs/quick-start.md) | Two-process bring-up, supported transports, deploy/eval/replay presets |
-| [🧭 Web console](./docs/console.md) | The seven tabs — MANUAL, COLLECT, REPLAY, DEBUG, RL, EVAL, RESULT |
+| [Installation](./docs/installation.md) | Python 3.11, application environment, actual extras, transport requirements |
+| [Quick start](./docs/quick-start.md) | DEVICE, fake hardware, deploy/collect/eval/SIM presets, headless access |
+| [Web console](./docs/console.md) | DASHBOARD, DEBUG, DEVICE, COLLECT, REPLAY, RL, EVAL, RESULT |
 | [📚 Core concepts](./docs/concepts.md) | Transports, policy backends, inference strategies, robots, action spaces |
 | [⚙️ Configuration](./docs/configuration.md) | `_base_` inheritance, deep merge, startup pipeline |
-| [🎞️ Recording](./docs/recording.md) | LeRobot v2.1 on-disk layout, QC flags, eval trials |
+| [Recording](./docs/recording.md) | Native/SIM recording, QC, dataset management, conversion and transfer |
+| [Collection scene plans](./docs/collection_scene_plan.md) | Task-set layout, CSV schema, scene identity and progress |
+| [Control channel](./docs/control-channel.md) | Headless ZMQ commands, queries and simulator integration |
+| [Policy examples](./examples/policy/README.md) | Backend setup and DreamLabs bridge |
 | [🔬 Development](./docs/development.md) | Tests, lint, type-check, and how the robot side is faked |
 
 ---
@@ -148,7 +167,8 @@ Full guides live in [`docs/`](./docs). Start here:
       language-driven planner (VLM / VLA + tool use) so long-horizon tasks
       can be decomposed, executed, verified, and re-planned end-to-end from
       the same console.
-- [ ] **Data annotation.** Extend Collect mode with fine-grained task and
+- [ ] **Finer temporal annotation.** Extend the existing task/scene plans and
+      episode quality review with fine-grained task and
       sub-task annotation, segmenting long-horizon episodes into labeled
       sub-task units and milestones within the same LeRobot dataset. This
       makes a collection reusable at the level of individual manipulation

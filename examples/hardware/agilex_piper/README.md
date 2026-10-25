@@ -33,23 +33,32 @@ path can be overridden by the matching environment variable:
 /home/agilex/cobot_magic/aloha_des                      # ALOHA_DES_ROOT (visualize)
 ```
 
-The fake node only needs the EVA base package in the virtual environment:
+The fake launcher uses the existing Python 3.11 environment at
+`examples/hardware/agilex_piper/.venv`, containing the dependencies declared in
+this directory's `pyproject.toml`. Override its location with
+`AGILEX_PIPER_VENV_DIR`. Activating the root `.venv` does not select the fake
+node's interpreter. Run EVA itself with the root `.venv/bin/eva`.
 
-```bash
-source .venv/bin/activate
-```
+The legacy `setup_env.sh` runs dependency synchronization. Preserve existing
+environments; add only missing dependencies after checking that the installation
+plan changes no installed package or file.
 
 ## Run the Fake Node (no hardware)
 
 For development without arms or ROS, the fake node speaks ZMQ. Point EVA at a
-`transport.type='zmq'` config (the openloop config
-`configs/00_openloop/dual_agilex_piper_openloop.py` is ROS-free):
+`transport.type='zmq'` config. In DEVICE select `Dual AgileX Piper`, switch
+Robot to `Fake`, choose Camera `None` if images are unnecessary, and apply. The
+saved Fake mode changes a live workflow's runtime transport to ZMQ. Dataset
+transport presets remain offline and do not connect to this node:
 
 ```bash
 bash examples/hardware/agilex_piper/run_fake_node.sh
-# then, in another shell, with a zmq-transport config:
-eva --config configs/00_openloop/dual_agilex_piper_openloop.py --web-port 8080
+# then, in another shell, using the saved Fake device selection:
+.venv/bin/eva --config configs/01_deploy/dual_agilex_piper/openpi_qpos.py --web-port 8080
 ```
+
+The deployment preset requires its policy server for inference. The fake node
+supplies synthetic robot observations, not a policy.
 
 Endpoint / rate overrides:
 
@@ -69,11 +78,13 @@ config, so its state/camera layout matches the real one.
 ```bash
 bash examples/hardware/agilex_piper/run_agilex_ros.sh
 # then, on the EVA host (ROS 1 transport):
-eva --config configs/01_deploy/dual_agilex_piper/openpi_qpos.py --web-port 8080
+.venv/bin/eva --config configs/01_deploy/dual_agilex_piper/openpi_qpos.py --web-port 8080
 ```
 
 When the EVA DEVICE page has `agilex_piper` selected in `Real` mode, its Robot
-Start button launches the same script. CAN setup follows the YAM launcher: it
+Start button launches this script with `--skip-camera`; the standalone command
+above also launches the upstream cameras. Configure external cameras separately
+when using DEVICE. CAN setup follows the YAM launcher: it
 first tries non-interactive `sudo` (for an existing authorization), then falls
 back to `pkexec` so the desktop PolicyKit agent can show the system password
 dialog. The EVA page does not collect or store a separate Piper password.
@@ -152,8 +163,7 @@ The 14D action/state layout is:
 ## Cameras
 
 Collection records cameras `cam_high` / `cam_left_wrist` / `cam_right_wrist`
-from the master/puppet ROS topics declared in
-`configs/02_collection/dual_agilex_piper.py`.
+from the ROS topic mappings declared in this directory's `config.yaml`.
 
 ## Teleop Collection
 
@@ -170,7 +180,7 @@ EVA forwards those messages to `/puppet/master_joint_left` and
 `/puppet/master_joint_right` only while Collection control or HIL takeover is
 active.
 
-`configs/02_collection/dual_agilex_piper.py` maps the topics per arm:
+`examples/hardware/agilex_piper/config.yaml` maps the topics per arm:
 
 ```text
 left_arm   qpos        /puppet/joint_left          (follower state)
@@ -186,5 +196,5 @@ right_arm  qpos        /puppet/joint_right
 Then run collection from the EVA host:
 
 ```bash
-eva --config configs/02_collection/dual_agilex_piper.py --web-port 8080
+.venv/bin/eva --config configs/02_collection/dual_agilex_piper.py --web-port 8080
 ```

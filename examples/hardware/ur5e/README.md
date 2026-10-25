@@ -25,25 +25,26 @@ EVA ZMQ `WireObservation` frames, and consumes EVA `WireAction` commands.
 
 ## Requirements
 
-Install the EVA base package and UR5e hardware SDK dependencies in the project
-virtual environment:
-
-```bash
-source .venv/bin/activate
-uv pip install -e ".[ur5e]"
-```
-
-The `ur5e` extra installs:
+The real and fake launchers use the existing Python 3.11 environment at
+`examples/hardware/ur5e/.venv` (`UR5E_VENV_DIR` overrides its location).
+Dependencies are declared in this directory's `pyproject.toml`; the root
+package no longer provides a `ur5e` extra. Run EVA with the root `.venv/bin/eva`.
+The hardware subproject includes:
 
 ```text
-alicia_d_sdk==6.1.0rc4
+alicia_d_sdk  # editable source: ../arx_r5/SDK/alicia_d
 ur-rtde==1.6.3
 pydhgripper==1.0.2
+synria-robocore>=2.0.0a1
 ```
 
 OpenCV camera access uses the base project `opencv-python` dependency. The robot
 host must also have network access to the UR controller and permission to open
 the AG95 and Alicia-D serial ports.
+
+The legacy `setup_env.sh` synchronizes dependencies. Preserve existing
+environments and add only missing dependencies after confirming the plan changes
+no installed versions or files.
 
 ## Run the Fake Node (no hardware)
 
@@ -53,7 +54,7 @@ protocol:
 ```bash
 bash examples/hardware/ur5e/run_fake_node.sh
 # then, in another shell:
-eva --config configs/01_deploy/ur5e/openpi_qpos.py --web-port 8080
+.venv/bin/eva --config configs/01_deploy/ur5e/openpi_qpos.py --web-port 8080
 ```
 
 Endpoint / rate overrides:
@@ -75,7 +76,7 @@ Run it on the robot host before starting EVA:
 
 ```bash
 bash examples/hardware/ur5e/run_hardware.sh
-eva --config configs/01_deploy/ur5e/openpi_qpos.py --web-port 8080
+.venv/bin/eva --config configs/01_deploy/ur5e/openpi_qpos.py --web-port 8080
 ```
 
 Environment overrides:
@@ -153,7 +154,13 @@ Use `TELEOP_PORT=/dev/ttyACM0` to override the teleop serial port.
 
 ## Teleop Collection
 
-For `configs/02_collection/ur5e.py`, `node.py` runs an Alicia-D master arm
+Use `configs/02_collection/ur5e.py`. The DEVICE default is `VR`; its single
+robot arm maps to the right controller. `EVA-VR (PICO)` uses the same mapping.
+To collect from Alicia-D instead, select `Leader` under Operation and apply;
+the device service passes the selected leader parameters to the robot node.
+Robot, Camera, and Operation use separate Start controls.
+
+When Leader is selected, `node.py` runs an Alicia-D master arm
 (`teleop.type='ur5e_master_arm'`) inside the same process. It listens for EVA's
 collection start/stop control actions; on start it connects the leader and
 calibrates a delta against the current UR5e qpos, and during an active episode it

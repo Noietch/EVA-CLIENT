@@ -26,36 +26,16 @@ same SDK, publishes EVA ZMQ `WireObservation` frames, and consumes EVA
 
 ## Requirements
 
-Create the isolated offline/fake environment without opening hardware:
+Use the existing Python 3.11 environment at
+`examples/hardware/agibot_g2/.venv`; `AGIBOT_G2_VENV_DIR` overrides this path for
+the fake launcher. Its dependencies are declared in `pyproject.toml`. The real
+node additionally requires the proprietary `agibot_gdk` package in that same
+environment; the fake node imports no GDK.
 
-```bash
-bash examples/hardware/agibot_g2/setup_env.sh
-```
-
-The real node additionally requires exactly one source for the proprietary
-`agibot_gdk` package. For a local SDK checkout or wheel directory, provide its
-exact path:
-
-```bash
-AGIBOT_GDK_LOCAL_PATH=/absolute/path/to/agibot_gdk \
-  bash examples/hardware/agibot_g2/setup_env.sh
-```
-
-Alternatively, provide a Git repository URL that contains the installable SDK:
-
-```bash
-AGIBOT_GDK_GIT_URL=https://github.com/example/agibot_gdk.git \
-  bash examples/hardware/agibot_g2/setup_env.sh
-```
-
-Do not set both variables. The setup script creates
-`examples/hardware/agibot_g2/.venv`. When a GDK source is selected, it installs
-the SDK there and verifies that `agibot_gdk` imports successfully. Without a
-GDK source the setup still succeeds for offline/fake use, but the real node
-cannot be used.
-
-The fake node imports no robot SDK and can run from the isolated environment
-after its normal Python dependencies have been installed.
+The legacy `setup_env.sh` synchronizes dependencies and can change installed
+packages. Under the repository environment policy, do not use it to repair an
+existing environment. Add only missing dependencies after confirming the plan
+preserves every installed package and file.
 
 ## Run the Fake Node (no hardware)
 
@@ -65,7 +45,7 @@ protocol:
 ```bash
 bash examples/hardware/agibot_g2/run_fake_node.sh
 # then, in another shell:
-eva --config configs/01_deploy/agibot_g2/openpi_qpos.py --web-port 8080
+.venv/bin/eva --config configs/01_deploy/agibot_g2/openpi_qpos.py --web-port 8080
 ```
 
 Endpoint / rate overrides:
@@ -86,10 +66,11 @@ so its state/camera layout matches the real one.
 Run it on the robot host before starting EVA:
 
 ```bash
-python examples/hardware/agibot_g2/node.py \
+PYTHONPATH=src examples/hardware/agibot_g2/.venv/bin/python \
+  examples/hardware/agibot_g2/node.py \
   --obs-endpoint tcp://127.0.0.1:5555 \
   --action-endpoint tcp://127.0.0.1:5556
-eva --config configs/01_deploy/agibot_g2/openpi_qpos.py --web-port 8080
+.venv/bin/eva --config configs/01_deploy/agibot_g2/openpi_qpos.py --web-port 8080
 ```
 
 `node.py` takes only the two endpoint arguments, both defaulting to the EVA
@@ -166,7 +147,11 @@ The collection config (`configs/02_collection/agibot_g2.py`) records these under
 
 ## Teleop Collection
 
-Use `configs/02_collection/agibot_g2_vr.py` for WebXR collection. EVA owns the
+Use `configs/02_collection/agibot_g2.py` for collection. In DEVICE, select
+`AgiBot G2`, choose `VR` or `EVA-VR (PICO)` under Operation, and apply the
+selection. This adapter has no real Robot launcher in `config.yaml`; start the
+GDK node separately using the command above. Operation Start runs the VR host
+node. EVA owns the
 collection lifecycle and pairs client teleop actions with the raw 30 Hz
 observation stream. The hardware node drains the latest `target="real"` action
 and keeps the GDK servo loop running at 100 Hz.

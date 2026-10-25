@@ -21,12 +21,10 @@ The native path uses ADB reverse for a USB-connected PICO or a LAN URL.
 
 ```bash
 cd /path/to/EVA-CLIENT
-source .venv/bin/activate
-
-python examples/input_sources/vr_webxr/node.py \
+printf '%s\n' eva | .venv/bin/python examples/input_sources/vr_webxr/node.py \
   --host 127.0.0.1 \
   --port 43876 \
-  --token eva \
+  --token-stdin \
   --endpoint tcp://127.0.0.1:8765 \
   --ack-endpoint tcp://127.0.0.1:8766
 ```
@@ -34,10 +32,10 @@ python examples/input_sources/vr_webxr/node.py \
 如果 PICO 通过局域网直接访问 Mac/Linux，不使用 ADB reverse，把主机监听地址改为：
 
 ```bash
-python examples/input_sources/vr_webxr/node.py \
+printf '%s\n' eva | .venv/bin/python examples/input_sources/vr_webxr/node.py \
   --host 0.0.0.0 \
   --port 43876 \
-  --token eva \
+  --token-stdin \
   --endpoint tcp://127.0.0.1:8765 \
   --ack-endpoint tcp://127.0.0.1:8766
 ```
@@ -48,12 +46,16 @@ port `43876` when the node listens on `0.0.0.0`.
 ## Native Start
 
 The device service uses `eva_pico` as the native teleop option. Select
-`EVA-VR (PICO)` in the Devices page and press the Operation `Start` button. This
-starts the host WebSocket node and a background USB watcher. The watcher keeps
+`EVA-VR (PICO)` in the DEVICE page, apply the selection, and press Operation
+`Start`. This starts the host WebSocket node and a background USB watcher. The watcher keeps
 ADB reverse forwarding ready and automatically adopts a newly connected,
 authorized PICO, even if the headset was plugged in after EVA started. Then
 open the installed `org.eva.pico.input` APK on the headset yourself. The robot
 still has its own explicit Start control.
+
+The device service survives EVA client exit. Use Operation Stop to stop the
+host node and USB watcher explicitly. Do not start a second manual bridge on
+the same HTTP or ZMQ endpoints while this service owns them.
 
 The WebXR option is unchanged: it still uses the device Start control and the
 `WebXR` button in the Devices page.
@@ -61,14 +63,13 @@ The WebXR option is unchanged: it still uses the device Start control and the
 The launcher can still be used directly when needed:
 
 ```bash
-PICO_SERIAL="$(adb devices | awk 'NR==2 && $2=="device" {print $1}')" \
-examples/input_sources/eva-pico/start.sh --launch-only
+bash examples/input_sources/eva-pico/start.sh --launch-only
 ```
 
 To prepare only USB forwarding without launching the APK:
 
 ```bash
-examples/input_sources/eva-pico/start.sh --prepare-only
+bash examples/input_sources/eva-pico/start.sh --prepare-only
 ```
 
 The app connects to:
@@ -76,6 +77,10 @@ The app connects to:
 ```text
 ws://127.0.0.1:43876/ws?token=eva
 ```
+
+Without `PICO_SERIAL`, the native launcher prepares or launches every authorized
+device visible to its selected ADB server. Use `--serial=<PICO_SERIAL>` to target
+one headset. `ADB` and `ADB_SERVER_PORT` select a specific ADB installation/server.
 
 ## WebXR Alternative
 
@@ -85,8 +90,10 @@ ws://127.0.0.1:43876/ws?token=eva
 USB/ADB reverse 启动：
 
 ```bash
-export PICO_SERIAL="$(adb devices | awk 'NR==2 && $2=="device" {print $1}')"
-export VR_TOKEN=YOUR_TOKEN
+export PICO_SERIAL="<PICO_SERIAL>"
+read -rsp 'VR access token: ' VR_TOKEN
+printf '\n'
+export VR_TOKEN
 examples/input_sources/vr_webxr/open_pico.sh
 ```
 
@@ -109,7 +116,7 @@ adb devices -l
 4. 安装 APK：
 
 ```bash
-adb install -r EVA-VR-v0.2.4.apk
+adb install -r /path/to/downloaded/EVA-VR.apk
 ```
 
 5. 启动 EVA-VR：
@@ -205,6 +212,6 @@ adb shell am force-stop org.eva.pico.input
 2. 检查 `node.py` 是否监听 `43876`。
 3. 检查 token 是否一致。
 4. 如果没有使用 EVA-CLIENT 设备服务，手动执行
-   `examples/input_sources/eva-pico/start.sh --prepare-only`。
+   `bash examples/input_sources/eva-pico/start.sh --prepare-only`。
 5. 看原生面板是否从 `HOST: DISCONNECTED` 变为 `HOST: CONNECTED`。
 6. 看 `adb logcat` 是否出现 `XR_SUCCESS`。

@@ -20,14 +20,11 @@ at 100 Hz, attaches each new camera frame once at 30 FPS, and consumes EVA
 
 ## Requirements
 
-Run from the EVA client virtual environment:
-
-```bash
-source .venv/bin/activate
-uv pip install -e ".[franka]"
-```
-
-The base EVA package provides the common runtime dependencies used by this node:
+The real and fake launchers use the existing Python 3.11 environment at
+`examples/hardware/franka/.venv` (`FRANKA_VENV_DIR` overrides the location).
+Dependencies belong to this directory's `pyproject.toml`; the root package no
+longer provides a `franka` extra. Run EVA itself with the root `.venv/bin/eva`.
+Common runtime dependencies include:
 
 ```text
 numpy
@@ -37,16 +34,20 @@ pyzmq
 msgpack / msgpack-numpy
 ```
 
-The `franka` extra adds the real robot control dependency:
+The hardware subproject also declares:
 
 ```text
 franky-control==1.1.1
+pyorbbecsdk2==2.1.1  # provides the pyorbbecsdk import
 ```
 
-`pyorbbecsdk` is not declared in `pyproject.toml`. It is expected to already be
-available on the real Franka robot host that has the Orbbec SDK installed. The
-node imports `pyorbbecsdk` lazily, so deployments with all Orbbec cameras
+The Orbbec wheel is selected by platform in the hardware `pyproject.toml`.
+The node imports `pyorbbecsdk` lazily, so deployments with all Orbbec cameras
 disabled can still start without that package.
+
+The legacy `setup_env.sh` synchronizes dependencies. Preserve existing
+environments and install only missing packages after checking the plan changes
+no installed versions or files.
 
 ```bash
 bash examples/hardware/franka/run_hardware.sh \
@@ -63,7 +64,7 @@ protocol:
 ```bash
 bash examples/hardware/franka/run_fake_node.sh
 # then, in another shell:
-eva --config configs/01_deploy/dual_franka/openpi_qpos.py --web-port 8080
+.venv/bin/eva --config configs/01_deploy/dual_franka/openpi_qpos.py --web-port 8080
 ```
 
 Endpoint / rate overrides:
@@ -85,7 +86,7 @@ Run it on the robot host before starting EVA:
 
 ```bash
 bash examples/hardware/franka/run_hardware.sh
-eva --config configs/01_deploy/dual_franka/openpi_qpos.py --web-port 8080
+.venv/bin/eva --config configs/01_deploy/dual_franka/openpi_qpos.py --web-port 8080
 ```
 
 By default `run_hardware.sh` reads `configs/01_deploy/dual_franka/openpi_qpos.py`
@@ -108,7 +109,7 @@ Default arm IPs:
 Override them with environment variables:
 
 ```bash
-LEFT_ROBOT_IP=<LEFT_ROBOT_IP> RIGHT_ROBOT_IP=<RIGHT_ROBOT_IP> \
+LEFT_ROBOT_IP="<LEFT_ROBOT_IP>" RIGHT_ROBOT_IP="<RIGHT_ROBOT_IP>" \
   bash examples/hardware/franka/run_hardware.sh
 ```
 
@@ -165,7 +166,7 @@ are shared across configured cameras:
 
 ```bash
 bash examples/hardware/franka/run_hardware.sh \
-  --orbbec-camera cam_left_wrist=<LEFT_WRIST_SERIAL> \
+  --orbbec-camera cam_left_wrist="<LEFT_WRIST_SERIAL>" \
   --orbbec-resolution 1280x720 \
   --orbbec-fps 30
 ```
@@ -182,7 +183,10 @@ transport:
 
 ## Teleop Collection
 
-Use `configs/02_collection/dual_franka_vr.py` for WebXR collection. EVA owns the
+Use `configs/02_collection/dual_franka.py` for collection. In DEVICE, select
+`Dual Franka`, choose `VR` or `EVA-VR (PICO)` under Operation, and apply the
+selection. Robot, Camera, and Operation have separate Start controls; the
+device service remains running when the EVA client exits. EVA owns the
 collection lifecycle and pairs each client teleop action with the raw ZMQ state
 stream; the hardware node only needs to execute `target="real"` actions and keep
 publishing state and fresh camera samples.

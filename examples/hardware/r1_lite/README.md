@@ -4,6 +4,13 @@ This directory keeps the R1 Lite hardware entrypoints that are specific to this
 robot. EVA core owns the generic ROS2 transport, HIL, collection recording, and
 fixed-clock dataset save logic; robot startup details stay here.
 
+DEVICE currently defaults to `VR` and also offers `EVA-VR (PICO)`, with
+`left_arm=left` and `right_arm=right`. Apply that selection before using
+Operation Start. There is no local real Robot launcher in this adapter's
+`config.yaml`; the remote launch scripts below remain a separate workflow.
+CAT/GELLO is a hardware-side alternative and is not an Operation option in the
+current device catalog.
+
 ## Files
 
 - `run_hardware.sh`: starts the remote R1 Lite robot stack and CAT teleop stack.
@@ -72,7 +79,7 @@ Useful overrides:
 ```bash
 START_R1LITE=0 bash examples/hardware/r1_lite/run_hardware.sh
 START_CAT=0 bash examples/hardware/r1_lite/run_hardware.sh
-R1LITE_HOST=r1lite@<R1LITE_HOST> CAT_HOST=cat@<CAT_HOST> \
+R1LITE_HOST="r1lite@<R1LITE_HOST>" CAT_HOST="cat@<CAT_HOST>" \
   bash examples/hardware/r1_lite/run_hardware.sh
 CAT_OPERATOR_BUTTON=0 bash examples/hardware/r1_lite/run_hardware.sh
 ```
@@ -125,7 +132,7 @@ After hardware is up, start EVA locally in another shell:
 ```bash
 source .venv/bin/activate
 export FASTRTPS_DEFAULT_PROFILES_FILE="$HOME/.ros/fastdds_r1lite_super_client.xml"
-eva --config configs/02_collection/r1lite.py --web-port 8080
+.venv/bin/eva --config configs/02_collection/r1lite.py --web-port 8080
 ```
 
 ### FastDDS Camera Receive Buffer
@@ -176,7 +183,7 @@ For policy rollout:
 
 ```bash
 source .venv/bin/activate
-eva --config configs/01_deploy/r1lite/openpi_qpos.py --web-port 8080
+.venv/bin/eva --config configs/01_deploy/r1lite/openpi_qpos.py --web-port 8080
 ```
 
 ## Operator Buttons
@@ -228,6 +235,19 @@ CAT_KILL_CMD='bash ~/kill_tele.sh' \
 
 ## ROS2 Fake Node
 
+The ROS2 fake below is a standalone alternative to DEVICE's `Fake` mode.
+DEVICE Fake starts the generic ZMQ fake node and switches EVA to ZMQ. To use
+this ROS2 fake, keep the R1 Lite transport in Real mode and launch only the
+local fake script below; do not start the remote robot/CAT scripts.
+
+The launcher uses the existing Python 3.11 environment at
+`examples/hardware/r1_lite/.venv`, or `R1_LITE_VENV_DIR` when set, together
+with the sourced ROS2 runtime. Activating the root `.venv` does not change that
+choice. This directory's `pyproject.toml` declares the helper dependencies;
+`rclpy` and ROS message packages must also be importable. The legacy
+`setup_env.sh` synchronizes packages; preserve installed dependencies and add
+only missing packages after reviewing the installation plan.
+
 For local development without physical R1 Lite/CAT hardware, start the local ROS2
 fake node with its embedded control UI:
 
@@ -265,7 +285,7 @@ source /opt/ros/humble/setup.bash
 source .venv/bin/activate
 unset FASTRTPS_DEFAULT_PROFILES_FILE ROS_DISCOVERY_SERVER RMW_IMPLEMENTATION
 export ROS_LOCALHOST_ONLY=1
-eva --config configs/02_collection/r1lite.py --web-port 8080
+.venv/bin/eva --config configs/02_collection/r1lite.py --web-port 8080
 ```
 
 For policy rollout:
@@ -276,7 +296,7 @@ source /opt/ros/humble/setup.bash
 source .venv/bin/activate
 unset FASTRTPS_DEFAULT_PROFILES_FILE ROS_DISCOVERY_SERVER RMW_IMPLEMENTATION
 export ROS_LOCALHOST_ONLY=1
-eva --config configs/01_deploy/r1lite/openpi_qpos.py --web-port 8080
+.venv/bin/eva --config configs/01_deploy/r1lite/openpi_qpos.py --web-port 8080
 ```
 
 UI, image, and rate overrides:
