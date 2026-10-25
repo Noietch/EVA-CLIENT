@@ -93,6 +93,7 @@ def _observation() -> dict:
         "images": {
             "cam_high": np.zeros((8, 10, 3), dtype=np.uint8),
             "cam_left_wrist": np.ones((8, 10, 3), dtype=np.uint8),
+            "cam_right_wrist": np.full((8, 10, 3), 2, dtype=np.uint8),
         },
         "prompt": "stack the bowls",
     }
@@ -134,6 +135,10 @@ def test_client_round_trip_over_local_websocket():
             thread.join(timeout=5)
 
     assert [frame["message_type"] for frame in peer.sent] == ["hello", "reset", "infer"]
+    vision = peer.sent[-1]["payload"]["observation"]["vision"]
+    assert list(vision) == list(_observation()["images"])
+    for name, image in _observation()["images"].items():
+        np.testing.assert_array_equal(vision[name]["color"], image)
 
 
 def test_client_rejects_nonfinite_actions():

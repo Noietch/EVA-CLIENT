@@ -6,15 +6,15 @@ typed envelope ``{"type": "infer", "payload": {...}}`` and returns
 carries ``action_chunk_size`` and the un-normalization keys.
 
 The EVA observation (``{"state", "images": {cam: HWC}, "prompt"}``) is adapted
-into the starVLA ``examples=[{"image", "lang", "state"}]`` request shape. Tune
-the camera pick and un-normalization key through ``policy.backend_options``::
+into the starVLA ``examples=[{"image", "lang", "state"}]`` request shape, with
+all camera images in observation order. Set the un-normalization key through
+``policy.backend_options``::
 
     policy:
       type: starvla
       host: 127.0.0.1
       port: 10093
       backend_options:
-        camera_key: cam_high      # which EVA camera feeds starVLA's single image
         unnorm_key: agilex        # dataset key for server-side un-normalization
 """
 
@@ -41,7 +41,7 @@ _RETRY_ERRORS = (ConnectionRefusedError, OSError)
 class StarVlaPolicyClient(WebSocketPolicyClient):
     """WebSocket client for a starVLA policy server.
 
-    Sends one ``examples`` entry per inference (single image + language + state)
+    Sends one ``examples`` entry per inference (all images + language + state)
     and returns the un-normalized action chunk the server produced, with the
     leading batch axis dropped to match the (T, D) chunk shape EVA expects.
     """
@@ -50,12 +50,10 @@ class StarVlaPolicyClient(WebSocketPolicyClient):
         self,
         host: str,
         port: int,
-        camera_key: str | None = None,
         unnorm_key: str | None = None,
         retry_until_connected: bool = True,
         max_retries: int = 0,
     ) -> None:
-        self._camera_key = camera_key
         self._unnorm_key = unnorm_key
         super().__init__(
             host,
@@ -68,22 +66,15 @@ class StarVlaPolicyClient(WebSocketPolicyClient):
 
     @classmethod
     def from_config(cls, config: ConfigDict, ctx: PolicyBuildContext) -> StarVlaPolicyClient:
-        """Build a starVLA client; camera/unnorm keys come from backend_options."""
+        """Build a starVLA client; unnorm_key comes from backend_options."""
         opts = config.backend_options
         return cls(
             config.host,
             config.port,
-            camera_key=opts.get("camera_key"),
             unnorm_key=opts.get("unnorm_key"),
             retry_until_connected=ctx.retry_until_connected,
             max_retries=ctx.max_retries,
         )
-
-    def _pick_image(self, images: dict[str, np.ndarray]) -> np.ndarray:
-        # starVLA consumes a single image; use the configured camera or the first one.
-        if self._camera_key is not None:
-            return images[self._camera_key]
-        return next(iter(images.values()))
 
     def infer(
         self,
@@ -99,7 +90,7 @@ class StarVlaPolicyClient(WebSocketPolicyClient):
         """
         _ = prev_action, rtc_params
         example = {
-            "image": self._pick_image(observation["images"]),
+            "image": list(observation["images"].values()),
             "lang": observation["prompt"],
             "state": np.asarray(observation["state"], dtype=np.float32),
         }
