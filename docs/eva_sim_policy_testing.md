@@ -19,14 +19,14 @@
 在 EVA-VLA 根目录执行：
 
 ```bash
-# 只测 v1.1
-bash benchmarks/eva_sim/eval.sh --ckpt-path /path/to/hf_checkpoint --task eval_v1.1
+# 默认：只测 v1.2，使用 GPU 0～7 共 8 张卡
+bash benchmarks/eva_sim/eval_yam.sh --ckpt-path /path/to/hf_checkpoint
 
-# 只测 v1.2
-bash benchmarks/eva_sim/eval.sh --ckpt-path /path/to/hf_checkpoint --task eval_v1.2
+# 传参数改成 4 张卡
+bash benchmarks/eva_sim/eval_yam.sh --ckpt-path /path/to/hf_checkpoint --sim-gpus 0,2,4,6
 
-# 不传版本时，默认只测 v1.2
-bash benchmarks/eva_sim/eval.sh --ckpt-path /path/to/hf_checkpoint
+# 传参数切换成 v1.1，仍然默认使用 8 张卡
+bash benchmarks/eva_sim/eval_yam.sh --ckpt-path /path/to/hf_checkpoint --task eval_v1.1
 ```
 
 这里传导出的 HF checkpoint，目录里需要有 `inference_metadata.yaml`。**每次只测一个版本**，用 `--task` 在 v1.1 和 v1.2 之间切换，不传时默认只测 v1.2。同时选择 `eval_v1.1` 和 `eval_v1.2` 会直接报错；同一版本内部仍可传多个任务分片。切换版本不需要修改脚本或重新手动部署服务。
