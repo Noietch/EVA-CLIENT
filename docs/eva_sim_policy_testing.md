@@ -4,6 +4,8 @@
 
 可编辑流程图：[EVA-SIM 多 Policy 1～8 卡评测流程](eva_sim_evaluation_flow.excalidraw)。
 
+使用前对齐三个仓库的分支：EVA-VLA 和 EVA-CLIENT 使用 `dev/eva-sim`，EVA-SIM 使用 `dev/evaluation-services`。EVA-SIM 的服务脚本目前在这个分支，尚未合入远端 `master`。
+
 ## 评测原理
 
 三个部分各做一件事：policy 根据画面和机器人状态预测动作，EVA-CLIENT 把数据和动作传过去，EVA-SIM 执行动作并判断任务是否成功。
@@ -25,6 +27,8 @@
 版本脚本固定版本、eval split 和动作模式，拒绝覆盖。v1.1 与 v1.2 的数据字段都叫 `eef`，但实际坐标不同；已用原始 Parquet 的 qpos 做 FK 抽样确认。不能只看字段名，也不能把两种坐标直接混用。
 
 本次直接读取 v1.1 split 的 train/eval，以及 v1.2 train、eval_pos、转换输出各一个 Parquet 的前 8 帧，比较左右臂的观察和动作。v1.1 对 `gripper` FK 的最大位置误差为 `1.43e-7 m`，v1.2 对 TCP 为 `2.06e-8 m`；用错 link 则相差约 `0.14593 m`、`π rad`。这是有界样本证据，不是全量校验；当前本地 `splits` 只有 v1.1，v1.2 结论来自实际 v1.2 数据目录。
+
+核对的是 `observations.state.qpos/eef` 和 `action.qpos/eef`：qpos 为 14 维，EEF 为 16 维，四元数顺序为 WXYZ。采样数据位于 EVA-CLIENT 的 `datasets/data_collection/`：v1.1 来自 `splits/v1.1` 的 train/eval manifest；v1.2 来自 `datasets/eva_sim/dual_yam/{train_v1.2,eval_v1.2_pos}` 和 `outputs/train_v1.2`。判断依据是同帧 qpos 的 FK 与记录位姿吻合，目录名只用于定位样本。
 
 ## Step-1 选好 checkpoint 和评测版本
 
@@ -103,6 +107,10 @@ bash scripts/evaluation/eval_v1.2.sh
 # v1.1 EEF，使用 4 张指定卡和自定义端口
 bash scripts/evaluation/eval_v1.1.sh \
   --sim-gpus 0,2,4,6 --policy-host 127.0.0.1 --policy-port 21000 --base-port 22000
+
+# XPolicyLab 原生协议，同样使用 v1.2 的 TCP 坐标
+bash scripts/evaluation/eval_v1.2.sh \
+  --sim-gpus 0,2,4,6 --policy-type xpolicylab --policy-port 21000 --base-port 22000
 ```
 
 这些命令只让服务就绪，评测仍需要外部编排器驱动。不要与总体 eval 同时重复启动同一组端口。可加 `--dry-run` 核对配置、卡号和端口；Ctrl-C 会关闭本次启动的 SIM 和 Client。
