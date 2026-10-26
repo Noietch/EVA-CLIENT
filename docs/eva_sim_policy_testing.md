@@ -84,10 +84,25 @@ Client 也已有原生 `xpolicylab` 接口，可直接连接它的 WebSocket 服
 
 新接入的 policy 先用 fake 服务测一条任务，核对服务收到的图像尺寸和像素与 SIM 输出一致，再扩到八路，最后替换成真实模型跑全量。OpenPI 可以复用 [fake server](../examples/policy/fake_policy/fake_policy_server.py)，XPolicyLab 原生协议有 `demo_policy` 可用；假动作也要符合对应机器人的动作格式。
 
+## EVA-VLA 里可以参考的分支
+
+下面这些分支都在 Sankuai 的 `robotics/eva-vla` 仓库中。它们解决的问题不同，参考实现时按需要看对应部分，不要直接把整个分支合进当前评测分支。
+
+| 分支 | 适合参考的内容 |
+| --- | --- |
+| `dev/eva-sim` | 当前 EVA-SIM 评测主线。包含八路 policy、Client、SIM 编排，v1.1/v1.2 切换、端口分配、同步执行和结果汇总；新改动以这个分支为准。 |
+| `dev/eva-sim-integration` | 较早的 EVA-SIM 集成和 AgileX VR SFT 配置。适合参考数据集与训练配置，评测启动方式已经旧于 `dev/eva-sim`。 |
+| `master-robolab-dev` | RoboLab 的 OpenPI 初始化、`deploy/serve.py` 和 OpenPI proxy。新 policy 想兼容 OpenPI 接口时，可以参考服务适配方式。 |
+| `feature/genie_sim_sft` | 另一套仿真 benchmark 的环境解析、评测入口和 SFT 配置。适合参考“训练配置加独立 benchmark 入口”的组织方式，不复用它的任务协议。 |
+
+查看参考分支时使用 `git show <分支>:<文件>` 或单独创建 worktree，避免切换当前正在评测的 checkout。
+
 ## 现在验证到了哪一步
 
-EVA-VLA 的一键入口已实现，本地配置、八路 fake 服务启动和故障清理共 20 项检查通过。两种协议的八路通信测试也已完成，共 800 次推理。
+EVA-VLA 的一键入口已实现。八路服务启动、端口和槽位绑定、故障退出与清理均已通过本地测试；OpenPI 和 XPolicyLab 两种协议的八路通信测试共完成 800 次推理。
 
 版本与任务分片的 9 项检查已通过，脚本会在启动服务前拒绝同时选择两个版本。
+
+原图透传也已验证：EVA-CLIENT 经过生产观察构造后，OpenPI 和 XPolicyLab socket 收到的三路图像尺寸、类型和像素均与输入一致；EVA-VLA 的真实 `WebsocketPolicyServer` 及 XPolicyLab 的真实 `PolicyServer` 都已完成往返验证。
 
 这些检查还没有覆盖真实 checkpoint 与八路 SIM 一起运行，完整评测和长时间稳定性仍需实测。
