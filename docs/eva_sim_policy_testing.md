@@ -93,18 +93,21 @@ bash policy/Pi_05/sft/serve.sh \
   --model_num 1 \
   --base_port 18000
 
-# EVA-SIM 根目录：同样使用 8 张卡，端口按 slot 自动展开
-cd /cfs/mlp/training/docker/user/hadoop-aipnlp/baizitong/eva-ws/EVA-SIM
-bash scripts/evaluation/eval_v1.2.sh \
+# EVA-VLA 根目录：一条命令完成 manifest、SIM/Client、worker 和汇总
+cd /cfs/mlp/training/docker/user/hadoop-aipnlp/baizitong/eva-ws/EVA-VLA
+bash benchmarks/eva_sim/eval_yam.sh \
+  --ckpt-path /cfs/mlp/training/docker/user/hadoop-aipnlp/yinxuanyu/workspace/eva-xpolicylab/policy/Pi_05/work_dirs/dual_yam_sim_v12_epoch10_pro6000d_20261024_v2/checkpoints/24510 \
   --action-mode qpos \
-  --sim-gpus 0,1,2,3,4,5,6,7 \
+  --external-policy \
   --policy-type xpolicylab \
   --policy-port 18000 \
   --base-port 19600
 ```
 
-SIM 启动器会同时拉起所有 SIM，全部就绪后再同时拉起 Client；默认给每个 SIM 4 个 Kit/PXR 工作线程。2026-10-26 使用上述 checkpoint 完成了 v1.2/qpos 的 8 卡实测：8/8 条评测完整落盘，7 条成功、1 条达到 482 步上限，基础设施失败为 0，共生成 8 个 Parquet 和 24 个视频。证据位于 EVA-SIM 的 `temp/xpolicylab_pi05_probe8_final_20261026/`，逐条结果见 `workers/worker_*/trials.jsonl`，录制产物见 `results/`。
+EVA-SIM 单独入口未传 `--sim-cpus` 时，每个 SIM 默认使用 4 个 Kit/PXR 工作线程；上面的 EVA-VLA 总体入口默认传 `--sim-cpu-count 8`。2026-10-26 的服务层探针完成 8/8 条评测，7 条成功、1 条达到 482 步上限，基础设施失败为 0，共生成 8 个 Parquet 和 24 个视频，证据位于 EVA-SIM 的 `temp/xpolicylab_pi05_probe8_final_20261026/`。
 
-这条命令只准备 SIM + Client；XPolicyLab 的总体脚本还要负责启动 Policy、分配任务、调用 worker 和汇总结果。
+上面的第二条命令默认运行 v1.2 全量评测。2026-10-27 基于相同配置额外传入 `--max-trials-per-task 8` 完成有界探针：8/8 条完整落盘，5 条成功、3 条模型失败、基础设施失败为 0。证据位于 checkpoint 的 `logs/eva_sim/xpolicylab_pi05_v12_qpos_probe8b_20261027/`。
+
+用户只需要执行上面两个脚本。第二个脚本会检查 8 路 Policy 握手，自动生成 manifest，启动和回收 SIM/Client，执行 worker，并在 checkpoint 的 `logs/eva_sim/<run-id>/summary.json` 写最终汇总；不需要手工生成配置或单独调用 `scripts/evaluate.py`。
 
 参考分支：EVA-CLIENT 和 EVA-VLA 使用 `dev/eva-sim`，EVA-SIM 使用 `master`。
