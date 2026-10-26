@@ -78,15 +78,25 @@ checkpoint 的 `inference_metadata.yaml` 必须声明匹配的 `control_mode`：
 
 #### XPolicyLab
 
-XPolicyLab 需要按上面的五项职责提供自己的总体脚本。原生服务连接 SIM 时使用：
+XPolicyLab 需要按上面的五项职责提供自己的总体脚本。当前 Pi05/qpos 服务已用下面的命令跑通：
 
 ```bash
+# XPolicyLab 根目录：GPU 5～7 启动 3 个 Policy 服务
+cd /cfs/mlp/training/docker/user/hadoop-aipnlp/yinxuanyu/workspace/eva-xpolicylab
+bash policy/Pi_05/sft/serve.sh \
+  --checkpoint policy/Pi_05/work_dirs/dual_yam_sim_v12_epoch10_pro6000d_20261024_v2/checkpoints/24510 \
+  --device_id 5,6,7 \
+  --model_num 1 \
+  --base_port 18000
+
+# EVA-SIM 根目录：GPU 0～2 启动对应的 SIM + Client
+cd /cfs/mlp/training/docker/user/hadoop-aipnlp/baizitong/eva-ws/EVA-SIM
 bash scripts/evaluation/eval_v1.2.sh \
-  --action-mode eef \
-  --sim-gpus 0,2,4,6 \
+  --action-mode qpos \
+  --sim-gpus 0,1,2 \
   --policy-type xpolicylab \
-  --policy-port 21000 \
-  --base-port 22000
+  --policy-port 18000 \
+  --base-port 19600
 ```
 
 这条命令只准备 SIM + Client；XPolicyLab 的总体脚本还要负责启动 Policy、分配任务、调用 worker 和汇总结果。
