@@ -14,6 +14,18 @@
 
 选择 N 张卡就同时跑 N 组这样的过程，N 可以是 1～8。每组有自己的 policy 服务、Client 和 SIM，各自处理分到的任务；脚本按任务最大步数尽量均匀分配负载。
 
+入口分两层：**EVA-VLA 的 `benchmarks/eva_sim/eval.sh` 负责总体评测**，启动 Policy、分配任务、驱动评测并汇总结果；**EVA-SIM 的 `scripts/evaluation/` 只提供 SIM + Client 服务**，连接外部 Policy，不会自行开始评测或加载 checkpoint。
+
+| EVA-SIM 服务入口 | 固定版本 | Client 动作坐标 |
+| --- | --- | --- |
+| `scripts/evaluation/eval_v1.1.sh` | v1.1 | `eef`：旧 `gripper` 末端 |
+| `scripts/evaluation/eval_v1.2.sh` | v1.2 | `tcp`：工具中心点 |
+| `scripts/evaluation/eval.sh` | 显式指定 `--task` | 显式指定 `--action-mode eef/tcp/qpos` |
+
+版本脚本固定版本、eval split 和动作模式，拒绝覆盖。v1.1 与 v1.2 的数据字段都叫 `eef`，但实际坐标不同；已用原始 Parquet 的 qpos 做 FK 抽样确认。不能只看字段名，也不能把两种坐标直接混用。
+
+本次直接读取 v1.1 split 的 train/eval，以及 v1.2 train、eval_pos、转换输出各一个 Parquet 的前 8 帧，比较左右臂的观察和动作。v1.1 对 `gripper` FK 的最大位置误差为 `1.43e-7 m`，v1.2 对 TCP 为 `2.06e-8 m`；用错 link 则相差约 `0.14593 m`、`π rad`。这是有界样本证据，不是全量校验；当前本地 `splits` 只有 v1.1，v1.2 结论来自实际 v1.2 数据目录。
+
 ## Step-1 选好 checkpoint 和评测版本
 
 在 EVA-VLA 根目录执行：
@@ -31,7 +43,7 @@ bash benchmarks/eva_sim/eval_yam.sh --ckpt-path /path/to/hf_checkpoint --task ev
 
 这里传导出的 HF checkpoint，目录里需要有 `inference_metadata.yaml`。**每次只测一个版本**，用 `--task` 在 v1.1 和 v1.2 之间切换，不传时默认只测 v1.2。同时选择 `eval_v1.1` 和 `eval_v1.2` 会直接报错；同一版本内部仍可传多个任务分片。切换版本不需要修改脚本或重新手动部署服务。
 
-脚本按 checkpoint 中的配置选择关节或末端动作空间。当前默认使用 TX 的 baizitong 环境和 GPU 0–7，也可以通过 `--sim-gpus` 选择任意 1～8 张卡，卡号不要求连续。
+v1.1 固定使用 EEF，v1.2 固定使用 TCP；对应 checkpoint 的 `control_mode` 都应为 `eef`，并且必须由匹配坐标的数据训练。总体入口会拒绝 `qpos` checkpoint 与这两个版本混用，`--action-mode` 也不能覆盖版本约定；其他自定义任务可显式选择 `qpos`。当前默认使用 TX 的 baizitong 环境和 GPU 0–7，也可以通过 `--sim-gpus` 选择任意 1～8 张卡，卡号不要求连续。
 
 ## Step-2 选择卡数并启动 policy 服务
 
@@ -53,6 +65,19 @@ bash benchmarks/eva_sim/eval.sh --ckpt-path /path/to/hf_checkpoint \
 
 policy 服务默认从端口 `20000` 开始，启动 N 个服务就使用 `20000` 到 `20000 + N - 1`。脚本确认所有服务都能连接后再开始评测，不用手动开多个终端。
 
+需要将 Policy 服务单独保持运行时，在 EVA-VLA 中分两步执行；两条命令的端口和服务数量要对应：
+
+```bash
+# 终端一：只启动 4 个 EVA-VLA Policy 服务
+bash benchmarks/eva_sim/serve_policies.sh \
+  --ckpt-path /path/to/hf_checkpoint --policy-gpus 0,2,4,6 --policy-port 21000
+
+# 终端二：总体评测复用已有服务，退出时保留这些外部 Policy
+bash benchmarks/eva_sim/eval.sh \
+  --ckpt-path /path/to/hf_checkpoint --task eval_v1.2 \
+  --sim-gpus 0,2,4,6 --external-policy --policy-host 127.0.0.1 --policy-port 21000
+```
+
 想换端口，用 `--policy-port` 指定起始值。例如 4 张卡从 `21000` 开始，四个服务就会使用 `21000–21003`，客户端会自动连接对应端口：
 
 ```bash
@@ -69,7 +94,20 @@ SIM 和 Client 之间的通信端口由 `--base-port` 控制，默认是 `19600`
 
 每个 Client 固定连接自己的 policy 服务和 SIM。脚本按机器人和物理配置分组，使用 1～8 路并行，并根据各任务的最大步数尽量均匀拆分；任务少于卡数时，只启动需要的执行链路。
 
-Client 的默认配置是 `transport.resize=False`、`image_layout="hwc"`、`convert_bgr_to_rgb=False`，按 `[H, W, 3] uint8` 发送 SIM 原图。EVA-VLA 生成的评测配置也显式使用这些值。`resize_pad=False` 只是关闭补边，不能用它来表示“不 resize”；需要由 Client 缩放的其他场景必须显式开启 `resize=True`。
+总体入口实际调用 EVA-SIM 的版本服务脚本，每路的 Client 配置由服务层生成。也可以在 EVA-SIM 根目录单独启动服务，供其他 policy codebase 对接：
+
+```bash
+# 默认 8 路、v1.2 TCP，连接已有 20000～20007 Policy
+bash scripts/evaluation/eval_v1.2.sh
+
+# v1.1 EEF，使用 4 张指定卡和自定义端口
+bash scripts/evaluation/eval_v1.1.sh \
+  --sim-gpus 0,2,4,6 --policy-host 127.0.0.1 --policy-port 21000 --base-port 22000
+```
+
+这些命令只让服务就绪，评测仍需要外部编排器驱动。不要与总体 eval 同时重复启动同一组端口。可加 `--dry-run` 核对配置、卡号和端口；Ctrl-C 会关闭本次启动的 SIM 和 Client。
+
+Client 的默认配置是 `transport.resize=False`、`image_layout="hwc"`、`convert_bgr_to_rgb=False`，按 `[H, W, 3] uint8` 发送 SIM 原图。服务层生成的评测配置也显式使用这些值。`resize_pad=False` 只是关闭补边，不能用它来表示“不 resize”；需要由 Client 缩放的其他场景必须显式开启 `resize=True`。
 
 Client 在 CPU 上运行。默认 policy 和 SIM 共用对应的 GPU，因此实际能否放下，还要看 checkpoint 和场景占用的显存。
 
@@ -97,6 +135,8 @@ Client 在 CPU 上运行。默认 policy 和 SIM 共用对应的 GPU，因此实
 
 Client 也已有原生 `xpolicylab` 接口，可直接连接它的 WebSocket 服务；这个接口负责转换字段，不负责 resize。两种协议不同，使用原生接口时需要相应配置。目前 EVA-VLA 的一键脚本只启动 EVA-VLA 服务，尚未接入 XPolicyLab 的服务启动或 OpenPI 适配。
 
+使用原生 XPolicyLab 服务时，EVA-SIM 的版本脚本加 `--policy-type xpolicylab` 即可生成对应 Client 配置。v1.1 和 v1.2 的 `action_type` 都是 `ee`，区别在 Client 继承 `openpi_eef.py` 还是 `openpi_tcp.py`；服务端模型必须使用相同坐标。当前原生握手不自动协商这个坐标选择。
+
 **加一套评测任务：**在 EVA-SIM 中准备任务配置，再通过 `--task 新任务名` 指定，每次只选一套。
 
 **加一个处理步骤：**先明确它是整次评测只做一次，还是每个任务都要做。前者放在 EVA-VLA 的 [批量评测入口](../../EVA-VLA/benchmarks/eva_sim/eval.py)，例如启动前检查或结束后统计；后者放在 EVA-SIM 的 [单任务评测流程](../../EVA-SIM/scripts/evaluate.py)，例如重置后检查场景。
@@ -120,7 +160,7 @@ Client 也已有原生 `xpolicylab` 接口，可直接连接它的 WebSocket 服
 
 EVA-VLA 的一键入口已实现。1～8 路资源配置、服务启动、端口和槽位绑定、故障退出与清理均已通过本地测试；OpenPI 和 XPolicyLab 两种协议的八路通信测试共完成 800 次推理。
 
-版本与任务分片的 9 项检查已通过，脚本会在启动服务前拒绝同时选择两个版本。
+版本与任务分片检查已通过，脚本会在启动服务前拒绝同时选择两个版本、覆盖版本动作坐标或使用不匹配的 checkpoint。服务层已通过真实 Client 配置加载，以及 fake 子进程的启动、超时、故障与退出清理测试。
 
 原图透传也已验证：EVA-CLIENT 经过生产观察构造后，OpenPI 和 XPolicyLab socket 收到的三路图像尺寸、类型和像素均与输入一致；EVA-VLA 的真实 `WebsocketPolicyServer` 及 XPolicyLab 的真实 `PolicyServer` 都已完成往返验证。
 
