@@ -69,6 +69,8 @@ def _configure_eval_service(
     )
     config.control_channel = ConfigDict(enabled=True, port=args.control_port)
     config.rollout.storage.enabled = False
+    # The evaluator owns termination by task success, step budget, and trial timeout.
+    config.inference_cfg.max_debug_time_s = float("inf")
     active = copy.deepcopy(config)
     active.eval_cfg = None
     active.eval = None
