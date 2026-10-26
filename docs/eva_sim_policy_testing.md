@@ -39,7 +39,9 @@ bash scripts/evaluation/eval_v1.1.sh \
 
 脚本直接使用 EVA-CLIENT 仓库已有的 `openpi_eef.py`、`openpi_tcp.py` 或 `openpi_qpos.py`，不生成临时配置。单独执行主要用于 fake Policy 和服务调试；正式评测由下一步的 Policy 总体脚本调用。
 
-## Step-2 准备 Policy
+## Policy 适配
+
+### Step-2 准备 Policy
 
 每个 Policy 代码库只需要提供一个总体评测脚本，例如 `eval_eva_sim.sh`。这个脚本需要完成：
 
@@ -48,6 +50,8 @@ bash scripts/evaluation/eval_v1.1.sh \
 3. 生成 task manifest，均匀分配任务并预分配 episode、task 和帧索引。
 4. 携带相同的 manifest 和 worker rank 调用 `eval_v1.1.sh` 或 `eval_v1.2.sh`，再启动 EVA-SIM 的 `scripts/evaluate.py` worker。
 5. 监控子进程，失败时保留日志并清理本次启动的服务；完成后汇总 `summary.json`。
+
+同一轮 manifest 中的 `(task_item_index, layout_index)` 必须唯一，不能把同一个 case 重复分给多个 worker，否则录制器无法唯一确定 episode。
 
 新 Policy 优先兼容 OpenPI 接口：接收 `images`、`state` 和 `prompt`，返回 `[T, D]` 的 `actions`。如果使用 XPolicyLab 原生协议，SIM 服务脚本传 `--policy-type xpolicylab`；图像仍然原样透传，resize 和归一化由 XPolicyLab 内部完成。
 
@@ -81,24 +85,26 @@ checkpoint 的 `inference_metadata.yaml` 必须声明匹配的 `control_mode`：
 XPolicyLab 需要按上面的五项职责提供自己的总体脚本。当前 Pi05/qpos 服务已用下面的命令跑通：
 
 ```bash
-# XPolicyLab 根目录：GPU 5～7 启动 3 个 Policy 服务
+# XPolicyLab 根目录：默认 8 张卡，端口 18000～18007
 cd /cfs/mlp/training/docker/user/hadoop-aipnlp/yinxuanyu/workspace/eva-xpolicylab
 bash policy/Pi_05/sft/serve.sh \
   --checkpoint policy/Pi_05/work_dirs/dual_yam_sim_v12_epoch10_pro6000d_20261024_v2/checkpoints/24510 \
-  --device_id 5,6,7 \
+  --device_id 0,1,2,3,4,5,6,7 \
   --model_num 1 \
   --base_port 18000
 
-# EVA-SIM 根目录：GPU 0～2 启动对应的 SIM + Client
+# EVA-SIM 根目录：同样使用 8 张卡，端口按 slot 自动展开
 cd /cfs/mlp/training/docker/user/hadoop-aipnlp/baizitong/eva-ws/EVA-SIM
 bash scripts/evaluation/eval_v1.2.sh \
   --action-mode qpos \
-  --sim-gpus 0,1,2 \
+  --sim-gpus 0,1,2,3,4,5,6,7 \
   --policy-type xpolicylab \
   --policy-port 18000 \
   --base-port 19600
 ```
 
+SIM 启动器会同时拉起所有 SIM，全部就绪后再同时拉起 Client；默认给每个 SIM 4 个 Kit/PXR 工作线程。2026-10-26 使用上述 checkpoint 完成了 v1.2/qpos 的 8 卡实测：8/8 条评测完整落盘，7 条成功、1 条达到 482 步上限，基础设施失败为 0，共生成 8 个 Parquet 和 24 个视频。证据位于 EVA-SIM 的 `temp/xpolicylab_pi05_probe8_final_20261026/`，逐条结果见 `workers/worker_*/trials.jsonl`，录制产物见 `results/`。
+
 这条命令只准备 SIM + Client；XPolicyLab 的总体脚本还要负责启动 Policy、分配任务、调用 worker 和汇总结果。
 
-当前分支：EVA-CLIENT 和 EVA-VLA 使用 `dev/eva-sim`，EVA-SIM 使用 `dev/evaluation-services`。
+参考分支：EVA-CLIENT 和 EVA-VLA 使用 `dev/eva-sim`，EVA-SIM 使用 `master`。
