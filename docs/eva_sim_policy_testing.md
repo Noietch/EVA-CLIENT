@@ -22,11 +22,11 @@ EVA-SIM 的 `scripts/evaluation/` 只启动 SIM + Client，连接已有 policy�
 
 | EVA-SIM 服务入口 | 固定版本 | Client 动作坐标 |
 | --- | --- | --- |
-| `scripts/evaluation/eval_v1.1.sh` | v1.1 | `eef`：旧 `gripper` 末端 |
-| `scripts/evaluation/eval_v1.2.sh` | v1.2 | `tcp`：工具中心点 |
-| `scripts/evaluation/eval.sh` | 显式指定 `--task` | 显式指定 `--action-mode eef/tcp/qpos` |
+| `scripts/evaluation/eval_v1.1.sh` | v1.1 | `qpos` 或 `eef`；`eef` 是旧 `gripper` 末端 |
+| `scripts/evaluation/eval_v1.2.sh` | v1.2 | `qpos` 或 `eef`；`eef` 是 TCP |
+| `scripts/evaluation/eval.sh` | 显式指定 `--task` | 显式指定 `--action-mode eef/qpos` |
 
-版本脚本固定版本、eval split 和动作模式，拒绝覆盖。v1.1 与 v1.2 的数据字段都叫 `eef`，但实际坐标不同；已用原始 Parquet 的 qpos 做 FK 抽样确认。不能只看字段名，也不能把两种坐标直接混用。
+版本脚本固定版本和 eval split，动作模式必须由用户传 `--action-mode eef` 或 `--action-mode qpos`。两个版本都能用 qpos 评测；选择 eef 时，虽然传入参数相同，v1.1 实际使用 gripper EEF，v1.2 实际使用 TCP。
 
 本次直接读取 v1.1 split 的 train/eval，以及 v1.2 train、eval_pos、转换输出各一个 Parquet 的前 8 帧，比较左右臂的观察和动作。v1.1 对 `gripper` FK 的最大位置误差为 `1.43e-7 m`，v1.2 对 TCP 为 `2.06e-8 m`；用错 link 则相差约 `0.14593 m`、`π rad`。这是有界样本证据，不是全量校验；当前本地 `splits` 只有 v1.1，v1.2 结论来自实际 v1.2 数据目录。
 
@@ -43,19 +43,20 @@ EVA-SIM 的 `scripts/evaluation/` 只启动 SIM + Client，连接已有 policy�
 在 EVA-SIM 根目录执行，默认使用 GPU 0～7 共 8 张卡，也可指定任意 1～8 张卡，卡号不要求连续：
 
 ```bash
-# v1.2 TCP，默认 8 路，连接已有 20000～20007 Policy
-bash scripts/evaluation/eval_v1.2.sh
+# v1.2 EE（实际为 TCP），默认 8 路，连接已有 20000～20007 Policy
+bash scripts/evaluation/eval_v1.2.sh --action-mode eef
 
-# v1.1 gripper EEF，指定 4 张卡和端口
+# v1.1 qpos，指定 4 张卡和端口
 bash scripts/evaluation/eval_v1.1.sh \
-  --sim-gpus 0,2,4,6 --policy-host 127.0.0.1 --policy-port 21000 --base-port 22000
+  --action-mode qpos --sim-gpus 0,2,4,6 \
+  --policy-host 127.0.0.1 --policy-port 21000 --base-port 22000
 ```
 
 `--base-port` 默认是 `19600`。每组使用 `base-port + slot*10 + 1..4`：基础端口为 `22000` 时，第一组用 `22001～22004`，第二组用 `22011～22014`。这些端口不能与 policy 或已有服务重叠。
 
-Client 在 CPU 上运行。生成配置使用 `transport.resize=False`、`image_layout="hwc"`、`convert_bgr_to_rgb=False`，按 `[H, W, 3] uint8` 发送原图。`resize_pad=False` 只表示不补边，不能代替关闭 resize。
+Client 在 CPU 上运行。服务脚本直接选择仓库已有的 `openpi_eef.py`、`openpi_tcp.py` 或 `openpi_qpos.py`，端口和评测参数通过 `src/main.py --eval-service` 传入，不生成临时配置文件。运行时使用 `transport.resize=False`、`image_layout="hwc"`、`convert_bgr_to_rgb=False`，按 `[H, W, 3] uint8` 发送原图。`resize_pad=False` 只表示不补边，不能代替关闭 resize。
 
-加 `--dry-run` 可查看配置、卡号和命令。Ctrl-C 关闭本次启动的 SIM 和 Client，保留外部 policy。这一步只让服务就绪，不会自动开始评测；使用代码库的一键总体入口时，由它调用服务层，避免重复启动同一组端口。
+加 `--dry-run` 可查看选中的 preset、卡号和命令。Ctrl-C 关闭本次启动的 SIM 和 Client，保留外部 policy。这一步只让服务就绪，不会自动开始评测；使用代码库的一键总体入口时，由它调用服务层，避免重复启动同一组端口。
 
 ## Step-4 驱动任务
 
@@ -81,18 +82,21 @@ Client 在 CPU 上运行。生成配置使用 `transport.resize=False`、`image_
 
 ```bash
 # 默认：只测 v1.2，使用 GPU 0～7 共 8 张卡
-bash benchmarks/eva_sim/eval_yam.sh --ckpt-path /path/to/hf_checkpoint
+bash benchmarks/eva_sim/eval_yam.sh \
+  --ckpt-path /path/to/hf_checkpoint --action-mode eef
 
-# 传参数改成 4 张卡
-bash benchmarks/eva_sim/eval_yam.sh --ckpt-path /path/to/hf_checkpoint --sim-gpus 0,2,4,6
+# v1.2 改用 qpos，并指定 4 张卡
+bash benchmarks/eva_sim/eval_yam.sh \
+  --ckpt-path /path/to/hf_checkpoint --action-mode qpos --sim-gpus 0,2,4,6
 
 # 传参数切换成 v1.1，仍然默认使用 8 张卡
-bash benchmarks/eva_sim/eval_yam.sh --ckpt-path /path/to/hf_checkpoint --task eval_v1.1
+bash benchmarks/eva_sim/eval_yam.sh \
+  --ckpt-path /path/to/hf_checkpoint --action-mode eef --task eval_v1.1
 ```
 
 这里传导出的 HF checkpoint，目录里需要有 `inference_metadata.yaml`。**每次只测一个版本**，用 `--task` 在 v1.1 和 v1.2 之间切换，不传时默认只测 v1.2。同时选择 `eval_v1.1` 和 `eval_v1.2` 会直接报错；同一版本内部仍可传多个任务分片。切换版本不需要修改脚本或重新手动部署服务。
 
-v1.1 固定使用 EEF，v1.2 固定使用 TCP；对应 checkpoint 的 `control_mode` 都应为 `eef`，并且必须由匹配坐标的数据训练。总体入口会拒绝 `qpos` checkpoint 与这两个版本混用，`--action-mode` 也不能覆盖版本约定；其他自定义任务可显式选择 `qpos`。当前默认使用 TX 的 baizitong 环境和 GPU 0–7，也可以通过 `--sim-gpus` 选择任意 1～8 张卡，卡号不要求连续。
+`--action-mode` 只有 `eef` 和 `qpos` 两个选择，并且必须显式传入。`eef` checkpoint 的 `control_mode` 应为 `eef`，版本会进一步决定 Client 使用 gripper EEF 还是 TCP；`qpos` checkpoint 的 `control_mode` 应为 `qpos`，v1.1 和 v1.2 都支持。总体入口会拒绝参数与 checkpoint 元数据不一致。当前默认使用 TX 的 baizitong 环境和 GPU 0–7，也可以通过 `--sim-gpus` 选择任意 1～8 张卡，卡号不要求连续。
 
 #### Step-2 选择卡数并启动 policy 服务
 
@@ -100,14 +104,16 @@ v1.1 固定使用 EEF，v1.2 固定使用 TCP；对应 checkpoint 的 `control_m
 
 ```bash
 # 1 张卡：policy、Client、SIM 都只启动一组
-bash benchmarks/eva_sim/eval.sh --ckpt-path /path/to/hf_checkpoint --sim-gpus 3
+bash benchmarks/eva_sim/eval.sh \
+  --ckpt-path /path/to/hf_checkpoint --action-mode eef --sim-gpus 3
 
 # 4 张不连续的卡
-bash benchmarks/eva_sim/eval.sh --ckpt-path /path/to/hf_checkpoint --sim-gpus 0,2,4,6
+bash benchmarks/eva_sim/eval.sh \
+  --ckpt-path /path/to/hf_checkpoint --action-mode qpos --sim-gpus 0,2,4,6
 
 # policy 和 SIM 分开用卡，两个列表按位置配对
 bash benchmarks/eva_sim/eval.sh --ckpt-path /path/to/hf_checkpoint \
-  --sim-gpus 0,2,4,6 --policy-gpus 1,3,5,7
+  --action-mode eef --sim-gpus 0,2,4,6 --policy-gpus 1,3,5,7
 
 # 不传 --sim-gpus 时默认使用 0,1,2,3,4,5,6,7
 ```
@@ -124,7 +130,8 @@ bash benchmarks/eva_sim/serve_policies.sh \
 # 终端二：总体评测复用已有服务，退出时保留这些外部 Policy
 bash benchmarks/eva_sim/eval.sh \
   --ckpt-path /path/to/hf_checkpoint --task eval_v1.2 \
-  --sim-gpus 0,2,4,6 --external-policy --policy-host 127.0.0.1 --policy-port 21000
+  --action-mode eef --sim-gpus 0,2,4,6 \
+  --external-policy --policy-host 127.0.0.1 --policy-port 21000
 ```
 
 想换端口，用 `--policy-port` 指定起始值。例如 4 张卡从 `21000` 开始，四个服务就会使用 `21000–21003`，客户端会自动连接对应端口：
@@ -133,6 +140,7 @@ bash benchmarks/eva_sim/eval.sh \
 bash benchmarks/eva_sim/eval.sh \
   --ckpt-path /path/to/hf_checkpoint \
   --task eval_v1.1 \
+  --action-mode qpos \
   --sim-gpus 0,2,4,6 \
   --policy-port 21000
 ```
@@ -170,16 +178,17 @@ Kit 运行目录默认是 `~/.cache/eva_sim/<hostname>/gpu_<gpu_uuid>/kit/`，GP
 
 ```bash
 bash scripts/evaluation/eval_v1.2.sh \
-  --sim-gpus 0,2,4,6 --policy-type xpolicylab --policy-port 21000 --base-port 22000
+  --action-mode eef --sim-gpus 0,2,4,6 \
+  --policy-type xpolicylab --policy-port 21000 --base-port 22000
 ```
 
-v1.1 和 v1.2 的 `action_type` 都是 `ee`，Client 分别继承 `openpi_eef.py` 和 `openpi_tcp.py`。原生握手不自动协商坐标，服务端模型必须与所选版本一致。这个命令只启动 SIM + Client；任务分配、worker 调用和汇总仍需由总体入口完成。
+选择 `--action-mode eef` 时，v1.1 和 v1.2 的 `action_type` 都是 `ee`，Client 分别继承 `openpi_eef.py` 和 `openpi_tcp.py`；选择 `qpos` 时，两版都使用 joint action。原生握手不自动协商坐标，服务端模型必须与参数和版本一致。这个命令只启动 SIM + Client；任务分配、worker 调用和汇总仍需由总体入口完成。
 
 ### 接入其他 policy 或新增步骤
 
 新 policy 先用 fake 服务测一条任务，核对动作格式和原图尺寸、像素，再逐步扩到所需卡数，最后替换成真实模型。OpenPI 可复用 [fake server](../examples/policy/fake_policy/fake_policy_server.py)，XPolicyLab 原生协议有 `demo_policy` 可用。
 
-新增任务时，在 EVA-SIM 准备任务配置，用共享服务入口 `eval.sh --task 新任务名 --action-mode 对应模式`，并让总体入口生成相应 manifest。
+新增任务时，在 EVA-SIM 准备任务配置，用共享服务入口 `eval.sh --task 新任务名 --action-mode eef/qpos`，并让总体入口生成相应 manifest。
 
 新增处理步骤时，整次评测只执行一次的逻辑放在各 policy 的总体入口；每个任务都执行的逻辑放在 EVA-SIM 的单任务评测流程。EVA-VLA 的总体入口示例是 [eval.py](../../EVA-VLA/benchmarks/eva_sim/eval.py)。
 
