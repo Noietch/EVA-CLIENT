@@ -51,7 +51,9 @@ bash scripts/evaluation/eval_v1.1.sh \
 
 新 Policy 优先兼容 OpenPI 接口：接收 `images`、`state` 和 `prompt`，返回 `[T, D]` 的 `actions`。如果使用 XPolicyLab 原生协议，SIM 服务脚本传 `--policy-type xpolicylab`；图像仍然原样透传，resize 和归一化由 XPolicyLab 内部完成。
 
-### EVA-VLA 示例
+### 适配项目实例
+
+#### EVA-VLA
 
 EVA-VLA 已提供总体脚本：
 
@@ -74,7 +76,7 @@ bash benchmarks/eva_sim/eval_yam.sh \
 
 checkpoint 的 `inference_metadata.yaml` 必须声明匹配的 `control_mode`：`eef` 或 `qpos`。结果写入 `<checkpoint>/logs/eva_sim/<run-id>/`，先看 `summary.json`，具体失败再看 `meta/episode.jsonl`、视频和 worker 日志。
 
-### XPolicyLab 示例
+#### XPolicyLab
 
 XPolicyLab 需要按上面的五项职责提供自己的总体脚本。原生服务连接 SIM 时使用：
 
