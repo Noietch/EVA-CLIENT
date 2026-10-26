@@ -17,7 +17,7 @@ policy = dict(
         handshake_timeout_s=30.0,
     ),
 )
-transport = dict(type="zmq", image_mode="on_demand", convert_bgr_to_rgb=False)
+transport = dict(type="zmq", image_mode="on_demand", convert_bgr_to_rgb=False, resize=False)
 control_channel = dict(enabled=True)
 inference_cfg = dict(max_debug_time_s=1800.0, setup_warmup_chunks=1)
 inference_strategies = {

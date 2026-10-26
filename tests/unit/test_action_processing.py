@@ -6,11 +6,34 @@ import numpy as np
 import pytest
 
 from core.app.handlers.imaging import (
+    prepare_image,
     snap_gripper_dims,
 )
 from core.app.handlers.space import EEFPose
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.mark.parametrize("resize_pad", [False, True])
+def test_prepare_image_preserves_original_pixels_by_default(resize_pad, monkeypatch):
+    image = np.arange(23 * 37 * 3, dtype=np.uint8).reshape(23, 37, 3)
+
+    def unexpected_resize(*_args):
+        pytest.fail("Raw policy images must not enter a resize operation")
+
+    monkeypatch.setattr("core.app.handlers.imaging.resize_direct", unexpected_resize)
+    monkeypatch.setattr("core.app.handlers.imaging.resize_with_pad", unexpected_resize)
+    output = prepare_image(image, False, 224, 224, resize_pad)
+    np.testing.assert_array_equal(output, image)
+    assert output.dtype == np.uint8
+
+
+@pytest.mark.parametrize("resize_pad", [False, True])
+def test_prepare_image_resizes_when_explicitly_enabled(resize_pad):
+    image = np.full((23, 37, 3), 100, dtype=np.uint8)
+    output = prepare_image(image, False, 8, 10, resize_pad, resize=True)
+    assert output.shape == (8, 10, 3)
+    assert output.dtype == np.uint8
 
 
 def test_snap_gripper_dims_uses_configured_open_close_values():

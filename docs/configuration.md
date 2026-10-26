@@ -92,16 +92,17 @@ Image preprocessing is configured under `transport`:
 
 | Field | Shared default | Meaning |
 | --- | --- | --- |
-| `convert_bgr_to_rgb` | `True` | Swap red and blue channels before policy inference |
-| `image_height`, `image_width` | `224`, `224` | Model input height and width |
-| `resize_pad` | `True` | Preserve aspect ratio with padding; `False` resizes directly |
-| `image_layout` | `"chw"` | `"chw"` produces channel-first arrays; use `"hwc"` for channel-last models |
+| `convert_bgr_to_rgb` | `False` | Preserve channels by default; `True` swaps red and blue |
+| `image_height`, `image_width` | `224`, `224` | Target dimensions when `resize=True`; ignored otherwise |
+| `resize` | `False` | Preserve source resolution; `True` enables resizing |
+| `resize_pad` | `True` | When resizing is enabled, preserve aspect ratio with padding; `False` resizes directly |
+| `image_layout` | `"hwc"` | Preserve channel-last layout; `"chw"` explicitly transposes to channel-first |
 | `image_mode` | `"stream"` | ZMQ policy frames use streaming images or `"on_demand"` image requests |
 | `image_request_timeout_s` | `2.0` | Maximum wait for a new image revision in on-demand mode |
 
-Check the complete preset chain: several robot bases already select HWC and
-direct resize. Match channel conversion to the transport's decoded image order;
-the simulator XPolicyLab eval preset explicitly disables the swap.
+Check the complete preset chain because a robot or workflow preset may override
+these defaults. Match channel conversion to the transport's decoded image order;
+the simulator XPolicyLab eval preset preserves the incoming channels and resolution.
 
 Dataset transport also needs `dataset_dir`, `episode_id`, and `dataset_keys`.
 Set `state_key`, `action_key`, and, for EEF observations, `eef_key` to the dataset's

@@ -417,6 +417,7 @@ def build_policy_observation(
             config.transport.image_width,
             resize_pad=config.transport.resize_pad,
             image_layout=config.transport.image_layout,
+            resize=config.transport.resize,
         )
     if config.inference_cfg.obs_space.is_eef():
         state = (
