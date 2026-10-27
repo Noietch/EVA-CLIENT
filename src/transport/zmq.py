@@ -671,15 +671,26 @@ class _ObservationReader:
         return np.concatenate(parts, axis=0), world_id
 
     def wait_action_applied(self, action_time: float, timeout: float) -> bool:
-        """Wait for an observation echoing the published action timestamp."""
+        """Wait for the action timestamp or execution ending before it can apply."""
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             wire_obs = self._drain_latest()
             if wire_obs is not None and wire_obs.sim_state is not None:
+                if wire_obs.sim_state.get("execution_complete", False):
+                    return True
                 applied_time = wire_obs.sim_state.get("action_time")
                 if applied_time is not None and float(applied_time) == action_time:
                     return True
             time.sleep(0.001)
+        latest = self._drain_latest()
+        state = {} if latest is None or latest.sim_state is None else latest.sim_state
+        logger.error(
+            "[ACTION_ACK_TIMEOUT] expected_t=%.9f last_obs_t=%s recv_age_s=%s "
+            "last_applied_t=%s execution_complete=%s frame_id=%s scene_revision=%s world=%s",
+            action_time, None if latest is None else latest.t, self._freshness.seconds_since(),
+            state.get("action_time"), state.get("execution_complete"), state.get("frame_id"),
+            state.get("scene_revision"), state.get("world_instance_id"),
+        )
         return False
 
     def execution_complete(self) -> bool:

@@ -14,11 +14,6 @@ rollout = dict(
 )
 
 inference_strategies = {
-    "sync": dict(
-        args=dict(
-            execute_horizon=30,
-        ),
-    ),
     "async": dict(
         args=dict(
             latency_k=8,

@@ -21,11 +21,10 @@ inference_cfg = dict(
 inference_strategies = {
     "sync": dict(
         args=dict(
-            execute_horizon=48,
             sync_wait_ignore_gripper=True,
             sync_wait_threshold=9999.0,
             sync_wait_max_ticks=5,  # 0.5 s at the configured 10 Hz action rate.
         )
     ),
-    "async": dict(args=dict(latency_k=8, execute_horizon=48, blend_gripper=False)),
+    "async": dict(args=dict(latency_k=8, blend_gripper=False)),
 }

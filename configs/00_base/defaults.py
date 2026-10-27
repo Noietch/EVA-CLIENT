@@ -132,8 +132,10 @@ inference_cfg = dict(
 #   async/naive/rtc: latency_k=<int>         # front-trim of new chunks, >=0
 #   act/async: exp_weight_m=0.01             # temporal-ensembling decay, >=0
 #   async/rtc: blend_gripper=False          # use new gripper commands without blending
+# Sync execution-step example: args=dict(execute_horizon=10) runs 10 steps per chunk.
+# Empty sync args keep the entire action chunk returned by the policy.
 inference_strategies = {
-    "sync": dict(type="BaseInferStrategy", args=dict(execute_horizon=5)),
+    "sync": dict(type="BaseInferStrategy", args={}),
     "async": dict(
         type="AsyncLinearOverlapInferStrategy",
         args=dict(blend_gripper=False),

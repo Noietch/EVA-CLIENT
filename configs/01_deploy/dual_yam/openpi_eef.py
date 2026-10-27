@@ -28,11 +28,6 @@ inference_cfg = dict(
 )
 
 inference_strategies = {
-    "sync": dict(
-        args=dict(
-            execute_horizon=50,
-        ),
-    ),
     "async": dict(
         args=dict(
             latency_k=0,

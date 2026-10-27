@@ -22,5 +22,4 @@ control_channel = dict(enabled=True)
 inference_cfg = dict(max_debug_time_s=1800.0, setup_warmup_chunks=1)
 inference_strategies = {
     "async": dict(args=dict(latency_k=0)),
-    "sync": dict(args=dict(execute_horizon=12)),
 }
