@@ -30,7 +30,7 @@ def _hold_until_killed(dataset_dir: str, held) -> None:
 
 
 def _probe_raw_lock(dataset_dir: str, result) -> None:
-    descriptor = os.open(dataset_dir, os.O_RDONLY)
+    descriptor = os.open(os.path.join(dataset_dir, ".dataset.lock"), os.O_RDWR)
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         result.put(True)
@@ -41,8 +41,8 @@ def _probe_raw_lock(dataset_dir: str, result) -> None:
 
 
 def _kernel_lock_is_free(dataset_dir: Path) -> bool:
-    """Whether a fresh descriptor can take the directory's flock right now."""
-    descriptor = os.open(dataset_dir, os.O_RDONLY)
+    """Whether a fresh descriptor can take the dataset lock right now."""
+    descriptor = os.open(dataset_dir / ".dataset.lock", os.O_RDWR)
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         return True
@@ -53,7 +53,7 @@ def _kernel_lock_is_free(dataset_dir: Path) -> bool:
 
 
 def _child_can_take_the_kernel_lock(dataset_dir: Path) -> bool:
-    """Ask a child process whether the directory flock is free right now."""
+    """Ask a child process whether the dataset lock is free right now."""
     context = mp.get_context("fork")
     result = context.Queue()
     child = context.Process(target=_probe_raw_lock, args=(str(dataset_dir), result))
@@ -78,6 +78,29 @@ def test_second_process_waits_for_the_holder(tmp_path: Path) -> None:
     holder.join(10.0)
     assert holder.exitcode == 0
     assert waited >= 0.05
+
+
+def test_lock_file_is_persistent_and_private(tmp_path: Path) -> None:
+    dataset_dir = tmp_path / "set"
+    with dataset_lock(dataset_dir).acquire():
+        lock_path = dataset_dir / ".dataset.lock"
+        assert lock_path.is_file()
+        assert lock_path.stat().st_mode & 0o777 == 0o600
+    assert (dataset_dir / ".dataset.lock").is_file()
+
+
+def test_failed_kernel_acquire_closes_its_descriptor(tmp_path: Path, monkeypatch) -> None:
+    lock = dataset_lock(tmp_path / "set")
+
+    def fail(_descriptor, _operation):
+        raise OSError("lock unavailable")
+
+    monkeypatch.setattr(fcntl, "flock", fail)
+    with pytest.raises(OSError, match="lock unavailable"):
+        with lock.acquire():
+            pass
+    assert lock._descriptor is None
+    assert lock._depth == 0
 
 
 def test_lock_is_released_when_the_holder_is_killed(tmp_path: Path) -> None:

@@ -4,7 +4,7 @@ One config -> one log dir -> one dataset. Each execution run appends one episode
 
 Two tables, deliberately different shapes, joined by ``absolute_step``:
 
-1. Main table (``data/chunk-000/episode_xxxxxx.parquet``): LeRobot v2.1 standard,
+1. Main table (``data/chunk-xxx/episode_xxxxxx.parquet``): LeRobot v2.1 standard,
    strictly 1 row per executed step. ``observation.<state>`` paired with the
    ``action`` actually sent to the robot, plus ``timestamp`` / ``frame_index`` /
    ``episode_index`` / ``task_index`` / ``index``. SFT training reads only this.
@@ -61,7 +61,7 @@ from core.types import (
 from core.utils.collection_paths import dataset_location
 from core.utils.dataset_lock import dataset_lock
 from core.utils.images import resize_direct
-from core.utils.lerobot import LeRobotDatasetIO
+from core.utils.lerobot import LeRobotDatasetIO, _write_json_atomic
 from core.utils.render_notify import notify_render_service
 
 if TYPE_CHECKING:
@@ -651,8 +651,9 @@ class EpisodeLogger:
         the matching row in place. Scores live ONLY in meta/episodes.jsonl (never in the
         parquet data table). Returns False when the episode index is not found.
         """
-        with self._lock:
-            return self._patch_episode_meta_locked(episode_index, fields)
+        with dataset_lock(self._log_dir).acquire():
+            with self._lock:
+                return self._patch_episode_meta_locked(episode_index, fields)
 
     def _patch_episode_meta_locked(self, episode_index: int, fields: dict[str, Any]) -> bool:
         path = self._meta_path("episodes.jsonl")
@@ -713,19 +714,20 @@ class EpisodeLogger:
         """
         if not clip_id:
             return None
-        with self._lock:
-            episode_index = self._episode_index_for_clip_id(clip_id)
-            if episode_index is not None:
-                self._patch_episode_meta_locked(episode_index, fields)
-                return episode_index
-            job = self._queued_job_for_clip_id_locked(clip_id)
-            if job is None:
-                return None
-            job.episode_meta.update(fields)
-            if job.collection_episode_row is not None:
-                job.collection_episode_row.update(fields)
-            self._pending_episode_meta_by_clip.setdefault(clip_id, {}).update(fields)
-            return job.episode_index
+        with dataset_lock(self._log_dir).acquire():
+            with self._lock:
+                episode_index = self._episode_index_for_clip_id(clip_id)
+                if episode_index is not None:
+                    self._patch_episode_meta_locked(episode_index, fields)
+                    return episode_index
+                job = self._queued_job_for_clip_id_locked(clip_id)
+                if job is None:
+                    return None
+                job.episode_meta.update(fields)
+                if job.collection_episode_row is not None:
+                    job.collection_episode_row.update(fields)
+                self._pending_episode_meta_by_clip.setdefault(clip_id, {}).update(fields)
+                return job.episode_index
 
     @property
     def current_episode_index(self) -> int:
@@ -1648,12 +1650,8 @@ class EpisodeLogger:
         video_fps = float(fps or self._fps)
         size = self._save_size()
         for video_key, samples in videos.items():
-            path = (
-                self._log_dir
-                / "videos"
-                / "chunk-000"
-                / video_key
-                / f"episode_{episode_index:06d}.mp4"
+            path = LeRobotDatasetIO(self._log_dir).episode_path(
+                episode_index, "video_path", video_key
             )
             path.parent.mkdir(parents=True, exist_ok=True)
             encoded = [
@@ -1785,7 +1783,15 @@ class EpisodeLogger:
                 _slot_id(job.episode_meta),
             )
             assert self._collection_qc is not None
-            self._collection_qc.submit(dataset_dir, job.episode_index)
+            try:
+                self._collection_qc.submit(dataset_dir, job.episode_index)
+            except (OSError, RuntimeError) as error:
+                LeRobotDatasetIO(dataset_dir).mark_qc(
+                    job.episode_index, "unreviewed", str(error), "auto_qc_error", auto=True
+                )
+                logger.exception(
+                    "Saved episode %d; automatic QC could not start", job.episode_index
+                )
 
     def _stage_collection_parquet(
         self, job: SaveJob, dataset_dir: Path, transaction_dir: Path, overwrite: bool
@@ -1834,10 +1840,15 @@ class EpisodeLogger:
                     "stats.json",
                 )
             }
+            # Invalidate both historical Client and current SIM report locations.
+            report_targets = (
+                dataset_dir / "meta/render_reports" / f"episode_{job.episode_index:06d}.json",
+                dataset_dir / "render/reports" / f"episode_{job.episode_index:06d}.json",
+            )
             targets = [
                 path,
                 *sorted(metadata_targets),
-                dataset_dir / "meta/render_reports" / f"episode_{job.episode_index:06d}.json",
+                *report_targets,
             ]
             if self._save_video:
                 targets.extend(
@@ -1906,7 +1917,7 @@ class EpisodeLogger:
         root = dataset_dir or self._log_dir
         video_fps = float(fps or self._fps)
         for video_key, frames in videos.items():
-            path = root / "videos" / "chunk-000" / video_key / f"episode_{episode_index:06d}.mp4"
+            path = LeRobotDatasetIO(root).episode_path(episode_index, "video_path", video_key)
             path.parent.mkdir(parents=True, exist_ok=True)
             writer = imageio.get_writer(
                 str(path),
@@ -2092,7 +2103,7 @@ class EpisodeLogger:
         """Load saved collection qpos for console replay.
 
         Args:
-            episode_index: Integer episode id saved under data/chunk-000.
+            episode_index: Integer episode id in the dataset.
 
         Returns:
             qpos: [T, robot.total_action_dim] float32 array, or None when the
@@ -2132,7 +2143,7 @@ class EpisodeLogger:
         """Load an episode's per-frame state/action time series for the viewer.
 
         Args:
-            episode_index: Integer episode id saved under data/chunk-000.
+            episode_index: Integer episode id in the dataset.
 
         Returns:
             {"timestamp": [T], "state": [T, Ds], "action": [T, Da]} as plain lists,
@@ -2286,8 +2297,9 @@ class EpisodeLogger:
             self._collection_writer.finalize()
             return
         self.wait_for_saves()
-        self._write_info_json()
-        self._write_stats_json()
+        with dataset_lock(self._log_dir).acquire():
+            self._write_info_json()
+            self._write_stats_json()
 
     def _save_size(self) -> tuple[int, int] | None:
         h = self._save_image_height
@@ -2381,25 +2393,24 @@ class EpisodeLogger:
 
     def _write_info_json(self) -> None:
         episodes = _read_jsonl(self._meta_path("episodes.jsonl"))
-        total_episodes = len(episodes)
         total_frames = sum(int(e.get("length", 0)) for e in episodes)
-        total_videos = total_episodes * len(self._camera_keys) if self._save_video else 0
+        total_videos = len(episodes) * len(self._camera_keys) if self._save_video else 0
         # fps must equal the integer target used to synthesize timestamps, not the
         # measured (jittery) average — LeRobot validates timestamp[i] == i/fps.
         fps = float(self._fps)
         info = build_info(
             robot_type=self._robot.name,
-            total_episodes=total_episodes,
+            episode_indices=[int(episode["episode_index"]) for episode in episodes],
             total_frames=total_frames,
             total_tasks=len(self._task_to_index),
             total_videos=total_videos,
             fps=fps,
             features=self._build_features(fps),
+            layout=LeRobotDatasetIO(self._log_dir).storage_layout(),
         )
         if self._eval_mode:
             info["eval"] = self._eval_info(episodes)
-        with self._meta_path("info.json").open("w") as f:
-            json.dump(info, f, indent=2, ensure_ascii=False)
+        _write_json_atomic(self._meta_path("info.json"), info)
 
     def _eval_info(self, episodes: list[dict[str, Any]]) -> dict[str, Any]:
         """The info.json ``eval`` section: which keys carry scoring + how many are scored.
@@ -2466,7 +2477,10 @@ class EpisodeLogger:
         state_acc = _StatAccumulator()
         action_acc = _StatAccumulator()
         eef_acc = _StatAccumulator()
-        for ep_path in sorted((self._log_dir / "data" / "chunk-000").glob("episode_*.parquet")):
+        for episode in _read_jsonl(self._meta_path("episodes.jsonl")):
+            ep_path = self._parquet_path(int(episode["episode_index"]))
+            if not ep_path.is_file():
+                continue
             table = pq.read_table(str(ep_path))
             state_acc.update(
                 np.array(table.column(self._keys.state_key).to_pylist(), dtype=np.float64)
@@ -2521,7 +2535,10 @@ class EpisodeLogger:
         for step in self._steps:
             if step.state_eef is not None:
                 return int(step.state_eef.shape[0])
-        for ep_path in sorted((self._log_dir / "data" / "chunk-000").glob("episode_*.parquet")):
+        for episode in _read_jsonl(self._meta_path("episodes.jsonl")):
+            ep_path = self._parquet_path(int(episode["episode_index"]))
+            if not ep_path.is_file():
+                continue
             table = pq.read_table(str(ep_path))
             if self._keys.eef_key in table.column_names:
                 col = table.column(self._keys.eef_key).to_pylist()
@@ -2565,8 +2582,13 @@ class EpisodeLogger:
 
     def _load_global_index(self, dataset_dir: Path | None = None) -> int:
         root = dataset_dir or self._log_dir
+        rows = _read_jsonl(self._meta_path("episodes.jsonl", dataset_dir))
+        paths = set((root / "data").glob("chunk-*/episode_*.parquet"))
+        paths.update(self._parquet_path(int(row["episode_index"]), root) for row in rows)
         maximum = -1
-        for path in (root / "data").glob("chunk-*/episode_*.parquet"):
+        for path in paths:
+            if not path.is_file():
+                continue
             parquet = pq.ParquetFile(path)
             if "index" not in parquet.schema_arrow.names:
                 continue
@@ -2575,10 +2597,7 @@ class EpisodeLogger:
                 maximum = max(maximum, max(int(value) for value in values))
         if maximum >= 0:
             return maximum + 1
-        return sum(
-            int(e.get("length", 0))
-            for e in _read_jsonl(self._meta_path("episodes.jsonl", dataset_dir))
-        )
+        return sum(int(episode.get("length", 0)) for episode in rows)
 
     def _load_collection_history(self, dataset_dir: Path | None = None) -> list[dict[str, Any]]:
         rows = deque(
@@ -2736,6 +2755,10 @@ class EpisodeLogger:
         columns["index"] = list(range(job.global_index, job.global_index + length))
         row["episode_index"] = job.episode_index
         row["global_index_start"] = job.global_index
+        if overwrite:
+            existing = next(item for item in rows if item["episode_index"] == job.episode_index)
+            if "file_stem" in existing:
+                row["file_stem"] = existing["file_stem"]
         return overwrite
 
     def _claim_collection_episode_index(
@@ -2783,7 +2806,7 @@ class EpisodeLogger:
         dataset_dir: Path | None = None,
     ) -> Path:
         root = dataset_dir or self._log_dir
-        return root / "data" / "chunk-000" / f"episode_{episode_index:06d}.parquet"
+        return LeRobotDatasetIO(root).episode_path(episode_index, "data_path")
 
     def _video_path(
         self,
@@ -2795,7 +2818,7 @@ class EpisodeLogger:
         video_key = resolve_video_key(self._keys, cam_key)
         if video_key is None:
             raise ValueError(f"No video key for camera {cam_key!r}")
-        return root / "videos" / "chunk-000" / video_key / f"episode_{episode_index:06d}.mp4"
+        return LeRobotDatasetIO(root).episode_path(episode_index, "video_path", video_key)
 
     def _meta_path(self, name: str, dataset_dir: Path | None = None) -> Path:
         return (dataset_dir or self._log_dir) / "meta" / name

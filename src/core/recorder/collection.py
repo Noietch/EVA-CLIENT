@@ -46,6 +46,7 @@ from core.recorder.sim_collection import (
 from core.types import CollectionRawBatch, Observation
 from core.utils.dataset_lock import dataset_lock
 from core.utils.images import resize_direct
+from core.utils.lerobot import LeRobotDatasetIO, _write_json_atomic
 
 if TYPE_CHECKING:
     from core.config import ConfigDict
@@ -962,8 +963,9 @@ class CollectionEpisodeWriter:
     def finalize(self, dataset_dir: Path | None = None) -> None:
         if dataset_dir is None:
             return
-        self._write_info_json(dataset_dir)
-        self._write_stats_json(dataset_dir)
+        with dataset_lock(dataset_dir).acquire():
+            self._write_info_json(dataset_dir)
+            self._write_stats_json(dataset_dir)
 
     def _check_timestamp(self, timestamp: float, frame_index: int) -> None:
         if frame_index == 0:
@@ -1081,12 +1083,8 @@ class CollectionEpisodeWriter:
         return tuple(
             video_key
             for video_key in self._schema.cameras.values()
-            if (
-                dataset_dir
-                / "videos"
-                / "chunk-000"
-                / video_key
-                / f"episode_{int(episode_index):06d}.mp4"
+            if LeRobotDatasetIO(dataset_dir).episode_path(
+                int(episode_index), "video_path", video_key
             ).exists()
         )
 
@@ -1117,7 +1115,6 @@ class CollectionEpisodeWriter:
         collection_started_at: str = "",
     ) -> None:
         episodes = _read_jsonl(self._logger._meta_path("episodes.jsonl", dataset_dir))
-        total_episodes = len(episodes)
         total_frames = sum(int(e.get("length", 0)) for e in episodes)
         video_keys: set[str] = set()
         total_videos = 0
@@ -1140,12 +1137,13 @@ class CollectionEpisodeWriter:
         total_tasks = len(self._logger._load_existing_tasks(dataset_dir))
         info = build_info(
             robot_type=self._schema.robot_type or self._logger._robot.name,
-            total_episodes=total_episodes,
+            episode_indices=[int(episode["episode_index"]) for episode in episodes],
             total_frames=total_frames,
             total_tasks=total_tasks,
             total_videos=total_videos,
             fps=fps,
             features=self._build_features(fps, video_keys),
+            layout=LeRobotDatasetIO(dataset_dir).storage_layout(),
         )
         info_path = self._logger._meta_path("info.json", dataset_dir)
         started_at = (
@@ -1153,8 +1151,7 @@ class CollectionEpisodeWriter:
         )
         if started_at:
             info["collection_started_at"] = started_at
-        with info_path.open("w") as f:
-            json.dump(info, f, indent=2, ensure_ascii=False)
+        _write_json_atomic(info_path, info)
 
     @staticmethod
     def _existing_collection_started_at(info_path: Path) -> str:
@@ -1210,8 +1207,10 @@ class CollectionEpisodeWriter:
         accumulators = {
             output_key: _StatAccumulator() for output_key in self._schema.columns.values()
         }
-        data_dir = dataset_dir / "data" / "chunk-000"
-        for ep_path in sorted(data_dir.glob("*.parquet")):
+        for episode in _read_jsonl(self._logger._meta_path("episodes.jsonl", dataset_dir)):
+            ep_path = self._logger._parquet_path(int(episode["episode_index"]), dataset_dir)
+            if not ep_path.is_file():
+                continue
             table = pq.read_table(str(ep_path))
             for output_key, accumulator in accumulators.items():
                 if output_key in table.column_names:

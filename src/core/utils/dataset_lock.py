@@ -1,10 +1,9 @@
-"""One exclusive lock per collection dataset directory, shared across processes.
+"""One exclusive lock per collection dataset, shared across processes.
 
-Several eva processes record into the same collection dataset, so every read-modify-write
+Several EVA processes record into the same collection dataset, so every read-modify-write
 of its ``meta/*`` files and every episode/frame index allocation must be serialized.
-The lock is an ``flock`` on the dataset directory itself: there is no lock file to leak
-into the dataset, and the kernel drops the lock when the holder exits, so a crashed peer
-cannot block the others.
+The lock is an ``flock`` on a persistent file in the dataset.  Locking the directory
+itself does not provide reliable mutual exclusion on the shared filesystem.
 """
 
 from __future__ import annotations
@@ -38,6 +37,7 @@ class DatasetLock:
 
     def __init__(self, dataset_dir: Path) -> None:
         self._dataset_dir = dataset_dir
+        self._lock_path = dataset_dir / ".dataset.lock"
         self._thread_lock = threading.RLock()
         self._descriptor: int | None = None
         self._depth = 0
@@ -50,8 +50,17 @@ class DatasetLock:
         try:
             if self._depth == 0:
                 self._dataset_dir.mkdir(parents=True, exist_ok=True)
-                self._descriptor = os.open(self._dataset_dir, os.O_RDONLY)
-                fcntl.flock(self._descriptor, fcntl.LOCK_EX)
+                descriptor = os.open(
+                    self._lock_path,
+                    os.O_CREAT | os.O_RDWR,
+                    0o600,
+                )
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX)
+                except BaseException:
+                    os.close(descriptor)
+                    raise
+                self._descriptor = descriptor
             self._depth += 1
             waited = time.monotonic() - started
             if waited > _WARN_AFTER_SEC:

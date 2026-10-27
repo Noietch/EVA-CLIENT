@@ -408,12 +408,16 @@ def test_sim_retake_invalidates_the_previous_replay_report(tmp_path):
     assert logger.end_episode()
     logger._collection_qc.wait(timeout=10)
 
-    report_path = dataset_dir / "meta/render_reports/episode_000000.json"
-    report_path.parent.mkdir(parents=True)
-    report_path.write_text(
-        json.dumps({"task_evaluation": {"success": True, "error": None}}),
-        encoding="utf-8",
+    report_paths = (
+        dataset_dir / "meta/render_reports/episode_000000.json",
+        dataset_dir / "render/reports/episode_000000.json",
     )
+    for report_path in report_paths:
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(
+            json.dumps({"task_evaluation": {"success": True, "error": None}}),
+            encoding="utf-8",
+        )
     previous = _read_jsonl(dataset_dir / "meta/episodes.jsonl")[0]
     assert replay_validation(dataset_dir, previous) == (True, "")
 
@@ -425,7 +429,7 @@ def test_sim_retake_invalidates_the_previous_replay_report(tmp_path):
     assert logger.mark_collection_qc("t", 0, "pass", "current take")
     current = _read_jsonl(dataset_dir / "meta/episodes.jsonl")[0]
     verified, reason = replay_validation(dataset_dir, current)
-    assert not report_path.exists()
+    assert all(not path.exists() for path in report_paths)
     assert (verified, reason) == (None, "replay_report_pending")
     assert qc_state("pass", "green", verified, True) == "passed"
     logger.finalize()
@@ -589,10 +593,17 @@ def test_collection_save_rolls_back_when_qc_write_fails(tmp_path, monkeypatch):
     dataset_dir = _collection_task_dir(tmp_path)
     old_parquet = (dataset_dir / "data/chunk-000/episode_000000.parquet").read_bytes()
     logger._collection_qc.wait(timeout=10)
-    report_path = dataset_dir / "meta/render_reports/episode_000000.json"
-    report_path.parent.mkdir(parents=True)
-    old_report = json.dumps({"task_evaluation": {"success": True, "error": None}})
-    report_path.write_text(old_report, encoding="utf-8")
+    report_paths = (
+        dataset_dir / "meta/render_reports/episode_000000.json",
+        dataset_dir / "render/reports/episode_000000.json",
+    )
+    old_reports = {}
+    for report_path in report_paths:
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        old_reports[report_path] = json.dumps(
+            {"task_evaluation": {"success": True, "error": None}}
+        )
+        report_path.write_text(old_reports[report_path], encoding="utf-8")
 
     original = LeRobotDatasetIO.reset_qc
 
@@ -612,7 +623,9 @@ def test_collection_save_rolls_back_when_qc_write_fails(tmp_path, monkeypatch):
     episodes = _read_jsonl(dataset_dir / "meta/episodes.jsonl")
     assert [(row["episode_index"], row["length"]) for row in episodes] == [(0, 1)]
     assert (dataset_dir / "data/chunk-000/episode_000000.parquet").read_bytes() == old_parquet
-    assert report_path.read_text(encoding="utf-8") == old_report
+    assert {
+        path: path.read_text(encoding="utf-8") for path in report_paths
+    } == old_reports
     logger.finalize()
 
 

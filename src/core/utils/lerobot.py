@@ -23,6 +23,12 @@ import pyarrow.parquet as pq
 
 from core.utils.dataset_lock import dataset_lock
 
+DEFAULT_STORAGE_LAYOUT = {
+    "chunks_size": 1000,
+    "data_path": "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet",
+    "video_path": "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4",
+}
+
 
 @lru_cache(maxsize=8)
 def _read_episode_file_stems(path: Path, signature: tuple[int, int, int]) -> dict[int, str]:
@@ -74,24 +80,29 @@ class LeRobotDatasetIO:
     def __init__(self, dataset_dir: str | Path) -> None:
         self.root = Path(dataset_dir)
 
+    def storage_layout(self) -> dict[str, Any]:
+        """Read the dataset's path templates, including defaults for a new dataset."""
+        try:
+            info = json.loads((self.root / "meta" / "info.json").read_text())
+        except FileNotFoundError:
+            info = {}
+        return {key: info.get(key, value) for key, value in DEFAULT_STORAGE_LAYOUT.items()}
+
+    def episode_path(self, episode_id: int, path_key: str, video_key: str = "") -> Path:
+        """Resolve a data_path or video_path before or after its file is written."""
+        layout = self.storage_layout()
+        return self.root / layout[path_key].format(
+            episode_chunk=episode_id // layout["chunks_size"],
+            episode_index=episode_id,
+            episode_file=self.episode_file_stem(episode_id),
+            video_key=video_key,
+        )
+
     def episode_parquet(self, episode_id: int) -> Path:
         """Resolve the parquet path for one episode from the dataset's info.json layout."""
         info_path = self.root / "meta" / "info.json"
         if info_path.exists():
-            with open(info_path) as f:
-                info = json.load(f)
-            chunks_size = info.get("chunks_size", 1000)
-            episode_chunk = episode_id // chunks_size
-            episode_file = self.episode_file_stem(episode_id)
-            data_path_tpl = info.get(
-                "data_path",
-                "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet",
-            )
-            return self.root / data_path_tpl.format(
-                episode_chunk=episode_chunk,
-                episode_index=episode_id,
-                episode_file=episode_file,
-            )
+            return self.episode_path(episode_id, "data_path")
         return self.root / f"episode_{episode_id:06d}.parquet"
 
     def episode_video_paths(
@@ -108,23 +119,10 @@ class LeRobotDatasetIO:
         Returns:
             Existing video paths keyed by the caller camera key.
         """
-        info_path = self.root / "meta" / "info.json"
-        if info_path.exists():
-            with open(info_path) as f:
-                info = json.load(f)
-            chunks_size = info.get("chunks_size", 1000)
-            episode_chunk = episode_id // chunks_size
-            episode_file = self.episode_file_stem(episode_id)
-            video_path_tpl = info.get(
-                "video_path",
-                "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4",
-            )
-        else:
-            episode_chunk = 0
-            episode_file = f"episode_{episode_id:06d}"
-            video_path_tpl = (
-                "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4"
-            )
+        layout = self.storage_layout()
+        episode_chunk = episode_id // layout["chunks_size"]
+        episode_file = self.episode_file_stem(episode_id)
+        video_path_tpl = layout["video_path"]
 
         out: dict[str, Path] = {}
         for cam_key, video_key in video_keys.items():

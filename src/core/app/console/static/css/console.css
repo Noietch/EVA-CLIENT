@@ -1475,7 +1475,7 @@
   .collect-tile.slot-pending { background: var(--qc-pending-soft); border-color: var(--qc-pending); color: var(--qc-pending-ink); }
   .collect-tile.slot-unreviewed { background: var(--qc-unreviewed-soft); border-color: var(--qc-unreviewed); color: var(--qc-unreviewed-ink); }
   .collect-tile.slot-passed, .collect-tile.slot-complete { background: var(--qc-passed); border-color: var(--qc-passed); color: #fff; }
-  .collect-tile.slot-render-pending { background: var(--render-pending-soft); border-color: var(--render-pending); color: var(--render-pending-ink); }
+  .collect-tile.slot-render-pending:not(.slot-failed):not(.slot-rejected) { background: var(--render-pending-soft); border-color: var(--render-pending); color: var(--render-pending-ink); }
   .collect-tile.slot-saving {
     position: relative; overflow: hidden;
     background: var(--signal-soft); border-color: var(--accent); color: var(--ink);

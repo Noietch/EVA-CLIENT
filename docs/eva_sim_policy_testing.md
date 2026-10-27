@@ -74,7 +74,7 @@ bash /cfs/mlp/training/docker/user/hadoop-aipnlp/baizitong/eva-ws/eva-xpolicylab
 
 第 i 路 Policy 使用 `policy-base-port + i`，示例为 `18000～18007`。SIM/Client 第 i 路使用 `base-port + i*10 + 1..4`，i 从 0 开始：示例前两路分别是 `19601～19604`、`19611～19614`。
 
-结果写入上述 checkpoint 的 `logs/eva_sim/<run-id>/`；进度每 30 秒更新。评测结束会回收 SIM/Client，Policy 服务继续保留。
+Policy 启动日志和缓存写入对应 checkpoint 的 `logs/policy_serving/<run-id>/`，评测结果写入 `logs/eva_sim/<run-id>/`；进度每 30 秒更新。评测结束会回收 SIM/Client，Policy 服务继续保留。
 
 | 文件 | 内容 |
 | --- | --- |
