@@ -96,6 +96,29 @@ SIM/Client 退出或任务无进展超时后，脚本会保存诊断、重启该
 | `benchmarks/eva_sim/serve_policies.sh` | 加载 checkpoint，在指定 GPU 和起始端口启动多路 EVA-VLA Policy 服务 |
 | `benchmarks/eva_sim/eval_yam.sh` | 连接已有 Policy 服务，启动 SIM + Client、分配评测任务并汇总结果 |
 
+在 EVA-VLA 仓库根目录打开两个终端。下面以 8 卡、v1.2/qpos 为例，把两条命令中的 checkpoint 路径替换成自己的：
+
+```bash
+# 终端 1：启动 Policy，端口 20000～20007；保持此终端运行
+bash benchmarks/eva_sim/serve_policies.sh \
+  --ckpt-path work_dirs/YOUR_RUN/checkpoints/YOUR_STEP/hf_ckpt \
+  --policy-gpus 0,1,2,3,4,5,6,7 \
+  --policy-base-port 20000
+
+# 终端 2：开始评测，自动启动 SIM + Client 和 worker
+bash benchmarks/eva_sim/eval_yam.sh \
+  --ckpt-path work_dirs/YOUR_RUN/checkpoints/YOUR_STEP/hf_ckpt \
+  --sim-root /cfs/mlp/training/docker/user/hadoop-aipnlp/baizitong/eva-ws/EVA-SIM \
+  --client-root /cfs/mlp/training/docker/user/hadoop-aipnlp/baizitong/eva-ws/EVA-CLIENT \
+  --task eval_v1.2 \
+  --action-mode qpos \
+  --sim-gpus 0,1,2,3,4,5,6,7 \
+  --policy-base-port 20000 \
+  --base-port 19600
+```
+
+测 v1.1 时改为 `--task eval_v1.1`；动作模式按 checkpoint 选择 `eef` 或 `qpos`。改卡数时，两条命令的 GPU 列表保持数量和顺序一致，两处 `--policy-base-port` 也保持一致。
+
 checkpoint 的 `inference_metadata.yaml` 必须声明匹配的 `control_mode`：`eef` 或 `qpos`。EVA-VLA 只负责自己的 Policy，不负责启动 XPolicyLab。
 
 参考分支：EVA-CLIENT 和 EVA-VLA 使用 `dev/eva-sim`，EVA-SIM 使用 `master`。EVA-VLA 的其他适配参考分支有 `codex/eva-sim-lamfeat-ckpt1078-adapter`、`codex/arx-x5-task-set-scene-integration`。
