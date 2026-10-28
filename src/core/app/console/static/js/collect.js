@@ -1588,9 +1588,9 @@ function renderCollectTiles(items) {
       const episode = savedEpisodeId(slot.episode);
       const recording = recordingSlotId === String(slot.slot_id);
       const saving = slot.state === "saving";
-      tile.title = `${t("collect.slot")} ${Number(slot.ordinal) + 1} · ${tile.title}`;
+      tile.title = `${t("collect.slot")} ${Number(slot.ordinal)} · ${tile.title}`;
       if (episode != null) tile.title += ` · ${t("collect.episodeLabel")} ${episode}`;
-      tile.textContent = String(Number(slot.ordinal) + 1);
+      tile.textContent = String(Number(slot.ordinal));
       const saved = episode != null;
       const renderPending = !recording && !saving && saved &&
         slot.episode.replay_required === true && slot.episode.replay_verified === null;
@@ -2014,7 +2014,7 @@ function renderCollect() {
     $("collect-eta").textContent = fmtEta(collect.eta_sec);
 
     $("collect-current-position").textContent = displaySlot
-      ? `${Number(displaySlot.ordinal) + 1} / ${totalSlots}` : `${totalSlots} / ${totalSlots}`;
+      ? `${Number(displaySlot.ordinal)} / ${totalSlots}` : `-- / ${totalSlots}`;
     const displayTask = scenePlanTasks().find((task) => task.task_id === displaySlot?.task_id);
     const displayScene = (S.SCENE_PLAN?.scenes || []).find(
       (scene) => scene.scene_id === displaySlot?.scene_id
