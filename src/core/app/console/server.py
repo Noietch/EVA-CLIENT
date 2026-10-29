@@ -92,6 +92,7 @@ from core.utils.dataset_upload import (
 from core.utils.lerobot import LeRobotDatasetIO
 from core.utils.scene_plan import (
     evaluation_task_sets,
+    plan_reference_images,
     read_plan_csv,
     read_plan_yaml,
     scene_plan_from_dir,
@@ -1168,6 +1169,9 @@ def _scene_plan_signature(root: Path) -> tuple[Any, ...]:
             signature.append(path.read_bytes())
         except FileNotFoundError:
             signature.append(None)
+    for path in plan_reference_images(root):
+        stat = path.stat()
+        signature.append((path.name, stat.st_mtime_ns, stat.st_size))
     return tuple(signature)
 
 
@@ -1182,7 +1186,18 @@ def _build_scene_plan(
             f"?set={quote(task_set or root.name, safe='')}&scope={scope}"
         )
 
-    return scene_plan_from_dir(root, photo_url)
+    plan = scene_plan_from_dir(root, photo_url)
+    plan["reference_images"] = [
+        {
+            "name": path.name,
+            "url": (
+                f"/api/scene_plan/reference-image/{quote(path.name, safe='')}"
+                f"?set={quote(task_set or root.name, safe='')}&scope={scope}"
+            ),
+        }
+        for path in plan_reference_images(root)
+    ]
+    return plan
 
 
 def _load_scene_plan(
@@ -2114,6 +2129,10 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             ".woff2": "font/woff2",
             ".woff": "font/woff",
             ".ttf": "font/ttf",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".png": "image/png",
+            ".webp": "image/webp",
         }.get(path.suffix.lower(), "application/octet-stream")
         self.send_response(200)
         self.send_header("Content-Type", ctype)
@@ -2455,6 +2474,9 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         if path.startswith("/api/scene_plan/object-photo/"):
             self._send_scene_plan_photo(path[len("/api/scene_plan/object-photo/") :])
             return
+        if path.startswith("/api/scene_plan/reference-image/"):
+            self._send_plan_reference_image(path[len("/api/scene_plan/reference-image/") :])
+            return
         handler = _GET_ROUTES.get(path)
         if handler is None:
             self._send_empty(404)
@@ -2520,6 +2542,26 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         photo_root = (objects_path.parent / "object_photos").resolve()
         target = (photo_root / photo_dir / parts[1]).resolve()
         if photo_root not in target.parents or not target.is_file():
+            self._send_empty(404)
+            return
+        self._send_static(target)
+
+    def _send_plan_reference_image(self, filename: str) -> None:
+        """Serve one of the task set's authored reference images."""
+        try:
+            root = _scene_plan_root(
+                self.ctx.config,
+                self._query_str("set").strip() or None,
+                scope=self._query_str("scope").strip() or "collect",
+            ).resolve()
+        except (OSError, ValueError):
+            self._send_empty(404)
+            return
+        target = next(
+            (path for path in plan_reference_images(root) if path.name == unquote(filename)),
+            None,
+        )
+        if target is None:
             self._send_empty(404)
             return
         self._send_static(target)

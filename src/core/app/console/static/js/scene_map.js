@@ -162,6 +162,38 @@ function taskHighlightsPlacement(task, placement) {
   return aliases.some((alias) => prompt.includes(alias));
 }
 
+function renderSceneReference(host, reference, version) {
+  const referenceKey = JSON.stringify([version, reference]);
+  if (host.dataset.referenceKey === referenceKey && host.children.length) return;
+  const panel = document.createElement("div");
+  const label = document.createElement("span");
+  const link = document.createElement("a");
+  const image = document.createElement("img");
+  const status = document.createElement("span");
+  panel.className = "collect-scene-reference";
+  label.className = "collect-scene-reference-label";
+  label.textContent = "参考图 / REFERENCE IMAGE";
+  link.className = "collect-scene-reference-link";
+  link.href = reference.url;
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  image.className = "collect-scene-reference-image";
+  image.alt = "当前数据点参考图";
+  status.className = "collect-scene-reference-status";
+  status.textContent = "图片加载失败 / Image unavailable";
+  status.hidden = true;
+  image.onerror = () => {
+    link.hidden = true;
+    status.hidden = false;
+  };
+  link.append(image);
+  panel.append(label, link, status);
+  host.replaceChildren(panel);
+  delete host.dataset.layoutKey;
+  host.dataset.referenceKey = referenceKey;
+  image.src = reference.url;
+}
+
 function renderSceneGridCells(host, plan, scene) {
   const geometry = scenePlanGridGeometry(plan, scenePlanGridPositions(plan, scene));
   const layoutKey = geometry.cells.map((cell) => (
@@ -195,6 +227,20 @@ function renderSceneGridCells(host, plan, scene) {
 }
 
 export function renderSceneGrid(host, plan, scene, task) {
+  const name = scene?.reference_image_names?.[0];
+  const reference = (plan?.reference_images || []).find((image) => image.name === name);
+  host.dataset.displayMode = reference ? "reference" : scene?.placements?.length ? "grid" : "prompt";
+  if (host.dataset.displayMode === "prompt") {
+    host.replaceChildren();
+    delete host.dataset.layoutKey;
+    delete host.dataset.referenceKey;
+    return;
+  }
+  if (reference) {
+    renderSceneReference(host, reference, plan.version);
+    return;
+  }
+  delete host.dataset.referenceKey;
   renderSceneGridCells(host, plan, scene);
   const byPosition = new Map();
   (scene && scene.placements || []).forEach((placement) => {

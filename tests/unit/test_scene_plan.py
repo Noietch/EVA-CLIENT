@@ -78,3 +78,16 @@ def test_scene_placements_preserve_the_configured_pose_and_fixed_flag():
     for placement in [*scene["placements"], *scene["placement_groups"]]:
         assert placement["pose_xyzw"] == pose
         assert placement["fixed"] is False
+
+
+def test_scene_reference_image_names_are_split_trimmed_and_merged():
+    rows = [
+        {"scene_id": "SC-001", "ref_imgs": "front.jpg; side.jpg ; front.jpg"},
+        {"scene_id": "SC-001", "ref_imgs": ";top.png; "},
+        {"scene_id": "SC-002", "placements": "[]"},
+    ]
+
+    scenes = plan_scenes(rows, {}, "unverified")
+
+    assert scenes[0]["reference_image_names"] == ["front.jpg", "side.jpg", "top.png"]
+    assert scenes[1]["reference_image_names"] == []

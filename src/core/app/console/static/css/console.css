@@ -727,7 +727,7 @@
       height: auto; min-height: 46vh;
     }
     #view-debug.collect-mode .stage-top .col-canvas {
-      flex: 0 0 160px; height: 160px;
+      flex: 0 0 360px; height: 360px;
     }
     /* Let the scene card determine the review row height without using the
        WebGL canvas's intrinsic size to grow the row on each resize. */
@@ -754,7 +754,7 @@
     }
     #view-debug.collect-mode .collect-current-slot { grid-template-columns: minmax(0, 1fr); }
     #view-debug.collect-mode .stage-top .col-canvas {
-      flex: 0 0 auto; height: 160px;
+      flex: 0 0 auto; height: 320px;
     }
     #view-debug.collect-mode .cam-strip {
       flex: 0 0 620px; flex-direction: column;
@@ -1402,6 +1402,27 @@
     grid-template-columns: repeat(var(--scene-grid-columns, 1), minmax(0, 1fr));
     grid-template-rows: repeat(var(--scene-grid-rows, 1), auto); gap: 5px;
     width: 100%; min-width: 0; align-content: start;
+  }
+  .collect-scene-grid[data-display-mode="prompt"] { display: none; }
+  .collect-scene-grid[data-display-mode="reference"] { display: block; }
+  .collect-scene-reference {
+    display: grid; gap: 6px; min-width: 0; max-width: 320px; padding: 8px;
+    border: 1px solid var(--rule); border-radius: 4px; background: var(--surface-2);
+  }
+  .collect-scene-reference [hidden] { display: none; }
+  .collect-scene-reference-label {
+    color: var(--ink-dim); font: 700 8px/1 var(--mono); letter-spacing: .06em;
+  }
+  .collect-scene-reference-link {
+    display: block; max-width: 100%;
+  }
+  .collect-scene-reference-image {
+    display: block; width: 100%; height: auto; max-height: 216px;
+    object-fit: contain; border: 1px solid var(--rule); border-radius: 3px;
+    background: var(--paper);
+  }
+  .collect-scene-reference-status {
+    color: var(--ink-dim); font: 11px/1.4 var(--sans);
   }
   .collect-scene-cell {
     position: relative; min-width: 0; min-height: 0; aspect-ratio: 1;

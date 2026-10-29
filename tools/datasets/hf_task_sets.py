@@ -13,6 +13,7 @@ from typing import Any
 
 import yaml
 
+from core.utils.scene_plan import plan_reference_images
 from tools.datasets.hf_compare import is_dataset_content
 from tools.datasets.hf_qc import merge_qc, write_qc
 
@@ -123,6 +124,10 @@ def publish_task_set(
     missing = [name for name in TASK_FILES if not (task_set_dir / name).is_file()]
     if missing:
         raise ValueError(f"task-set is missing: {', '.join(missing)}")
+    allow_patterns = list(TASK_FILES)
+    allow_patterns.extend(
+        path.relative_to(task_set_dir).as_posix() for path in plan_reference_images(task_set_dir)
+    )
     commit = HfApi(token=token).upload_folder(
         repo_id=repo_id,
         repo_type="dataset",
@@ -130,7 +135,7 @@ def publish_task_set(
         path_in_repo=f"task_sets/{task_set_dir.name}",
         commit_message=f"Publish task set {task_set_dir.name}",
         token=token,
-        allow_patterns=list(TASK_FILES),
+        allow_patterns=allow_patterns,
     )
     return {"repo_id": repo_id, "task_set": task_set_dir.name, "revision": commit.oid}
 
@@ -162,9 +167,11 @@ def fetch_task_set(
         if not (source / "tasks.csv").is_file():
             raise FileNotFoundError(f"task set was not found in HF repo: {task_set}")
         target.mkdir(parents=True, exist_ok=True)
-        for item in source.iterdir():
+        for item in source.rglob("*"):
             if item.is_file():
-                (target / item.name).write_bytes(item.read_bytes())
+                output = target / item.relative_to(source)
+                output.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(item, output)
     return {"repo_id": repo_id, "task_set": task_set, "revision": revision}
 
 
