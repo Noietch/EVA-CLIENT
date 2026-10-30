@@ -1169,9 +1169,12 @@ def _scene_plan_signature(root: Path) -> tuple[Any, ...]:
             signature.append(path.read_bytes())
         except FileNotFoundError:
             signature.append(None)
-    for path in plan_reference_images(root):
-        stat = path.stat()
-        signature.append((path.name, stat.st_mtime_ns, stat.st_size))
+    for task_id, path in plan_reference_images(root).items():
+        try:
+            stat = path.stat()
+            signature.append((task_id, str(path), stat.st_mtime_ns, stat.st_size))
+        except FileNotFoundError:
+            signature.append((task_id, str(path), None))
     return tuple(signature)
 
 
@@ -1187,16 +1190,12 @@ def _build_scene_plan(
         )
 
     plan = scene_plan_from_dir(root, photo_url)
-    plan["reference_images"] = [
-        {
-            "name": path.name,
-            "url": (
-                f"/api/scene_plan/reference-image/{quote(path.name, safe='')}"
+    for task in plan["tasks"]:
+        if task["reference_image"]:
+            task["reference_image_url"] = (
+                f"/api/scene_plan/reference-image/{quote(task['task_id'], safe='')}"
                 f"?set={quote(task_set or root.name, safe='')}&scope={scope}"
-            ),
-        }
-        for path in plan_reference_images(root)
-    ]
+            )
     return plan
 
 
@@ -2546,7 +2545,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             return
         self._send_static(target)
 
-    def _send_plan_reference_image(self, filename: str) -> None:
+    def _send_plan_reference_image(self, task_id: str) -> None:
         """Serve one of the task set's authored reference images."""
         try:
             root = _scene_plan_root(
@@ -2557,11 +2556,8 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         except (OSError, ValueError):
             self._send_empty(404)
             return
-        target = next(
-            (path for path in plan_reference_images(root) if path.name == unquote(filename)),
-            None,
-        )
-        if target is None:
+        target = plan_reference_images(root).get(unquote(task_id))
+        if target is None or not target.is_file():
             self._send_empty(404)
             return
         self._send_static(target)

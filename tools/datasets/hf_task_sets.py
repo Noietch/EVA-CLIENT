@@ -125,8 +125,13 @@ def publish_task_set(
     if missing:
         raise ValueError(f"task-set is missing: {', '.join(missing)}")
     allow_patterns = list(TASK_FILES)
+    images = plan_reference_images(task_set_dir)
+    for path in images.values():
+        if not path.is_file():
+            raise FileNotFoundError(f"task reference image not found: {path}")
     allow_patterns.extend(
-        path.relative_to(task_set_dir).as_posix() for path in plan_reference_images(task_set_dir)
+        path.relative_to(task_set_dir).as_posix()
+        for path in images.values()
     )
     commit = HfApi(token=token).upload_folder(
         repo_id=repo_id,

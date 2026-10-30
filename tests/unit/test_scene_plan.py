@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from core.utils.scene_plan import plan_scenes, read_plan_yaml
+from core.utils.scene_plan import plan_scenes, plan_tasks, read_plan_yaml
 
 pytestmark = pytest.mark.unit
 
@@ -80,14 +80,7 @@ def test_scene_placements_preserve_the_configured_pose_and_fixed_flag():
         assert placement["fixed"] is False
 
 
-def test_scene_reference_image_names_are_split_trimmed_and_merged():
-    rows = [
-        {"scene_id": "SC-001", "ref_imgs": "front.jpg; side.jpg ; front.jpg"},
-        {"scene_id": "SC-001", "ref_imgs": ";top.png; "},
-        {"scene_id": "SC-002", "placements": "[]"},
-    ]
-
-    scenes = plan_scenes(rows, {}, "unverified")
-
-    assert scenes[0]["reference_image_names"] == ["front.jpg", "side.jpg", "top.png"]
-    assert scenes[1]["reference_image_names"] == []
+def test_reference_image_belongs_to_task_without_a_scene():
+    (task,) = plan_tasks([{"task_id": "T1", "reference_image": " images/first.png "}])
+    assert task["reference_image"] == "images/first.png"
+    assert task["scene_ids"] == []

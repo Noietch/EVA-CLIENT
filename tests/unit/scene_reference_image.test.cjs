@@ -60,10 +60,7 @@ function loadRenderer() {
 }
 
 function makePlan() {
-  return {positions: [{position_id: "P1", x: 0, y: 0}], reference_images: [
-    {name: "front.jpg", url: "/front.jpg"},
-    {name: "side.jpg", url: "/side.jpg"},
-  ]};
+  return {positions: [{position_id: "P1", x: 0, y: 0}]};
 }
 
 function imageIn(host) {
@@ -74,22 +71,25 @@ function gridScene() {
   return {placements: [{position_id: "P1", object_id: "cup", name_en: "Cup", photo_url: "/cup.jpg"}]};
 }
 
-test("每个数据点只显示自身参考图并替代排布网格，切换数据点更新图片", () => {
+test("任务参考图替代排布网格，切换任务更新图片", () => {
   const host = new Element();
   const renderSceneGrid = loadRenderer();
   const plan = makePlan();
-  renderSceneGrid(host, plan, {reference_image_names: ["side.jpg"]}, null);
+  renderSceneGrid(host, plan, gridScene(), {reference_image_url: "/side.jpg"});
   assert.equal(host.children.length, 1);
   assert.equal(host.dataset.displayMode, "reference");
   assert.equal(imageIn(host).src, "/side.jpg");
   assert.equal(host.children.some((child) => child.className.includes("collect-scene-cell")), false);
 
-  renderSceneGrid(host, plan, {reference_image_names: ["front.jpg"]}, null);
+  renderSceneGrid(host, plan, null, {reference_image_url: "/side.jpg"});
+  assert.equal(imageIn(host).src, "/side.jpg");
+
+  renderSceneGrid(host, plan, gridScene(), {reference_image_url: "/front.jpg"});
   assert.equal(imageIn(host).src, "/front.jpg");
   assert.equal(host.children.length, 1);
 });
 
-test("无参考图的数据点显示排布，有图和无图之间切换可恢复", () => {
+test("无参考图的任务显示排布，有图和无图之间切换可恢复", () => {
   const host = new Element();
   const renderSceneGrid = loadRenderer();
   const plan = makePlan();
@@ -97,7 +97,7 @@ test("无参考图的数据点显示排布，有图和无图之间切换可恢�
   assert.match(host.children[0].className, /collect-scene-cell/);
   assert.equal(host.dataset.displayMode, "grid");
   assert.equal(host.children[0].querySelector("img").src, "/cup.jpg");
-  renderSceneGrid(host, plan, {reference_image_names: ["front.jpg"]}, null);
+  renderSceneGrid(host, plan, gridScene(), {reference_image_url: "/front.jpg"});
   assert.equal(imageIn(host).src, "/front.jpg");
   renderSceneGrid(host, plan, gridScene(), null);
   assert.match(host.children[0].className, /collect-scene-cell/);
@@ -106,7 +106,7 @@ test("无参考图的数据点显示排布，有图和无图之间切换可恢�
 
 test("参考图加载失败显示提示，仍不显示排布", () => {
   const host = new Element();
-  loadRenderer()(host, makePlan(), {reference_image_names: ["front.jpg"]}, null);
+  loadRenderer()(host, makePlan(), gridScene(), {reference_image_url: "/front.jpg"});
   const panel = host.children[0];
   const link = panel.querySelector("a");
   const status = panel.querySelector(".collect-scene-reference-status");
@@ -118,9 +118,9 @@ test("参考图加载失败显示提示，仍不显示排布", () => {
   assert.equal(host.dataset.displayMode, "reference");
 });
 
-test("数据点未绑定参考图时不会显示其他数据点的图库", () => {
+test("任务未绑定参考图时显示排布", () => {
   const host = new Element();
-  loadRenderer()(host, makePlan(), {...gridScene(), reference_image_names: ["missing.jpg"]}, null);
+  loadRenderer()(host, makePlan(), gridScene(), null);
   assert.match(host.children[0].className, /collect-scene-cell/);
   assert.equal(host.dataset.displayMode, "grid");
 });
@@ -129,7 +129,7 @@ test("仅 prompt 的数据点不显示网格或其他点参考图，三种模式
   const host = new Element();
   const renderSceneGrid = loadRenderer();
   const plan = makePlan();
-  renderSceneGrid(host, plan, {reference_image_names: ["front.jpg"]}, null);
+  renderSceneGrid(host, plan, gridScene(), {reference_image_url: "/front.jpg"});
   assert.equal(host.dataset.displayMode, "reference");
   renderSceneGrid(host, plan, {placements: []}, null);
   assert.equal(host.dataset.displayMode, "prompt");
@@ -140,7 +140,7 @@ test("仅 prompt 的数据点不显示网格或其他点参考图，三种模式
   renderSceneGrid(host, plan, null, null);
   assert.equal(host.dataset.displayMode, "prompt");
   assert.equal(host.children.length, 0);
-  renderSceneGrid(host, plan, {reference_image_names: ["front.jpg"]}, null);
+  renderSceneGrid(host, plan, gridScene(), {reference_image_url: "/front.jpg"});
   assert.equal(host.dataset.displayMode, "reference");
   assert.equal(imageIn(host).src, "/front.jpg");
 });
@@ -161,12 +161,11 @@ test("网格物体缺少照片时保留名称，并清除之前照片", () => {
 test("同名参考图更新后按计划版本重新加载图片", () => {
   const host = new Element();
   const renderSceneGrid = loadRenderer();
-  const plan = {positions: [], reference_images: [
-    {name: "photo", url: "/photo.png"},
-  ]};
-  const scene = {reference_image_names: ["photo"]};
-  renderSceneGrid(host, {...plan, version: "before"}, scene, null);
+  const plan = {positions: []};
+  const scene = {placements: []};
+  const task = {reference_image_url: "/photo.png"};
+  renderSceneGrid(host, {...plan, version: "before"}, scene, task);
   const before = imageIn(host);
-  renderSceneGrid(host, {...plan, version: "after"}, scene, null);
+  renderSceneGrid(host, {...plan, version: "after"}, scene, task);
   assert.notEqual(imageIn(host), before);
 });

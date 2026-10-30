@@ -16,7 +16,9 @@ def test_publish_task_set_includes_configured_reference_images(tmp_path, monkeyp
     (task_set / "ref_imgs").mkdir(parents=True)
     for name in ("info.yaml", "layout.yaml", "scene.csv", "tasks.csv"):
         (task_set / name).write_text("x\n", encoding="utf-8")
-    (task_set / "layout.yaml").write_text("ref_imgs: ref_imgs\n", encoding="utf-8")
+    (task_set / "tasks.csv").write_text(
+        "task_id,reference_image\nT1,ref_imgs/reference.png\n", encoding="utf-8"
+    )
     (task_set / "ref_imgs/reference.png").write_bytes(b"reference")
     (task_set / "ref_imgs/notes.txt").write_text("metadata\n", encoding="utf-8")
     uploaded = {}
@@ -48,8 +50,9 @@ def test_fetch_task_set_copies_nested_references_and_keeps_existing_files(tmp_pa
         requested.append(kwargs["allow_patterns"])
         source = Path(kwargs["local_dir"]) / "task_sets/set_a"
         (source / "ref_imgs/nested").mkdir(parents=True)
-        (source / "tasks.csv").write_text("task\n", encoding="utf-8")
-        (source / "layout.yaml").write_text("ref_imgs: ref_imgs\n", encoding="utf-8")
+        (source / "tasks.csv").write_text(
+            "task_id,reference_image\nT1,ref_imgs/nested/reference.webp\n", encoding="utf-8"
+        )
         (source / "ref_imgs/nested/reference.webp").write_bytes(b"reference")
 
     monkeypatch.setitem(

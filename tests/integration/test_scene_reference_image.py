@@ -16,10 +16,10 @@ def test_reference_images_follow_task_set_and_scope(tmp_path):
     for root, color in zip(roots, ["red", "blue"], strict=True):
         (root / "ref_imgs").mkdir(parents=True)
         Image.new("RGB", (8, 6), color).save(root / "ref_imgs/摆放照片.png")
-        (root / "layout.yaml").write_text("ref_imgs: ref_imgs\n")
         (root / "tasks.csv").write_text(
-            "task_id,prompt_en,scene_ids,scene_epsiodes_count,total_epsiodes_count\n"
-            "TASK-1,put cup,SC/1,1,1\n"
+            "task_id,prompt_en,scene_ids,scene_epsiodes_count,total_epsiodes_count,reference_image\n"
+            "TASK-1,put cup,SC/1,1,1,ref_imgs/摆放照片.png\n"
+            "TASK-2,move cup,SC/1,1,1,\n"
         )
         with (root / "scene.csv").open("w", newline="") as handle:
             writer = csv.writer(handle)
@@ -32,13 +32,14 @@ def test_reference_images_follow_task_set_and_scope(tmp_path):
         for root, scope in zip(roots, ["collect", "eval"], strict=True):
             plan = console.get(f"/api/scene_plan?set={root.name}&scope={scope}")
             assert plan.status == 200
-            image, = plan.json["reference_images"]
-            assert image["name"] == "摆放照片.png"
-            response = console.get(image["url"])
+            first, second = plan.json["tasks"]
+            assert first["reference_image"] == "ref_imgs/摆放照片.png"
+            assert not second.get("reference_image_url")
+            response = console.get(first["reference_image_url"])
             assert response.status == 200
             assert response.headers["content-type"] == "image/png"
             assert response.raw == (root / "ref_imgs/摆放照片.png").read_bytes()
-            for filename in ["missing.png", "..%2Foutside.png"]:
+            for filename in ["TASK-2", "..%2Foutside.png"]:
                 response = console.get(
                     f"/api/scene_plan/reference-image/{filename}"
                     f"?set={root.name}&scope={scope}"
@@ -47,20 +48,19 @@ def test_reference_images_follow_task_set_and_scope(tmp_path):
 
 
 def test_reference_image_folder_changes_invalidate_plan(tmp_path):
-    (tmp_path / "tasks.csv").write_text("task_id,prompt_en\nT1,put cup\n")
+    (tmp_path / "tasks.csv").write_text(
+        "task_id,prompt_en,reference_image\nT1,put cup,ref_imgs/photo.png\n"
+    )
     config = console_config(collection={"task_set_dir": str(tmp_path)})
     with serve_console(config) as console:
         url = f"/api/scene_plan?set={tmp_path.name}"
         original = console.get(url)
-        assert original.json["reference_images"] == []
+        image_url = original.json["tasks"][0]["reference_image_url"]
+        assert console.get(image_url).status == 404
         (tmp_path / "ref_imgs").mkdir()
-        (tmp_path / "layout.yaml").write_text("ref_imgs: ref_imgs\n")
-        empty = console.get(url)
-        assert empty.json["reference_images"] == []
-        assert empty.json["version"] != original.json["version"]
         Image.new("RGB", (8, 6), "red").save(tmp_path / "ref_imgs/photo.png")
         added = console.get(url)
-        assert [image["name"] for image in added.json["reference_images"]] == ["photo.png"]
-        assert added.json["version"] != empty.json["version"]
+        assert console.get(image_url).status == 200
+        assert added.json["version"] != original.json["version"]
         (tmp_path / "ref_imgs/notes.txt").write_text("Reference folder, no rendering required.")
         assert console.get(url).json["version"] == added.json["version"]

@@ -224,11 +224,11 @@ function renderEvalSceneMap() {
       : state.error ? state.error
       : !state.taskSet ? "No evaluation task set configured"
       : !task ? "No scene map linked to this evaluation task"
-      : !scene ? "No scene layout found for this task" : "";
+      : !scene && !task.reference_image_url ? "No scene layout found for this task" : "";
     $("eval-scene-refresh").disabled = state.loading || evalBusy();
     $("eval-scene-refresh").onclick = () => loadEvalScenePlan(true);
-    host.hidden = !scene;
-    if (scene) renderSceneGrid(host, state.plan, scene, task);
+    host.hidden = !scene && !task?.reference_image_url;
+    if (scene || task?.reference_image_url) renderSceneGrid(host, state.plan, scene, task);
     else {
       host.replaceChildren();
       delete host.dataset.layoutKey;
@@ -1032,9 +1032,9 @@ function trialPopOpen(rec, modelName) {
     const grid = $("tp-scene-grid");
     const scene = rec.scene_map?.scenes?.find((entry) => entry.scene_id === rec.scene_id);
     $("tp-scene-label").textContent = rec.scene_id ? `${rec.task_set} / ${rec.task_id} / ${rec.scene_id}` : "";
-    grid.hidden = !scene;
-    if (scene) renderSceneGrid(grid, rec.scene_map, scene,
-      rec.scene_map.tasks.find((task) => task.task_id === rec.task_id));
+    const task = rec.scene_map?.tasks?.find((item) => item.task_id === rec.task_id);
+    grid.hidden = !scene && !task?.reference_image_url;
+    if (scene || task?.reference_image_url) renderSceneGrid(grid, rec.scene_map, scene, task);
     else { grid.replaceChildren(); delete grid.dataset.layoutKey; }
     const note = $("tp-note");
     if (note) { note.textContent = rec.note || "(no note)"; note.classList.toggle("empty", !rec.note); }

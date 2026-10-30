@@ -250,14 +250,9 @@ def plan_scenes(
                 "scene_id": scene_id,
                 "placements": [],
                 "placement_groups": [],
-                "reference_image_names": [],
                 "calibration_status": calibration_status,
             },
         )
-        for name in str(row.get("ref_imgs", "") or "").split(";"):
-            name = name.strip()
-            if name and name not in scene["reference_image_names"]:
-                scene["reference_image_names"].append(name)
         for group_index, placement in enumerate(plan_placements(row.get("placements"))):
             object_id = placement["object_id"]
             position_ids = placement["position_ids"]
@@ -303,12 +298,13 @@ def plan_tasks(rows: list[dict[str, str]]) -> list[dict[str, Any]]:
     for row in rows:
         task_id = str(row.get("task_id", "")).strip()
         scene_ids = [value for value in str(row.get("scene_ids", "")).split(";") if value]
-        if not task_id or not scene_ids:
+        if not task_id:
             continue
         episode_counts = str(row.get("scene_epsiodes_count", "")).split(";")
         tasks.append(
             {
                 "task_id": task_id,
+                "reference_image": str(row.get("reference_image", "") or "").strip(),
                 "action": str(row.get("action", "") or ""),
                 "category": str(row.get("category", "") or ""),
                 "operation_object": str(
@@ -332,18 +328,21 @@ def plan_tasks(rows: list[dict[str, str]]) -> list[dict[str, Any]]:
     return tasks
 
 
-def plan_reference_images(root: Path) -> list[Path]:
-    """Read optional reference images from the folder named by layout.yaml.ref_imgs."""
-    directory = read_plan_yaml(root, "layout.yaml").get("ref_imgs", "")
-    if not directory:
-        return []
-    folder = (root / directory).resolve()
-    if root.resolve() not in folder.parents:
-        raise ValueError("ref_imgs must name a folder inside the task set")
-    return sorted(
-        path for path in folder.iterdir()
-        if path.is_file() and path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}
-    )
+def plan_reference_images(root: Path) -> dict[str, Path]:
+    """Resolve the optional image authored on each task, relative to its task set."""
+    images = {}
+    for row in read_plan_csv(root, "tasks.csv"):
+        task_id = str(row.get("task_id", "")).strip()
+        name = str(row.get("reference_image", "") or "").strip()
+        if not task_id or not name:
+            continue
+        path = (root / name).resolve()
+        if root.resolve() not in path.parents or path.suffix.lower() not in {
+            ".jpg", ".jpeg", ".png", ".webp"
+        }:
+            raise ValueError(f"invalid reference_image for task {task_id}: {name}")
+        images[task_id] = path
+    return images
 
 
 def scene_plan_from_dir(

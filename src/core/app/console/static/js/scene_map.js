@@ -178,7 +178,7 @@ function renderSceneReference(host, reference, version) {
   link.target = "_blank";
   link.rel = "noopener noreferrer";
   image.className = "collect-scene-reference-image";
-  image.alt = "当前数据点参考图";
+  image.alt = "当前任务参考图";
   status.className = "collect-scene-reference-status";
   status.textContent = "图片加载失败 / Image unavailable";
   status.hidden = true;
@@ -227,8 +227,7 @@ function renderSceneGridCells(host, plan, scene) {
 }
 
 export function renderSceneGrid(host, plan, scene, task) {
-  const name = scene?.reference_image_names?.[0];
-  const reference = (plan?.reference_images || []).find((image) => image.name === name);
+  const reference = task?.reference_image_url ? {url: task.reference_image_url} : null;
   host.dataset.displayMode = reference ? "reference" : scene?.placements?.length ? "grid" : "prompt";
   if (host.dataset.displayMode === "prompt") {
     host.replaceChildren();

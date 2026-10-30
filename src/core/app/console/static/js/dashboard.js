@@ -73,7 +73,7 @@ function renderDashboardSceneMap() {
     : !sets.length && S.CFG.scene_plan_errors?.[state.scope] ? S.CFG.scene_plan_errors[state.scope]
     : !sets.length ? "No scene task sets configured"
     : !task ? "No tasks found in this scene map"
-    : !scene ? "No scene layout found for this task" : "";
+    : !scene && !task.reference_image_url ? "No scene layout found for this task" : "";
   $("dashboard-scene-refresh").disabled = state.loading || !sets.length;
   $("dashboard-scene-all").disabled = !state.filterActive;
   const selectedScope = state.scope === "collect" ? "COLLECTION" : "EVALUATION";
@@ -83,8 +83,8 @@ function renderDashboardSceneMap() {
     : state.loading ? "Loading selected scene statistics…"
     : `${selectedScope}: ${[state.taskSet, state.taskId, state.sceneId].filter(Boolean).join(" / ") || "ALL DATA"} · ${otherScope}: ALL DATA`;
   const host = $("dashboard-scene-grid");
-  host.hidden = !scene;
-  if (scene) renderSceneGrid(host, state.plan, scene, task);
+  host.hidden = !scene && !task?.reference_image_url;
+  if (scene || task?.reference_image_url) renderSceneGrid(host, state.plan, scene, task);
   else {
     host.replaceChildren();
     delete host.dataset.layoutKey;
