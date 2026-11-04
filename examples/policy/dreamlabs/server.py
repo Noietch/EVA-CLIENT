@@ -10,10 +10,16 @@ from __future__ import annotations
 
 import argparse
 import base64
+import http.client
 import io
 import logging
+import os
+from types import SimpleNamespace
+from urllib.parse import urlsplit
 
 import dream
+import dream.datasets
+import dream.transport
 import numpy as np
 import websockets.exceptions
 import websockets.sync.server
@@ -23,6 +29,30 @@ from PIL import Image
 
 logger = logging.getLogger(__name__)
 VIDEO_KEYS = ("video.overhead", "video.wrist_l", "video.wrist_r")
+
+
+def configure_proxy() -> None:
+    """Route the Dream SDK's HTTPS connections through the configured HTTP proxy."""
+    proxy_url = os.environ.get("https_proxy") or os.environ.get("HTTPS_PROXY")
+    if not proxy_url:
+        return
+    proxy = urlsplit(proxy_url)
+    if proxy.scheme != "http" or not proxy.hostname or not proxy.port:
+        raise ValueError("DreamLabs HTTPS proxy must be an HTTP proxy URL with a port")
+
+    class ProxyConnection(dream.transport._SecureConnection):
+        def __init__(self, host: str, port: int | None = None, *, timeout: float) -> None:
+            super().__init__(proxy.hostname, proxy.port, timeout=timeout)
+            self.set_tunnel(host, port)
+
+    class ProxyHttpClient:
+        HTTPSConnection = ProxyConnection
+
+        def __getattr__(self, name: str):
+            return getattr(http.client, name)
+
+    dream.datasets.http = SimpleNamespace(client=ProxyHttpClient())
+    dream.transport._SecureConnection = ProxyConnection
 
 
 class DreamPolicy:
@@ -143,6 +173,7 @@ def main() -> None:
     """Start the Dream-1 bridge for the selected robot; credentials stay on this server."""
     from dream_ik.specs import EMBODIMENTS
 
+    configure_proxy()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="127.0.0.1")

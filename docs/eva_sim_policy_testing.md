@@ -21,7 +21,7 @@ Policy 根据图像、机器人状态和指令预测动作；EVA-CLIENT 负责�
 
 ## Step-1 准备 SIM
 
-EVA-SIM 的 `/cfs/mlp/training/docker/user/hadoop-aipnlp/baizitong/eva-ws/EVA-SIM/scripts/evaluation/` 提供 `eval.sh`、`eval_v1.1.sh`、`eval_v1.2.sh`，只负责启动 SIM + Client。两个版本脚本分别固定任务版本和 `eval` split。
+EVA-SIM 的 `/path/to/EVA-SIM/scripts/evaluation/` 提供 `eval.sh`、`eval_v1.1.sh`、`eval_v1.2.sh`，只负责启动 SIM + Client。两个版本脚本分别固定任务版本和 `eval` split。
 
 正式评测由 Policy 的评测脚本调用这些入口，用户无需额外启动一次 SIM。服务直接使用 Client 已有的动作配置，不需要手工生成配置；单独调用可用于 fake Policy 和服务调试。
 
@@ -46,17 +46,17 @@ XPolicyLab 负责模型加载、原图预处理和动作推理。以下两个脚
 
 ```bash
 # 1. 启动 8 路 Policy，端口 18000～18007；就绪后命令返回，服务在后台运行
-bash /cfs/mlp/training/docker/user/hadoop-aipnlp/baizitong/eva-ws/eva-xpolicylab/policy/Pi_05/sft/serve.sh \
-  --checkpoint /cfs/mlp/training/docker/user/hadoop-aipnlp/yinxuanyu/workspace/eva-xpolicylab/policy/Pi_05/work_dirs/dual_yam_sim_v12_epoch10_pro6000d_20261024_v2/checkpoints/24510 \
+bash /path/to/eva-xpolicylab/policy/Pi_05/sft/serve.sh \
+  --checkpoint /path/to/checkpoint \
   --device_id 0,1,2,3,4,5,6,7 \
   --model_num 1 \
   --base_port 18000
 
 # 2. 开始 v1.2 全量评测；自动启动 SIM + Client、分配任务并汇总结果
-bash /cfs/mlp/training/docker/user/hadoop-aipnlp/baizitong/eva-ws/eva-xpolicylab/eval_eva_sim.sh \
-  --checkpoint /cfs/mlp/training/docker/user/hadoop-aipnlp/yinxuanyu/workspace/eva-xpolicylab/policy/Pi_05/work_dirs/dual_yam_sim_v12_epoch10_pro6000d_20261024_v2/checkpoints/24510 \
-  --sim-root /cfs/mlp/training/docker/user/hadoop-aipnlp/baizitong/eva-ws/EVA-SIM \
-  --client-root /cfs/mlp/training/docker/user/hadoop-aipnlp/baizitong/eva-ws/EVA-CLIENT \
+bash /path/to/eva-xpolicylab/eval_eva_sim.sh \
+  --checkpoint /path/to/checkpoint \
+  --sim-root /path/to/EVA-SIM \
+  --client-root /path/to/EVA-CLIENT \
   --task eval_v1.2 \
   --action-mode qpos \
   --sim-gpus 0,1,2,3,4,5,6,7 \
@@ -108,8 +108,8 @@ bash benchmarks/eva_sim/serve_policies.sh \
 # 终端 2：开始评测，自动启动 SIM + Client 和 worker
 bash benchmarks/eva_sim/eval_yam.sh \
   --ckpt-path work_dirs/YOUR_RUN/checkpoints/YOUR_STEP/hf_ckpt \
-  --sim-root /cfs/mlp/training/docker/user/hadoop-aipnlp/baizitong/eva-ws/EVA-SIM \
-  --client-root /cfs/mlp/training/docker/user/hadoop-aipnlp/baizitong/eva-ws/EVA-CLIENT \
+  --sim-root /path/to/EVA-SIM \
+  --client-root /path/to/EVA-CLIENT \
   --task eval_v1.2 \
   --action-mode qpos \
   --sim-gpus 0,1,2,3,4,5,6,7 \
