@@ -704,9 +704,47 @@ function renderTaskEditor() {
     }
     editor.shell.querySelector("h1").textContent = draft.task_id || translate("entity.newTask");
   });
-  editor.body.append(form, buildTaskObjectPicker(), buildTaskScenePicker());
+  editor.body.append(form, buildTaskMilestoneEditor(), buildTaskObjectPicker(), buildTaskScenePicker());
   host.replaceChildren(editor.shell);
   updateTaskTotal();
+}
+
+function buildTaskMilestoneEditor() {
+  const surface = node("section", "surface compact-picker");
+  const milestones = app.draft.tasks.milestones;
+  const render = () => {
+    const head = node("div", "section-head");
+    const add = button(translate("entity.addMilestone"));
+    add.addEventListener("click", () => { milestones.push({id: "", label: ""}); render(); });
+    head.append(node("h2", "", translate("entity.milestones")), add);
+    surface.replaceChildren(head, node("p", "", translate("entity.milestoneHint")));
+    milestones.forEach((milestone, index) => {
+      const row = node("div", "form-grid");
+      for (const [name, label] of [["id", "entity.milestoneId"], ["label", "entity.milestoneLabel"]]) {
+        const control = input("text", "", milestone[name]);
+        control.addEventListener("input", () => { milestone[name] = control.value.trim(); });
+        row.append(field(`${index + 1} · ${translate(label)}`, control));
+      }
+      const actions = node("div", "section-head");
+      for (const [offset, label] of [[-1, "entity.moveUp"], [1, "entity.moveDown"]]) {
+        const move = button(translate(label));
+        const target = index + offset;
+        move.disabled = target < 0 || target >= milestones.length;
+        move.addEventListener("click", () => {
+          [milestones[index], milestones[target]] = [milestones[target], milestones[index]];
+          render();
+        });
+        actions.append(move);
+      }
+      const remove = button(translate("entity.removeMilestone"));
+      remove.addEventListener("click", () => { milestones.splice(index, 1); render(); });
+      actions.append(remove);
+      row.append(actions);
+      surface.append(row);
+    });
+  };
+  render();
+  return surface;
 }
 
 function buildTaskObjectPicker() {
@@ -1183,6 +1221,7 @@ function newEntity(kind) {
       operation_object_ids: [],
       prompt_en: "",
       prompt_zh: "",
+      milestones: [],
       total_epsiodes_count: 0,
       scene_ids: [],
       scene_epsiodes_count: [],

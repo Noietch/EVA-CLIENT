@@ -323,9 +323,44 @@ def plan_tasks(rows: list[dict[str, str]]) -> list[dict[str, Any]]:
                 "scene_ids": scene_ids,
                 "scene_epsiodes_count": [int(value) for value in episode_counts if value.isdigit()],
                 "total_epsiodes_count": int(row.get("total_epsiodes_count", 0) or 0),
+                "milestones": parse_task_milestones(row.get("milestones"), task_id),
             }
         )
     return tasks
+
+
+def parse_task_milestones(value: Any, task_id: str) -> list[dict[str, str]]:
+    """Decode the ordered milestone list stored in a task-set CSV row."""
+    if value is None or value == "":
+        return []
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return []
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError as error:
+            raise ValueError(f"invalid milestones for task {task_id}") from error
+    if not isinstance(value, list):
+        raise ValueError(f"milestones for task {task_id} must be a list")
+    milestones = []
+    seen = set()
+    for milestone in value:
+        if not isinstance(milestone, dict):
+            raise ValueError(f"milestones for task {task_id} must contain objects")
+        milestone_id = milestone.get("id")
+        label = milestone.get("label")
+        if not isinstance(milestone_id, str) or not isinstance(label, str):
+            raise ValueError(f"milestones for task {task_id} require string id and label")
+        milestone_id = milestone_id.strip()
+        label = label.strip()
+        if not milestone_id or not label:
+            raise ValueError(f"milestones for task {task_id} require id and label")
+        if milestone_id in seen:
+            raise ValueError(f"milestones for task {task_id} contain duplicate id {milestone_id}")
+        seen.add(milestone_id)
+        milestones.append({"id": milestone_id, "label": label})
+    return milestones
 
 
 def plan_reference_images(root: Path) -> dict[str, Path]:
@@ -338,7 +373,10 @@ def plan_reference_images(root: Path) -> dict[str, Path]:
             continue
         path = (root / name).resolve()
         if root.resolve() not in path.parents or path.suffix.lower() not in {
-            ".jpg", ".jpeg", ".png", ".webp"
+            ".jpg",
+            ".jpeg",
+            ".png",
+            ".webp",
         }:
             raise ValueError(f"invalid reference_image for task {task_id}: {name}")
         images[task_id] = path

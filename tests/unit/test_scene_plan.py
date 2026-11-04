@@ -84,3 +84,36 @@ def test_reference_image_belongs_to_task_without_a_scene():
     (task,) = plan_tasks([{"task_id": "T1", "reference_image": " images/first.png "}])
     assert task["reference_image"] == "images/first.png"
     assert task["scene_ids"] == []
+
+
+def test_task_milestones_are_preserved_in_order():
+    (task,) = plan_tasks(
+        [
+            {
+                "task_id": "T1",
+                "milestones": '[{"id":"grasp","label":" Grasp "},{"id":"place","label":"Place"}]',
+            }
+        ]
+    )
+    assert task["milestones"] == [
+        {"id": "grasp", "label": "Grasp"},
+        {"id": "place", "label": "Place"},
+    ]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "not-json",
+        "{}",
+        "[1]",
+        '[{"id":null,"label":"step"}]',
+        '[{"id":"step","label":1}]',
+        '[{"id":"","label":"step"}]',
+        '[{"id":"step","label":""}]',
+        '[{"id":"step","label":"one"},{"id":"step","label":"two"}]',
+    ],
+)
+def test_invalid_task_milestones_are_rejected(value):
+    with pytest.raises(ValueError, match="milestones"):
+        plan_tasks([{"task_id": "T1", "milestones": value}])

@@ -238,12 +238,14 @@ def test_batch_filter_and_plan_crud_round_trip(tmp_path):
             "scene_ids": ["SC-2"],
             "scene_epsiodes_count": [3],
             "total_epsiodes_count": 3,
+            "milestones": [{"id": "grasp", "label": "抓取"}],
         },
     )
     assert response.status_code == 200
     state = response.get_json()
     assert len(state["tasks"]) == 2
     assert len(state["tasks"][1]["slots"]) == 3
+    assert state["tasks"][1]["milestones"] == [{"id": "grasp", "label": "抓取"}]
     assert state["scenes"][-1]["placements"] == [{"position_ids": ["P2"], "object_id": "OBJ-2"}]
     assert TaskSetStore(plans / BATCH).state()["info"]["target_episodes"] == 5
 
@@ -532,6 +534,39 @@ def test_task_set_round_trips_into_production_loader(tmp_path):
     assert state["issues"] == []
     production_tasks = load_collection_task_set(imported.root)
     assert sum(target for _, target in production_tasks[imported.root.name]) == 2
+
+
+def test_task_milestones_round_trip_through_store_and_zip(tmp_path):
+    source = TaskSetStore(_task_set(tmp_path / "source"))
+    task = dict(source.state()["tasks"][0])
+    task["milestones"] = [
+        {"id": "grasp", "label": "抓取"},
+        {"id": "place", "label": "放下"},
+    ]
+    state = source.upsert("tasks", "TASK-1", task)
+    assert state["tasks"][0]["milestones"] == task["milestones"]
+    assert "grasp" in (tmp_path / "source/tasks.csv").read_text(encoding="utf-8-sig")
+
+    imported = TaskSetStore(_task_set(tmp_path / "copy"))
+    imported_state = imported.import_zip(source.export_zip().getvalue())
+    assert imported_state["tasks"][0]["milestones"] == task["milestones"]
+
+
+@pytest.mark.parametrize(
+    "milestones",
+    [
+        [{"id": "", "label": "step"}],
+        [{"id": "step", "label": ""}],
+        [{"id": "step", "label": "one"}, {"id": "step", "label": "two"}],
+        [{"id": "step"}],
+    ],
+)
+def test_task_milestones_validate_ids_and_labels(tmp_path, milestones):
+    source = TaskSetStore(_task_set(tmp_path / "source"))
+    task = dict(source.state()["tasks"][0])
+    task["milestones"] = milestones
+    with pytest.raises(ValueError, match="milestones"):
+        source.upsert("tasks", "TASK-1", task)
 
 
 def test_dataset_browser_requires_configured_roots(monkeypatch, capsys):

@@ -74,7 +74,8 @@ function evalTasks() {
         && (entry.task_id ? entry.task_id === task.task_id : entry.prompt_en === task.prompt_en)
       ));
       return {...task, ...configured, task_id: task.task_id, task_set: EVAL_SCENE_MAP.taskSet,
-        milestones: configured?.milestones || [{id: "success", label: "Task completed"}]};
+        milestones: configured?.milestones?.length ? configured.milestones
+          : task.milestones?.length ? task.milestones : [{id: "success", label: "Task completed"}]};
     });
     const selected = plan ? tasks.concat(authored.filter((entry) => !entry.task_set
       && !tasks.some((task) => entry.task_id ? task.task_id === entry.task_id
@@ -403,8 +404,7 @@ function firstUntestedTrial(taskKey) {
     return 1;
   }
 
-// First task (in config order) that still has any unscored trial; falls back to the first
-// task when every trial is scored. Drives resume so re-entering EVAL lands on real work.
+// First unfinished task and scene in task-set order; null means evaluation is complete.
 function firstUntestedTaskPrompt() {
     const tasks = evalTasks();
     const n = evalCfg().trials_per_prompt || 5;
@@ -416,7 +416,7 @@ function firstUntestedTaskPrompt() {
         }
       }
     }
-    return tasks.length ? {key: evalTaskKey(tasks[0]), sceneId: tasks[0].scene_ids?.[0] || ""} : null;
+    return null;
   }
 
 // Re-entering EVAL resumes at the first untested task+trial, using the on-disk scores that
@@ -516,7 +516,8 @@ function renderEvalConsole() {
       const node = document.createElement("div");
       node.className = "ms-node" + (on ? " done" : "");
       node.dataset.idx = i;
-      node.innerHTML = '<div class="ms-dot">' + (on ? "✓" : (i + 1)) + '</div><div class="ms-label">' + m.label + '</div>';
+      node.innerHTML = '<div class="ms-dot">' + (on ? "✓" : (i + 1)) + '</div><div class="ms-label"></div>';
+      node.querySelector(".ms-label").textContent = m.label;
       node.onclick = () => setMilestoneLevel(i);
       nodes.appendChild(node);
     });
@@ -686,11 +687,12 @@ async function submitEvalScore() {
           || ["warming", "starting", "running", "stopping"].includes(evalCurPhase())
           || EVAL_RECORDS[evalRecKey(key, trial)]?.clip_id !== rec.clip_id) return;
       EVAL_SHOW_UNSCORABLE_HINT = false;
-      const n = evalCfg().trials_per_prompt || 5;
-      EVAL_TRIAL = Math.min(trial + 1, n);
-      EVAL_CLIP = null;
+      const next = firstUntestedTaskPrompt();
+      if (next) selectEvalTask(next.key, next.sceneId);
+      else EVAL_CLIP = null;
       renderEvalPromptList(); renderEvalTrialRow(); renderEvalConsole();
-      if (trial < n) evalSetup(true);
+      if (next) evalSetup(true);
+      else $("eval-saved").textContent = "全部任务评测完成";
     } catch (error) {
       $("eval-saved").textContent = error.message;
     } finally {
@@ -807,7 +809,9 @@ function rvTasks() {
           : task.prompt_en === record.prompt);
         const snapshotTask = record.scene_map?.tasks?.find((task) => task.task_id === record.task_id);
         tasks.set(key, {...snapshotTask, ...authored, ...record, prompt_en: record.prompt,
-          milestones: authored?.milestones || [{id: "success", label: "Task completed"}]});
+          milestones: authored?.milestones?.length ? authored.milestones
+            : snapshotTask?.milestones?.length ? snapshotTask.milestones
+            : [{id: "success", label: "Task completed"}]});
       }
     }
     for (const task of RV.tasks) {
@@ -1062,7 +1066,8 @@ function tpRenderSteps() {
     ms.forEach((m, i) => {
       const el = document.createElement("div");
       el.className = "tp-step" + (score >= i + 1 ? " done" : "");
-      el.innerHTML = `<span class="si">${i + 1}</span><span class="sl">${m.label}</span>`;
+      el.innerHTML = `<span class="si">${i + 1}</span><span class="sl"></span>`;
+      el.querySelector(".sl").textContent = m.label;
       host.appendChild(el);
     });
   }

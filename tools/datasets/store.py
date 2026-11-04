@@ -17,6 +17,8 @@ from typing import Any
 
 import yaml
 
+from core.utils.scene_plan import parse_task_milestones
+
 FILES = ("info.yaml", "layout.yaml", "scene.csv", "tasks.csv")
 MAX_ARCHIVE_FILES, MAX_ARCHIVE_BYTES = 64, 32 * 1024 * 1024
 FIELDS = {
@@ -24,7 +26,7 @@ FIELDS = {
     "scenes": ["scene_id", "placements"],
     "tasks": (
         "task_id action category operation_object_ids prompt_en prompt_zh "
-        "total_epsiodes_count scene_ids scene_epsiodes_count"
+        "total_epsiodes_count scene_ids scene_epsiodes_count milestones"
     ).split(),
 }
 ID_FIELDS = {"objects": "object_id", "scenes": "scene_id", "tasks": "task_id"}
@@ -344,6 +346,7 @@ class TaskSetStore:
             "total_epsiodes_count": int(total or 0),
             "scene_ids": scene_ids,
             "scene_epsiodes_count": counts,
+            "milestones": parse_task_milestones(payload.get("milestones"), record_id),
         }
 
     def _placement(self, payload: Any) -> dict[str, Any]:
@@ -423,6 +426,9 @@ class TaskSetStore:
             if kind == "tasks":
                 for field in ("operation_object_ids", "scene_ids", "scene_epsiodes_count"):
                     row[field] = ";".join(str(value) for value in row[field])
+                row["milestones"] = json.dumps(
+                    row["milestones"], ensure_ascii=False, separators=(",", ":")
+                )
             writer.writerow({field: row.get(field, "") for field in FIELDS[kind]})
         return "\ufeff" + stream.getvalue()
 

@@ -82,6 +82,7 @@ function harness({get, post} = {}) {
         scene: EVAL_SCENE_MAP.sceneId, records: EVAL_RECORDS}; },
       resultMatrix(records) { RV = {tasks: [], models: [{model_name: "model-a", records}], trials: 5};
         return rvBuildMatrix(records); },
+      resultMilestones(record) { RV = {tasks: [], models: [{records: [record]}]}; return rvTrialMs(record); },
       resultStats(records) { return rvStats(Object.values(rvBuildMatrix(records)).flat().filter(Boolean)); },
     };`, context);
   return {api: context.api, nodes, calls, state};
@@ -199,8 +200,10 @@ test("score completion preserves a newly selected scene and locks model changes"
 });
 
 test("score completion advances the trial while the robot is resetting", async () => {
+  const saved = record("left", "saved", 0);
   const {api, nodes, calls} = harness({get: async (url) => url.startsWith("/api/scene_plan")
-    ? plan() : {model_name: "model-a", records: [record("left", "saved", 0)]}});
+    ? plan() : {model_name: "model-a", records: [saved]},
+  post: async (url) => { if (url === "/api/score") saved.score = 0; return {ok: true}; }});
   await api.load();
   await api.results();
   api.status({web_phase: "resetting", session_status: "ready", is_setup_done: false});
@@ -305,4 +308,80 @@ test("an unlinked manual task still runs without a scene identity", async () => 
   assert.equal(request.task_set, "");
   assert.equal(request.task_id, "");
   assert.equal(request.scene_id, "");
+});
+
+test("saved scores advance scenes and tasks automatically and stop at completion", async () => {
+  const records = [record("left", "left-1", 0), record("right", "right-1", 1),
+    record("right", "place-1", 2, null, "place")];
+  const {api, nodes, calls, state} = harness({
+    get: async (url) => url.startsWith("/api/scene_plan")
+      ? plan() : {model_name: "model-a", records},
+    post: async (url, body) => {
+      if (url === "/api/score") Object.assign(records.find((r) => r.clip_id === body.clip_id), body);
+      return {ok: true};
+    },
+  });
+  state.CFG.eval.trials_per_prompt = 1;
+  await api.load();
+  await api.results();
+  assert.equal(nodes.get("eval-prompt-list").tagName, "SELECT");
+  await api.score();
+  assert.equal(api.current().task.task_id, "pick");
+  assert.equal(api.current().scene, "right");
+  api.status({web_phase: "ready", session_status: "ready", is_setup_done: true});
+  await api.score();
+  assert.equal(api.current().task.task_id, "place");
+  assert.equal(api.current().trial, 1);
+  assert.equal(nodes.get("eval-prompt-list").value, api.taskKey(api.current().task));
+  api.status({web_phase: "ready", session_status: "ready", is_setup_done: true});
+  await api.score();
+  assert.equal(api.current().task.task_id, "place");
+  assert.equal(nodes.get("eval-saved").textContent, "全部任务评测完成");
+  assert.equal(calls.filter((call) => call.url === "/api/score").length, 3);
+  assert.equal(calls.some((call) => call.url === "/api/eval_start"), false);
+});
+
+test("rejected score does not advance the task or scene", async () => {
+  const {api, state} = harness({get: async (url) => url.startsWith("/api/scene_plan")
+    ? plan() : {model_name: "model-a", records: [record("left", "saved", 0)]},
+  post: async () => ({ok: false, error: "score rejected"})});
+  state.CFG.eval.trials_per_prompt = 1;
+  await api.load();
+  await api.results();
+  await api.score();
+  assert.equal(api.current().task.task_id, "pick");
+  assert.equal(api.current().scene, "left");
+  assert.equal(api.current().trial, 1);
+});
+
+
+test("task-set milestones drive scoring and result replay without eval task overrides", async () => {
+  const catalog = plan();
+  const milestones = [{id: "grasp", label: "抓住杯子"}, {id: "place", label: "放到目标位置"}];
+  catalog.tasks[0].milestones = milestones;
+  const saved = {...record("left", "saved", 0), scene_map: catalog};
+  const {api, calls, state, nodes} = harness({get: async (url) => url.startsWith("/api/scene_plan")
+    ? catalog : {model_name: "model-a", records: [saved]},
+  post: async (url, body) => { if (url === "/api/score") Object.assign(saved, body); return {ok: true}; }});
+  state.CFG.eval.tasks = [];
+  await api.load();
+  await api.results();
+  assert.deepEqual(Array.from(api.tasks()[0].milestones), milestones);
+  nodes.get("ms-nodes").children[0].classList.add("done");
+  await api.score();
+  const score = calls.find((call) => call.url === "/api/score").body;
+  assert.equal(score.max_score, 2);
+  assert.equal(score.score, 1);
+  assert.deepEqual({...score.milestones}, {grasp: true, place: false});
+  assert.deepEqual(Array.from(api.resultMilestones(saved)), milestones);
+});
+
+test("configured milestones override task-set milestones and empty definitions use success", async () => {
+  const catalog = plan();
+  catalog.tasks[0].milestones = [{id: "plan", label: "Plan milestone"}];
+  catalog.tasks[1].milestones = [];
+  const {api} = harness({get: async () => catalog});
+  await api.load();
+  assert.equal(api.tasks()[0].milestones[0].id, "lift");
+  assert.equal(api.tasks()[1].milestones[0].id, "success");
 });
