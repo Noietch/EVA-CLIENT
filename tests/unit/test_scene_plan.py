@@ -84,3 +84,24 @@ def test_reference_image_belongs_to_task_without_a_scene():
     (task,) = plan_tasks([{"task_id": "T1", "reference_image": " images/first.png "}])
     assert task["reference_image"] == "images/first.png"
     assert task["scene_ids"] == []
+
+
+def test_task_milestones_parse_objects_and_pairs():
+    rows = [
+        {
+            "task_id": "T1",
+            "milestones": json.dumps(
+                [{"id": "grasp", "label": "grasp the cup"}, ["place", "place the cup"]]
+            ),
+        }
+    ]
+    (task,) = plan_tasks(rows)
+    assert task["milestones"] == [
+        {"id": "grasp", "label": "grasp the cup"},
+        {"id": "place", "label": "place the cup"},
+    ]
+
+
+def test_invalid_task_milestones_are_ignored():
+    (task,) = plan_tasks([{"task_id": "T1", "milestones": "not-json"}])
+    assert task["milestones"] == []

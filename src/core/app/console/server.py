@@ -1690,6 +1690,10 @@ def _serialize_status(ctx: ConsoleContext, *, include_history: bool = False) -> 
         "step_operation": getattr(r, "step_operation", ""),
         "step_preview_version": getattr(r, "step_preview_version", 0),
         "current_episode": getattr(r.replay_source or r.transport, "episode_id", None),
+        "eval_saving": bool(
+            getattr(r, "episode_logger", None) is not None
+            and getattr(r.episode_logger, "is_saving", False)
+        ),
         "last_error": s.last_error,
         "replay_dataset_dir": r.replay_dataset_dir,
         "replay_episode_id": r.replay_episode_id,

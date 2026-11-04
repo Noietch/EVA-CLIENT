@@ -65,7 +65,7 @@ _COMMANDS = (
     (
         "gripper",
         "web:gripper:{side}:{state}:{lock}",
-        ("gripper-buttons", "eval-gripper-buttons", "rl-gripper-buttons"),
+        ("gripper-buttons", "rl-gripper-buttons"),
     ),
 )
 

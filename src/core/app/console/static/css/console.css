@@ -1789,6 +1789,7 @@
   .eval-meta .run-id { font-family: var(--mono); font-size: 11px; color: var(--ink-faint); }
 
   .ctx-trial { font-family: var(--mono); font-size: 11px; color: var(--ink-faint); }
+  /* EVAL task tiles reuse .collect-tiles / .collect-tile verbatim. */
   .eval-gripper { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
   .eval-gripper .btn { flex: 1 1 0; min-width: 80px; }
   /* read-only viewer: hide every operator surface, leaving only the browseable task/trial

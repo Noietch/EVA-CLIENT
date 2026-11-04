@@ -6,7 +6,9 @@ console = dict(initial_tab="debug")
 
 robot = dict(type="arx_x5")
 
-transport = dict(resize_pad=False, image_layout="hwc")
+# The ARX X5 RealSense pipeline streams BGR8, while the policy, console preview
+# and recordings expect RGB; convert at the transport boundary.
+transport = dict(resize_pad=False, image_layout="hwc", convert_bgr_to_rgb=True)
 
 rollout = dict(
     storage=dict(enabled=True, log_dir="work_dirs/rollout/arx_x5"),

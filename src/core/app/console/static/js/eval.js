@@ -2,7 +2,7 @@
 // trial-detail popup (trialpop).
 import { $, RT_COLORS, S, apiGet, apiPost, setCommandMetadata } from "./core.js";
 import { drawSeriesChart } from "./charts.js";
-import { renderEvalGripper, setPanel, syncChip } from "./run.js";
+import { setPanel, syncChip } from "./run.js";
 import { renderSceneGrid } from "./scene_map.js";
 
 // ===== eval =====
@@ -32,6 +32,14 @@ let EVAL_SETUP_STAGE = "";
 let EVAL_SHOW_UNSCORABLE_HINT = false;
 
 let EVAL_SETUP_FIRED = false;
+
+let EVAL_TASK_SYNC = "";
+
+const EVAL_TASK_PAGE_SIZE = 50;
+
+let EVAL_TASK_PAGE = 1;
+
+let EVAL_TASK_PAGE_ANCHOR = "";
 
 let EVAL_PREV_SETUP_DONE = false;
 
@@ -74,7 +82,8 @@ function evalTasks() {
         && (entry.task_id ? entry.task_id === task.task_id : entry.prompt_en === task.prompt_en)
       ));
       return {...task, ...configured, task_id: task.task_id, task_set: EVAL_SCENE_MAP.taskSet,
-        milestones: configured?.milestones || [{id: "success", label: "Task completed"}]};
+        milestones: configured?.milestones || task.milestones
+          || [{id: "success", label: "Task completed"}]};
     });
     const selected = plan ? tasks.concat(authored.filter((entry) => !entry.task_set
       && !tasks.some((task) => entry.task_id ? task.task_id === entry.task_id
@@ -216,6 +225,8 @@ function renderEvalSceneMap() {
       state.sceneId = "";
       EVAL_TASK = null;
       EVAL_CLIP = null;
+      EVAL_TASK_PAGE = 1;
+      EVAL_TASK_PAGE_ANCHOR = "";
       loadEvalScenePlan(true);
     };
     const scene = scenes.find((entry) => entry.scene_id === state.sceneId);
@@ -273,6 +284,22 @@ function maybeAutoEvalSetup() {
     const done = !!((S.STATUS || {}).is_setup_done) && evalCurPhase() !== "warming";
     if (EVAL_PREV_SETUP_DONE && !done) EVAL_SETUP_FIRED = false;
     EVAL_PREV_SETUP_DONE = done;
+    // A restored or quick-loaded trial can exist only in the browser. Warmup is
+    // silently ignored while the backend has no selected_task, so bind it first
+    // and let the next status poll fire setup.
+    const task = evalTask();
+    const backendTask = (S.STATUS || {}).selected_task;
+    if (task && evalCurPhase() === "ready" && backendTask !== task.prompt_en) {
+      EVAL_SETUP_FIRED = false;
+      if (EVAL_TASK_SYNC !== task.prompt_en) {
+        EVAL_TASK_SYNC = task.prompt_en;
+        apiPost("/api/select_task", {task: task.prompt_en})
+          .catch(() => { EVAL_TASK_SYNC = ""; });
+      }
+      renderEvalSetupState();
+      return;
+    }
+    EVAL_TASK_SYNC = "";
     renderEvalSetupState();
     if (done || EVAL_SETUP_FIRED || evalSetupErrored() || !evalSetupReady()) return;
     EVAL_SETUP_FIRED = true;
@@ -288,7 +315,6 @@ function renderEvalSelectors() {
     if (prompts.length && !evalBusy() && !EVAL_RESTORE && (EVAL_TASK == null || !evalTask())) {
       selectEvalTask(evalTaskKey(prompts[0]));
     }
-    renderEvalGripper();
     renderEvalPromptList(); renderEvalTrialRow(); renderEvalConsole();
   }
 
@@ -419,6 +445,30 @@ function firstUntestedTaskPrompt() {
     return tasks.length ? {key: evalTaskKey(tasks[0]), sceneId: tasks[0].scene_ids?.[0] || ""} : null;
   }
 
+// Next unscored cell after the given one, walking scenes then tasks so SAVE SCORE · NEXT
+// keeps moving when trials_per_prompt is 1. Wraps once; null when everything is scored.
+function nextUntestedEvalCell(afterKey, afterSceneId, afterTrial) {
+    const tasks = evalTasks();
+    const n = evalCfg().trials_per_prompt || 5;
+    if (!tasks.length) return null;
+    const start = Math.max(0, tasks.findIndex((task) => evalTaskKey(task) === afterKey));
+    for (let offset = 0; offset < tasks.length; offset++) {
+      const task = tasks[(start + offset) % tasks.length];
+      const key = evalTaskKey(task);
+      const scenes = task.scene_ids?.length ? task.scene_ids : [""];
+      const resumeScene = offset === 0 && key === afterKey ? scenes.indexOf(afterSceneId) : -1;
+      for (let sceneIndex = Math.max(0, resumeScene); sceneIndex < scenes.length; sceneIndex++) {
+        const sceneId = scenes[sceneIndex];
+        const firstTrial = sceneIndex === resumeScene ? afterTrial + 1 : 1;
+        for (let trial = firstTrial; trial <= n; trial++) {
+          const record = EVAL_RECORDS[evalCellKey(task, sceneId, trial)];
+          if (!record || record.score == null) return {key, sceneId, trial};
+        }
+      }
+    }
+    return null;
+  }
+
 // Re-entering EVAL resumes at the first untested task+trial, using the on-disk scores that
 // loadEvalResults just populated. Never yanks the selection mid-run.
 function evalResumeOnEnter() {
@@ -463,18 +513,76 @@ function renderEvalPromptList() {
       syncChip("eval-prompt-list");
       return;
     }
-    prompts.forEach((p, pi) => {
-      let sc = 0, mx = 0, te = 0;
-      for (let t = 1; t <= n; t++) { const r = EVAL_RECORDS[evalRecKey(evalTaskKey(p), t)]; if (r && r.score != null) { sc += r.score; mx += r.max_score; te++; } }
-      const rate = te ? sc + "/" + mx : "—";
-      const seg = document.createElement("div");
-      seg.className = "seg" + (evalTaskKey(p) === EVAL_TASK ? " active" : "");
-      seg.innerHTML = '<span class="mk">' + String(pi + 1).padStart(2, "0") + '</span><span>'
-        + (p.task_id ? p.task_id + ' · ' : '') + (p.prompt_zh || p.prompt_en) + '</span><span class="epb-rate">' + rate + '</span>';
-      seg.onclick = () => activateEvalCell(evalTaskKey(p), firstUntestedTrial(evalTaskKey(p)));
-      list.appendChild(seg);
+    const pageCount = Math.max(1, Math.ceil(prompts.length / EVAL_TASK_PAGE_SIZE));
+    const selectedIndex = prompts.findIndex((p) => evalTaskKey(p) === EVAL_TASK);
+    if (EVAL_TASK && EVAL_TASK !== EVAL_TASK_PAGE_ANCHOR) {
+      EVAL_TASK_PAGE_ANCHOR = EVAL_TASK;
+      if (selectedIndex >= 0) {
+        EVAL_TASK_PAGE = Math.floor(selectedIndex / EVAL_TASK_PAGE_SIZE) + 1;
+      }
+    }
+    EVAL_TASK_PAGE = Math.max(1, Math.min(pageCount, EVAL_TASK_PAGE));
+    const pageStart = (EVAL_TASK_PAGE - 1) * EVAL_TASK_PAGE_SIZE;
+    const phase = evalCurPhase();
+    const runningPhase = ["starting", "running", "stopping"].includes(phase);
+    const currentRecord = EVAL_RECORDS[evalRecKey(EVAL_TASK, EVAL_TRIAL)];
+    const saving = !runningPhase && !!EVAL_CLIP
+      && (!!((S.STATUS || {}).eval_saving)
+        || !currentRecord || currentRecord.clip_id !== EVAL_CLIP);
+    prompts.slice(pageStart, pageStart + EVAL_TASK_PAGE_SIZE).forEach((p, offset) => {
+      const pi = pageStart + offset;
+      const key = evalTaskKey(p);
+      const scenes = p.scene_ids?.length ? p.scene_ids : [""];
+      let sc = 0, mx = 0, scored = 0, recorded = 0, total = 0;
+      for (const sceneId of scenes) {
+        for (let t = 1; t <= n; t++) {
+          total++;
+          const r = EVAL_RECORDS[evalCellKey(p, sceneId, t)];
+          if (r && r.episode_index != null) recorded++;
+          if (r && r.score != null) { scored++; sc += r.score; mx += r.max_score || 0; }
+        }
+      }
+      const isCurrent = key === EVAL_TASK;
+      const recording = isCurrent && runningPhase && !!EVAL_CLIP;
+      const tileSaving = isCurrent && saving;
+      let state = scored && scored >= total ? "passed" : (recorded ? "unreviewed" : "pending");
+      if (recording) state = "unreviewed";
+      const rate = scored ? sc + "/" + mx : "—";
+      const stateLabel = recording ? "RECORDING" : tileSaving ? "SAVING"
+        : state === "passed" ? "SCORED" : state === "unreviewed" ? "UNSCORED" : "NOT RUN";
+      const label = (p.task_id ? p.task_id + " · " : "") + (p.prompt_zh || p.prompt_en);
+      const tile = document.createElement("button");
+      tile.type = "button";
+      tile.className = `collect-tile eval-task-tile slot-${state}`;
+      if (tileSaving) tile.classList.add("slot-saving");
+      tile.classList.toggle("selected", isCurrent);
+      tile.classList.toggle("actionable", !evalBusy());
+      tile.setAttribute("aria-busy", String(recording || tileSaving));
+      tile.textContent = String(pi + 1);
+      tile.title = `${pi + 1} · ${label} · ${stateLabel} · ${rate}`;
+      tile.setAttribute("aria-label", tile.title);
+      tile.onclick = () => {
+        if (evalBusy()) return;
+        activateEvalCell(key, firstUntestedTrial(key));
+      };
+      list.appendChild(tile);
     });
+    const pager = $("eval-task-page");
+    if (pager) {
+      pager.hidden = pageCount <= 1;
+      $("eval-task-page-label").textContent = `${EVAL_TASK_PAGE} / ${pageCount}`;
+      $("b-eval-task-prev").disabled = EVAL_TASK_PAGE <= 1;
+      $("b-eval-task-next").disabled = EVAL_TASK_PAGE >= pageCount;
+      $("b-eval-task-prev").onclick = () => setEvalTaskPage(EVAL_TASK_PAGE - 1);
+      $("b-eval-task-next").onclick = () => setEvalTaskPage(EVAL_TASK_PAGE + 1);
+    }
     syncChip("eval-prompt-list");
+  }
+
+function setEvalTaskPage(page) {
+    const count = Math.max(1, Math.ceil(evalTasks().length / EVAL_TASK_PAGE_SIZE));
+    EVAL_TASK_PAGE = Math.max(1, Math.min(count, page));
+    renderEvalPromptList();
   }
 
 function renderEvalTrialRow() {
@@ -600,7 +708,6 @@ function applyEvalPhase() {
     setPanel("eval-panel-trial", hasPrompt ? (hasTrial ? "done" : "active") : "pending");
     setPanel("eval-panel-setup", setupDone ? "done" : (setupErrored ? "error" : (hasTrial ? "active" : "pending")));
     setPanel("eval-panel-run", setupDone && hasTrial ? (scorable ? "done" : "active") : "pending");
-    setPanel("eval-panel-gripper", setupDone && hasTrial ? "active" : "pending");
     setPanel("eval-panel-score", scorable ? "active" : "pending");
     maybeAutoEvalSetup();
     const hint = $("eval-gate-hint");
@@ -625,6 +732,18 @@ function evalSetup(force) {
     if (!evalHasTrial()) { $("be-err").textContent = "select a trial first"; return; }
     if (evalCurPhase() !== "ready") return;
     if (!force && ((S.STATUS || {}).is_setup_done)) return;
+    // Warmup is ignored unless the backend already holds this prompt; bind it first
+    // and let the next status poll start setup.
+    const task = evalTask();
+    if (task && (S.STATUS || {}).selected_task !== task.prompt_en) {
+      EVAL_SETUP_FIRED = false;
+      if (EVAL_TASK_SYNC !== task.prompt_en) {
+        EVAL_TASK_SYNC = task.prompt_en;
+        apiPost("/api/select_task", {task: task.prompt_en})
+          .catch(() => { EVAL_TASK_SYNC = ""; });
+      }
+      return;
+    }
     EVAL_SETUP_FIRED = true;
     setEvalPending("warming");
     apiPost("/api/warmup").catch(() => { EVAL_PENDING = null; applyEvalPhase(); });
@@ -686,11 +805,19 @@ async function submitEvalScore() {
           || ["warming", "starting", "running", "stopping"].includes(evalCurPhase())
           || EVAL_RECORDS[evalRecKey(key, trial)]?.clip_id !== rec.clip_id) return;
       EVAL_SHOW_UNSCORABLE_HINT = false;
-      const n = evalCfg().trials_per_prompt || 5;
-      EVAL_TRIAL = Math.min(trial + 1, n);
       EVAL_CLIP = null;
+      const next = nextUntestedEvalCell(key, sceneId, trial);
+      if (!next) {
+        renderEvalPromptList(); renderEvalTrialRow(); renderEvalConsole();
+        $("eval-saved").textContent = "all trials scored";
+        return;
+      }
+      if (next.key !== key || EVAL_SCENE_MAP.sceneId !== next.sceneId) {
+        selectEvalTask(next.key, next.sceneId);
+      }
+      EVAL_TRIAL = next.trial;
       renderEvalPromptList(); renderEvalTrialRow(); renderEvalConsole();
-      if (trial < n) evalSetup(true);
+      evalSetup(true);
     } catch (error) {
       $("eval-saved").textContent = error.message;
     } finally {
@@ -776,6 +903,7 @@ function applyEvalStatus(s) {
       EVAL_SCENE_MAP.taskSet = taskSet;
       if (!restoreEvalAttempt() && (!sameSet || !EVAL_SCENE_MAP.loading)) loadEvalScenePlan(true);
     }
+    renderEvalPromptList();
     applyEvalPhase();
   }
 

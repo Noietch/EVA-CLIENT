@@ -810,7 +810,12 @@
 
         <div class="panel" id="eval-panel-task">
           <div class="panel-h"><span class="step-badge">2</span>TASK</div>
-          <select class="choice-select task-select" id="eval-prompt-list" aria-label="Evaluation task"></select>
+          <div class="collect-tiles eval-task-tiles" id="eval-prompt-list" role="listbox" aria-label="Evaluation task"></div>
+          <div class="collect-slot-page" id="eval-task-page" hidden>
+            <button class="btn collect-page-btn" id="b-eval-task-prev" title="Previous 50 tasks" aria-label="Previous 50 tasks">&#8592;</button>
+            <span id="eval-task-page-label">1 / 1</span>
+            <button class="btn collect-page-btn" id="b-eval-task-next" title="Next 50 tasks" aria-label="Next 50 tasks">&#8594;</button>
+          </div>
         </div>
 
         <div class="panel" id="eval-panel-trial">
@@ -850,16 +855,8 @@
           </div>
         </div>
 
-        <div class="panel" id="eval-panel-gripper">
-          <div class="panel-h"><span class="step-badge">6</span>GRIPPER</div>
-          <div class="card">
-            <div class="eval-gripper" id="eval-gripper-buttons"></div>
-            <div class="lock-note">↑ run SETUP first</div>
-          </div>
-        </div>
-
         <div class="panel" id="eval-panel-score">
-          <div class="panel-h"><span class="step-badge">7</span>SCORE</div>
+          <div class="panel-h"><span class="step-badge">6</span>SCORE</div>
           <div class="card">
             <div class="ms-wrap vertical">
               <div class="ms-top">

@@ -1431,6 +1431,7 @@ def select_task(
         logger.info("Task is already %s", format_task_label(task))
         return
     session.selected_task = task
+    session.last_error = ""
     reset_run_state(config, runtime, session)
     logger.info("Selected task %s; status is now unset", format_task_label(session.selected_task))
 

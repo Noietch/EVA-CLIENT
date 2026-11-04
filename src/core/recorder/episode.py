@@ -1959,6 +1959,12 @@ class EpisodeLogger:
                 job.sim_state_raw_rows,
             )
 
+    @property
+    def is_saving(self) -> bool:
+        """True while any queued or running job still owns an episode write."""
+        with self._lock:
+            return any(job.status in ("queued", "saving") for job in self._save_jobs)
+
     def wait_for_saves(
         self,
         timeout: float | None = None,

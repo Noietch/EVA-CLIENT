@@ -32,6 +32,7 @@ class Element {
   }
   querySelectorAll() { return this.children; }
   getAttribute(name) { return this[name]; }
+  setAttribute(name, value) { this.attributes = this.attributes || {}; this.attributes[name] = value; }
   removeAttribute(name) { delete this[name]; }
   set innerHTML(value) { this.children = []; this.html = value; }
   get innerHTML() { return this.html || ""; }
@@ -47,11 +48,11 @@ function plan(taskSet = "set-a") {
   ]};
 }
 
-function harness({get, post} = {}) {
+function harness({get, post, tiles = false} = {}) {
   const nodes = new Map();
   const $ = (id) => {
     if (!nodes.has(id)) nodes.set(id, new Element(
-      ["eval-prompt-list", "eval-model-list"].includes(id) ? "SELECT" : "div"));
+      ["eval-model-list"].includes(id) || (!tiles && id === "eval-prompt-list") ? "SELECT" : "div"));
     return nodes.get(id);
   };
   const state = {ACTIVE_TAB: "eval", evalRunToggleBusy: null, EVAL_MODEL_NAME: "model-a",
@@ -76,6 +77,7 @@ function harness({get, post} = {}) {
     this.api = {load: loadEvalScenePlan, results: loadEvalResults, run: evalRun, score: submitEvalScore,
       status: applyEvalStatus, switchModel: evalSwitchCkpt, render: renderEvalSelectors,
       resume: evalResumeOnEnter, tasks: evalTasks, taskKey: evalTaskKey,
+      cellKey: evalCellKey, nextCell: nextUntestedEvalCell,
       fill: updateMsFill, replay: trialPopOpen,
       select(key, scene = "") { selectEvalTask(key, scene); renderEvalConsole(); },
       current() { return {task: evalTask(), trial: EVAL_TRIAL, clip: EVAL_CLIP,
@@ -292,6 +294,50 @@ test("running browser recovery waits for the authoritative task set without sele
   assert.equal(calls.some((call) => call.url === "/api/select_task"), false);
 });
 
+
+test("next cell crosses task boundaries when each task has one trial", async () => {
+  const {api, state} = harness();
+  await api.load();
+  state.CFG.eval.trials_per_prompt = 1;
+  const tasks = api.tasks();
+  const firstKey = api.taskKey(tasks[0]);
+  const records = api.current().records;
+  records[api.cellKey(tasks[0], "left", 1)] = {score: 1};
+  const sameTask = api.nextCell(firstKey, "left", 1);
+  assert.equal(sameTask.key, firstKey);
+  assert.equal(sameTask.sceneId, "right");
+  assert.equal(sameTask.trial, 1);
+
+  records[api.cellKey(tasks[0], "right", 1)] = {score: 1};
+  const nextTask = api.nextCell(firstKey, "right", 1);
+  assert.equal(nextTask.key, api.taskKey(tasks[1]));
+  assert.equal(nextTask.sceneId, "right");
+  assert.equal(nextTask.trial, 1);
+
+  records[api.cellKey(tasks[1], "right", 1)] = {score: 1};
+  assert.equal(api.nextCell(api.taskKey(tasks[1]), "right", 1), null);
+});
+
+test("task tiles page fifty at a time", async () => {
+  const bigPlan = {
+    task_set: "set-a",
+    positions: [{position_id: "P1", x: 0, y: 0}],
+    tasks: Array.from({length: 90}, (_, index) => ({
+      task_id: `task-${index + 1}`, prompt_en: `Task ${index + 1}`, scene_ids: ["left"],
+    })),
+    scenes: [{scene_id: "left", placements: []}],
+  };
+  const {api, nodes} = harness({get: () => bigPlan, tiles: true});
+  await api.load();
+  const list = nodes.get("eval-prompt-list");
+  assert.equal(list.children.length, 50);
+  assert.equal(list.children[0].textContent, "1");
+  assert.equal(nodes.get("eval-task-page-label").textContent, "1 / 2");
+  nodes.get("b-eval-task-next").onclick();
+  assert.equal(list.children.length, 40);
+  assert.equal(list.children[0].textContent, "51");
+  assert.equal(nodes.get("eval-task-page-label").textContent, "2 / 2");
+});
 
 test("an unlinked manual task still runs without a scene identity", async () => {
   const {api, state, calls} = harness();
