@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import queue
+import threading
 from types import SimpleNamespace
 
 from core.app import run
@@ -76,3 +77,25 @@ def test_channel_handles_rl_and_collect_commands() -> None:
     reply = _handle_message(runtime, {"cmd": "web:collect_arm:on"})
     assert reply == {"ok": True, "cmd": "web:collect_arm:on"}
     assert runtime.command_queue.get_nowait() == "web:collect_arm:on"
+
+
+def test_channel_queues_typed_agent_command() -> None:
+    runtime = _runtime()
+    runtime.agent_command_queue = queue.Queue()
+    runtime.agent_operation = None
+    runtime.agent_operation_lock = threading.Lock()
+
+    reply = _handle_message(
+        runtime,
+        {
+            "agent_command": {
+                "action": "move_joints",
+                "arguments": {"group": "left_arm", "positions": [0.1, 0.2]},
+            }
+        },
+    )
+
+    assert reply["ok"] is True
+    command = runtime.agent_command_queue.get_nowait()
+    assert command.action == "move_joints"
+    assert command.operation_id == reply["operation"]["operation_id"]
