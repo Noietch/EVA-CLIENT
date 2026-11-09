@@ -6,6 +6,7 @@ import { renderSceneGrid } from "./scene_map.js";
 let dashboardData = null;
 let dashboardLoading = null;
 let dashboardRequestId = 0;
+const DASHBOARD_TIMEOUT_MS = 30000;
 let dateRangeInitialized = false;
 let dateRangeApplied = false;
 const selectedTrendDay = {collection: "", eval: ""};
@@ -664,7 +665,7 @@ export async function loadDashboard(force = false) {
     }
   }
   const endpoint = `/api/dashboard${params.size ? `?${params.toString()}` : ""}`;
-  dashboardLoading = apiGet(endpoint)
+  dashboardLoading = apiGet(endpoint, { timeoutMs: DASHBOARD_TIMEOUT_MS })
     .then((data) => {
       if (requestId !== dashboardRequestId) return data;
       dashboardData = data;
@@ -678,7 +679,9 @@ export async function loadDashboard(force = false) {
     })
     .catch((error) => {
       if (requestId !== dashboardRequestId) return;
-      $("dashboard-error").textContent = error.message || "Dashboard data is unavailable";
+      $("dashboard-error").textContent = error.name === "AbortError"
+        ? "看板统计请求超过 30 秒，请稍后重试。"
+        : error.message || "Dashboard data is unavailable";
       $("dashboard-error").style.display = "block";
       throw error;
     })

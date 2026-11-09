@@ -63,6 +63,7 @@ function loadDashboardSceneMap(apiGet = async () => makePlan(), sets = {
   const state = {CFG: {scene_plan_sets: sets}, SCENE_PLAN: selectedPlan};
   const calls = [];
   const statsCalls = [];
+  const statsOptions = [];
   const renderedStats = [];
   const context = vm.createContext({
     URLSearchParams,
@@ -71,10 +72,11 @@ function loadDashboardSceneMap(apiGet = async () => makePlan(), sets = {
     document: {createElement: (tagName) => new Element(tagName)},
     loadDatasetManager: () => {},
     renderedStats,
-    apiGet: (url) => {
+    apiGet: (url, options) => {
       if (url.startsWith("/api/dashboard")) {
         statsCalls.push(url);
-        return dashboardApi(url);
+        statsOptions.push(options);
+        return dashboardApi(url, options);
       }
       calls.push(url);
       return apiGet(url);
@@ -94,7 +96,7 @@ function loadDashboardSceneMap(apiGet = async () => makePlan(), sets = {
     },
   };
   renderDashboard = () => renderedStats.push(dashboardData);`, context);
-  return {api: context.sceneMap, nodes, calls, statsCalls, renderedStats, state, selectedPlan};
+  return {api: context.sceneMap, nodes, calls, statsCalls, statsOptions, renderedStats, state, selectedPlan};
 }
 
 function select(nodes, id, value) {
@@ -245,6 +247,40 @@ test("默认预览保留全部统计，主动选场景发送精确筛选且可�
   assert.equal(allQuery.has("scene_scope"), false);
   assert.equal(allQuery.get("from"), "2026-10-01");
   assert.equal(nodes.get("dashboard-scene-all").disabled, true);
+});
+
+test("看板统计使用独立超时预算，等待中的普通刷新复用同一请求", async () => {
+  let finish;
+  const {api, statsCalls, statsOptions, renderedStats} = loadDashboardSceneMap(
+    undefined, undefined, () => new Promise((resolve) => { finish = resolve; }),
+  );
+  const first = api.dashboard();
+  const second = api.dashboard();
+  assert.equal(statsCalls.length, 1);
+  assert.equal(statsOptions[0].timeoutMs, 30000);
+  finish({available_range: {}, marker: "slow statistics"});
+  await Promise.all([first, second]);
+  assert.equal(renderedStats.at(-1).marker, "slow statistics");
+});
+
+test("看板超时显示可读提示，保留既有统计并允许刷新重试", async () => {
+  const aborted = new Error("signal is aborted without reason");
+  aborted.name = "AbortError";
+  let fail = false;
+  const {api, nodes, renderedStats} = loadDashboardSceneMap(
+    undefined, undefined, () => fail
+      ? Promise.reject(aborted)
+      : Promise.resolve({available_range: {}, marker: "available statistics"}),
+  );
+  await api.dashboard();
+  fail = true;
+  await assert.rejects(api.dashboard(true), {name: "AbortError"});
+  assert.match(nodes.get("dashboard-error").textContent, /30 秒.*重试/);
+  assert.equal(nodes.get("dashboard-error").style.display, "block");
+  assert.equal(renderedStats.at(-1).marker, "available statistics");
+  fail = false;
+  await api.dashboard(true);
+  assert.equal(nodes.get("dashboard-error").style.display, "none");
 });
 
 test("改变 scope、任务集和任务均刷新统计，旧响应不能覆盖新的场景统计", async () => {
