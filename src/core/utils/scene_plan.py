@@ -293,6 +293,36 @@ def plan_scenes(
     return list(scenes.values())
 
 
+def plan_milestones(value: Any) -> list[dict[str, str]]:
+    """Parse the optional ``milestones`` task column.
+
+    Accepts a JSON list of ``{"id", "label"}`` objects or ``[id, label]`` pairs;
+    malformed values are ignored so a bad cell never blocks the whole plan.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return []
+    try:
+        payload = json.loads(text)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        logger.warning("Invalid task milestones JSON: %s", exc)
+        return []
+    if not isinstance(payload, list):
+        return []
+    milestones = []
+    for item in payload:
+        if isinstance(item, dict):
+            milestone_id = str(item.get("id", "") or "").strip()
+            label = str(item.get("label", "") or "").strip()
+        elif isinstance(item, (list, tuple)) and len(item) == 2:
+            milestone_id, label = (str(part or "").strip() for part in item)
+        else:
+            continue
+        if milestone_id:
+            milestones.append({"id": milestone_id, "label": label or milestone_id})
+    return milestones
+
+
 def plan_tasks(rows: list[dict[str, str]]) -> list[dict[str, Any]]:
     tasks = []
     for row in rows:
@@ -305,6 +335,7 @@ def plan_tasks(rows: list[dict[str, str]]) -> list[dict[str, Any]]:
             {
                 "task_id": task_id,
                 "reference_image": str(row.get("reference_image", "") or "").strip(),
+                "milestones": plan_milestones(row.get("milestones")),
                 "action": str(row.get("action", "") or ""),
                 "category": str(row.get("category", "") or ""),
                 "operation_object": str(
@@ -323,7 +354,6 @@ def plan_tasks(rows: list[dict[str, str]]) -> list[dict[str, Any]]:
                 "scene_ids": scene_ids,
                 "scene_epsiodes_count": [int(value) for value in episode_counts if value.isdigit()],
                 "total_epsiodes_count": int(row.get("total_epsiodes_count", 0) or 0),
-                "milestones": parse_task_milestones(row.get("milestones"), task_id),
             }
         )
     return tasks

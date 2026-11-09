@@ -1378,10 +1378,6 @@ function renderGripperButtons() {
     buildGripperCaps($("gripper-buttons"));
   }
 
-function renderEvalGripper() {
-    buildGripperCaps($("eval-gripper-buttons"));
-  }
-
 function renderRlGripper(enabled) {
     const host = $("rl-gripper-buttons");
     const state = $("rl-gripper-state");
@@ -1958,7 +1954,6 @@ export {
   retrySetup, setPanel, startRunFromDebug, syncChip, uiMode, updateGuide,
   applyTune, applyManualTune, collectSetValue, selectCollectSet, collectTaskIndexValue,
   collectTaskValue, renderConfig, applyCollectTaskSelection, syncCollectTaskNavigation,
-  renderEvalGripper,
   renderRlGripper,
   enterManualSim, manualConnect, manualDisconnect, manualDispatchToggle,
   renderManualConn, renderManualCurrent, renderManualTarget,

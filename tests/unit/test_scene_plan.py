@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from core.utils.scene_plan import plan_scenes, plan_tasks, read_plan_yaml
+from core.utils.scene_plan import parse_task_milestones, plan_scenes, plan_tasks, read_plan_yaml
 
 pytestmark = pytest.mark.unit
 
@@ -101,6 +101,27 @@ def test_task_milestones_are_preserved_in_order():
     ]
 
 
+def test_task_milestones_parse_objects_and_pairs():
+    rows = [
+        {
+            "task_id": "T1",
+            "milestones": json.dumps(
+                [{"id": "grasp", "label": "grasp the cup"}, ["place", "place the cup"]]
+            ),
+        }
+    ]
+    (task,) = plan_tasks(rows)
+    assert task["milestones"] == [
+        {"id": "grasp", "label": "grasp the cup"},
+        {"id": "place", "label": "place the cup"},
+    ]
+
+
+def test_invalid_task_milestones_are_ignored():
+    (task,) = plan_tasks([{"task_id": "T1", "milestones": "not-json"}])
+    assert task["milestones"] == []
+
+
 @pytest.mark.parametrize(
     "value",
     [
@@ -114,6 +135,6 @@ def test_task_milestones_are_preserved_in_order():
         '[{"id":"step","label":"one"},{"id":"step","label":"two"}]',
     ],
 )
-def test_invalid_task_milestones_are_rejected(value):
+def test_invalid_task_milestones_are_rejected_on_write(value):
     with pytest.raises(ValueError, match="milestones"):
-        plan_tasks([{"task_id": "T1", "milestones": value}])
+        parse_task_milestones(value, "T1")

@@ -1,5 +1,10 @@
 """Shared evaluation workflow settings."""
 
+# EVAL trials record through eval.storage. A deploy preset's DEBUG rollout recorder
+# must not take over, or the eval episode is never started and STOP leaves nothing
+# to score.
+rollout = dict(storage=dict(enabled=False))
+
 eval_cfg = dict(
     task_set_dir="",
     checkpoints=[],

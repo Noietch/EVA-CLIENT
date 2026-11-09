@@ -25,3 +25,6 @@ dashboard = dict(
 )
 
 robot = dict(type="arx_x5")
+
+# The ARX X5 RealSense pipeline streams BGR8; the console and recordings expect RGB.
+transport = dict(convert_bgr_to_rgb=True)

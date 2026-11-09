@@ -253,6 +253,10 @@ def _activate_ckpt_slot(
 
     config = copy.deepcopy(ckpt.config)
     config.eval = eval_cfg
+    # The checkpoint config is a deploy preset loaded on its own, so the eval preset's
+    # rollout override does not reach it. EVAL records through eval.storage; leaving the
+    # preset's DEBUG rollout recorder enabled would suppress the eval episode's start.
+    config.rollout.storage.enabled = False
     runtime.active_config = config
     runtime.active_ckpt_slot = slot
     runtime.policy = None
@@ -416,6 +420,7 @@ def _handle_web_command(
             logger.warning("Ignored warmup: phase=%s", runtime.web_phase)
             return
         if session.selected_task is None:
+            session.last_error = "Select a task before preparing the robot"
             logger.warning("Ignored warmup: no task selected")
             return
         set_phase(runtime, "starting")
