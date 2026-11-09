@@ -5,7 +5,7 @@ _base_ = ["../01_deploy/arx_x5/xpolicylab.py", "../00_base/evaluation.py"]
 console = dict(initial_tab="eval")
 
 eval_cfg = dict(
-    task_set_dir="work_dirs/tasksets/larybench2_20261102_real",
+    task_set_dir="/home/arx/projects/EVA-CLIENT/work_dirs/tasksets/larybench2_20261102_v1.4_real",
     # One row in this task set is one episode-level eval case, so a single trial
     # per task covers it. Raise this only to repeat tasks intentionally.
     trials_per_prompt=1,
