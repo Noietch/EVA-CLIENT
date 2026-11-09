@@ -68,7 +68,7 @@ eval_cfg = dict(
             name="arx_x5_larybench2_xpolicylab_pi_0",
             config="../01_deploy/arx_x5/xpolicylab.py",
             host="10.245.6.224",
-            port=8421,
+            port=8419,
         ),
     ],
 )
