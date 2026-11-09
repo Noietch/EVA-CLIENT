@@ -1,4 +1,8 @@
-"""ARX X5: local real-robot eval against a cloud XPolicyLab policy (joint/qpos)."""
+"""ARX X5: local real-robot eval against the served v1.4 XPolicyLab fleet.
+
+Each checkpoint entry is one served real model; joint/qpos models use the joint
+preset and eef models use the eef preset.
+"""
 
 _base_ = ["../01_deploy/arx_x5/xpolicylab.py", "../00_base/evaluation.py"]
 
@@ -13,10 +17,58 @@ eval_cfg = dict(
     inference_strategy="async",
     checkpoints=[
         dict(
-            name="arx_x5_larybench2_xpolicylab_qpos",
+            name="arx_x5_larybench2_xpolicylab_pi_05",
             config="../01_deploy/arx_x5/xpolicylab.py",
-            host="33.29.36.208",
+            host="10.245.6.224",
+            port=8411,
+        ),
+        dict(
+            name="arx_x5_larybench2_xpolicylab_internvla_a1_5",
+            config="../01_deploy/arx_x5/xpolicylab.py",
+            host="10.245.6.224",
+            port=8412,
+        ),
+        dict(
+            name="arx_x5_larybench2_xpolicylab_gr00t_n17",
+            config="../01_deploy/arx_x5/xpolicylab.py",
+            host="10.245.6.224",
+            port=8413,
+        ),
+        dict(
+            name="arx_x5_larybench2_xpolicylab_xiaomi_robotics_1",
+            config="../01_deploy/arx_x5/xpolicylab_eef.py",
+            host="10.245.6.224",
+            port=8414,
+        ),
+        dict(
+            name="arx_x5_larybench2_xpolicylab_openwam",
+            config="../01_deploy/arx_x5/xpolicylab_eef.py",
+            host="10.245.6.224",
+            port=8415,
+        ),
+        dict(
+            name="arx_x5_larybench2_xpolicylab_hy_embodied_05_vla",
+            config="../01_deploy/arx_x5/xpolicylab_eef.py",
+            host="10.245.6.224",
             port=8416,
+        ),
+        dict(
+            name="arx_x5_larybench2_xpolicylab_lingbot_vla",
+            config="../01_deploy/arx_x5/xpolicylab.py",
+            host="10.245.6.224",
+            port=8417,
+        ),
+        dict(
+            name="arx_x5_larybench2_xpolicylab_starvla_real",
+            config="../01_deploy/arx_x5/xpolicylab.py",
+            host="33.229.215.241",
+            port=8418,
+        ),
+        dict(
+            name="arx_x5_larybench2_xpolicylab_pi_0",
+            config="../01_deploy/arx_x5/xpolicylab.py",
+            host="10.245.6.224",
+            port=8421,
         ),
     ],
 )

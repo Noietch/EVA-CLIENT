@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import csv
 import math
+import os
 import posixpath
 import re
 from pathlib import Path, PurePosixPath
@@ -161,6 +162,7 @@ def load_config(path: str | Path, *, workspace: DeviceWorkspace | None = None) -
     _normalize_rl_cfg(cfg)
     _normalize_collection_task_set(cfg)
     _coerce_spaces(cfg)
+    _apply_extra_state(cfg)
     _apply_derived(cfg, p)
     _validate(cfg)
     _resolve_eval_checkpoints(cfg, p, workspace)
@@ -330,6 +332,24 @@ def _coerce_spaces(cfg: ConfigDict) -> None:
         icfg.obs_space = build_space(icfg.obs_space)
     if "action_space" in icfg:
         icfg.action_space = build_space(icfg.action_space)
+
+
+def _apply_extra_state(cfg: ConfigDict) -> None:
+    """Expose EVA_CLIENT_EXTRA_STATE as ``inference_cfg.extra_state``.
+
+    An EEF preset sends only end-effector state, but some policies (Xiaomi XR1)
+    also consume measured joint positions. The variable lists slices of the
+    transport's joint state as ``name:start:end`` items separated by commas, for
+    example ``left_arm_joint_state:0:6,right_arm_joint_state:7:13``.
+    """
+    icfg = cfg.get("inference_cfg")
+    raw = os.environ.get("EVA_CLIENT_EXTRA_STATE", "")
+    if not icfg or not raw:
+        return
+    icfg.extra_state = {}
+    for item in raw.split(","):
+        name, start, end = item.split(":")
+        icfg.extra_state[name] = (int(start), int(end))
 
 
 def _apply_derived(cfg: ConfigDict, path: Path) -> None:

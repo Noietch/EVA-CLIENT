@@ -427,11 +427,17 @@ def build_policy_observation(
         )
     else:
         state = frame.state_qpos
-    return runtime.robot.build_observation(
+    observation = runtime.robot.build_observation(
         images=processed_images,
         state=state,
         prompt=prompt,
     )
+    extra_state = config.inference_cfg.get("extra_state")
+    if extra_state:
+        observation["extra_state"] = {
+            name: frame.state_qpos[start:end] for name, (start, end) in extra_state.items()
+        }
+    return observation
 
 
 def _is_collection_config(config: ConfigDict) -> bool:

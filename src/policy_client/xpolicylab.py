@@ -240,12 +240,14 @@ class XPolicyLabPolicyClient(PolicyClient):
             raise ValueError(
                 f"XPolicyLab state must have shape [{self._action_dim}], got {state.shape}"
             )
+        fields = dict(zip(self._state_dims, np.split(state, self._state_offsets), strict=True))
+        fields.update(observation.get("extra_state") or {})
         return {
             "instruction": str(observation["prompt"]),
             "vision": {
                 name: {"color": np.asarray(image)} for name, image in observation["images"].items()
             },
-            "state": dict(zip(self._state_dims, np.split(state, self._state_offsets), strict=True)),
+            "state": fields,
         }
 
     def _flatten_action(self, action: Mapping[str, Any]) -> np.ndarray:
