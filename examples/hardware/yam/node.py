@@ -359,8 +359,10 @@ class YamZmqNode:
             if action.target == HIL_STOP_TARGET:
                 self._stop_hil()
                 continue
+            # Sim previews and on-demand image requests share this channel but carry
+            # no robot command (an image request is a zero placeholder).
             if (
-                action.target == "sim"
+                action.target != "real"
                 or self._direct_leader_control
                 or self._hil_active
                 or (self._collection_active and self._collection_control_source == "transport")

@@ -174,6 +174,10 @@ class FrankaZmqNode:
             except self._zmq.Again:
                 return
             action = unpack_action(payload)
+            if action.target != "real":
+                # Sim previews and on-demand image requests share this channel but carry
+                # no robot command (an image request is a zero placeholder).
+                continue
             self._robot.apply_action(action)
             self._received_actions += 1
 

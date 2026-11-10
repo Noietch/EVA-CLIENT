@@ -158,7 +158,9 @@ class Ur5eZmqNode:
             if action.target == HIL_STOP_TARGET:
                 self.stop_hil()
                 continue
-            if action.target == "sim":
+            if action.target != "real":
+                # Sim previews and on-demand image requests share this channel but carry
+                # no robot command (an image request is a zero placeholder).
                 continue
             self._apply_action(action.action)
 
