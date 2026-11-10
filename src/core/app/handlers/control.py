@@ -204,6 +204,8 @@ def set_gripper_open_close(
     Used by the EVAL INIT panel: it physically drives a gripper to a known state
     without setting a session lock, so the policy regains gripper control once RUN
     starts. Holds the arm at its live qpos and only moves the targeted gripper dims.
+    The value is remembered as that gripper's start state, which every later reset
+    restores.
 
     Args:
         open_gripper: True opens (config.robot.gripper_open), False closes
@@ -214,9 +216,13 @@ def set_gripper_open_close(
         True when a gripper move was published, False if no joint feedback is available.
     """
     value = config.robot.gripper_open if open_gripper else config.robot.gripper_close
-    return apply_gripper_command(
+    published = apply_gripper_command(
         config, runtime, None, side, decide=lambda _cur: value, lock=None, stream=True
     )
+    if published:
+        for group, _, _ in iter_target_grippers(runtime.robot, side):
+            runtime.init_gripper[group.name] = float(value)
+    return published
 
 
 def opposite_gripper_value(
@@ -640,17 +646,17 @@ def reset_target_qpos(runtime: RuntimeState) -> np.ndarray:
     """Joint target the arm resets to: the EVAL INIT start pose when set, else home.
 
     The INIT start pose carries only arm joints; its gripper dims are overwritten with
-    the live gripper so a reset never loads/moves the gripper (the operator drives that
-    with the INIT panel's OPEN/CLOSE buttons).
+    each gripper's start value: the one the operator set with the INIT panel's
+    OPEN/CLOSE buttons, else the robot's home gripper value. Every episode therefore
+    starts from the same gripper state, whatever the previous episode left behind.
     """
     if runtime.init_qpos is None:
         return runtime.robot.initial_qpos
     target = np.asarray(runtime.init_qpos, dtype=np.float32).copy()
-    live = runtime.transport.get_latest_qpos()
-    if live is not None:
-        for idx in runtime.robot.gripper_indices:
-            if idx < len(target) and idx < len(live):
-                target[idx] = float(live[idx])
+    home = runtime.robot.initial_qpos
+    for group, index, _ in iter_target_grippers(runtime.robot, None):
+        if index < len(target) and index < len(home):
+            target[index] = runtime.init_gripper.get(group.name, float(home[index]))
     return target
 
 
@@ -934,7 +940,8 @@ def _resolve_init_pose(
 
     Returns:
         [n] float32 qpos, or None when nothing is configured. The length must cover at
-        least the arm joints; gripper dims are overwritten on reset from the live qpos.
+        least the arm joints; gripper dims are overwritten on reset with each
+        gripper's start value.
     """
     values = qpos if qpos else None
     if values is None:
@@ -960,8 +967,9 @@ def run_init_move(
     """EVAL INIT panel: move the arm to the configured start-pose qpos.
 
     Sets runtime.init_qpos (which retargets every later reset) and streams the arm
-    there now. Gripper dims of the start pose are ignored — the gripper holds its live
-    value and is driven by the panel's OPEN/CLOSE buttons.
+    there now. Gripper dims of the start pose are ignored — each gripper goes to its
+    start value, set by the panel's OPEN/CLOSE buttons and defaulting to the robot's
+    home gripper value.
 
     Args:
         qpos: operator-supplied joint values from the editable INIT box. Empty falls

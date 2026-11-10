@@ -348,6 +348,10 @@ class RuntimeState:
     # the operator clicks DONE, gating RUN until the arm is positioned + gripper set.
     init_qpos: np.ndarray | None = None
     init_ready: bool = False
+    # Start gripper value per arm group chosen with the INIT panel's OPEN/CLOSE. A
+    # reset drives each gripper back to it; a group without a choice starts at the
+    # robot's home gripper value.
+    init_gripper: dict[str, float] = dataclasses.field(default_factory=dict)
 
 
 # --- state-transition helpers (log every transition uniformly) ---
