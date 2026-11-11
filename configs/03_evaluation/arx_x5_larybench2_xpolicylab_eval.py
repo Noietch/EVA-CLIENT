@@ -1,7 +1,8 @@
 """ARX X5: local real-robot eval against the served v1.4 XPolicyLab fleet.
 
 Each checkpoint entry is one served real model; joint/qpos models use the joint
-preset and eef models use the eef preset.
+preset and eef models use the eef preset. A checkpoint runs on its deploy preset
+(publish rate, strategy args) with only this eval section grafted on.
 """
 
 _base_ = ["../01_deploy/arx_x5/xpolicylab.py", "../00_base/evaluation.py"]
@@ -14,7 +15,10 @@ eval_cfg = dict(
     # per task covers it. Raise this only to repeat tasks intentionally.
     trials_per_prompt=1,
     cli_mode="real",
-    inference_strategy="async",
+    # Sync, as in simulation: execute the whole returned chunk, then read the next
+    # observation. Async with latency_k=0 replayed every new chunk from its stale
+    # first step (re-opening a closed gripper) and blended the EEF grippers.
+    inference_strategy="sync",
     checkpoints=[
         dict(
             name="arx_x5_larybench2_xpolicylab_g05",
