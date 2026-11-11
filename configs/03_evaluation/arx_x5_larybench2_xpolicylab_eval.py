@@ -80,5 +80,11 @@ eval_cfg = dict(
             host="10.245.6.224",
             port=8419,
         ),
+        dict(
+            name="arx_x5_larybench2_xpolicylab_vpp2",
+            config="../01_deploy/arx_x5/xpolicylab_eef.py",
+            host="10.245.6.31",
+            port=8410,
+        ),
     ],
 )
