@@ -2287,41 +2287,59 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             return
         self._send_json(200, {"ok": True, "clip_id": clip_id})
 
-    def _eval_score(self, body: dict) -> None:
-        # Submit/overwrite a trial's score+milestones+note. The score is written ONLY into
-        # the recorded lerobot episode (meta/episodes.jsonl + per-frame parquet columns +
-        # info.json), keyed by clip_id -> episode_index. Gate: refuse to score a clip that
-        # has no recorded episode yet (model still initializing, or the trial never ran).
+    def _saved_eval_attempt(self, body: dict) -> tuple[Any, dict[str, Any]] | None:
+        """Resolve the saved attempt an EVAL score/cancel request refers to.
+
+        The attempt is the recorded lerobot episode of the active model keyed by the
+        body's clip_id; identity fields the body carries must match the saved row.
+
+        Returns:
+            (recorder, record) for the saved attempt, or None after sending the error
+            response (no clip_id, model switched, nothing recorded or saved yet, or an
+            identity mismatch).
+        """
         runtime = self.ctx.runtime
         clip_id = body.get("clip_id")
         if not clip_id:
             self._send_json(400, {"ok": False, "error": "clip_id required"})
-            return
+            return None
         model_name = self.ctx.active_model_name()
         if body.get("model_name") not in {None, "", model_name}:
             self._send_json(409, {"ok": False, "error": "evaluation model has changed"})
-            return
+            return None
         if runtime.episode_logger is None:
             self._send_json(
                 409,
                 {"ok": False, "error": "no recorded episode for this trial yet — run it first"},
             )
-            return
+            return None
         recorder = runtime.episode_logger
         target = eval_episode_dir(self.ctx.output_dir, model_name)
         if Path(recorder._log_dir) != target:
             self._send_json(409, {"ok": False, "error": "evaluation recorder is changing models"})
-            return
+            return None
         record = next((row for row in read_result_rows(target) if row["clip_id"] == clip_id), None)
         if record is None:
             self._send_json(409, {"ok": False, "error": "evaluation attempt is not saved yet"})
-            return
+            return None
         identity_fields = ("prompt", "trial", "task_set", "task_id", "scene_id")
         if any(
             key in body and (body[key] or "") != (record.get(key) or "") for key in identity_fields
         ):
             self._send_json(409, {"ok": False, "error": "evaluation attempt identity mismatch"})
+            return None
+        return recorder, record
+
+    def _eval_score(self, body: dict) -> None:
+        # Submit/overwrite a trial's score+milestones+note. The score is written ONLY into
+        # the recorded lerobot episode (meta/episodes.jsonl + per-frame parquet columns +
+        # info.json), keyed by clip_id -> episode_index. Gate: refuse to score a clip that
+        # has no recorded episode yet (model still initializing, or the trial never ran).
+        resolved = self._saved_eval_attempt(body)
+        if resolved is None:
             return
+        recorder, _record = resolved
+        clip_id = body["clip_id"]
         fields = dict(
             score=body.get("score"),
             max_score=body.get("max_score"),
@@ -2333,6 +2351,32 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         ep = recorder.patch_episode_meta_by_clip(
             str(clip_id),
             **fields,
+        )
+        if ep is None:
+            self._send_json(409, {"ok": False, "error": "evaluation attempt is not saved yet"})
+            return
+        self._send_json(200, {"ok": True, "episode_index": ep})
+
+    def _eval_discard(self, body: dict) -> None:
+        # Cancel an attempt that already ended and is not scored yet. Its saved episode is
+        # flagged ``cancelled`` (kept on disk, dropped from the results), so the trial
+        # reads as untested and can run again. A run still in flight is cancelled through
+        # /api/eval_cancel instead, which discards the episode before it is saved.
+        clip_id = body.get("clip_id")
+        if clip_id and clip_id == self.ctx.runtime.current_clip_id:
+            self._send_json(409, {"ok": False, "error": "evaluation attempt is still running"})
+            return
+        resolved = self._saved_eval_attempt(body)
+        if resolved is None:
+            return
+        recorder, record = resolved
+        if record.get("score") is not None:
+            self._send_json(409, {"ok": False, "error": "evaluation attempt is already scored"})
+            return
+        ep = recorder.patch_episode_meta_by_clip(
+            str(clip_id),
+            cancelled=True,
+            cancelled_at=_dt.datetime.now().isoformat(timespec="seconds"),
         )
         if ep is None:
             self._send_json(409, {"ok": False, "error": "evaluation attempt is not saved yet"})
@@ -4783,6 +4827,7 @@ _POST_ROUTES = {
     "/api/init_gripper": ConsoleRequestHandler._post_init_gripper,
     "/api/eval_start": ConsoleRequestHandler._eval_start,
     "/api/score": ConsoleRequestHandler._eval_score,
+    "/api/eval_discard": ConsoleRequestHandler._eval_discard,
 }
 
 

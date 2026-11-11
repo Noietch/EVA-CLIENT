@@ -55,7 +55,9 @@ def read_result_rows(dataset_root: Path) -> list[dict[str, Any]]:
 
     Returns:
         rows: list of result dicts, deduped to the latest episode per clip_id. Rows
-            without a clip_id (plain collection) are skipped.
+            without a clip_id (plain collection) are skipped, and so is a clip whose
+            latest row was cancelled after the run ended (``cancelled``), so its trial
+            reads as untested and can be run again.
     """
     path = dataset_root / "meta" / "episodes.jsonl"
     key = _result_rows_cache_key(dataset_root)
@@ -70,6 +72,7 @@ def read_result_rows(dataset_root: Path) -> list[dict[str, Any]]:
         rows = []
         by_clip: dict[str, dict[str, Any]] = {}
         order: list[str] = []
+        cancelled: set[str] = set()
         with path.open() as f:
             for line in f:
                 line = line.strip()
@@ -105,7 +108,11 @@ def read_result_rows(dataset_root: Path) -> list[dict[str, Any]]:
                 if cid not in by_clip:
                     order.append(cid)
                 by_clip[cid] = rec  # later episode row for a clip wins
-        rows = [by_clip[c] for c in order]
+                if row.get("cancelled"):
+                    cancelled.add(cid)
+                else:
+                    cancelled.discard(cid)
+        rows = [by_clip[c] for c in order if c not in cancelled]
     with _RESULT_ROWS_CACHE_LOCK:
         existing = _RESULT_ROWS_CACHE.get(key)
         if existing is not None:

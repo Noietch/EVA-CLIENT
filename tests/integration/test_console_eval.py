@@ -338,3 +338,88 @@ def test_dashboard_requires_explicit_roots_even_when_work_and_output_have_record
         payload = console.get("/api/dashboard").json
         assert len(payload["sources"]) == 1
         assert payload["views"]["eval"]["episodes"] == 1
+
+
+def test_results_skip_attempts_cancelled_after_the_run(tmp_path):
+    # A cancelled attempt stays on disk but leaves the results; a later row for the same
+    # clip (a re-test) brings it back.
+    with serve_console(_eval_config(), tmp_path) as h:
+        ep_meta = tmp_path / "episodes" / "raw" / "meta"
+        ep_meta.mkdir(parents=True)
+        (ep_meta / "episodes.jsonl").write_text(
+            '{"episode_index": 0, "clip_id": "c1", "trial": 1, "cancelled": true}\n'
+            '{"episode_index": 1, "clip_id": "c2", "trial": 2, "score": 1}\n'
+            '{"episode_index": 2, "clip_id": "c3", "trial": 3, "cancelled": true}\n'
+            '{"episode_index": 4, "clip_id": "c3", "trial": 3, "score": 2}\n',
+            encoding="utf-8",
+        )
+        recs = h.get("/api/results").json["records"]
+        assert [(r["clip_id"], r["episode_index"]) for r in recs] == [("c2", 1), ("c3", 4)]
+
+
+def test_eval_discard_cancels_a_finished_unscored_attempt(tmp_path, monkeypatch):
+    plan_root = tmp_path / "plans/eval-cups"
+    _scene_plan(plan_root, "CUP", "pick up the cup", b"cup")
+    cfg = _eval_config()
+    cfg.eval.task_set_dir = str(plan_root)
+    cfg.eval.reset_after_each_trial = False
+    with serve_console(cfg, tmp_path / "run") as h:
+        recorder = EpisodeLogger(
+            eval_episode_dir(h.runtime.console_ctx.output_dir, "model"),
+            h.runtime.robot,
+            fps=10,
+            dataset_keys=cfg.transport.dataset_keys,
+            eval_mode=True,
+        )
+        h.runtime.episode_logger = recorder
+
+        def dispatch(_config, runtime, session):
+            recorder.start_episode(session.selected_task)
+            state = np.zeros(runtime.robot.total_action_dim, dtype=np.float32)
+            for frame in range(3):
+                recorder.record_step(
+                    Observation(state_qpos=state, images={}), state, timestamp=10.0 + frame / 10
+                )
+            session.status = SessionStatus.RUNNING
+
+        monkeypatch.setattr(app, "_dispatch_run", dispatch)
+        monkeypatch.setattr(app, "run_setup", lambda *_args: True)
+        h.runtime.web_phase = "ready"
+        body = dict(
+            clip_id="attempt-1",
+            prompt="pick up the cup",
+            trial=1,
+            task_set="eval-cups",
+            task_id="CUP",
+            scene_id="SC-1",
+            model_name="model",
+        )
+        assert h.do("/api/eval_start", body).status == 200
+        # A run in flight is cancelled through /api/eval_cancel, never through discard.
+        assert h.post("/api/eval_discard", body).status == 409
+        assert h.do("/api/eval_stop").status == 200
+        recorder.wait_for_saves(fail_on_error=True)
+        assert len(h.get("/api/results").json["records"]) == 1
+        assert h.post("/api/eval_discard", {**body, "model_name": "other"}).status == 409
+        assert h.post("/api/eval_discard", {**body, "scene_id": "SC-2"}).status == 409
+
+        assert h.post("/api/eval_discard", body).status == 200
+        assert h.get("/api/results").json["records"] == []
+        assert h.post("/api/score", {**body, "score": 1, "max_score": 1}).status == 409
+        assert h.post("/api/eval_discard", body).status == 409
+        rows = [
+            json.loads(line)
+            for line in (recorder._log_dir / "meta" / "episodes.jsonl").read_text().splitlines()
+        ]
+        assert rows[0]["clip_id"] == "attempt-1" and rows[0]["cancelled"] is True
+
+        # The same trial runs again and scores; a scored attempt can no longer be cancelled.
+        retry = {**body, "clip_id": "attempt-2"}
+        h.runtime.web_phase = "ready"
+        assert h.do("/api/eval_start", retry).status == 200
+        assert h.do("/api/eval_stop").status == 200
+        recorder.wait_for_saves(fail_on_error=True)
+        assert h.post("/api/score", {**retry, "score": 1, "max_score": 1}).status == 200
+        records = h.get("/api/results").json["records"]
+        assert [(r["clip_id"], r["score"]) for r in records] == [("attempt-2", 1)]
+        assert h.post("/api/eval_discard", retry).status == 409

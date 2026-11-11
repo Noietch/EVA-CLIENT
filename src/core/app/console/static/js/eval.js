@@ -48,6 +48,8 @@ let EVAL_RESULTS_REQUEST = 0;
 let EVAL_RESULTS_LOADING = false;
 
 let EVAL_SCORE_PENDING = false;
+// A CANCEL of a finished attempt is in flight.
+let EVAL_CANCEL_PENDING = false;
 
 let EVAL_OBSERVED_CLIP = null;
 
@@ -690,8 +692,17 @@ function applyEvalPhase() {
     else if (phase === "resetting") { label.textContent = "RUN ▶"; reset.classList.add("attention"); reset.textContent = "RESETTING…"; }
     else { label.textContent = "RUN ▶"; reset.disabled = !(setupDone && phase === "ready"); }
     const clickable = running || (phase === "ready" && hasTrial && setupDone
-      && !EVAL_SWITCHING && !EVAL_SCORE_PENDING);
+      && !EVAL_SWITCHING && !EVAL_SCORE_PENDING && !EVAL_CANCEL_PENDING);
     run.disabled = busy || !clickable;
+    // The RESET slot turns into CANCEL while there is an attempt to drop: a run in flight,
+    // or a finished run that is not scored yet (an auto-reset keeps RESETTING… on top).
+    if (phase === "cancelling" || EVAL_CANCEL_PENDING) {
+      reset.textContent = "CANCELLING…"; reset.disabled = true; reset.classList.add("danger");
+    } else if (phase !== "resetting" && evalCancelable(phase)) {
+      reset.textContent = "CANCEL ✕"; reset.disabled = false; reset.classList.add("danger");
+    } else {
+      reset.classList.remove("danger");
+    }
     renderEvalSetupState();
     const lockCkpt = EVAL_SWITCHING || EVAL_SCORE_PENDING || ["warming","starting","running","stopping","resetting"].includes(phase);
     const modelList = $("eval-model-list");
@@ -764,6 +775,56 @@ function evalRun() {
       task_set: task.task_set || "", task_id: task.task_id || "", scene_id: EVAL_SCENE_MAP.sceneId})
       .catch(() => { EVAL_PENDING = null; EVAL_CLIP = null; applyEvalPhase(); });
     renderEvalTrialRow();
+  }
+
+// CANCEL drops the current attempt: a run in flight is halted and never saved, and a
+// finished run that is not scored yet is flagged cancelled, so the trial can run again.
+function evalCancelable(phase) {
+    if (EVAL_CANCEL_PENDING || EVAL_SWITCHING || EVAL_SCORE_PENDING) return false;
+    if (["starting", "running", "stopping"].includes(phase)) return true;
+    if (!["ready", "idle", "resetting"].includes(phase) || !evalHasTrial()) return false;
+    const rec = EVAL_RECORDS[evalRecKey(EVAL_TASK, EVAL_TRIAL)];
+    return evalTrialScorable(EVAL_TRIAL) && rec.score == null;
+  }
+
+async function evalCancel() {
+    const phase = evalCurPhase();
+    if (!evalCancelable(phase)) return;
+    if (["starting", "running", "stopping"].includes(phase)) {
+      S.evalRunToggleBusy = null;
+      setEvalPending("cancelling");
+      apiPost("/api/eval_cancel")
+        .then(() => { EVAL_CLIP = null; })
+        .catch(() => { EVAL_PENDING = null; applyEvalPhase(); });
+      return;
+    }
+    const task = evalTask();
+    const key = EVAL_TASK;
+    const trial = EVAL_TRIAL;
+    const rec = EVAL_RECORDS[evalRecKey(key, trial)];
+    EVAL_CANCEL_PENDING = true;
+    applyEvalPhase();
+    try {
+      const response = await apiPost("/api/eval_discard", {
+        clip_id: rec.clip_id, prompt: task.prompt_en, trial, model_name: S.EVAL_MODEL_NAME,
+        task_set: task.task_set || "", task_id: task.task_id || "", scene_id: EVAL_SCENE_MAP.sceneId,
+      });
+      if (response?.ok === false) { $("eval-saved").textContent = response.error || "cancel rejected"; return; }
+      if (EVAL_CLIP === rec.clip_id) EVAL_CLIP = null;
+      await loadEvalResults();
+      renderEvalTrialRow(); renderEvalConsole();
+      $("eval-saved").textContent = "attempt cancelled — run it again";
+    } catch (error) {
+      $("eval-saved").textContent = "cancel failed";
+    } finally {
+      EVAL_CANCEL_PENDING = false;
+      applyEvalPhase();
+    }
+  }
+
+// The RESET slot of the RUN panel doubles as CANCEL (see applyEvalPhase).
+function evalResetOrCancel() {
+    return evalCancelable(evalCurPhase()) && evalCurPhase() !== "resetting" ? evalCancel() : evalReset();
   }
 
 function evalReset() {
@@ -863,7 +924,8 @@ function applyEvalStatus(s) {
         || (EVAL_PENDING === "starting" && phase === "running")
         || (EVAL_PENDING === "warming" && phase === "ready")
         || (EVAL_PENDING === "stopping" && ["resetting","ready","idle"].includes(phase))
-        || (EVAL_PENDING === "resetting" && ["ready","idle"].includes(phase)))) {
+        || (EVAL_PENDING === "resetting" && ["ready","idle"].includes(phase))
+        || (EVAL_PENDING === "cancelling" && ["ready","idle"].includes(phase)))) {
       EVAL_PENDING = null; EVAL_PENDING_TICKS = 0;
     } else if (EVAL_PENDING === "warming" && phase === "starting") {
       // web:warmup drives the backend phase to "starting" while it homes + validates;
@@ -1402,7 +1464,7 @@ function tpDrawChart(force = false) {
   }
 
 export {
-  applyEvalStatus, evalCfg, evalEnabled, evalReset, evalSetup, evalRunToggle, evalResumeOnEnter, loadEvalResults,
+  applyEvalStatus, evalCfg, evalEnabled, evalReset, evalResetOrCancel, evalSetup, evalRunToggle, evalResumeOnEnter, loadEvalResults,
   renderEvalSelectors, submitEvalScore,
   loadResultsAll, rvTrialMs,
   tpSeek, tpToggle, trialPopClose, trialPopOpen,

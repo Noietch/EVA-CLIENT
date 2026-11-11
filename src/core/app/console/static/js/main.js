@@ -5,7 +5,7 @@ import { initLocale } from "./i18n.js";
 import { closeChartModal, drawLiveCharts, liveDimsAll, onScrubInput, openChartModal, resetLiveSeries } from "./charts.js";
 import { cancelDebugIntent, applyTune, applyManualTune, renderConfig, manualConnect, manualDisconnect, manualDispatchToggle, enterManualSim, applyStatus, pauseSetup, replayIsLocalMode, resumeSetup, retrySetup, startRunFromDebug, updateGuide } from "./run.js";
 import { handleCollectionReviewInput, resetCollectionReviewInput, changeCollectionExportFormat, changeCollectionSlotFilter, changeCollectionSlotPage, clearReviewPlayback, collectConfigured, downloadCollectionAssetsFromHf, downloadCollectionTaskSetFromHf, exportCollectionQuality, installCollectKeyboardControls, pollEpisodeHistory, renderCollect, renderCollectControls, renderRolloutSave, returnReviewToLive, reviewActiveInCurrentTab, saveAnnotation, startCollectFromTab, submitEpisodeNote, submitEpisodeQc, submitQc, toggleCollectionSlotAll, uploadCollectionDatasetToHf, uploadCollectionQuality } from "./collect.js";
-import { evalReset, evalSetup, evalRunToggle, evalResumeOnEnter, submitEvalScore, loadEvalResults, renderEvalSelectors, loadResultsAll, tpSeek, tpToggle, trialPopClose } from "./eval.js";
+import { evalResetOrCancel, evalSetup, evalRunToggle, evalResumeOnEnter, submitEvalScore, loadEvalResults, renderEvalSelectors, loadResultsAll, tpSeek, tpToggle, trialPopClose } from "./eval.js";
 import { handleVisibilityChange, replayPlay, replayStop, replayToggle, seekReplay, loop, pollFrame, pollScene, refreshCameraStreams, exitReplayMode } from "./replay.js";
 import { pollRlSeries, renderRlConfig, renderRlStatus } from "./rl.js";
 import { initDashboard, loadDashboard } from "./dashboard.js";
@@ -450,7 +450,7 @@ $("b-replay-reset").onclick  = () => {
   };
 $("be-run").onclick    = () => evalRunToggle();
 $("be-setup").onclick  = () => evalSetup(true);
-$("be-reset").onclick  = () => evalReset();
+$("be-reset").onclick  = () => evalResetOrCancel();
 $("be-submit").onclick = () => submitEvalScore();
 $("b-collect-toggle").onclick = () => {
     if (S.collectToggleBusy !== null) return;
