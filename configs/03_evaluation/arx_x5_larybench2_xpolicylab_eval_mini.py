@@ -24,6 +24,12 @@ eval_cfg = dict(
     inference_strategy="sync",
     checkpoints=[
         dict(
+            name="arx_x5_larybench2_xpolicylab_g05",
+            config="../01_deploy/arx_x5/xpolicylab.py",
+            host="10.245.71.100",
+            port=8410,
+        ),
+        dict(
             name="arx_x5_larybench2_xpolicylab_pi_05",
             config="../01_deploy/arx_x5/xpolicylab.py",
             host="10.245.6.224",
