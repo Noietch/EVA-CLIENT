@@ -860,6 +860,10 @@ def run_setup(
                 session.selected_task,
                 partial(_loop_fetch_chunk, config, runtime, session),
             )
+        # Discard the validation chunk and the policy's memory of it — a fresh warmup
+        # runs when execution starts, and a history-conditioned policy must take its
+        # first episode frame from that run, not from this setup.
+        reset_infer_strategy(runtime)
     except PolicyRequestError as error:
         session.last_error = f"Setup failed: policy request error: {error}"
         invalidate_policy_connection(config, runtime, session, error)
@@ -872,9 +876,6 @@ def run_setup(
         logger.info("Action chunk preparation failed: %s", error)
         return False
     logger.info("Setup complete: policy validated")
-    # Discard the validation chunk — a fresh warmup runs when execution starts.
-    if runtime.infer_strategy is not None:
-        runtime.infer_strategy.reset()
     session.action_chunk = None
     session.chunk_index = 0
     session.pending_real_chunk = None

@@ -721,6 +721,33 @@ def test_rapid_reselection_leaks_no_loop_threads(console):
     assert _eva_loop_thread_count() <= baseline + 1
 
 
+def test_setup_resets_the_policy_after_its_validation_inference(console, monkeypatch):
+    """Setup discards its validation chunk, so the policy must forget that inference
+    too: a history-conditioned policy would otherwise start the episode on the frame
+    it saw during setup."""
+    console.do("/api/connect")
+    console.do("/api/select_mode", {"mode": "real"})
+    console.do("/api/select_task", {"task": "pick up the cup"})
+    policy = console.runtime.policy
+    calls: list[str] = []
+
+    def record(name: str) -> None:
+        original = getattr(policy, name)
+
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            calls.append(name)
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(policy, name, wrapper)
+
+    record("infer")
+    record("reset")
+    console.do("/api/setup")
+
+    assert console.session.is_setup_done is True
+    assert calls[-2:] == ["infer", "reset"]
+
+
 def test_repeated_setup_run_stop_cycles_never_pin_running(console):
     """setup->run->publish->stop, ~15x. step_index is reset by run_setup (via
     reset_session_progress), so it must read 0 right after each /api/setup. The final
