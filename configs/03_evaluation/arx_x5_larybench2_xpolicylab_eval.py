@@ -38,7 +38,7 @@ eval_cfg = dict(
         dict(
             name="arx_x5_larybench2_xpolicylab_internvla_a1_5",
             config="../01_deploy/arx_x5/xpolicylab.py",
-            host="10.245.6.224",
+            host="10.245.76.49",
             port=8412,
         ),
         dict(
