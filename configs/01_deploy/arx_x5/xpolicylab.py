@@ -33,6 +33,9 @@ inference_cfg = dict(
     setup_warmup_chunks=1,
 )
 
+# Async drops the first 8 steps (0.27 s at 30 Hz) of each new chunk, the part
+# that already elapsed while the policy was inferring; with 0 every chunk
+# replayed from its stale first step and re-opened grippers that had closed.
 inference_strategies = {
-    "async": dict(args=dict(latency_k=0)),
+    "async": dict(args=dict(latency_k=8)),
 }
