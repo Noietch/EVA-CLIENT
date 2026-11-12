@@ -51,7 +51,7 @@ eval_cfg = dict(
             name="arx_x5_larybench2_xpolicylab_xiaomi_robotics_1",
             config="../01_deploy/arx_x5/xpolicylab_eef.py",
             robot=dict(eef_links=["link6", "link6"]),
-            host="10.245.6.224",
+            host="10.245.76.49",
             port=8414,
         ),
         dict(
