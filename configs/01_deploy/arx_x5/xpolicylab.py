@@ -29,7 +29,7 @@ policy = dict(
 # this preset as its whole config, so the rate has to be set here.
 inference_cfg = dict(
     inference_rate=3,
-    publish_rate=30,
+    publish_rate=10,
     setup_warmup_chunks=1,
 )
 
