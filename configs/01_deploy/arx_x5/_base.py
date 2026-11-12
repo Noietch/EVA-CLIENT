@@ -15,11 +15,12 @@ rollout = dict(
     intervention=dict(control_mode="relative"),
 )
 
-# Sync waits after every step until the robot reaches the target. A gripper
-# closed on an object never reaches its commanded closed value, so including it
-# made every step after a grasp wait out the full timeout; only the arm is waited on.
+# Sync publishes each chunk step at the 30 Hz loop rate, as in the
+# demonstrations, without waiting for the robot to reach every step. The arrival
+# wait (up to 3.3 s per step) never ended once a gripper closed on an object,
+# because the gripper cannot reach its commanded closed value.
 inference_strategies = {
-    "sync": dict(args=dict(sync_wait_ignore_gripper=True)),
+    "sync": dict(args=dict(sync_wait_threshold=9999.0)),
     "async": dict(
         args=dict(
             latency_k=8,
