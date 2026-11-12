@@ -589,8 +589,9 @@ def _resolve_eval_checkpoints(
     For an eval config (``cfg.eval_cfg`` non-empty with a ``checkpoints`` list), each
     checkpoint entry carries a ``config`` string pointing at a deploy preset. This
     loads that preset into a full ConfigDict (recursively via ``load_config``),
-    overrides its policy endpoint with the checkpoint's ``host``/``port``, and
-    replaces the ``config`` string in place — run loop deep-copies it per ckpt swap.
+    overrides its policy endpoint with the checkpoint's ``host``/``port``, merges its
+    optional ``robot`` override, and replaces the ``config`` string in place — run
+    loop deep-copies it per ckpt swap.
 
     The ``eval_cfg.ssh`` block (host/user/port/remote_sync_dir) is left untouched —
     consumers pass it straight to the FUNCTIONS-registered forwarder.
@@ -611,6 +612,8 @@ def _resolve_eval_checkpoints(
         sub = load_config((path.parent / ref).resolve(), workspace=workspace)
         sub.policy.host = str(ckpt.get("host", "127.0.0.1"))
         sub.policy.port = int(ckpt["port"])
+        if "robot" in ckpt:
+            sub.robot.update(ckpt["robot"])
         ckpt["config"] = sub
 
 

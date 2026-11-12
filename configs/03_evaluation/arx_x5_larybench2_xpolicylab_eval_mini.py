@@ -3,6 +3,9 @@
 Each checkpoint entry is one served real model; joint/qpos models use the joint
 preset and eef models use the eef preset. A checkpoint runs on its deploy preset
 (publish rate, strategy args) with only this eval section grafted on.
+
+The v1.4 demonstrations were collected with the client FK at link6 (each arm's
+base_link), not the URDF TCP, so eef checkpoints pin ``eef_links`` to link6.
 """
 
 _base_ = ["../01_deploy/arx_x5/xpolicylab.py", "../00_base/evaluation.py"]
@@ -41,18 +44,21 @@ eval_cfg = dict(
         dict(
             name="arx_x5_larybench2_xpolicylab_xiaomi_robotics_1",
             config="../01_deploy/arx_x5/xpolicylab_eef.py",
+            robot=dict(eef_links=["link6", "link6"]),
             host="10.245.6.224",
             port=8414,
         ),
         dict(
             name="arx_x5_larybench2_xpolicylab_openwam",
             config="../01_deploy/arx_x5/xpolicylab_eef.py",
+            robot=dict(eef_links=["link6", "link6"]),
             host="10.245.6.224",
             port=8415,
         ),
         dict(
             name="arx_x5_larybench2_xpolicylab_hy_embodied_05_vla",
             config="../01_deploy/arx_x5/xpolicylab_eef.py",
+            robot=dict(eef_links=["link6", "link6"]),
             host="10.245.6.224",
             port=8416,
         ),
@@ -77,6 +83,7 @@ eval_cfg = dict(
         dict(
             name="arx_x5_larybench2_xpolicylab_vpp2",
             config="../01_deploy/arx_x5/xpolicylab_eef.py",
+            robot=dict(eef_links=["link6", "link6"]),
             host="10.245.6.31",
             port=8410,
         ),
