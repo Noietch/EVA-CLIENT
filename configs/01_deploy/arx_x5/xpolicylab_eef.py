@@ -9,6 +9,13 @@ _base_ = ["openpi_eef.py"]
 
 transport = dict(type="zmq", image_mode="on_demand")
 
+# The rest-pose weight is only passed to the IK solver together with explicit EEF
+# links. A 6-DoF arm has no null space for it to act in, so the default of 1.0
+# trades pose accuracy for staying near home: replayed v1.4 demonstrations miss
+# their fingertip target by 2.5 mm (median) to 9 mm when the gripper closes. 0.1,
+# as in the simulation EEF presets, keeps that under 0.2 mm.
+robot = dict(eef_links=["link6", "link6"], ik_reg_weight=0.1)
+
 policy = dict(
     type="xpolicylab",
     host="33.29.36.208",
