@@ -46,6 +46,18 @@
   * **Collection.** One data root for task sets, datasets, and assets; scene/task identity binding; slots ordered by hand and layout and grouped by scene; VR review controls; recorder rejects missing, stalled, or frozen camera streams. See [`docs/collection_scene_plan.md`](./docs/collection_scene_plan.md).
   * **Policy backends.** Native client for the official [XPolicyLab](https://github.com/XPolicyLab/XPolicyLab) websocket protocol (joint and EEF actions, episode reset, replaced-session recovery); policy requests keep every configured camera and pass raw images by default.
   * **Hardware.** Dual YAM EEF configs, YAML-configured gripper speed and bounded impedance, camera startup controls, and a refined camera/device lifecycle.
+  * **Refreshed console UI.** A redesigned browser console with dedicated DASHBOARD, DEBUG, DEVICE, COLLECT, REPLAY, RL, EVAL, and RESULT tabs.
+
+<table>
+  <tr>
+    <td><img src="assets/media/console/device.png" alt="DEVICE tab: live cameras and 3D arm view"></td>
+    <td><img src="assets/media/console/eval.png" alt="EVAL tab: scene-aware evaluation"></td>
+  </tr>
+  <tr>
+    <td><img src="assets/media/console/dashboard.png" alt="DASHBOARD tab: operations overview"></td>
+    <td><img src="assets/media/console/replay.png" alt="REPLAY tab: episode replay"></td>
+  </tr>
+</table>
 
 * **[2026-08-28] EVA-Client 0.2.0** EVA-Client now supports WebXR-based VR controller teleoperation, ARX X5 hardware, dual-YAM leader-follower data collection, export to LeRobot v3.0, MCAP, and HDF5, and multiple coding-agent skills for adding robots, calibrating cameras, and debugging robot SDKs.
 
