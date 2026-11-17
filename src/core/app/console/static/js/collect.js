@@ -11,7 +11,7 @@ import {
   exitReplayMode, loadReviewPlayback, refreshCameraStreams, replayStop,
 } from "./replay.js";
 import { setActiveTab } from "./main.js";
-import { renderSceneGrid } from "./scene_map.js";
+import { renderSceneReference } from "./scene_map.js";
 
 // ===== collect =====
 
@@ -49,7 +49,6 @@ const EPISODE_HISTORY_PAGE_SIZE = 128;
 const COLLECTION_SLOT_POLL_MS = 2000;
 let episodeHistoryPolling = false;
 let collectionSlotsController = null;
-let currentSceneGridRender = null;
 let collectItemsRenderKey = "";
 let rolloutItemsRenderKey = "";
 let collectionSlotClickTimer = null;
@@ -439,16 +438,6 @@ function changeCollectionSlotPage(delta) {
   state.followActivePage = false;
   pollCollectionSlots(true);
   renderCollect();
-}
-
-function renderCurrentSceneGrid(scene, task) {
-  const host = $("collect-current-scene-grid");
-  if (!host) return;
-  if (currentSceneGridRender && currentSceneGridRender.host === host &&
-      currentSceneGridRender.scene === scene && currentSceneGridRender.task === task &&
-      currentSceneGridRender.plan === S.SCENE_PLAN) return;
-  currentSceneGridRender = { host, scene, task, plan: S.SCENE_PLAN };
-  renderSceneGrid(host, S.SCENE_PLAN, scene, task);
 }
 
 function itemsForPrompt(items, prompt) {
@@ -2016,10 +2005,7 @@ function renderCollect() {
     $("collect-current-position").textContent = displaySlot
       ? `${Number(displaySlot.ordinal)} / ${totalSlots}` : `-- / ${totalSlots}`;
     const displayTask = scenePlanTasks().find((task) => task.task_id === displaySlot?.task_id);
-    const displayScene = (S.SCENE_PLAN?.scenes || []).find(
-      (scene) => scene.scene_id === displaySlot?.scene_id
-    );
-    renderCurrentSceneGrid(displayScene, displayTask);
+    renderSceneReference($("collect-current-scene-grid"), S.SCENE_PLAN, displayTask);
     $("collect-current-task").textContent = displaySlot
       ? (displaySlot.task_zh || displaySlot.task || displaySlot.episode?.task || displaySlot.episode?.prompt || "--") : "--";
     $("collect-current-task-en").textContent = displaySlot && displaySlot.task_zh

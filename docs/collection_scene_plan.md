@@ -92,8 +92,10 @@ sampling_points:
 Keep approximate coordinates `unverified`. The runtime considers a layout
 calibrated only when every parsed point has both coordinates and is marked
 `verified`. Point-level unit/frame/status values can override layout defaults.
-`display_grid` optionally describes the display arrangement. The map is a scene
-reference; marking it calibrated does not itself calibrate the robot or cameras.
+Marking a layout calibrated does not itself calibrate the robot or cameras.
+The console does not draw layouts or placements; they feed spatial task order
+and simulator-aware plans. What the operator sees is the task's reference photo
+(see `reference_image` below).
 
 ## Scenes: `scene.csv`
 
@@ -117,8 +119,7 @@ A placement has this shape:
 ```
 
 A continuous object spanning multiple points remains one placement with multiple
-`position_ids`. The map expands those points while preserving their grouping.
-The parser also retains a seven-value `pose_xyzw` and `fixed` when authored for
+`position_ids`. The parser also retains a seven-value `pose_xyzw` and `fixed` when authored for
 simulator-aware plans. Tasks reference scenes; scenes do not duplicate their
 own list of tasks.
 
@@ -138,6 +139,11 @@ count field names.
 | `action`, `category` | Optional task classification |
 | `operation_object` | Optional object label(s), separated with `/` |
 | `operation_object_ids` | Optional semicolon-separated object IDs for spatial ordering |
+| `reference_image` | Optional photo path relative to the task set (JPG/PNG/WebP) |
+
+COLLECT, EVAL, DASHBOARD, and RESULT show a task's `reference_image` as its scene
+reference. A task without one shows only its prompt; there is no position-grid
+view.
 
 For example, a task with `scene_ids=SC-001;SC-002` and
 `scene_epsiodes_count=3;2` expands into five slots. Set

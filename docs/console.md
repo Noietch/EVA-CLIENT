@@ -90,8 +90,8 @@ evaluation recording settings. Restart EVA after changing console configuration.
 ## Collection workflow
 
 Choose a dataset in COLLECT, then a slot in the scene/task/round grid. A mounted
-[scene plan](./collection_scene_plan.md) supplies object placement and target
-counts. Scene and task filters change the displayed grid; the slot ID remains
+[scene plan](./collection_scene_plan.md) supplies each task's reference photo and
+target counts. Scene and task filters change the displayed grid; the slot ID remains
 stable. Inline `collection.tasks` configs also use the picker, with a DEFAULT
 scene and one slot per requested episode. A target of `-1` stays available for
 repeated captures.
@@ -149,7 +149,7 @@ Prepare the robot before RUN. After STOP and save completion, mark milestones
 and save the score/note. Scoring is tied to the recorded clip, model, scene, and
 trial; a running or unsaved attempt cannot be scored. Re-entering EVAL resumes
 from unscored work. RESULT includes scene identity when grouping trials and can
-open recorded scene layouts, cameras, robot replay, and charts.
+open the task reference photo, cameras, robot replay, and charts.
 
 ## RL and human intervention
 

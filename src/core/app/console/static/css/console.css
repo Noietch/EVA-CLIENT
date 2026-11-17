@@ -1105,7 +1105,7 @@
   #view-eval .cam-strip { flex: 2 1 0; }
   #view-eval .stage-top { height: auto; }
   #view-eval .stage-top .col-canvas { flex: 0 0 160px; height: 160px; }
-  #eval-scene-grid[hidden], #eval-scene-set-list[hidden] { display: none; }
+  #eval-scene-set-list[hidden] { display: none; }
   #eval-scene-status { color: var(--ink-dim); font: 11px/1.4 var(--sans); }
   #eval-scene-status:empty { display: none; }
   .dashboard-scene-selectors {
@@ -1115,11 +1115,9 @@
   .dashboard-scene-selectors label { display: grid; gap: 5px; font: 10px/1.3 var(--mono); }
   .dashboard-scene-selectors select { width: 100%; min-width: 0; }
   #dashboard-scene-grid { max-width: 900px; }
-  #dashboard-scene-grid[hidden] { display: none; }
   #dashboard-scene-status { color: var(--ink-dim); font: 11px/1.4 var(--sans); }
   #dashboard-scene-status:empty { display: none; }
   #tp-scene-grid { width: min(100%, 900px); margin: 0 auto 12px; }
-  #tp-scene-grid[hidden] { display: none; }
   .collect-current-copy {
     display: grid; grid-template-columns: minmax(0, 1fr) auto;
     align-content: start; gap: 6px 12px; min-width: 0;
@@ -1397,14 +1395,8 @@
     height: 34px; min-height: 34px; padding: 7px 30px 7px 9px; font-size: 10px;
     background-position: right 8px center;
   }
-  .collect-scene-grid {
-    display: grid;
-    grid-template-columns: repeat(var(--scene-grid-columns, 1), minmax(0, 1fr));
-    grid-template-rows: repeat(var(--scene-grid-rows, 1), auto); gap: 5px;
-    width: 100%; min-width: 0; align-content: start;
-  }
-  .collect-scene-grid[data-display-mode="prompt"] { display: none; }
-  .collect-scene-grid[data-display-mode="reference"] { display: block; }
+  .collect-scene-grid { display: block; width: 100%; min-width: 0; }
+  .collect-scene-grid[hidden] { display: none; }
   .collect-scene-reference {
     display: grid; gap: 6px; min-width: 0; max-width: 320px; padding: 8px;
     border: 1px solid var(--rule); border-radius: 4px; background: var(--surface-2);
@@ -1423,34 +1415,6 @@
   }
   .collect-scene-reference-status {
     color: var(--ink-dim); font: 11px/1.4 var(--sans);
-  }
-  .collect-scene-cell {
-    position: relative; min-width: 0; min-height: 0; aspect-ratio: 1;
-    overflow: hidden; padding: 16px 5px 5px;
-    border: 1px solid var(--rule-strong); border-radius: 4px;
-    background: var(--surface-2); color: var(--ink-faint); container-type: inline-size;
-  }
-  .collect-scene-cell span {
-    position: absolute; top: 5px; left: 6px; font: 700 8px/1 var(--mono);
-    color: currentColor; letter-spacing: 0;
-  }
-  .collect-scene-cell b {
-    position: absolute; z-index: 2; right: 4px; bottom: 4px; left: 4px;
-    min-width: 0; overflow: hidden; font: 700 8px/1.2 var(--sans);
-    letter-spacing: 0; text-align: center; text-overflow: ellipsis; white-space: nowrap;
-  }
-  .collect-scene-object-photo {
-    position: absolute; z-index: 1; inset: 18px 8px 22px; width: calc(100% - 16px);
-    height: calc(100% - 40px); object-fit: contain; border-radius: 3px;
-    background: var(--paper);
-  }
-  .collect-scene-cell.empty { background: var(--surface-2); color: var(--ink-faint); }
-  .collect-scene-cell.fixed {
-    border-color: var(--ink); background: var(--ink); color: var(--paper);
-  }
-  .collect-scene-cell.fixed.task-relevant {
-    border-color: var(--ink); background: var(--paper); color: var(--ink);
-    box-shadow: inset 0 0 0 1px var(--ink);
   }
   .collect-episode-summary {
     display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; margin-top: 8px;

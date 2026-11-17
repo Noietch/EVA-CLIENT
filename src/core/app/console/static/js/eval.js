@@ -3,7 +3,7 @@
 import { $, RT_COLORS, S, apiGet, apiPost, setCommandMetadata } from "./core.js";
 import { drawSeriesChart } from "./charts.js";
 import { setPanel, syncChip } from "./run.js";
-import { renderSceneGrid } from "./scene_map.js";
+import { renderSceneReference } from "./scene_map.js";
 
 // ===== eval =====
 
@@ -231,21 +231,14 @@ function renderEvalSceneMap() {
       EVAL_TASK_PAGE_ANCHOR = "";
       loadEvalScenePlan(true);
     };
-    const scene = scenes.find((entry) => entry.scene_id === state.sceneId);
     $("eval-scene-task").textContent = task?.prompt_zh || selectedTask?.prompt_en || "—";
     $("eval-scene-status").textContent = state.loading ? "Loading scene map…"
       : state.error ? state.error
       : !state.taskSet ? "No evaluation task set configured"
-      : !task ? "No scene map linked to this evaluation task"
-      : !scene && !task.reference_image_url ? "No scene layout found for this task" : "";
+      : !task ? "No scene map linked to this evaluation task" : "";
     $("eval-scene-refresh").disabled = state.loading || evalBusy();
     $("eval-scene-refresh").onclick = () => loadEvalScenePlan(true);
-    host.hidden = !scene && !task?.reference_image_url;
-    if (scene || task?.reference_image_url) renderSceneGrid(host, state.plan, scene, task);
-    else {
-      host.replaceChildren();
-      delete host.dataset.layoutKey;
-    }
+    renderSceneReference(host, state.plan, task);
   }
 
 function evalHasTrial() { return !!evalTask() && EVAL_TRIAL != null
@@ -1222,12 +1215,9 @@ function trialPopOpen(rec, modelName) {
     TP_REC = rec; TP_MODEL = modelName || "";
     tpRenderSteps();
     const grid = $("tp-scene-grid");
-    const scene = rec.scene_map?.scenes?.find((entry) => entry.scene_id === rec.scene_id);
     $("tp-scene-label").textContent = rec.scene_id ? `${rec.task_set} / ${rec.task_id} / ${rec.scene_id}` : "";
     const task = rec.scene_map?.tasks?.find((item) => item.task_id === rec.task_id);
-    grid.hidden = !scene && !task?.reference_image_url;
-    if (scene || task?.reference_image_url) renderSceneGrid(grid, rec.scene_map, scene, task);
-    else { grid.replaceChildren(); delete grid.dataset.layoutKey; }
+    renderSceneReference(grid, rec.scene_map, task);
     const note = $("tp-note");
     if (note) { note.textContent = rec.note || "(no note)"; note.classList.toggle("empty", !rec.note); }
     if (tpResultDock()) { const e = $("rv-replay-empty"); if (e) e.style.display = "none"; }
