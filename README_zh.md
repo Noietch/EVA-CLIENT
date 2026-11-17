@@ -40,8 +40,6 @@ uv venv --python 3.11 .venv && uv pip install --python .venv/bin/python -e ".[de
   <video src="https://github.com/user-attachments/assets/09cf8c98-396d-45d0-bd38-8603412ec3c2" controls muted></video>
 </p>
 
-<p align="center"><em>EVA-Client 在浏览器中端到端驱动 AgileX 双臂：遥操作 → 录制 → π₀ checkpoint → 平滑异步部署。真机实拍，并非渲染。</em></p>
-
 ## ✨ 核心特性
 
 - **🚀 一键部署**：一个 `.py` 配置即可拉起真机闭环：通信层（[ROS 1](https://github.com/ros/ros) / [ROS 2](https://github.com/ros2/ros2) / [ZeroMQ](https://github.com/zeromq/pyzmq) / 离线数据集）→ 策略后端 → 推理策略（sync / [async](https://github.com/OpenDriveLab/kai0#train-deploy-alignment) / naive / [ACT-ensemble](https://github.com/tonyzhaozh/act) / RTC），并实时补偿推理延迟。

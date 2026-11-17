@@ -40,8 +40,6 @@ uv venv --python 3.11 .venv && uv pip install --python .venv/bin/python -e ".[de
   <video src="https://github.com/user-attachments/assets/09cf8c98-396d-45d0-bd38-8603412ec3c2" controls muted></video>
 </p>
 
-<p align="center"><em>EVA-Client driving an AgileX bimanual arm end-to-end from the browser: teleop → record → π₀ checkpoint → smooth async deploy. Real hardware, not a rendering.</em></p>
-
 ## ✨ Key Features
 
 - **🚀 One-command Deployment**: A `.py` config brings up a real-robot closed loop: transport ([ROS 1](https://github.com/ros/ros) / [ROS 2](https://github.com/ros2/ros2) / [ZeroMQ](https://github.com/zeromq/pyzmq) / offline dataset) → policy backend → inference strategy (sync / [async](https://github.com/OpenDriveLab/kai0#train-deploy-alignment) / naive / [ACT-ensemble](https://github.com/tonyzhaozh/act) / RTC) with live latency compensation.
