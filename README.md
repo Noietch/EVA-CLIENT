@@ -34,24 +34,14 @@
 
 ## 🔥 What's NEW!
 
-<p align="center">
-  <video src="https://github.com/user-attachments/assets/caeabb2f-7896-4863-848d-21f9a5a38dcb" controls muted></video>
-</p>
-
-* **[2026-11-17] EVA-Client 0.3.0: unified devices, scene-aware evaluation, and dataset dashboard.** A large update across deployment, collection, evaluation, and data management:
-  * **Unified device workflow.** Pick a robot from the DEVICE tab or `eva device`, with hardware YAML defaults, workstation overrides, and detached device processes; EVA now starts without a business preset. Safer bring-up with camera readiness checks, preflight, homing, and safe stop. See [`docs/quick-start.md`](./docs/quick-start.md).
-  * **EVA-SIM support (simulator coming soon).** Record in simulation with simulator-owned MCAP capture, asynchronous native episode export, and world-bound teleoperation; import and validate simulator traces into collection datasets. See [`docs/recording.md`](./docs/recording.md#eva-sim-execution-recording).
-  * **Scene-aware evaluation.** Task sets with milestones, automatic task advance, attempt tracking and cancellation from the RUN panel, scene reference images, evaluation without client recording, and Client services configurable from the CLI. See [`docs/console.md`](./docs/console.md#scene-evaluation).
-  * **Dataset dashboard.** A new DASHBOARD and standalone dataset browser for task sets and datasets: scene filters, episode review, QC with download control, task-description and object-metadata editing, and SFTP/S3 delivery. See [`docs/console.md`](./docs/console.md#dataset-operations).
-  * **Collection.** One data root for task sets, datasets, and assets; scene/task identity binding; slots ordered by hand and layout and grouped by scene; VR review controls; recorder rejects missing, stalled, or frozen camera streams. See [`docs/collection_scene_plan.md`](./docs/collection_scene_plan.md).
-  * **Policy backends.** Native client for the official [XPolicyLab](https://github.com/XPolicyLab/XPolicyLab) websocket protocol (joint and EEF actions, episode reset, replaced-session recovery); policy requests keep every configured camera and pass raw images by default.
-  * **Hardware.** Dual YAM EEF configs, YAML-configured gripper speed and bounded impedance, camera startup controls, and a refined camera/device lifecycle.
-  * **Refreshed console UI.** A redesigned browser console with dedicated DASHBOARD, DEBUG, DEVICE, COLLECT, REPLAY, RL, EVAL, and RESULT tabs.
+* **[2026-11-17] EVA-Client 0.3.0: unified devices, scene-aware evaluation, and dataset dashboard.**
+  * Pick a robot from the DEVICE tab or `eva device`; evaluate with task sets, milestones, and attempt tracking; review, QC, and deliver data from the new DASHBOARD. See [`docs/quick-start.md`](./docs/quick-start.md) and [`docs/console.md`](./docs/console.md).
+  * Native [XPolicyLab](https://github.com/XPolicyLab/XPolicyLab) policy client, Dual YAM EEF configs, a refreshed console UI, and client-side EVA-SIM recording (simulator coming soon). Full list in [`CHANGELOG.md`](./CHANGELOG.md).
 
 <table>
   <tr>
-    <td><img src="assets/media/console/device.png" alt="DEVICE tab: live cameras and 3D arm view"></td>
-    <td><img src="assets/media/console/eval.png" alt="EVAL tab: scene-aware evaluation"></td>
+    <td><img src="assets/media/console/debug.png" alt="DEBUG tab: Dual YAM 3D scene"></td>
+    <td><img src="assets/media/console/device.png" alt="DEVICE tab: live cameras and Dual YAM arms"></td>
   </tr>
   <tr>
     <td><img src="assets/media/console/dashboard.png" alt="DASHBOARD tab: operations overview"></td>
