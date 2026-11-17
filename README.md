@@ -1,8 +1,6 @@
 <p align="center">
-  <a href="https://colalab.net/projects/eva-client/"><img src="assets/eva-logo.svg" alt="EVA-Client Logo" width="34%"></a>
+  <a href="https://colalab.net/projects/eva-client/"><img src="assets/eva-logo.svg" alt="EVA-Client Logo" width="60%"></a>
 </p>
-
-<h1 align="center">EVA-Client: A Unified Framework for Deployment, Evaluation, and Data Collection on Real Robots</h1>
 
 <p align="center">One policy, any robot — the smooth all-in-one real-robot stack. Debug, record, evaluate, visualize, all in the browser.</p>
 
