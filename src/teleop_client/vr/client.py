@@ -49,6 +49,11 @@ _EVENT_INTENTS = frozenset(
         "arm_toggle",
         "home",
         "intervention_toggle",
+        "review_left",
+        "review_right",
+        "review_up",
+        "review_down",
+        "review_select",
     }
 )
 
@@ -741,6 +746,41 @@ class VrTeleopClient:
         with self._lock:
             self._enqueue_ack_locked(_event_ack(event, accepted=accepted, message=message))
 
+    def send_haptic(
+        self,
+        *,
+        hand: str,
+        intensity: float,
+        duration_ms: float,
+    ) -> bool:
+        """Queue one explicit EVA-to-headset haptic request.
+
+        Motion frames never produce haptics. The request is sent through the
+        existing acknowledgement channel and forwarded by the WebSocket node.
+        """
+        normalized_hand = str(hand).strip().lower()
+        if normalized_hand not in _HANDS:
+            raise ValueError(f"unsupported haptic hand: {hand!r}")
+        normalized_intensity = float(intensity)
+        normalized_duration = float(duration_ms)
+        if not math.isfinite(normalized_intensity) or not math.isfinite(normalized_duration):
+            raise ValueError("haptic values must be finite")
+        with self._lock:
+            if not self._session_id or not self._browser_connected:
+                return False
+            self._enqueue_ack_locked(
+                {
+                    "protocol": VR_NODE_PROTOCOL,
+                    "version": VR_NODE_PROTOCOL_VERSION,
+                    "type": "haptic",
+                    "session_id": self._session_id,
+                    "hand": normalized_hand,
+                    "intensity": max(0.0, min(1.0, normalized_intensity)),
+                    "duration_ms": max(1.0, min(1000.0, normalized_duration)),
+                }
+            )
+            return True
+
     def status(self, now: float | None = None) -> TeleopStatus:
         current = time.monotonic() if now is None else float(now)
         with self._lock:
@@ -751,11 +791,13 @@ class VrTeleopClient:
             worker_healthy = not self._worker_ever_started or bool(
                 worker is not None and worker.is_alive() and not self._stop.is_set()
             )
+            frame_fresh = bool(frame is not None and frame.age(current) <= self._input_timeout_s)
             connected = bool(
                 worker_healthy
                 and browser_connected
                 and node_seen_at is not None
                 and current - node_seen_at <= self._heartbeat_timeout_s
+                and frame_fresh
             )
             input_age_ms = None if frame is None else frame.age(current) * 1000.0
             neutral = bool(

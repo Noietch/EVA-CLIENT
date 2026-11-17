@@ -1,65 +1,27 @@
-"""Default configuration for the EVA-CLIENT robot inference client.
+"""Shared model and workflow defaults; hardware defaults come from each device config.yaml."""
 
-Every config under configs/01_deploy/*, configs/00_openloop/*,
-configs/02_collection/* and configs/03_evaluation/* should start with:
-
-    _base_ = ["../00_base/defaults.py"]
-
-…then override only the fields it actually needs to change. Field-wise deep
-merge (via Config.fromfile / _merge_a_into_b) means partial overrides on
-nested dicts work without re-stating the whole section.
-
-The top-level sections below are the single source of truth for "what happens
-when a field is omitted from a preset". load_config() (src/core/config.py)
-does NOT apply fallback defaults — it relies on this base file being merged
-in via _base_.
-"""
-
-robot = dict(
-    type="agilex_piper",
-    initial_qpos=None,  # None -> use the robot zoo's bundled initial_qpos
-    eef_reference_frame="base_link",
-    gripper_threshold=0.5,
-    gripper_open=1.0,
-    gripper_close=0.0,
-)
+robot = dict(type="agilex_piper", eef_links=[], ik_reg_weight=1.0)
 
 transport = dict(
-    type="ros1",  # "ros1" | "ros2" | "zmq" | "dataset"
-    node_name="eva_client",
+    image_mode="stream",
+    image_request_timeout_s=2.0,
     dataset_dir="",
     episode_id=0,
-    convert_bgr_to_rgb=True,
+    convert_bgr_to_rgb=False,
     image_height=224,
     image_width=224,
+    resize=False,
     resize_pad=True,
-    image_layout="chw",
-    sub_endpoint="tcp://127.0.0.1:5555",
-    pub_endpoint="tcp://127.0.0.1:5556",
-    disabled_cameras=[],
-    disabled_groups=[],
+    image_layout="hwc",
     dataset_keys=dict(
         state_key="observations.state.qpos",
         eef_key="observations.state.eef",
         action_key="action",
-        video_keys={},  # empty -> fallback to "observation.images.{cam}" pattern
+        video_keys=dict(),
     ),
-    topics={},  # ros1/ros2 topic mapping; set per-robot in deploy configs ({} for deep-merge)
 )
 
-policy = dict(
-    type="openpi",  # "openpi" | "openpi_rtc" | "starvla" | "gr00t" | "mock" | "replay"
-    host="127.0.0.1",
-    port=9000,
-    # Per-backend optional knobs; which keys apply depends on policy.type. Uncomment as needed:
-    #   openpi_rtc:  latency_k=1                       # latency shift s
-    #   mock/replay: chunk_size=<int>                  # action chunk length
-    #   starvla:     camera_key=<str>, unnorm_key=<str>
-    #   gr00t:       api_token=<str>, video_keys=<list>, action_keys=<list>,
-    #                state_key="state.qpos", language_key="annotation.human.task_description",
-    #                timeout_ms=15000
-    backend_options={},
-)
+policy = dict(type="openpi", host="127.0.0.1", port=9000, backend_options=dict())
 
 collection = dict(
     controls=dict(
@@ -80,74 +42,36 @@ collection = dict(
     ),
     storage=dict(
         log_dir="",
+        # One root holds task_sets/, datasets/ and assets/ on every machine.
+        data_root="datasets/data_collection",
         fps=30,
         save_queue_max=15,
         image_skew_tolerance_sec=None,
-        # Saved video resolution; uncomment BOTH to resize each saved frame to exactly
-        # (image_width, image_height). Omitted/commented -> keep the camera's native size.
-        # image_height=224,
-        # image_width=224,
     ),
+    sim_recording_url="",
     schema=dict(
-        robot_type="",
         min_episode_frames=1,
         max_frame_dt_factor=3.0,
-        arms={},
-        cameras={},
         columns={},
     ),
-    teleop=dict(
-        control_source="transport",
-        type="",
-        client={},
-        port="",
-        joint_coef=[],
-        gripper=dict(
-            source="command",
-            mode="toggle",
-            threshold=400.0,
-            open_value=1.0,
-            close_value=0.0,
-            raw_open=1000.0,
-            raw_close=0.0,
-        ),
-        safety=dict(
-            max_qpos_step=0.08,
-            max_position_error_m=0.08,
-            max_orientation_error_rad=0.35,
-        ),
-    ),
-    transport=dict(
-        ros1=dict(primary_camera="", max_frame_skew_sec=0.1, groups={}),
-        ros2=dict(primary_camera="", max_frame_skew_sec=0.1, groups={}),
-    ),
-    # Dataset directory name -> (prompt, target) pairs in one shared LeRobot dataset.
-    # Use target=-1 when collection has no episode limit.
-    tasks={},
+    teleop=dict(control_source="transport", client=dict()),
+    task_set_dir="",
+    task_set_name="",
+    tasks=dict(),
 )
 
 rollout = dict(
-    storage=dict(
-        enabled=False,
-        log_dir="",
-        fps=30,
-        save_queue_max=15,
-        async_save=True,
-    ),
-    intervention=dict(
-        control_mode="absolute",
-    ),
-)
-
-operator_control = dict(
-    enabled=False,
-    action_topic="/eva/operator_action",
+    storage=dict(enabled=False, log_dir="", fps=30, save_queue_max=15, async_save=True),
+    intervention=dict(control_mode="absolute"),
 )
 
 # Console startup workspace. "auto" preserves the workflow-specific defaults:
 # EVAL for evaluation configs, otherwise DEBUG.
 console = dict(
     initial_tab="auto",
+    session_history=True,
+    history_dir="~/.eva-client",
+    record_rollouts=False,
 )
 
 # ZMQ control channel: exposes every console button (web:* commands) + read-only
@@ -167,7 +91,7 @@ rl_cfg = {}
 # Eval block template (see configs/03_evaluation/*); fill eval_cfg to turn a deploy preset
 # into an eval run:
 #   eval_cfg = dict(
-#       storage=dict(fps=30, save_queue_max=15),
+#       storage=dict(enabled=True, fps=30, save_queue_max=15),
 #       trials_per_prompt=5,
 #       cli_mode="real",
 #       inference_strategy="async",
@@ -184,6 +108,9 @@ rl_cfg = {}
 # Root for all generated artifacts (collection logs, eval results). Subpaths under
 # it are derived by convention; override per config to redirect output elsewhere.
 work_dir = "work_dirs"
+
+# Only these configured roots appear in the Dashboard; empty keeps it unconfigured.
+dashboard = dict(raw_roots=[])
 
 # All inference-runtime configuration in one section.
 # obs_space / action_space are dicts that load_config replaces with the
@@ -204,11 +131,14 @@ inference_cfg = dict(
 #   sync/rtc: ignore_gripper_in_sync_wait=False
 #   async/naive/rtc: latency_k=<int>         # front-trim of new chunks, >=0
 #   act/async: exp_weight_m=0.01             # temporal-ensembling decay, >=0
+#   async/rtc: blend_gripper=False          # use new gripper commands without blending
+# Sync execution-step example: args=dict(execute_horizon=10) runs 10 steps per chunk.
+# Empty sync args keep the entire action chunk returned by the policy.
 inference_strategies = {
-    "sync": dict(type="BaseInferStrategy", args=dict(execute_horizon=5)),
+    "sync": dict(type="BaseInferStrategy", args={}),
     "async": dict(
         type="AsyncLinearOverlapInferStrategy",
-        args={},
+        args=dict(blend_gripper=False),
     ),
     "naive": dict(
         type="NaiveAsyncInferStrategy",

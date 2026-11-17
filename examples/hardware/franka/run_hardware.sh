@@ -24,8 +24,8 @@ fi
 exec "${FRANKA_PYTHON_BIN}" -X faulthandler examples/hardware/franka/node.py \
   --obs-endpoint "${OBS_ENDPOINT:-tcp://127.0.0.1:5555}" \
   --action-endpoint "${ACTION_ENDPOINT:-tcp://127.0.0.1:5556}" \
-  --left-robot-ip "${LEFT_ROBOT_IP:-172.16.0.2}" \
-  --right-robot-ip "${RIGHT_ROBOT_IP:-172.16.0.3}" \
+  --left-robot-ip "${LEFT_ROBOT_IP:-127.0.0.2}" \
+  --right-robot-ip "${RIGHT_ROBOT_IP:-127.0.0.3}" \
   --left-gripper-ip "${LEFT_GRIPPER_IP:-}" \
   --right-gripper-ip "${RIGHT_GRIPPER_IP:-}" \
   --eva-config "${EVA_CONFIG:-configs/01_deploy/dual_franka/openpi_qpos.py}" \

@@ -122,7 +122,9 @@ function syncRlTeleopStatus(status) {
   const source = resolveRlInterventionSource(status);
   const teleop = status && status.teleop;
   const vrClient = source === "teleop_client";
-  const fault = vrClient && !!(teleop && (teleop.last_fault || teleop.source_error));
+  // An execution/IK fault is not a headset transport failure. Keep the VR
+  // badge linked while the input stream itself is alive.
+  const fault = vrClient && !!(teleop && teleop.source_error);
   const linked = !!(teleop && teleop.connected && !fault);
   const state = !vrClient ? "off" : (fault ? "warn" : (linked ? "ok" : "warn"));
   const text = !vrClient ? "VR N/A" : (fault ? "VR ERROR" : (linked ? "VR LINKED" : "VR DOWN"));

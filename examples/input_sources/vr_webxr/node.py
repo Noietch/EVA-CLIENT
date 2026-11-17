@@ -156,6 +156,7 @@ class FrameConsoleMonitor:
 class ControllerLayout:
     trigger: int = 0
     grip: int = 1
+    thumbstick: int = 3
     primary: int = 4
     secondary: int = 5
 
@@ -245,8 +246,12 @@ def normalize_controller(hand: str, value: object) -> tuple[dict[str, object], d
     profiles = _sequence(raw.get("profiles", ()), f"controllers.{hand}.profiles")
     buttons = _sequence(raw.get("buttons", ()), f"controllers.{hand}.buttons")
     layout = _layout(profiles)
+    axes = _sequence(raw.get("axes", ()), f"controllers.{hand}.axes")
+    stick = axes[2:4] if len(axes) >= 4 else axes[:2]
+    thumbstick = [_finite(axis, f"controllers.{hand}.axes") for axis in stick]
     normalized: dict[str, object] = {
         "valid": valid,
+        "thumbstick": thumbstick if valid and len(thumbstick) == 2 else [0.0, 0.0],
         "trigger": _button_value(buttons, layout.trigger),
         "profiles": [str(profile) for profile in profiles],
     }
@@ -256,6 +261,7 @@ def normalize_controller(hand: str, value: object) -> tuple[dict[str, object], d
         "primary": _button_pressed(buttons, layout.primary),
         "secondary": _button_pressed(buttons, layout.secondary),
         "grip": _button_pressed(buttons, layout.grip),
+        "thumbstick": valid and _button_pressed(buttons, layout.thumbstick),
     }
     return normalized, face
 
@@ -265,8 +271,10 @@ class OperatorEventMapper:
 
     A short press emits ``record_toggle`` on release. Holding A for the configured
     duration emits exactly one ``record_cancel`` and suppresses the later release.
-    A short B press emits ``arm_toggle`` on release. A short left X press emits
-    ``home`` on release, and a short left Y press emits ``intervention_toggle``.
+    A B press emits ``arm_toggle`` immediately, once per press. A short left X
+    press emits ``home`` on release, and a short left Y press emits ``intervention_toggle``
+    (collection QC outside RL). The left stick emits four-way review navigation
+    with a deadzone and delayed repeat; pressing it selects the capture slot once.
     Grip is consumed here only for its
     long-press toggle state; the client receives the resulting state alongside
     the absolute controller pose.
@@ -277,22 +285,26 @@ class OperatorEventMapper:
             raise ValueError("long_press_ms must be positive and finite")
         self._long_press_ms = float(long_press_ms)
         self._event_id = 0
+        self._stick_direction = ""
+        self._stick_repeat_ms = 0.0
+        self._previous_thumbstick = False
         self._previous_primary = False
         self._previous_secondary = False
         self._previous_home = False
         self._previous_intervention = False
         self._press_started_ms: float | None = None
-        self._secondary_started_ms: float | None = None
         self._long_press_fired = False
 
     def reset(self) -> None:
         self._event_id = 0
+        self._stick_direction = ""
+        self._stick_repeat_ms = 0.0
+        self._previous_thumbstick = False
         self._previous_primary = False
         self._previous_secondary = False
         self._previous_home = False
         self._previous_intervention = False
         self._press_started_ms = None
-        self._secondary_started_ms = None
         self._long_press_fired = False
 
     def update(
@@ -303,12 +315,28 @@ class OperatorEventMapper:
         controllers: Mapping[str, Mapping[str, object]],
         face_buttons: Mapping[str, Mapping[str, bool]],
     ) -> tuple[dict[str, object], ...]:
-        _ = controllers
         pressed = bool(face_buttons["right"].get("primary", False))
         secondary = bool(face_buttons["right"].get("secondary", False))
         home_pressed = bool(face_buttons["left"].get("primary", False))
         intervention_pressed = bool(face_buttons["left"].get("secondary", False))
+        stick_pressed = bool(face_buttons["left"].get("thumbstick", False))
         intents: list[str] = []
+        if stick_pressed and not self._previous_thumbstick:
+            intents.append("review_select")
+        axes = cast(Sequence[float], controllers["left"].get("thumbstick", (0.0, 0.0)))
+        x, y = axes
+        direction = ""
+        if not stick_pressed and max(abs(x), abs(y)) >= 0.6:
+            direction = (
+                ("right" if x > 0 else "left") if abs(x) > abs(y) else ("down" if y > 0 else "up")
+            )
+        if direction and direction != self._stick_direction:
+            intents.append(f"review_{direction}")
+            self._stick_repeat_ms = client_time_ms + 400.0
+        elif direction and client_time_ms >= self._stick_repeat_ms:
+            intents.append(f"review_{direction}")
+            self._stick_repeat_ms = client_time_ms + 160.0
+        self._stick_direction = direction
         if pressed and not self._previous_primary:
             self._press_started_ms = float(client_time_ms)
             self._long_press_fired = False
@@ -322,18 +350,12 @@ class OperatorEventMapper:
             self._press_started_ms = None
             self._long_press_fired = False
         if secondary and not self._previous_secondary:
-            self._secondary_started_ms = float(client_time_ms)
-        if self._previous_secondary and not secondary:
-            if (
-                self._secondary_started_ms is not None
-                and client_time_ms - self._secondary_started_ms < self._long_press_ms
-            ):
-                intents.append("arm_toggle")
-            self._secondary_started_ms = None
+            intents.append("arm_toggle")
         if self._previous_home and not home_pressed:
             intents.append("home")
         if self._previous_intervention and not intervention_pressed:
             intents.append("intervention_toggle")
+        self._previous_thumbstick = stick_pressed
         self._previous_primary = pressed
         self._previous_secondary = secondary
         self._previous_home = home_pressed
@@ -841,7 +863,7 @@ class WebXrNode:
         tls_key: str,
         bridge: ZmqBridge,
         long_press_ms: float = 1000.0,
-        stats_interval_s: float = 0.25,
+        stats_interval_s: float = 0.0,
     ) -> None:
         if bool(tls_cert) != bool(tls_key):
             raise ValueError("TLS certificate and key must be configured together")
@@ -1043,9 +1065,7 @@ class WebXrNode:
             bound = next(iter(server.sockets), None)
             if bound is not None:
                 self.port = int(bound.getsockname()[1])
-            logger.info("WebXR node ready: %s", self.public_url)
-            reverse, launch = self.pico_commands
-            logger.info("PICO commands:\n%s\n%s", reverse, launch)
+            logger.info("WebXR node ready: %s", self.public_url.partition("?")[0])
             await self._forward_acks()
 
 
@@ -1055,6 +1075,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=8443)
     parser.add_argument("--public-host", default="")
     parser.add_argument("--token", default="")
+    parser.add_argument("--token-stdin", action="store_true")
     parser.add_argument("--tls-cert", default="")
     parser.add_argument("--tls-key", default="")
     parser.add_argument("--endpoint", default="tcp://127.0.0.1:8765")
@@ -1068,8 +1089,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--stats-interval-s",
         type=float,
-        default=0.25,
-        help="single-line VR receive diagnostics interval; use 0 to disable",
+        default=0.0,
+        help="single-line VR receive diagnostics interval; disabled by default",
     )
     parser.add_argument("--log-level", default="INFO")
     return parser
@@ -1077,6 +1098,10 @@ def _parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = _parser().parse_args()
+    if args.token_stdin:
+        args.token = sys.stdin.readline().strip()
+        if not args.token:
+            raise ValueError("VR access token is missing from stdin")
     logging.basicConfig(
         level=getattr(logging, str(args.log_level).upper()),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",

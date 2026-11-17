@@ -70,10 +70,12 @@ _MOTION_INTERRUPTING_VERBS = frozenset(
         "switch_ckpt",
         "reset",
         "console_reset",
+        "eval_cancel",
+        "device_stop",
     }
 )
 
-_MOTION_DEFERRED_VERBS = frozenset({"start"})
+_MOTION_DEFERRED_VERBS = frozenset({"start", "device_start"})
 
 
 MANUAL_MAX_QPOS_STEP = 0.02
@@ -202,6 +204,8 @@ def set_gripper_open_close(
     Used by the EVAL INIT panel: it physically drives a gripper to a known state
     without setting a session lock, so the policy regains gripper control once RUN
     starts. Holds the arm at its live qpos and only moves the targeted gripper dims.
+    The value is remembered as that gripper's start state, which every later reset
+    restores.
 
     Args:
         open_gripper: True opens (config.robot.gripper_open), False closes
@@ -212,9 +216,26 @@ def set_gripper_open_close(
         True when a gripper move was published, False if no joint feedback is available.
     """
     value = config.robot.gripper_open if open_gripper else config.robot.gripper_close
-    return apply_gripper_command(
+    published = apply_gripper_command(
         config, runtime, None, side, decide=lambda _cur: value, lock=None, stream=True
     )
+    if published:
+        for group, _, _ in iter_target_grippers(runtime.robot, side):
+            runtime.init_gripper[group.name] = float(value)
+    return published
+
+
+def opposite_gripper_value(
+    current: float,
+    open_value: float,
+    close_value: float,
+    threshold: float | None = None,
+) -> float:
+    """Return the opposite endpoint for either high-open or low-open grippers."""
+    boundary = (open_value + close_value) / 2.0 if threshold is None else threshold
+    high_is_open = open_value >= close_value
+    is_open = current >= boundary if high_is_open else current <= boundary
+    return close_value if is_open else open_value
 
 
 def toggle_gripper_immediate(
@@ -236,15 +257,14 @@ def toggle_gripper_immediate(
     Returns:
         True when a gripper was toggled, False if no feedback / no gripper.
     """
-    # When no explicit threshold is configured, decide open/closed by proximity to
-    # the configured open/close targets rather than a fixed 0.5 (gripper ranges vary).
-    if config.robot.gripper_threshold is not None:
-        threshold = config.robot.gripper_threshold
-    else:
-        threshold = (config.robot.gripper_open + config.robot.gripper_close) / 2.0
 
     def decide(cur: float) -> float:
-        return config.robot.gripper_close if cur >= threshold else config.robot.gripper_open
+        return opposite_gripper_value(
+            cur,
+            config.robot.gripper_open,
+            config.robot.gripper_close,
+            config.robot.gripper_threshold,
+        )
 
     return apply_gripper_command(
         config, runtime, session, side, decide=decide, lock=True, stream=False
@@ -291,6 +311,8 @@ def _publish_manual_real_qpos(
     runtime: RuntimeState,
     session: SessionState,
     target: np.ndarray,
+    *,
+    feedback_guard=None,
 ) -> bool:
     start = session.manual_real_qpos
     if start is None:
@@ -314,6 +336,8 @@ def _publish_manual_real_qpos(
         if poll_motion_commands(config, runtime, session):
             consume_motion_interrupt(session, session.status)
             return False
+        if feedback_guard is not None:
+            feedback_guard()
         publish_action(runtime, action, target=OutputTarget.REAL.value)
         session.manual_real_qpos = np.asarray(action, dtype=np.float32).copy()
         rate.sleep()
@@ -327,6 +351,8 @@ def _publish_manual_real_qpos(
         if poll_motion_commands(config, runtime, session):
             consume_motion_interrupt(session, session.status)
             return False
+        if feedback_guard is not None:
+            feedback_guard()
         publish_action(runtime, target, target=OutputTarget.REAL.value)
         session.manual_real_qpos = np.asarray(target, dtype=np.float32).copy()
         rate.sleep()
@@ -486,6 +512,13 @@ def handle_motion_command(
     # is what lets a mode switch abort an in-progress setup instead of being dropped.
     raw_verb = command.strip().lower().removeprefix("web:")
     verb, _, arg = raw_verb.partition(":")
+    if (
+        verb == "select_mode"
+        and arg == session.mode.value
+        and session.mode in {SessionMode.REAL, SessionMode.STEP}
+        and getattr(runtime.console_ctx, "active_tab", None) == "debug"
+    ):
+        return False
     if verb == "operator_action":
         action, _, source = arg.partition(":")
         resolved_command = resolve_operator_action(
@@ -613,17 +646,17 @@ def reset_target_qpos(runtime: RuntimeState) -> np.ndarray:
     """Joint target the arm resets to: the EVAL INIT start pose when set, else home.
 
     The INIT start pose carries only arm joints; its gripper dims are overwritten with
-    the live gripper so a reset never loads/moves the gripper (the operator drives that
-    with the INIT panel's OPEN/CLOSE buttons).
+    each gripper's start value: the one the operator set with the INIT panel's
+    OPEN/CLOSE buttons, else the robot's home gripper value. Every episode therefore
+    starts from the same gripper state, whatever the previous episode left behind.
     """
     if runtime.init_qpos is None:
         return runtime.robot.initial_qpos
     target = np.asarray(runtime.init_qpos, dtype=np.float32).copy()
-    live = runtime.transport.get_latest_qpos()
-    if live is not None:
-        for idx in runtime.robot.gripper_indices:
-            if idx < len(target) and idx < len(live):
-                target[idx] = float(live[idx])
+    home = runtime.robot.initial_qpos
+    for group, index, _ in iter_target_grippers(runtime.robot, None):
+        if index < len(target) and index < len(home):
+            target[index] = runtime.init_gripper.get(group.name, float(home[index]))
     return target
 
 
@@ -827,6 +860,10 @@ def run_setup(
                 session.selected_task,
                 partial(_loop_fetch_chunk, config, runtime, session),
             )
+        # Discard the validation chunk and the policy's memory of it — a fresh warmup
+        # runs when execution starts, and a history-conditioned policy must take its
+        # first episode frame from that run, not from this setup.
+        reset_infer_strategy(runtime)
     except PolicyRequestError as error:
         session.last_error = f"Setup failed: policy request error: {error}"
         invalidate_policy_connection(config, runtime, session, error)
@@ -839,9 +876,6 @@ def run_setup(
         logger.info("Action chunk preparation failed: %s", error)
         return False
     logger.info("Setup complete: policy validated")
-    # Discard the validation chunk — a fresh warmup runs when execution starts.
-    if runtime.infer_strategy is not None:
-        runtime.infer_strategy.reset()
     session.action_chunk = None
     session.chunk_index = 0
     session.pending_real_chunk = None
@@ -907,7 +941,8 @@ def _resolve_init_pose(
 
     Returns:
         [n] float32 qpos, or None when nothing is configured. The length must cover at
-        least the arm joints; gripper dims are overwritten on reset from the live qpos.
+        least the arm joints; gripper dims are overwritten on reset with each
+        gripper's start value.
     """
     values = qpos if qpos else None
     if values is None:
@@ -933,8 +968,9 @@ def run_init_move(
     """EVAL INIT panel: move the arm to the configured start-pose qpos.
 
     Sets runtime.init_qpos (which retargets every later reset) and streams the arm
-    there now. Gripper dims of the start pose are ignored — the gripper holds its live
-    value and is driven by the panel's OPEN/CLOSE buttons.
+    there now. Gripper dims of the start pose are ignored — each gripper goes to its
+    start value, set by the panel's OPEN/CLOSE buttons and defaulting to the robot's
+    home gripper value.
 
     Args:
         qpos: operator-supplied joint values from the editable INIT box. Empty falls
@@ -998,6 +1034,21 @@ def publish_next_action(config: ConfigDict, runtime: RuntimeState, session: Sess
     strategy = runtime.infer_strategy
 
     sim_only = session.mode is SessionMode.SIM
+    action_ack_enabled = (
+        bool(config.transport.get("wait_action_applied", False))
+        and not sim_only
+        and config.transport.type == "zmq"
+    )
+    if action_ack_enabled:
+        execution_complete = (
+            runtime.transport.execution_complete  # pyright: ignore[reportAttributeAccessIssue]
+        )
+        if execution_complete:
+            logger.info(
+                "[ACTION_ACK] execution complete at step=%d; waiting for external stop",
+                session.step_index,
+            )
+            return False
 
     # Continuous mode: pop individual actions from the buffer
     if strategy is not None and strategy.is_loop_running():
@@ -1057,8 +1108,17 @@ def publish_next_action(config: ConfigDict, runtime: RuntimeState, session: Sess
     else:
         publish_real_action_with_preview(config, runtime, action, session=session)
 
+    # The target has already been dispatched, even if a mode change interrupts
+    # its arrival wait. Count it before handling that interrupt.
+    session.chunk_index += 1
+    session.step_index += 1
     is_sync = strategy is not None and not strategy.runs_background_loop
-    if is_sync and strategy is not None and not is_offline_transport(runtime):
+    if (
+        is_sync
+        and strategy is not None
+        and not is_offline_transport(runtime)
+        and not action_ack_enabled
+    ):
         if not _wait_until_reached(
             runtime,
             action,
@@ -1072,8 +1132,6 @@ def publish_next_action(config: ConfigDict, runtime: RuntimeState, session: Sess
             consume_motion_interrupt(session, SessionStatus.READY)
             return False
 
-    session.chunk_index += 1
-    session.step_index += 1
     return True
 
 
@@ -1192,6 +1250,10 @@ def run_one_chunk_on_sim(config: ConfigDict, runtime: RuntimeState, session: Ses
     remaining_chunk = session.action_chunk[session.chunk_index :].copy()
     rate = runtime.transport.create_rate(config.inference_cfg.publish_rate)
     for action in remaining_chunk:
+        if poll_motion_commands(config, runtime, session):
+            consume_motion_interrupt(session, SessionStatus.READY, clear_pending_real_chunk=True)
+            session.sim_preview_qpos = None
+            return False
         session.sim_preview_qpos = action.copy()
         publish_action(runtime, action, target=OutputTarget.SIM.value)
         rate.sleep()
@@ -1304,8 +1366,11 @@ def replace_inference_strategy(
     cls = STRATEGY_REGISTRY.get(spec["type"])
     # inference_rate is a global setting; inject only for classes that declare it
     # (background-loop strategies). Sync strategies don't have this field.
-    if "inference_rate" in {f.name for f in dataclasses.fields(cls)}:  # pyright: ignore[reportArgumentType]
+    strategy_fields = {f.name for f in dataclasses.fields(cls)}  # pyright: ignore[reportArgumentType]
+    if "inference_rate" in strategy_fields:
         args.setdefault("inference_rate", config.inference_cfg.inference_rate)
+    if "gripper_indices" in strategy_fields:
+        args["gripper_indices"] = runtime.robot.gripper_indices
     runtime.infer_strategy = STRATEGY_REGISTRY.build(spec["type"], **args)
 
 
@@ -1375,6 +1440,7 @@ def select_task(
         logger.info("Task is already %s", format_task_label(task))
         return
     session.selected_task = task
+    session.last_error = ""
     reset_run_state(config, runtime, session)
     logger.info("Selected task %s; status is now unset", format_task_label(session.selected_task))
 
@@ -1386,6 +1452,7 @@ __all__ = [
     "iter_target_grippers",
     "apply_gripper_command",
     "set_gripper_open_close",
+    "opposite_gripper_value",
     "toggle_gripper_immediate",
     "set_gripper_immediate",
     "publish_action",

@@ -1,0 +1,185 @@
+robot:
+  arx_x5:
+    label: ARX X5
+    defaults: {teleop: vr_webxr, camera: x5_d405_day}
+    launch:
+      python: examples/hardware/arx_x5/.venv/bin/python
+      module: examples.hardware.arx_x5.node
+      disable_camera_option: disabled_camera
+    settings:
+      obs_endpoint: tcp://127.0.0.1:5555
+      action_endpoint: tcp://127.0.0.1:5556
+      camera_endpoint: tcp://127.0.0.1:5557
+      left_can_port: can1
+      right_can_port: can3
+      arm_type: 2
+      rate: 30
+    config:
+      robot:
+        type: arx_x5
+        initial_qpos: [0.0, 1.58, 0.49, 1.15, 0.0, 0.0, 1.0, 0.0, 1.58, 0.49, 1.15, 0.0, 0.0, 1.0]
+        safe_qpos: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+        eef_reference_frame: base_link
+        gripper_threshold: null
+        gripper_open: 1.0
+        gripper_close: 0.0
+      transport:
+        type: zmq
+        node_name: eva_client
+        disabled_cameras: []
+        disabled_groups: []
+        topics: {}
+      collection:
+        schema:
+          robot_type: arx_x5
+          arms:
+            left_arm: left
+            right_arm: right
+          cameras:
+            cam_high: observation.images.cam_high
+            cam_left_wrist: observation.images.cam_left_wrist
+            cam_right_wrist: observation.images.cam_right_wrist
+        transport:
+          ros1:
+            primary_camera: ''
+            max_frame_skew_sec: 0.1
+            groups: {}
+          ros2:
+            primary_camera: ''
+            max_frame_skew_sec: 0.1
+            groups: {}
+      operator_control:
+        enabled: false
+        action_topic: /eva/operator_action
+camera_devices:
+  x5_d405_high_day:
+    repeat:
+    - realsense_camera
+    settings:
+      realsense_camera:
+      - cam_high=409122271504
+      realsense_color_profiles:
+        cam_high:
+          enable_auto_exposure: false
+          exposure: 6000
+          gain: 16
+          enable_auto_white_balance: false
+          white_balance: 4390
+          bgr_gains: [0.977523, 1.047903, 0.977785]
+  x5_d405_left_wrist_day:
+    repeat:
+    - realsense_camera
+    settings:
+      realsense_camera:
+      - cam_left_wrist=352122272510
+      realsense_color_profiles:
+        cam_left_wrist:
+          enable_auto_exposure: false
+          exposure: 8000
+          gain: 16
+          enable_auto_white_balance: false
+          white_balance: 4450
+          bgr_gains: [0.982710, 1.038928, 0.980512]
+  x5_d405_right_wrist_day:
+    repeat:
+    - realsense_camera
+    settings:
+      realsense_camera:
+      - cam_right_wrist=352122271326
+      realsense_color_profiles:
+        cam_right_wrist:
+          enable_auto_exposure: false
+          exposure: 7000
+          gain: 16
+          enable_auto_white_balance: false
+          white_balance: 4410
+          bgr_gains: [0.971018, 1.064308, 0.970333]
+  x5_d405_high_night:
+    repeat:
+    - realsense_camera
+    settings:
+      realsense_camera:
+      - cam_high=409122271504
+      realsense_color_profiles:
+        cam_high:
+          enable_auto_exposure: false
+          exposure: 12000
+          gain: 16
+          enable_auto_white_balance: false
+          white_balance: 4390
+          bgr_gains: [0.977523, 1.047903, 0.977785]
+  x5_d405_left_wrist_night:
+    repeat:
+    - realsense_camera
+    settings:
+      realsense_camera:
+      - cam_left_wrist=352122272510
+      realsense_color_profiles:
+        cam_left_wrist:
+          enable_auto_exposure: false
+          exposure: 14000
+          gain: 16
+          enable_auto_white_balance: false
+          white_balance: 4450
+          bgr_gains: [0.982710, 1.038928, 0.980512]
+  x5_d405_right_wrist_night:
+    repeat:
+    - realsense_camera
+    settings:
+      realsense_camera:
+      - cam_right_wrist=352122271326
+      realsense_color_profiles:
+        cam_right_wrist:
+          enable_auto_exposure: false
+          exposure: 14000
+          gain: 16
+          enable_auto_white_balance: false
+          white_balance: 4410
+          bgr_gains: [0.971018, 1.064308, 0.970333]
+camera:
+  x5_d405_day:
+    separate: true
+    label: 3 D405 - Day
+    robots:
+    - arx_x5
+    cameras:
+    - x5_d405_high_day
+    - x5_d405_left_wrist_day
+    - x5_d405_right_wrist_day
+    settings:
+      realsense_resolution: 640x480
+      realsense_fps: 30
+  x5_d405_night:
+    separate: true
+    label: 3 D405 - Night
+    robots:
+    - arx_x5
+    cameras:
+    - x5_d405_high_night
+    - x5_d405_left_wrist_night
+    - x5_d405_right_wrist_night
+    settings:
+      realsense_resolution: 640x480
+      realsense_fps: 30
+  none: {}
+  external:
+    hidden: true
+teleop:
+  x5_leader:
+    label: Leader
+    operation: leader
+    robots:
+    - arx_x5
+    settings:
+      # Alicia-D leaders drive the follower arms, so EVA must only observe: the node
+      # drops every action it receives while passive. VR teleop needs the opposite.
+      passive_collection: true
+      left_alicia_port: /dev/ttyUSB0
+      right_alicia_port: /dev/ttyUSB1
+  vr_webxr:
+    client:
+      arms:
+        left_arm:
+          controller: left
+        right_arm:
+          controller: right

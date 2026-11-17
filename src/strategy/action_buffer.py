@@ -25,8 +25,12 @@ class StreamActionBuffer:
     Each pop_next_action() increments k (steps consumed since last chunk).
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self, *, gripper_indices: tuple[int, ...] = (), blend_gripper: bool = False
+    ) -> None:
         self._lock = threading.Lock()
+        self._gripper_indices = tuple(gripper_indices)
+        self._blend_gripper = blend_gripper
         self._cur_chunk: deque[np.ndarray] = deque()
         self._k: int = 0
         self._last_action: np.ndarray | None = None
@@ -86,6 +90,10 @@ class StreamActionBuffer:
             else:
                 old_weights = np.linspace(1.0, 0.0, overlap_len, dtype=np.float32)[:, np.newaxis]
             smoothed = old[:overlap_len] * old_weights + new[:overlap_len] * (1.0 - old_weights)
+            if self._gripper_indices and not self._blend_gripper:
+                # Grasp/release commands follow the new, latency-aligned prediction
+                # directly; arm joints retain their linear overlap weights.
+                smoothed[:, self._gripper_indices] = new[:overlap_len, self._gripper_indices]
             combined = np.concatenate((smoothed, new[overlap_len:]), axis=0)
             prepared_chunk = deque(row.copy() for row in combined)
             with self._lock:

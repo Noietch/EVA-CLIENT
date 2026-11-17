@@ -3,6 +3,7 @@
 // (not ES-imported); each exposes itself on window for the rest of the app.
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { t } from "./i18n.js";
 
 // Self-rendered URDF canvas — mirrors viser's "geometry once + transform stream":
 // load each geometry payload once into a mesh per arm, then each frame apply the
@@ -19,6 +20,7 @@ const Scene3D = (() => {
   let armNames = [];
   let ready = false;
   let ghostVisible = false;
+  let ground, keyLight;
 
   function init() {
     renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
@@ -26,12 +28,14 @@ const Scene3D = (() => {
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.05;
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     scene = new THREE.Scene();
     scene.background = new THREE.Color(0xFFFFFF);
 
     camera = new THREE.PerspectiveCamera(45, 1, 0.01, 100);
     camera.up.set(0, 0, 1);              // URDF is Z-up
-    camera.position.set(0.9, -0.9, 0.7);
+    camera.position.set(0.65, -1.1, 0.72);
 
     controls = new OrbitControls(camera, renderer.domElement);
     controls.target.set(0, 0, 0.2);
@@ -40,16 +44,27 @@ const Scene3D = (() => {
 
     // Hemisphere fill (sky/ground) for soft ambient gradient + a strong key and a
     // gentle rim, so the grey arm reads as shaped metal instead of a flat silhouette.
-    scene.add(new THREE.HemisphereLight(0xffffff, 0xbfc4c9, 0.55));
-    const key = new THREE.DirectionalLight(0xffffff, 1.25); key.position.set(1, -1, 2); scene.add(key);
-    const fill = new THREE.DirectionalLight(0xffffff, 0.45); fill.position.set(-1, 1, 1); scene.add(fill);
+    scene.add(new THREE.HemisphereLight(0xffffff, 0xbfc4c9, 0.85));
+    const key = new THREE.DirectionalLight(0xffffff, 2.1); key.position.set(1, -1, 2); scene.add(key);
+    keyLight = key;
+    key.castShadow = true;
+    key.shadow.mapSize.set(2048, 2048);
+    key.shadow.normalBias = 0.002;
+    key.shadow.bias = -0.0001;
+    key.shadow.radius = 3;
+    scene.add(key.target);
+    const fill = new THREE.DirectionalLight(0xffffff, 0.9); fill.position.set(-1, 1, 1); scene.add(fill);
     const rim = new THREE.DirectionalLight(0xffffff, 0.35); rim.position.set(-0.5, -1.2, 0.6); scene.add(rim);
 
     // drafting ground grid (Z-up: rotate the XY grid into place)
     const grid = new THREE.GridHelper(2, 20, COL.rule, COL.rule);
     grid.rotation.x = Math.PI / 2;
-    grid.material.opacity = 0.5; grid.material.transparent = true;
+    grid.material.opacity = 0.16; grid.material.transparent = true;
     scene.add(grid);
+    ground = new THREE.Mesh(new THREE.PlaneGeometry(20, 20),
+      new THREE.ShadowMaterial({ color: 0x30373D, opacity: 0.22 }));
+    ground.receiveShadow = true;
+    scene.add(ground);
     // world axes accent
     const axes = new THREE.AxesHelper(0.12); scene.add(axes);
 
@@ -60,9 +75,11 @@ const Scene3D = (() => {
 
   function resize() {
     const r = canvas.parentElement.getBoundingClientRect();
+    if (r.width < 1 || r.height < 1) return;
     renderer.setSize(r.width, r.height, false);
     camera.aspect = r.width / Math.max(r.height, 1);
     camera.updateProjectionMatrix();
+    if (_framed) fitCameraToArm();
   }
 
   // Smoothing time constant (seconds). Each render frame the meshes ease toward
@@ -104,8 +121,8 @@ const Scene3D = (() => {
   async function load() {
     const meta = await (await fetch("/api/meshes")).json();
     if (!meta.available) {
-      document.getElementById("canvas-empty").querySelector(".big").textContent = "3D UNAVAILABLE";
-      document.getElementById("canvas-empty").querySelector("div:last-child").textContent = "URDF not found on server";
+      document.getElementById("canvas-empty").querySelector(".big").textContent = t("scene.unavailable");
+      document.getElementById("canvas-empty").querySelector("div:last-child").textContent = t("scene.urdfMissing");
       return;
     }
     armNames = (meta.arms && meta.arms.length) ? meta.arms : ["arm"];
@@ -147,7 +164,9 @@ const Scene3D = (() => {
       const c = Array.isArray(m.color) ? m.color.slice(0, 3).map((x) => Number(x).toFixed(4)).join(",") : "fallback";
       if (!solidMats[c]) {
         solidMats[c] = new THREE.MeshStandardMaterial(
-          { color: meshColor(m), metalness: 0.25, roughness: 0.55, side: THREE.DoubleSide });
+          { color: meshColor(m), metalness: 0.08,
+            roughness: 0.42,
+            side: THREE.DoubleSide });
       }
       return solidMats[c];
     }
@@ -168,6 +187,8 @@ const Scene3D = (() => {
       const geo = geos[m.file];
       for (const arm of armNames) {
         const mesh = new THREE.Mesh(geo, solidMaterial(m));
+        mesh.castShadow = true;
+        mesh.receiveShadow = true;
         mesh.matrixAutoUpdate = false;   // we drive the matrix directly each frame
         meshes[arm][m.name] = mesh;
         scene.add(mesh);
@@ -188,7 +209,7 @@ const Scene3D = (() => {
     console.error("3D scene unavailable", error);
     const empty = document.getElementById("canvas-empty");
     empty.style.display = "flex";
-    empty.querySelector(".big").textContent = "3D UNAVAILABLE";
+    empty.querySelector(".big").textContent = t("scene.unavailable");
     const message = error && error.message ? error.message : String(error || "unknown error");
     empty.querySelector("div:last-child").textContent = message;
   }
@@ -329,12 +350,32 @@ const Scene3D = (() => {
     if (_fitBox.isEmpty()) return;
     _fitBox.getCenter(_fitCtr);
     _fitBox.getSize(_fitSz);
-    const maxDim = Math.max(_fitSz.x, _fitSz.y, _fitSz.z) || 1;
     const fov = camera.fov * Math.PI / 180;
-    let dist = (maxDim / 2) / Math.tan(fov / 2) * 1.6;   // 1.6 = breathing room
     _fitDir.copy(camera.position).sub(controls.target);
     if (_fitDir.lengthSq() < 1e-6) _fitDir.set(0.9, -0.9, 0.7);
     _fitDir.normalize();
+    const right = new THREE.Vector3().crossVectors(camera.up, _fitDir).normalize();
+    const up = new THREE.Vector3().crossVectors(_fitDir, right).normalize();
+    const tanY = Math.tan(fov / 2);
+    const tanX = tanY * camera.aspect;
+    let dist = 0.1;
+    // Fit projected corners instead of a bounding sphere: portrait canvases
+    // otherwise waste most of their width around a compact, folded robot.
+    for (const x of [-1, 1]) for (const y of [-1, 1]) for (const z of [-1, 1]) {
+      const corner = new THREE.Vector3(x * _fitSz.x / 2, y * _fitSz.y / 2, z * _fitSz.z / 2);
+      const depth = corner.dot(_fitDir);
+      dist = Math.max(dist, depth + Math.abs(corner.dot(right)) / tanX * 1.12,
+        depth + Math.abs(corner.dot(up)) / tanY * 1.12);
+    }
+    ground.position.z = _fitBox.min.z - 0.002;
+    const radius = Math.max(_fitSz.length(), 0.5);
+    keyLight.target.position.copy(_fitCtr);
+    keyLight.position.copy(_fitCtr).add(new THREE.Vector3(radius, -radius, radius * 2));
+    Object.assign(keyLight.shadow.camera, {
+      left: -radius, right: radius, top: radius, bottom: -radius,
+      near: 0.01, far: radius * 5,
+    });
+    keyLight.shadow.camera.updateProjectionMatrix();
     controls.target.copy(_fitCtr);
     camera.position.copy(_fitCtr).addScaledVector(_fitDir, dist);
     camera.near = Math.max(dist / 200, 0.001);
@@ -457,7 +498,7 @@ const ReplayScene = (() => {
       const c = Array.isArray(m.color) ? m.color.slice(0, 3) : null;
       const key = c ? c.map((x) => Number(x).toFixed(3)).join(",") : "fb";
       if (!mats[key]) mats[key] = new THREE.MeshStandardMaterial({
-        color: c ? new THREE.Color(c[0], c[1], c[2]) : new THREE.Color(0xE6EBED),
+        color: c ? new THREE.Color().setRGB(c[0], c[1], c[2], THREE.SRGBColorSpace) : new THREE.Color(0xE6EBED),
         metalness: 0.05, roughness: 0.72, side: THREE.DoubleSide });
       return mats[key];
     };

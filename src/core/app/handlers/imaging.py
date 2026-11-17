@@ -80,9 +80,10 @@ def prepare_image(
     height: int,
     width: int,
     resize_pad: bool = True,
-    image_layout: str = "chw",
+    image_layout: str = "hwc",
+    resize: bool = False,
 ) -> np.ndarray:
-    """Preprocess an image into the model's expected layout and size.
+    """Preserve image resolution and layout unless preprocessing is requested.
 
     Args:
         image: Source image array.
@@ -91,6 +92,7 @@ def prepare_image(
         width: Target width.
         resize_pad: Pad to preserve aspect ratio when True, else resize directly.
         image_layout: "chw" to transpose to channel-first, else channel-last.
+        resize: Resize to the target dimensions; False preserves source resolution.
 
     Returns:
         Processed uint8 array in the requested layout.
@@ -102,10 +104,11 @@ def prepare_image(
         converted = np.repeat(converted[..., None], 3, axis=2)
     if convert_bgr_to_rgb and converted.ndim == 3 and converted.shape[2] == 3:
         converted = converted[:, :, ::-1]
-    if resize_pad:
-        converted = resize_with_pad(converted, height, width)
-    else:
-        converted = resize_direct(converted, height, width)
+    if resize:
+        if resize_pad:
+            converted = resize_with_pad(converted, height, width)
+        else:
+            converted = resize_direct(converted, height, width)
     if image_layout == "chw":
         return np.transpose(converted, (2, 0, 1))
     return converted

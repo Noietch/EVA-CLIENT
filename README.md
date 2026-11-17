@@ -38,11 +38,20 @@
   <video src="https://github.com/user-attachments/assets/caeabb2f-7896-4863-848d-21f9a5a38dcb" controls muted></video>
 </p>
 
+* **[2026-11-17] EVA-Client 0.3.0: unified devices, scene-aware evaluation, and dataset dashboard.** A large update across deployment, collection, evaluation, and data management:
+  * **Unified device workflow.** Pick a robot from the DEVICE tab or `eva device`, with hardware YAML defaults, workstation overrides, and detached device processes; EVA now starts without a business preset. Safer bring-up with camera readiness checks, preflight, homing, and safe stop. See [`docs/quick-start.md`](./docs/quick-start.md).
+  * **EVA-SIM support (simulator coming soon).** Record in simulation with simulator-owned MCAP capture, asynchronous native episode export, and world-bound teleoperation; import and validate simulator traces into collection datasets. See [`docs/recording.md`](./docs/recording.md#eva-sim-execution-recording).
+  * **Scene-aware evaluation.** Task sets with milestones, automatic task advance, attempt tracking and cancellation from the RUN panel, scene reference images, evaluation without client recording, and Client services configurable from the CLI. See [`docs/console.md`](./docs/console.md#scene-evaluation).
+  * **Dataset dashboard.** A new DASHBOARD and standalone dataset browser for task sets and datasets: scene filters, episode review, QC with download control, task-description and object-metadata editing, and SFTP/S3 delivery. See [`docs/console.md`](./docs/console.md#dataset-operations).
+  * **Collection.** One data root for task sets, datasets, and assets; scene/task identity binding; slots ordered by hand and layout and grouped by scene; VR review controls; recorder rejects missing, stalled, or frozen camera streams. See [`docs/collection_scene_plan.md`](./docs/collection_scene_plan.md).
+  * **Policy backends.** Native client for the official [XPolicyLab](https://github.com/XPolicyLab/XPolicyLab) websocket protocol (joint and EEF actions, episode reset, replaced-session recovery); policy requests keep every configured camera and pass raw images by default.
+  * **Hardware.** Dual YAM EEF configs, YAML-configured gripper speed and bounded impedance, camera startup controls, and a refined camera/device lifecycle.
+
 * **[2026-08-28] EVA-Client 0.2.0** EVA-Client now supports WebXR-based VR controller teleoperation, ARX X5 hardware, dual-YAM leader-follower data collection, export to LeRobot v3.0, MCAP, and HDF5, and multiple coding-agent skills for adding robots, calibrating cameras, and debugging robot SDKs.
 
 * **[2026-08-28] EVA-MHS Preview.** Inspired by Anthropic's [Model Hardware Standard (MHS) research preview](https://www.anthropic.com/news/model-hardware-standard-research-preview), EVA-MHS explores an MHS-style agent-to-hardware interface for robotics. Its MCP service allows coding agents to inspect runtime state, call policy models, and directly control robots. EVA-MHS is available on the `dev/mcp_preview` branch and will be formally released in a future update.
 
-* **[2026-07-22] New RL Workspace.** EVA-Client now supports human-in-the-loop (HIL) intervention during policy rollouts and real-time value-curve visualization. See the [RL workspace and HIL intervention demo](./docs/console.md#rl-workspace-and-hil-intervention).
+* **[2026-07-22] New RL Workspace.** EVA-Client now supports human-in-the-loop (HIL) intervention during policy rollouts and real-time value-curve visualization. See the [RL workspace and HIL intervention demo](./docs/console.md#rl-and-human-intervention).
 
 * **[2026-07-18] Headless CLI + ZMQ control channel.** Drive the full deploy / eval / RL / collect loop from a single `.py` config without the browser — every console button (incl. HIL takeover) mirrored on a ZMQ socket. See [`docs/console.md`](./docs/console.md) and [`docs/control-channel.md`](./docs/control-channel.md).
 * **[2026-07-03] EVA-Client is open-sourced!**
@@ -126,10 +135,12 @@ Full guides live in [`docs/`](./docs). Start here:
 |-------|---------------|
 | [📦 Installation](./docs/installation.md) | Requirements, `uv` setup, hardware extras, verify |
 | [🚀 Quick start](./docs/quick-start.md) | Two-process bring-up, supported transports, deploy/eval/replay presets |
-| [🧭 Web console](./docs/console.md) | The seven tabs — MANUAL, COLLECT, REPLAY, DEBUG, RL, EVAL, RESULT |
+| [🧭 Web console](./docs/console.md) | The eight tabs — DASHBOARD, DEBUG, DEVICE, COLLECT, REPLAY, RL, EVAL, RESULT |
 | [📚 Core concepts](./docs/concepts.md) | Transports, policy backends, inference strategies, robots, action spaces |
 | [⚙️ Configuration](./docs/configuration.md) | `_base_` inheritance, deep merge, startup pipeline |
-| [🎞️ Recording](./docs/recording.md) | LeRobot v2.1 on-disk layout, QC flags, eval trials |
+| [🎞️ Recording](./docs/recording.md) | On-disk layout, capture checks, QC, export and delivery |
+| [🗂️ Collection scene plans](./docs/collection_scene_plan.md) | Task sets, scenes, objects, and planned collection slots |
+| [🔌 Control channel](./docs/control-channel.md) | Headless ZMQ commands for deploy, eval, RL, and collection |
 | [🔬 Development](./docs/development.md) | Tests, lint, type-check, and how the robot side is faked |
 
 ---

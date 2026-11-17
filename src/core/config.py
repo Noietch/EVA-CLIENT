@@ -1,28 +1,22 @@
-"""Minimal config loader wrapping Config.fromfile + a few derived fields.
-
-The previous 750-line dataclass + hand-written YAML loader is replaced by:
-
-  1. ``configs/_base_/defaults.py`` — single source of truth for default values
-     (every preset inherits via ``_base_ = ["../../_base_/defaults.py"]``).
-  2. ``Config.fromfile`` (vendored mmengine) — handles .py lazy config loading
-     and deep ``_base_`` merge.
-  3. ``load_config`` (this file) — wraps the loaded ConfigDict, builds
-     ``obs_space`` / ``action_space`` into JointState / EEFPose instances,
-     applies path-dependent derived fields, and validates.
-
-The returned ConfigDict supports dotted attribute access
-(``cfg.transport.image_height``) and behaves like a plain dict otherwise.
-"""
+"""Compose device YAML defaults with business presets, derive fields and validate."""
 
 from __future__ import annotations
 
+import copy
+import csv
 import math
 import posixpath
 import re
 from pathlib import Path, PurePosixPath
-from typing import TypedDict
+from typing import TYPE_CHECKING, TypedDict
 
 from core.cfg import Config, ConfigDict
+from core.devices.hardware import HardwareCatalog
+from core.utils.collection_paths import discover_task_sets
+from core.utils.s3_upload import S3UploadConfig
+
+if TYPE_CHECKING:
+    from core.devices import DeviceWorkspace
 
 
 class StrategyYamlArgs(TypedDict, total=False):
@@ -33,6 +27,7 @@ class StrategyYamlArgs(TypedDict, total=False):
     execute_horizon: int
     latency_k: int
     exp_weight_m: float
+    blend_gripper: bool
     sync_wait_ignore_gripper: bool
     sync_wait_threshold: float
     sync_wait_max_ticks: int
@@ -54,6 +49,67 @@ _CONSOLE_INITIAL_TABS = frozenset(
 _SCENE_DATASET_RE = re.compile(
     r"^(?P<base>.+)_scene_(?P<index>[1-9][0-9]*)(?:_(?P<date>[0-9]{8}))?$"
 )
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _resolve_collection_task_set_path(path: str | Path) -> Path:
+    root = Path(path).expanduser()
+    if not root.is_absolute():
+        root = _PROJECT_ROOT / root
+    return root.resolve()
+
+
+def load_collection_task_set(
+    path: str | Path,
+    dataset_name: str | None = None,
+    *,
+    task_prompts: dict[str, str] | None = None,
+) -> dict[str, list[tuple[str, int]]]:
+    """Load normalized collection tasks from a task-set directory."""
+    root = _resolve_collection_task_set_path(path)
+    tasks_path = root / "tasks.csv"
+    if not tasks_path.is_file():
+        raise FileNotFoundError(f"collection task-set is missing {tasks_path}")
+
+    prompt_targets: dict[str, int] = {}
+    try:
+        with tasks_path.open("r", encoding="utf-8-sig", newline="") as handle:
+            rows = csv.DictReader(handle)
+            required = {"prompt_en", "total_epsiodes_count"}
+            missing = sorted(required - set(rows.fieldnames or ()))
+            if missing:
+                raise ValueError(f"{tasks_path} is missing required columns: {', '.join(missing)}")
+            for row_number, row in enumerate(rows, start=2):
+                prompt = str(row.get("prompt_en", "") or "").strip()
+                if not prompt:
+                    raise ValueError(f"{tasks_path}:{row_number} prompt_en must not be empty")
+                task_id = str(row.get("task_id") or "").strip()
+                if task_prompts is not None and task_id:
+                    if task_id in task_prompts:
+                        raise ValueError(f"{tasks_path}:{row_number} duplicate task_id {task_id}")
+                    task_prompts[task_id] = prompt
+                try:
+                    target = int(str(row.get("total_epsiodes_count", "") or "").strip())
+                except ValueError as error:
+                    raise ValueError(
+                        f"{tasks_path}:{row_number} total_epsiodes_count must be an integer"
+                    ) from error
+                previous_target = prompt_targets.get(prompt)
+                if previous_target is None:
+                    prompt_targets[prompt] = target
+                elif previous_target == -1 or target == -1:
+                    prompt_targets[prompt] = -1
+                else:
+                    prompt_targets[prompt] = previous_target + target
+    except (OSError, UnicodeError, csv.Error) as error:
+        raise ValueError(f"unable to read collection task-set {tasks_path}") from error
+
+    if not prompt_targets:
+        raise ValueError(f"{tasks_path} must contain at least one task")
+    name = str(dataset_name or root.name).strip()
+    if not _is_safe_dataset_name_component(name):
+        raise ValueError("collection task-set dataset_name must be a safe path component")
+    return {name: list(prompt_targets.items())}
 
 
 def _is_safe_dataset_name_component(value: str) -> bool:
@@ -68,7 +124,20 @@ def _is_safe_posix_directory(value: str) -> bool:
     return path.is_absolute() and canonical and all(part not in {".", ".."} for part in path.parts)
 
 
-def load_config(path: str | Path) -> ConfigDict:
+def _is_safe_loopback_directory(value: str) -> bool:
+    path = Path(value)
+    if (
+        not value
+        or path == Path(".")
+        or any(char in value for char in "\r\n")
+        or any(part in {".", ".."} for part in path.parts)
+        or path.as_posix() != value.rstrip("/")
+    ):
+        return False
+    return path.expanduser().resolve() != Path("/")
+
+
+def load_config(path: str | Path, *, workspace: DeviceWorkspace | None = None) -> ConfigDict:
     """Load a .py config (with ``_base_`` inheritance) into a ConfigDict.
 
     Args:
@@ -83,14 +152,126 @@ def load_config(path: str | Path) -> ConfigDict:
     p = Path(path).expanduser()
     cfg = Config.fromfile(str(p)).to_dict()
     cfg = ConfigDict(cfg)
+    if workspace is None:
+        cfg = HardwareCatalog().compose(cfg)
+    else:
+        cfg = workspace.configure(cfg)
+    _normalize_policy_models(cfg)
     _normalize_eval_cfg(cfg)
     _normalize_rl_cfg(cfg)
+    _normalize_collection_task_set(cfg)
     _coerce_spaces(cfg)
     _apply_derived(cfg, p)
     _validate(cfg)
-    _resolve_eval_checkpoints(cfg, p)
-    _resolve_rl_policies(cfg, p)
+    _resolve_eval_checkpoints(cfg, p, workspace)
+    _resolve_rl_policies(cfg, p, workspace)
     return cfg
+
+
+def _normalize_policy_models(cfg: ConfigDict) -> None:
+    """Keep authored policy choices while exposing the first policy to the runtime."""
+    authored = cfg.get("policy")
+    cfg.policy_models = []
+    if authored is None or isinstance(authored, dict):
+        return
+    if not isinstance(authored, list) or not authored:
+        raise ValueError("policy must be a dict or a non-empty list[dict]")
+    names: set[str] = set()
+    models = []
+    for index, entry in enumerate(authored):
+        prefix = f"policy[{index}]"
+        if not isinstance(entry, dict):
+            raise ValueError(f"{prefix} must be a dict")
+        name = entry.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError(f"{prefix}.name must be a non-empty string")
+        name = name.strip()
+        if name in names:
+            raise ValueError(f"duplicate policy model name: {name}")
+        names.add(name)
+        model = ConfigDict(type="openpi", host="127.0.0.1", port=9000, backend_options={})
+        model.update(entry)
+        model.name = name
+        if not isinstance(model.type, str) or not model.type.strip():
+            raise ValueError(f"{prefix}.type must be a non-empty string")
+        if not isinstance(model.host, str) or not model.host.strip():
+            raise ValueError(f"{prefix}.host must be a non-empty string")
+        if (
+            isinstance(model.port, bool)
+            or not isinstance(model.port, int)
+            or not 1 <= model.port <= 65535
+        ):
+            raise ValueError(f"{prefix}.port must be an integer in [1, 65535]")
+        if not isinstance(model.backend_options, dict):
+            raise ValueError(f"{prefix}.backend_options must be a dict")
+        models.append(copy.deepcopy(model))
+    cfg.policy_models = models
+    cfg.policy = copy.deepcopy(
+        ConfigDict({key: value for key, value in models[0].items() if key != "name"})
+    )
+
+
+def deployment_models(cfg: ConfigDict) -> list[ConfigDict]:
+    """Return named deploy policy choices, including legacy single-policy configs."""
+    models = cfg.get("policy_models")
+    if models:
+        return models
+    policy = cfg.get("policy") or {}
+    return [ConfigDict({**policy, "name": policy.get("name") or policy.get("type", "Model")})]
+
+
+def _normalize_collection_task_set(cfg: ConfigDict) -> None:
+    """Load a mounted task set; otherwise retain configured tasks."""
+    collection = cfg.get("collection") or {}
+    task_set_dirs = collection.get("task_set_dir", "") or ""
+    if isinstance(task_set_dirs, (str, Path)):
+        task_set_dirs = [str(task_set_dirs)] if str(task_set_dirs).strip() else []
+    if not task_set_dirs:
+        return
+    # Keep task identity alongside the startup recorder prompts. Scene-plan text
+    # can be edited while this config and the recorder are still running.
+    collection["task_prompt_bindings"] = {}
+
+    def load_bound_task_set(root: Path, name: str | None = None):
+        bindings: dict[str, str] = {}
+        tasks = load_collection_task_set(root, name, task_prompts=bindings)
+        dataset = next(iter(tasks))
+        prefix = str((collection.get("task_prompt_prefixes") or {}).get(dataset) or "")
+        if prefix:
+            tasks[dataset] = [(prefix + prompt, target) for prompt, target in tasks[dataset]]
+            bindings = {task_id: prefix + prompt for task_id, prompt in bindings.items()}
+        collection["task_prompt_bindings"][dataset] = bindings
+        return tasks
+
+    authored_tasks = collection.get("tasks") or {}
+    dataset_name = str(collection.get("task_set_name", "") or "").strip()
+    if len(task_set_dirs) > 1:
+        task_sets = {}
+        for task_set_dir in task_set_dirs:
+            root = _resolve_collection_task_set_path(task_set_dir)
+            for name, leaf in discover_task_sets(root).items():
+                if name in task_sets:
+                    raise ValueError(f"Duplicate configured task-set name {name}")
+                task_sets.update(load_bound_task_set(leaf, name))
+        if task_sets:
+            collection["tasks"] = task_sets
+        return
+    task_set_dir = str(task_set_dirs[0]).strip()
+    root = _resolve_collection_task_set_path(task_set_dir)
+    if not root.is_dir():
+        return
+    # A task-sets parent directory exposes each child task set to the collection
+    # selector. The child directory name is the dataset name shown in the UI.
+    if not dataset_name and not (root / "tasks.csv").is_file():
+        task_sets = {}
+        for name, leaf in discover_task_sets(root).items():
+            task_sets.update(load_bound_task_set(leaf, name))
+        if task_sets:
+            collection["tasks"] = task_sets
+        return
+    if not dataset_name and len(authored_tasks) == 1:
+        dataset_name = str(next(iter(authored_tasks)))
+    collection["tasks"] = load_bound_task_set(root, dataset_name or None)
 
 
 def resolve_video_key(dataset_keys: ConfigDict | dict, cam_key: str) -> str | None:
@@ -116,6 +297,9 @@ def _normalize_eval_cfg(cfg: ConfigDict) -> None:
         eval_cfg = legacy_eval
     if eval_cfg == {}:
         eval_cfg = None
+    if eval_cfg is not None:
+        eval_cfg.setdefault("checkpoints", [])
+        eval_cfg.setdefault("tasks", [])
     cfg.eval_cfg = eval_cfg
     cfg.eval = eval_cfg
 
@@ -163,7 +347,20 @@ def _apply_derived(cfg: ConfigDict, path: Path) -> None:
 
 
 def _validate(cfg: ConfigDict) -> None:
-    """Validate configured collection and RL storage contracts."""
+    """Validate configured transport, collection, and RL storage contracts."""
+    default_strategy = cfg.inference_cfg.get("default_strategy")
+    if default_strategy is not None and default_strategy not in cfg.inference_strategies:
+        raise ValueError("inference_cfg.default_strategy must name a configured strategy")
+    transport = cfg.get("transport") or {}
+    image_mode = str(transport.get("image_mode", "stream"))
+    if image_mode not in {"stream", "on_demand"}:
+        raise ValueError(
+            f"transport.image_mode must be 'stream' or 'on_demand', got {image_mode!r}"
+        )
+    timeout = float(transport.get("image_request_timeout_s", 2.0))
+    if timeout <= 0.0:
+        raise ValueError("transport.image_request_timeout_s must be positive")
+
     console = cfg.get("console") or {}
     initial_tab = str(console.get("initial_tab", "auto"))
     if initial_tab not in _CONSOLE_INITIAL_TABS:
@@ -180,6 +377,7 @@ def _validate(cfg: ConfigDict) -> None:
     if not isinstance(tasks, dict):
         raise ValueError("collection.tasks must map dataset names to (prompt, target) lists")
     prompt_datasets: dict[str, str] = {}
+    mounted_task_sets = bool(coll.get("task_prompt_bindings"))
     for dataset_name, prompts in tasks.items():
         normalized_name = str(dataset_name).strip()
         if not _is_safe_dataset_name_component(normalized_name):
@@ -207,7 +405,10 @@ def _validate(cfg: ConfigDict) -> None:
                     and previous_scene.group("base") == current_scene.group("base")
                     and previous_dataset != normalized_name
                 )
-                if not same_scene_family:
+                # Mounted task sets keep dataset and task identity in the
+                # runtime bindings, so the same prompt may intentionally occur
+                # in multiple task-plan datasets.
+                if not same_scene_family and not mounted_task_sets:
                     raise ValueError(
                         f"collection prompt must belong to one dataset: {normalized_prompt!r}"
                     )
@@ -226,6 +427,14 @@ def _validate(cfg: ConfigDict) -> None:
         raise ValueError(
             "collection.task_requirements was removed; put each target beside its prompt"
         )
+    storage = coll.get("storage") or {}
+    remotes = [name for name in ("huggingface", "sftp", "s3", "loopback") if storage.get(name)]
+    delivery_remotes = [name for name in ("sftp", "s3", "loopback") if storage.get(name)]
+    if len(delivery_remotes) > 1:
+        raise ValueError(
+            f"collection.storage configures multiple remotes: {', '.join(remotes)}; "
+            "configure at most one delivery remote"
+        )
     sftp = (coll.get("storage") or {}).get("sftp") or {}
     if sftp:
         if not str(sftp.get("host", "")).strip():
@@ -239,14 +448,31 @@ def _validate(cfg: ConfigDict) -> None:
         remote_dir = str(sftp.get("remote_dir", "")).strip()
         if not _is_safe_posix_directory(remote_dir):
             raise ValueError("collection.storage.sftp.remote_dir must be a canonical absolute path")
+    s3 = (coll.get("storage") or {}).get("s3") or {}
+    if s3:
+        try:
+            S3UploadConfig(
+                endpoint=str(s3.get("endpoint", "")),
+                bucket=str(s3.get("bucket", "")),
+                prefix=str(s3.get("prefix", "")),
+                sign_service=str(s3.get("sign_service", "")),
+                secure=s3.get("secure", False),
+            )
+        except ValueError as error:
+            raise ValueError(f"collection.storage.s3: {error}") from error
+    loopback = (coll.get("storage") or {}).get("loopback") or {}
+    if loopback:
+        remote_dir = str(loopback.get("remote_dir", "")).strip()
+        if not _is_safe_loopback_directory(remote_dir):
+            raise ValueError(
+                "collection.storage.loopback.remote_dir must be a canonical non-root path"
+            )
     rl_cfg = cfg.get("rl_cfg")
     columns = set(schema.get("columns") or {})
     if columns:
         missing = sorted(set(_COLLECTION_REQUIRED_COLUMNS) - columns)
         if missing:
             raise ValueError(f"collection.schema.columns missing required keys: {missing}")
-        if not (schema.get("cameras") or {}):
-            raise ValueError("collection.schema.cameras must define at least one camera")
         if not (schema.get("arms") or {}):
             raise ValueError("collection.schema.arms must define at least one arm")
         storage = coll.get("storage") or {}
@@ -259,27 +485,6 @@ def _validate(cfg: ConfigDict) -> None:
 
     if rl_cfg and str(rl_cfg.data.format) != "lerobot":
         raise ValueError("rl.data.format must be 'lerobot' in this version")
-    rollout_source = str(((cfg.get("rollout") or {}).get("intervention") or {}).get("source", ""))
-    if rollout_source and rollout_source not in _ROLLOUT_INTERVENTION_SOURCES:
-        raise ValueError(
-            "rollout.intervention.source must be one of "
-            f"{sorted(_ROLLOUT_INTERVENTION_SOURCES)}, got {rollout_source!r}"
-        )
-    if rl_cfg is not None:
-        rl_source = str((rl_cfg.get("intervention") or {}).get("source", ""))
-        if rl_source and rl_source not in _ROLLOUT_INTERVENTION_SOURCES:
-            raise ValueError(
-                "rl.intervention.source must be one of "
-                f"{sorted(_ROLLOUT_INTERVENTION_SOURCES)}, got {rl_source!r}"
-            )
-        if (
-            rl_source == "teleop_client"
-            and str((coll.get("teleop") or {}).get("control_source", "")) != "client"
-        ):
-            raise ValueError(
-                "rl.intervention.source='teleop_client' requires "
-                "collection.teleop.control_source='client'"
-            )
 
     # Validate rollout intervention input source
     for field, section in (("rollout", cfg.get("rollout") or {}), ("rl", rl_cfg or {})):
@@ -356,14 +561,17 @@ def _validate_teleop(cfg: ConfigDict) -> None:
         _positive_finite(safety.get(name), f"collection.teleop.safety.{name}")
 
 
-def _resolve_eval_checkpoints(cfg: ConfigDict, path: Path) -> None:
+def _resolve_eval_checkpoints(
+    cfg: ConfigDict, path: Path, workspace: DeviceWorkspace | None = None
+) -> None:
     """Load an eval config's inline checkpoint list into full ConfigDicts.
 
     For an eval config (``cfg.eval_cfg`` non-empty with a ``checkpoints`` list), each
     checkpoint entry carries a ``config`` string pointing at a deploy preset. This
     loads that preset into a full ConfigDict (recursively via ``load_config``),
-    overrides its policy endpoint with the checkpoint's ``host``/``port``, and
-    replaces the ``config`` string in place — run loop deep-copies it per ckpt swap.
+    overrides its policy endpoint with the checkpoint's ``host``/``port``, merges its
+    optional ``robot`` override, and replaces the ``config`` string in place — run
+    loop deep-copies it per ckpt swap.
 
     The ``eval_cfg.ssh`` block (host/user/port/remote_sync_dir) is left untouched —
     consumers pass it straight to the FUNCTIONS-registered forwarder.
@@ -381,13 +589,17 @@ def _resolve_eval_checkpoints(cfg: ConfigDict, path: Path) -> None:
 
     for ckpt in eval_cfg["checkpoints"]:
         ref = str(ckpt["config"])
-        sub = load_config((path.parent / ref).resolve())
+        sub = load_config((path.parent / ref).resolve(), workspace=workspace)
         sub.policy.host = str(ckpt.get("host", "127.0.0.1"))
         sub.policy.port = int(ckpt["port"])
+        if "robot" in ckpt:
+            sub.robot.update(ckpt["robot"])
         ckpt["config"] = sub
 
 
-def _resolve_rl_policies(cfg: ConfigDict, path: Path) -> None:
+def _resolve_rl_policies(
+    cfg: ConfigDict, path: Path, workspace: DeviceWorkspace | None = None
+) -> None:
     """Load each RL policy choice into a full deploy ConfigDict."""
     rl_cfg = cfg.get("rl_cfg")
     if not rl_cfg:
@@ -396,7 +608,7 @@ def _resolve_rl_policies(cfg: ConfigDict, path: Path) -> None:
         ref = model.config
         if isinstance(ref, ConfigDict):
             continue
-        sub = load_config((path.parent / str(ref)).resolve())
+        sub = load_config((path.parent / str(ref)).resolve(), workspace=workspace)
         if "host" in model:
             sub.policy.host = str(model.host)
         if "port" in model:
@@ -408,6 +620,7 @@ __all__ = [
     "ConfigDict",
     "StrategyYamlArgs",
     "StrategyYamlSpec",
+    "deployment_models",
     "load_config",
     "resolve_video_key",
 ]

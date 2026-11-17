@@ -11,6 +11,7 @@ Usage:
     python examples/control_channel/eva_ctl.py query status
     python examples/control_channel/eva_ctl.py wait-idle       # block until the run finishes
     python examples/control_channel/eva_ctl.py cmd web:tab_switch:collect --json '{"armed": true}'
+    python examples/control_channel/eva_ctl.py haptic right --intensity 0.6 --duration-ms 80
 
 The ``send()`` helper is import-friendly, so a simulator can drive the loop directly
 (add this directory to sys.path, or copy this file next to your script):
@@ -97,6 +98,23 @@ def wait_idle(
             return last
         time.sleep(poll_s)
     return last
+
+
+def haptic(
+    hand: str = "both",
+    *,
+    intensity: float = 0.6,
+    duration_ms: float = 80.0,
+    host: str = DEFAULT_HOST,
+    port: int = DEFAULT_PORT,
+) -> dict:
+    """Request one vibration from the connected EVA-VR controller(s)."""
+    return send(
+        cmd="web:haptic",
+        host=host,
+        port=port,
+        extra={"hand": hand, "intensity": intensity, "duration_ms": duration_ms},
+    )
 
 
 _QUERY_WORDS = {"status", "config", "frame"}
@@ -204,6 +222,11 @@ def main() -> int:
     p_query = sub.add_parser("query", help="read-only query")
     p_query.add_argument("name", choices=["status", "config", "frame"])
 
+    p_haptic = sub.add_parser("haptic", help="vibrate EVA-VR controller(s)")
+    p_haptic.add_argument("hand", choices=["left", "right", "both"])
+    p_haptic.add_argument("--intensity", type=float, default=0.6)
+    p_haptic.add_argument("--duration-ms", type=float, default=80.0)
+
     sub.add_parser("wait-idle", help="block until the active run finishes")
     sub.add_parser("repl", help="interactive prompt over the control channel")
 
@@ -214,6 +237,14 @@ def main() -> int:
         reply = send(cmd=args.command, host=args.host, port=args.port, extra=extra)
     elif args.action == "query":
         reply = send(query=args.name, host=args.host, port=args.port)
+    elif args.action == "haptic":
+        reply = haptic(
+            hand=args.hand,
+            intensity=args.intensity,
+            duration_ms=args.duration_ms,
+            host=args.host,
+            port=args.port,
+        )
     elif args.action == "wait-idle":
         reply = {"ok": True, "data": wait_idle(host=args.host, port=args.port)}
     elif args.action == "repl":

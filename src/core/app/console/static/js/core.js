@@ -8,9 +8,17 @@ export function setCommandMetadata(node, command, template = false) {
   else node.dataset.command = command;
 }
 
+export function releaseCameraImage(image) {
+  if (image._cameraAbort) { image._cameraAbort.abort(); image._cameraAbort = null; }
+  const source = image.getAttribute("src");
+  image.removeAttribute("src");
+  if (source && source.startsWith("blob:")) URL.revokeObjectURL(source);
+}
+
 function replaceCamStripContent(html) {
   const strip = $("cam-strip");
   if (!strip) return;
+  strip.querySelectorAll("img.cam").forEach(releaseCameraImage);
   strip.querySelectorAll("video.cam").forEach((v) => {
     v.pause();
     v.removeAttribute("src");
@@ -57,6 +65,14 @@ export const RT_COLORS = ["#FF4D00", "#1F7A4D", "#2563EB", "#B0A14F", "#9B59B6",
 // Cross-module mutable state. Modules read/write via S.<name> so the binding is shared.
 export const S = {
   CFG: null,
+  SCENE_PLAN: null,
+  TELEOP_FEEDBACK: null,
+  scenePlanTaskId: "",
+  scenePlanSceneIndex: 0,
+  scenePlanSceneId: "",
+  scenePlanRoundIndex: 0,
+  scenePlanTaskPromptKey: "",
+  scenePlanSelectionManual: false,
   STATUS: {},
   ACTIVE_TAB: "debug",
   collectReplayEpisode: null,
@@ -79,10 +95,17 @@ export const S = {
   chartModalWhich: null,
   EVAL_MODEL_NAME: "",
   EVAL_EPISODES_DIR: "",
-  collectQueueExpanded: false,
-  collectQueueEnabled: false,
+  collectionSlots: {
+    loaded: false, loading: false, error: "", scenePlanVersion: "",
+    dataset: "", datasetDir: "", active: null, counts: {},
+    scenes: [], tasks: [], slots: [], page: 1, pageCount: 1, filteredTotal: 0,
+    sceneFilter: "", taskFilter: "", showAll: true, selectedSlotId: "",
+    cursorPinned: false, followActivePage: true, lastAttemptAt: 0,
+    lastSaveRevision: 0, sessionDataset: "", sessionSlotId: "",
+  },
   collectArmEnabled: false,
   collectToggleBusy: null,
+  collectTaskSelectionPending: false,
   collectHomeBusy: false,
   rolloutSaveQueueExpanded: false,
   rolloutSaveEpisode: null,
@@ -167,48 +190,88 @@ window.addEventListener("unhandledrejection", (event) => {
 // the client-liveness heartbeat. Keep ordinary requests bounded and let the
 // caller's single-flight loop retry on its next tick.
 const API_GET_TIMEOUT_MS = 5000;
+const API_GET_ABORT_TRACE_MS = 30000;
+const apiGetAbortTraceAt = new Map();
+
+async function parseJsonResponse(response, path) {
+  const text = await response.text();
+  if (!text.trim()) {
+    throw new Error(`Empty response from ${path} (HTTP ${response.status}); EVA may be restarting`);
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`Invalid JSON response from ${path} (HTTP ${response.status})`);
+  }
+}
 
 async function apiGet(path, { timeoutMs = API_GET_TIMEOUT_MS, signal = null } = {}) {
   let controller = null;
   let timer = null;
+  let timedOut = false;
+  const abort = () => controller.abort();
   if (typeof AbortController !== "undefined" && timeoutMs > 0) {
     controller = new AbortController();
     if (signal) {
       if (signal.aborted) controller.abort();
-      else signal.addEventListener("abort", () => controller.abort(), { once: true });
+      else signal.addEventListener("abort", abort, { once: true });
     }
-    timer = setTimeout(() => controller.abort(), timeoutMs);
+    timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
   }
   try {
-    const r = await fetch(path, controller ? { signal: controller.signal } : {});
+    const r = await fetch(path, { signal: controller ? controller.signal : signal });
     if (!r.ok) clientTrace("api.get.error", { path, status: r.status });
-    return await r.json();
+    return await parseJsonResponse(r, path);
   } catch (error) {
-    clientTrace("api.get.exception", {
-      path,
-      message: String(error),
-      timeout: !!(error && error.name === "AbortError"),
-    });
+    const aborted = !!(error && error.name === "AbortError");
+    const lastAbortTraceAt = apiGetAbortTraceAt.get(path) || 0;
+    if (!(signal && signal.aborted) &&
+        (!aborted || Date.now() - lastAbortTraceAt >= API_GET_ABORT_TRACE_MS)) {
+      if (aborted) apiGetAbortTraceAt.set(path, Date.now());
+      clientTrace("api.get.exception", {
+        path,
+        message: String(error),
+        timeout: timedOut,
+      });
+    }
     throw error;
   } finally {
     if (timer !== null) clearTimeout(timer);
+    if (signal) signal.removeEventListener("abort", abort);
   }
 }
 
 let postQueue = Promise.resolve();
+const API_POST_TIMEOUT_MS = 10000;
 
-async function apiPost(path, body, { concurrent = false } = {}) {
+async function apiPost(
+    path,
+    body,
+    { concurrent = false, timeoutMs = API_POST_TIMEOUT_MS } = {},
+) {
   const request = async () => {
     const traceId = `${CLIENT_TRACE_ID}:${clientTraceSeq + 1}`;
     const started = performance.now();
+    const controller = typeof AbortController !== "undefined" && timeoutMs > 0
+      ? new AbortController()
+      : null;
+    let timedOut = false;
+    const timer = controller ? setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs) : null;
     clientTrace("api.post.begin", { path }, traceId);
     try {
       const r = await fetch(path, {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-EVA-Trace-ID": traceId },
         body: JSON.stringify(body || {}),
+        ...(controller ? { signal: controller.signal } : {}),
       });
-      const payload = await r.json();
+      const payload = await parseJsonResponse(r, path);
       clientTrace("api.post.end", {
         path,
         status: r.status,
@@ -221,9 +284,12 @@ async function apiPost(path, body, { concurrent = false } = {}) {
       clientTrace("api.post.error", {
         path,
         message: String(error),
+        timeout: timedOut,
         elapsed_ms: Math.round((performance.now() - started) * 10) / 10,
       }, traceId);
       throw error;
+    } finally {
+      if (timer !== null) clearTimeout(timer);
     }
   };
   if (concurrent) return request();

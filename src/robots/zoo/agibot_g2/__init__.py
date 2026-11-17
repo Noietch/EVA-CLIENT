@@ -195,8 +195,8 @@ class AgibotG2(Robot):
             observation_schema=ObservationSchema(
                 cameras=(
                     CameraSpec("front", "top_head"),
-                    CameraSpec("left_wrist", "hand_left"),
-                    CameraSpec("right_wrist", "hand_right"),
+                    CameraSpec("left_wrist", "hand_left", attached_to="left_arm"),
+                    CameraSpec("right_wrist", "hand_right", attached_to="right_arm"),
                 ),
                 state_composition=("left_arm", "right_arm", "head", "body"),
             ),

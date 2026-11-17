@@ -1,13 +1,15 @@
 // main.js: app entry — wires DOM events, exposes inline handlers, boots polling
 // (main); tab switching + active-tab thumb + per-tab render dispatch (tabs).
-import { $, LIVE, S, apiGet, apiPost, setCommandMetadata } from "./core.js";
+import { $, LIVE, S, apiGet, apiPost, releaseCameraImage, setCommandMetadata } from "./core.js";
+import { initLocale } from "./i18n.js";
 import { closeChartModal, drawLiveCharts, liveDimsAll, onScrubInput, openChartModal, resetLiveSeries } from "./charts.js";
-import { applyTune, applyManualTune, renderConfig, manualConnect, manualDisconnect, manualDispatchToggle, enterManualSim, applyStatus, pauseSetup, replayIsLocalMode, resumeSetup, retrySetup, startRunFromDebug, updateGuide } from "./run.js";
-import { changeCollectionExportFormat, clearReviewPlayback, collectConfigured, exportCollectionQuality, installCollectKeyboardControls, pollEpisodeHistory, renderCollect, renderRolloutSave, returnReviewToLive, reviewActiveInCurrentTab, saveAnnotation, startCollectFromTab, submitEpisodeNote, submitEpisodeQc, submitQc, uploadCollectionQuality } from "./collect.js";
-import { evalReset, evalSetup, evalRunToggle, evalResumeOnEnter, submitEvalScore, loadEvalResults, renderEvalSelectors, loadResultsAll, tpSeek, tpToggle, trialPopClose } from "./eval.js";
+import { cancelDebugIntent, applyTune, applyManualTune, renderConfig, manualConnect, manualDisconnect, manualDispatchToggle, enterManualSim, applyStatus, pauseSetup, replayIsLocalMode, resumeSetup, retrySetup, startRunFromDebug, updateGuide } from "./run.js";
+import { handleCollectionReviewInput, resetCollectionReviewInput, changeCollectionExportFormat, changeCollectionSlotFilter, changeCollectionSlotPage, clearReviewPlayback, collectConfigured, downloadCollectionAssetsFromHf, downloadCollectionTaskSetFromHf, exportCollectionQuality, installCollectKeyboardControls, pollEpisodeHistory, renderCollect, renderCollectControls, renderRolloutSave, returnReviewToLive, reviewActiveInCurrentTab, saveAnnotation, startCollectFromTab, submitEpisodeNote, submitEpisodeQc, submitQc, toggleCollectionSlotAll, uploadCollectionDatasetToHf, uploadCollectionQuality } from "./collect.js";
+import { evalResetOrCancel, evalSetup, evalRunToggle, evalResumeOnEnter, submitEvalScore, loadEvalResults, renderEvalSelectors, loadResultsAll, tpSeek, tpToggle, trialPopClose } from "./eval.js";
 import { handleVisibilityChange, replayPlay, replayStop, replayToggle, seekReplay, loop, pollFrame, pollScene, refreshCameraStreams, exitReplayMode } from "./replay.js";
 import { pollRlSeries, renderRlConfig, renderRlStatus } from "./rl.js";
 import { initDashboard, loadDashboard } from "./dashboard.js";
+import { closeLocalHistoryView } from "./local_history.js";
 
 const FIXED_COMMANDS = {
   "b-run": "web:run",
@@ -28,7 +30,7 @@ const FIXED_COMMANDS = {
   "bm-connect": "web:connect",
   "bm-send": "web:manual_send",
   "bm-home": "web:manual_home",
-  "b-collect-toggle": "web:operator_action:{intent}:ui",
+  "b-collect-toggle": "web:collect_start|web:operator_action:accept:ui",
   "b-collect-cancel": "web:collect_cancel",
   "b-collect-home": "web:collect_home",
   "rl-b-setup": "web:rl_setup",
@@ -51,12 +53,20 @@ function annotateFixedCommands() {
   setCommandMetadata($("mode-list"), "web:select_mode:{mode}", true);
   setCommandMetadata($("strategy-list"), "web:select_strategy:{strategy}", true);
   setCommandMetadata($("prompt-list"), "web:switch_task:{task}", true);
-  setCommandMetadata($("collect-prompt-list"), "web:select_collect_task:{task}", true);
   setCommandMetadata($("rl-task-list"), "web:rl_select_task:{task}", true);
   setCommandMetadata($("rl-policy-list"), "web:rl_select_policy:{slot}", true);
   setCommandMetadata($("rl-critic-list"), "web:rl_select_critic:{slot}", true);
   setCommandMetadata($("scrub-range"), "web:replay_seek:{frame}", true);
 }
+
+initLocale();
+
+// Capture outside presses before the 3D canvas handles its pointer events.
+document.addEventListener("pointerdown", (event) => {
+  document.querySelectorAll(".debug-composer details[open]").forEach((menu) => {
+    if (!menu.contains(event.target)) menu.open = false;
+  });
+}, true);
 
 // ===== tabs =====
 function moveTabThumb() {
@@ -66,6 +76,13 @@ function moveTabThumb() {
     thumb.style.setProperty("--thumb-x", active.offsetLeft + "px");
     thumb.style.setProperty("--thumb-w", active.offsetWidth + "px");
     thumb.classList.add("ready");
+    const tabs = active.parentElement;
+    if (tabs && tabs.scrollWidth > tabs.clientWidth) {
+      tabs.scrollTo({
+        left: active.offsetLeft - (tabs.clientWidth - active.offsetWidth) / 2,
+        behavior: "smooth",
+      });
+    }
   }
 
 function relocateCanvas(tab) {
@@ -80,10 +97,11 @@ function relocateCanvas(tab) {
     else if (tab === "rl") host = $("rl-stage-col");
     else host = $("view-" + tab);
     if (host && stage.parentElement !== host) host.appendChild(stage);
-    const showSeries = tab === "rl" || tab === "replay" ||
-      (tab === "collect" && LIVE.replayOwner === "collect") ||
+    const collectReview = tab === "collect" && LIVE.replayOwner === "collect";
+    const showSeries = tab === "rl" || tab === "replay" || collectReview ||
       (tab === "debug" && LIVE.replayOwner === "rollout");
     stage.classList.toggle("no-series", !showSeries);
+    stage.classList.toggle("collect-review", collectReview);
     const rlReplay = tab === "rl" && LIVE.replayMode && LIVE.replayOwner === "rl";
     stage.classList.toggle("rl-live", tab === "rl" && !rlReplay);
     stage.classList.toggle("rl-replay", rlReplay);
@@ -110,15 +128,42 @@ function afterWindowLoad(fn) {
   }
 
 function closeMediaStreams() {
-    document.querySelectorAll("img.cam").forEach((img) => {
-      img.removeAttribute("src");
-    });
+    closeTeleopFeedbackStream();
+    document.querySelectorAll("img.cam").forEach(releaseCameraImage);
     document.querySelectorAll("video.cam, video.tp-cam").forEach((video) => {
       video.pause();
       video.removeAttribute("src");
       video.load();
     });
   }
+
+let teleopFeedbackSource = null;
+
+function closeTeleopFeedbackStream() {
+    if (!teleopFeedbackSource) return;
+    teleopFeedbackSource.close();
+    teleopFeedbackSource = null;
+}
+
+function startTeleopFeedbackStream() {
+    const controls = S.CFG && S.CFG.collection && S.CFG.collection.controls;
+    if (!controls || controls.mode !== "vr" || !window.EventSource || teleopFeedbackSource) return;
+    teleopFeedbackSource = new EventSource("/api/teleop/feedback");
+    teleopFeedbackSource.onopen = () => resetCollectionReviewInput();
+    teleopFeedbackSource.onmessage = (event) => {
+      try {
+        const feedback = JSON.parse(event.data);
+        handleCollectionReviewInput(feedback);
+        S.TELEOP_FEEDBACK = feedback;
+        S.STATUS.teleop = { ...(S.STATUS.teleop || {}), ...feedback };
+        renderCollectControls();
+        if (S.ACTIVE_TAB === "collect") updateGuide();
+      } catch {}
+    };
+    // EventSource reconnects automatically. Keep the last valid snapshot visible
+    // during a short reconnect instead of replacing it with a stale 1 Hz status.
+    teleopFeedbackSource.onerror = () => resetCollectionReviewInput();
+}
 
 // #trial-pop is a single shared node used only by RESULT now: its detail view docks it
 // into #rv-detail-replay; anything else parks it on .workspace as a floating popup
@@ -136,6 +181,7 @@ function relocateTrialPop(tab) {
   }
 
 function setActiveTab(tab) {
+    if (tab !== "debug") closeLocalHistoryView();
     if (tab !== "collect") disarmCollectArm();
     const leavingCollectReview = S.ACTIVE_TAB === "collect" && tab !== "collect" &&
       LIVE.replayOwner === "collect";
@@ -163,6 +209,8 @@ function setActiveTab(tab) {
     const viewTab = tab === "collect" ? "debug" : tab;
     $("view-" + viewTab).classList.add("active");
     $("guidebar").style.display = tab === "dashboard" ? "none" : "";
+    const transferInfo = $("collect-transfer-info");
+    transferInfo.style.display = tab === "collect" && transferInfo.textContent ? "" : "none";
     if (viewTab === "debug") {
       $("view-debug").classList.toggle("collect-mode", tab === "collect");
     }
@@ -193,23 +241,65 @@ function setActiveTab(tab) {
     pollEpisodeHistory(true);
   }
 
+async function openCollectRobotReplay() {
+    const episode = S.collectReplayEpisode;
+    const datasetDir = (S.collectionSlots.datasetDir || (S.STATUS.collect || {}).dataset_dir || "").trim();
+    if (episode == null || !datasetDir || !S.STATUS.transport_connected) return;
+    const button = $("review-robot-replay");
+    if (button) button.disabled = true;
+    S.pendingQcLoad = { dir: datasetDir, episode };
+    S.qcMode = false;
+    S._setupFired = false;
+    S._setupPaused = false;
+    try {
+      await apiPost("/api/tab_switch", { tab: "replay" });
+      await apiPost("/api/select_mode", { mode: "real" });
+      S.STATUS.cli_mode = "real";
+      setActiveTab("replay");
+    } catch (error) {
+      S.pendingQcLoad = null;
+      const status = $("collect-err");
+      if (status) status.textContent = error.message || "Unable to open robot replay";
+      if (button) button.disabled = false;
+    }
+  }
+
 // ===== main =====
 
 "use strict";
+
+async function waitForBootApi(path) {
+    for (;;) {
+      try {
+        return await apiGet(path, { timeoutMs: 2000 });
+      } catch (error) {
+        // The browser can be opened a moment before EVA finishes binding the
+        // console port, or while the process is restarting. Keep boot pending
+        // and recover automatically instead of leaving a permanent spinner.
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+    }
+  }
 
 // Expose handlers referenced by inline on* attributes in index.html.
 Object.assign(window, { tpToggle, tpSeek, trialPopClose, replayToggle });
 
 async function boot() {
-    S.CFG = await apiGet("/api/config");
+    S.CFG = await waitForBootApi("/api/config");
+    try {
+      S.SCENE_PLAN = await apiGet("/api/scene_plan");
+    } catch {
+      S.SCENE_PLAN = { ok: false, tasks: [], scenes: [], positions: [], objects: [] };
+    }
     initDashboard();
     installCollectKeyboardControls();
-    renderConfig();
+    startTeleopFeedbackStream();
     // EVAL/RESULT use inline onclick handlers; expose them.
     window.tpToggle = tpToggle; window.tpSeek = tpSeek;
     window.trialPopClose = trialPopClose;
-    const s = await apiGet("/api/status");
+    const s = await waitForBootApi("/api/status");
     applyStatus(s);
+    renderConfig();
     renderRlStatus(s);
     if (!collectConfigured()) {
       document.querySelector('.tab[data-tab="collect"]').classList.add("disabled");
@@ -241,6 +331,7 @@ async function boot() {
         drawLiveCharts();
       });
       ro.observe($("stage"));
+      ro.observe($("canvas-col"));
     }
     resetLiveSeries();
     requestAnimationFrame(moveTabThumb);
@@ -257,9 +348,23 @@ async function boot() {
     loop(async () => {
       try {
         const status = await apiGet("/api/status", { timeoutMs: STATUS_REQUEST_TIMEOUT_MS });
+        const connectionError = $("debug-prompt-status");
+        if (connectionError?.dataset.connectionLost === "1") {
+          connectionError.dataset.connectionLost = "";
+          connectionError.hidden = true;
+          connectionError.textContent = "";
+        }
         applyStatus(status);
         renderRlStatus(status);
-      } catch {}
+      } catch {
+        if (S.ACTIVE_TAB === "debug") {
+          cancelDebugIntent();
+          const error = $("debug-prompt-status");
+          error.dataset.connectionLost = "1";
+          error.textContent = "Connection lost. Reconnecting…";
+          error.hidden = false;
+        }
+      }
     }, STATUS_POLL_MS);
     // The loader itself enforces a 5s minimum interval; this lightweight scheduler
     // notices tab switches without adding another high-rate request stream.
@@ -270,31 +375,42 @@ async function boot() {
   }
 
 document.querySelectorAll(".tab").forEach((t) => {
-    t.addEventListener("click", () => {
+    t.addEventListener("click", async () => {
       if (t.classList.contains("disabled")) return;
       const tab = t.dataset.tab;
-      if (tab === S.ACTIVE_TAB) return;
-      // A direct tab click is plain browsing, so clear QC mode here.
-      S.qcMode = false;
-      S.pendingQcLoad = null;
-      // Soft reset on every tab switch. COLLECT teleop is armed only after the
-      // local motion gate is switched on; START RECORD still controls recording.
-      if (tab !== "collect") disarmCollectArm();
-      apiPost("/api/tab_switch", { tab });
-      // Leaving MANUAL: drop both the SIM-debug flag and any real-robot link so
-      // re-entering starts fresh (SIM debug auto-arms, REAL needs CONNECT again).
-      S.manualActive = false;
-      S.realRequested = false;
-      S.realConnected = false;
-      S.manualDispatching = false;
-      S.manualDispatchStopPending = false;
-      // Switching away mid-setup: abort the in-flight setup (halt interrupts the running
-      // reset/warmup motion and clears it) so the new tab starts from a clean idle state
-      // instead of finishing a setup for the tab we just left. _setupFired stays true so
-      // it doesn't immediately re-fire; clear any pause latch so the new tab can auto-setup.
-      if (S.STATUS && S.STATUS.setup_stage) { apiPost("/api/halt"); S._setupFired = true; }
-      S._setupPaused = false;
-      setActiveTab(tab);
+      if (tab === S.ACTIVE_TAB || S.tabSwitchPending) return;
+      // Release MJPEG slots before the switch POST needs a browser connection.
+      S.tabSwitchPending = true;
+      cancelDebugIntent();
+      closeMediaStreams();
+      try {
+        // A direct tab click is plain browsing, so clear QC mode here.
+        S.qcMode = false;
+        S.pendingQcLoad = null;
+        // Soft reset on every tab switch. COLLECT teleop is armed only after the
+        // local motion gate is switched on; START RECORD still controls recording.
+        if (tab !== "collect") disarmCollectArm();
+        const switched = await apiPost("/api/tab_switch", { tab });
+        if (switched && switched.ok === false) throw new Error(switched.error || "Tab switch failed");
+        // Leaving MANUAL: drop both the SIM-debug flag and any real-robot link so
+        // re-entering starts fresh (SIM debug auto-arms, REAL needs CONNECT again).
+        S.manualActive = false;
+        S.realRequested = false;
+        S.realConnected = false;
+        S.manualDispatching = false;
+        S.manualDispatchStopPending = false;
+        // Switching away mid-setup: abort the in-flight setup (halt interrupts the running
+        // reset/warmup motion and clears it) so the new tab starts from a clean idle state
+        // instead of finishing a setup for the tab we just left. _setupFired stays true so
+        // it doesn't immediately re-fire; clear any pause latch so the new tab can auto-setup.
+        if (S.STATUS && S.STATUS.setup_stage) { apiPost("/api/halt"); S._setupFired = true; }
+        S._setupPaused = false;
+        setActiveTab(tab);
+      } catch (error) {
+        $("gb-msg").textContent = "切换失败：" + error.message;
+      } finally {
+        S.tabSwitchPending = false;
+      }
     });
   });
 $("b-run").onclick    = () => {
@@ -305,9 +421,13 @@ $("b-run").onclick    = () => {
     setTimeout(() => {
       if (S.runToggleBusy !== null) { S.runToggleBusy = null; applyStatus(S.STATUS); }
     }, 1500);
+    if (S.ACTIVE_TAB === "manual" && !live) {
+      S.realRequested = true;
+      applyStatus(S.STATUS);
+    }
     return live ? apiPost("/api/operator_action", { intent: "start" }) : startRunFromDebug();
   };
-$("b-reset").onclick  = () => apiPost("/api/reset");
+$("b-reset").onclick  = () => { cancelDebugIntent(); return apiPost("/api/reset"); };
 $("b-step").onclick   = () => apiPost("/api/step_infer");
 $("b-tune-apply").onclick = applyTune;
 $("b-commit").onclick = () => apiPost("/api/step_commit");
@@ -330,7 +450,7 @@ $("b-replay-reset").onclick  = () => {
   };
 $("be-run").onclick    = () => evalRunToggle();
 $("be-setup").onclick  = () => evalSetup(true);
-$("be-reset").onclick  = () => evalReset();
+$("be-reset").onclick  = () => evalResetOrCancel();
 $("be-submit").onclick = () => submitEvalScore();
 $("b-collect-toggle").onclick = () => {
     if (S.collectToggleBusy !== null) return;
@@ -340,7 +460,6 @@ $("b-collect-toggle").onclick = () => {
       updateGuide();
       return;
     }
-    if (live) S.collectQueueEnabled = true;
     S.collectToggleBusy = !live;
     renderCollect();
     // Normal release is by the status poll once `collecting` matches the target. This
@@ -360,7 +479,6 @@ $("collect-arm-enable").onchange = () => {
     apiPost("/api/collect_arm", { enabled: S.collectArmEnabled });
   };
 $("b-collect-cancel").onclick = () => {
-    S.collectQueueEnabled = false;
     renderCollect();
     return apiPost("/api/operator_action", { intent: "cancel" });
   };
@@ -374,18 +492,30 @@ $("b-collect-home").onclick = () => {
     });
   };
 $("b-collect-qc-pass").onclick = () => submitEpisodeQc("collect", "pass");
+$("b-collect-qc-unreviewed").onclick = () => submitEpisodeQc("collect", "unreviewed");
 $("b-goto-qc").onclick = () => submitEpisodeQc("collect", "fail");
 $("b-collect-note-save").onclick = () => submitEpisodeNote("collect");
+$("collect-slot-scene-filter").onchange = (event) => {
+  changeCollectionSlotFilter("scene", event.target.value);
+};
+
+$("collect-slot-task-filter").onchange = (event) => {
+  changeCollectionSlotFilter("task", event.target.value);
+};
+$("b-collect-slot-prev").onclick = () => changeCollectionSlotPage(-1);
+$("b-collect-slot-next").onclick = () => changeCollectionSlotPage(1);
 $("b-collect-quality-export").onclick = exportCollectionQuality;
-$("b-collect-quality-upload").onclick = uploadCollectionQuality;
 $("collect-export-format").onchange = changeCollectionExportFormat;
+$("b-collect-dataset-upload").onclick = uploadCollectionDatasetToHf;
+$("b-collect-assets-download").onclick = downloadCollectionAssetsFromHf;
+$("b-collect-task-set-download").onclick = downloadCollectionTaskSetFromHf;
 $("review-return-live").onclick = returnReviewToLive;
+$("review-robot-replay").onclick = openCollectRobotReplay;
 $("replay-b-qc-pass").onclick = () => submitQc("pass");
 $("replay-b-qc-fail").onclick = () => submitQc("fail");
 $("replay-b-anno-save").onclick = () => saveAnnotation();
 $("collect-queue-toggle").onclick = () => {
-    S.collectQueueExpanded = !S.collectQueueExpanded;
-    renderCollect();
+    toggleCollectionSlotAll();
   };
 document.querySelector("#panel-setup .auto-setup-row").onclick = () => {
     if ($("panel-setup").dataset.st === "error") retrySetup();

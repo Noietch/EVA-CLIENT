@@ -1,19 +1,12 @@
 """R1 Lite: openpi qpos eval."""
 
-_base_ = ["../01_deploy/r1lite/openpi_qpos.py"]
+_base_ = ["../01_deploy/r1lite/openpi_qpos.py", "../00_base/evaluation.py"]
 
 console = dict(initial_tab="eval")
 
 eval_cfg = dict(
-    storage=dict(
-        fps=15,
-        save_queue_max=15,
-    ),
-    trials_per_prompt=5,
-    cli_mode="real",
+    storage=dict(fps=15),
     inference_strategy="rtc",
-    reset_after_each_trial=False,
-    skip_warmup_after_first=True,
     checkpoints=[
         dict(
             name="r1lite_openpi_qpos_baseline",
@@ -21,9 +14,6 @@ eval_cfg = dict(
             port=9000,
         ),
     ],
-    shuffle_ckpts=False,
-    shuffle_seed=42,
-    enable_ssh_forward=False,
     tasks=[
         dict(
             prompt_en="placeholder task — replace with the real task prompt",

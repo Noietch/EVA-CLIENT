@@ -2,7 +2,9 @@
 // polling loop for frame/scene/camera refresh (poll).
 import { $, LIVE, RUN_CONTROLS, S, apiGet, clientTrace, replaceCamStripContent } from "./core.js";
 import { buildLiveDims, drawLiveCharts, resetLiveSeries, updateScrub } from "./charts.js";
-import { applyRunControlStatus, renderManualCurrent, renderManualTarget, uiMode } from "./run.js";
+import {
+  applyRunControlStatus, renderManualCurrent, renderManualTarget, syncGripperState, uiMode,
+} from "./run.js";
 
 window.__evaReplaySync = LIVE.replaySync;
 
@@ -24,6 +26,7 @@ let replayTransformLoads = new Map();
 let _lastReplayChartDraw = 0;
 
 const REPLAY_DEFAULT_FPS = 10;
+const REPLAY_VIDEO_PREBUFFER_SECONDS = 5;
 
 // These tabs host the shared live stage. RESULT and DASHBOARD deliberately park
 // that stage off-screen; keeping their MJPEG streams alive only consumes one
@@ -31,12 +34,14 @@ const REPLAY_DEFAULT_FPS = 10;
 const LIVE_STAGE_TABS = new Set(["debug", "manual", "collect", "eval", "rl"]);
 
 function liveStageActive() {
-    return !document.hidden && LIVE_STAGE_TABS.has(S.ACTIVE_TAB);
+    return !document.hidden && !S.tabSwitchPending && LIVE_STAGE_TABS.has(S.ACTIVE_TAB);
   }
 
 let replayVideoFps = REPLAY_DEFAULT_FPS;
 
 const REAL_REPLAY_MAX_EXTRAPOLATE_S = 0.5;
+
+const REPLAY_UI_UPDATE_MS = 80;
 
 let realReplayVizRaf = null;
 
@@ -53,6 +58,10 @@ let replayLoadSeq = 0;
 let replayVideoAbortController = null;
 
 let replayLastRafAt = 0;
+
+let replayLastUiUpdateAt = 0;
+
+let replayLastUiFrame = -1;
 
 let replayTransformsUrl = "/api/replay_transforms";
 
@@ -74,6 +83,8 @@ function resetReplaySyncMetrics() {
     metrics.hardVideoSeeks = 0;
     metrics.playbackRateCorrections = 0;
     replayLastRafAt = 0;
+    replayLastUiUpdateAt = 0;
+    replayLastUiFrame = -1;
   }
 
 function recordReplaySync(frame) {
@@ -224,6 +235,7 @@ async function loadReplaySeries() {
     if (replayVideoAbortController) replayVideoAbortController.abort();
     replayVideoAbortController = new AbortController();
     replayStop();
+    stopRealReplayVisual();
     resetReplaySyncMetrics();
     LIVE.replayOwner = "replay";
     LIVE.replayError = "";
@@ -387,6 +399,7 @@ async function loadReviewPlayback(info, owner) {
     if (replayVideoAbortController) replayVideoAbortController.abort();
     replayVideoAbortController = new AbortController();
     replayStop();
+    stopRealReplayVisual();
     clientTrace("review.playback.begin", {
       episode: Number(info.episode || 0),
       dataset_dir: info.dataset_dir || "",
@@ -462,10 +475,16 @@ function replayApplyTransformFrame(frame) {
     const sceneReady = window.Scene3D && Scene3D.applyTransformFrame;
     if (!sceneReady) return false;
     const numericFrame = Math.max(0, Number(frame) || 0);
-    const chunk = [...replayTransformChunks.values()].find((candidate) => (
-      numericFrame >= candidate.start
-      && numericFrame < candidate.start + candidate.nFrames
-    ));
+    let chunk = null;
+    // Transform ranges are disjoint. Avoid spreading the whole Map and allocating
+    // an array on every animation frame, which becomes noticeable on long episodes.
+    for (const candidate of replayTransformChunks.values()) {
+      if (numericFrame >= candidate.start &&
+          numericFrame < candidate.start + candidate.nFrames) {
+        chunk = candidate;
+        break;
+      }
+    }
     if (!chunk) return false;
     Scene3D.applyTransformFrame(
       chunk.parts,
@@ -488,31 +507,48 @@ function syncRealReplayVisual(frame) {
       realReplayReportedFrame = reportedFrame;
       realReplayAnchorFrame = reportedFrame;
       realReplayAnchorWall = now;
-      syncReplayVideos(realReplayAnchorFrame);
+      syncReplayVideosToFrame(realReplayAnchorFrame, true);
       playStageVideos();
       realReplayLastVideoSync = realReplayAnchorWall;
       realReplayVizRaf = requestAnimationFrame(realReplayVisualFrame);
       return;
     }
-    if (reportedFrame > realReplayReportedFrame) {
-      const cursor = LIVE.cursorFrac != null ? LIVE.cursorFrac : LIVE.cursor;
+    const master = replayMasterVideo();
+    const masterReady = master && !master.error && master.readyState >= 2 &&
+      Number.isFinite(master.currentTime);
+    const visualFrame = masterReady
+      ? replayFrameAtTime(master.currentTime)
+      : realReplayAnchorFrame;
+    // The robot is authoritative, but only correct the browser clock when it has
+    // drifted materially. Seeking the video on every status poll causes visible
+    // stalls and makes the 3D model/cameras disagree during normal playback.
+    if (Math.abs(reportedFrame - visualFrame) > Math.max(2, replayVideoFps * 0.35)) {
       realReplayReportedFrame = reportedFrame;
-      realReplayAnchorFrame = Math.max(reportedFrame, cursor);
+      realReplayAnchorFrame = reportedFrame;
+      realReplayAnchorWall = now;
+      syncReplayVideosToFrame(reportedFrame, true);
+      playStageVideos();
+    } else if (reportedFrame > realReplayReportedFrame) {
+      realReplayReportedFrame = reportedFrame;
+      realReplayAnchorFrame = reportedFrame;
       realReplayAnchorWall = now;
     }
   }
 
 function realReplayVisualFrame() {
     if (realReplayVizRaf === null) return;
-    const elapsed = Math.min(
-      Math.max(0, (performance.now() - realReplayAnchorWall) / 1000),
-      REAL_REPLAY_MAX_EXTRAPOLATE_S,
-    );
+    const now = performance.now();
+    const master = replayMasterVideo();
+    const elapsed = Math.min(Math.max(0, (now - realReplayAnchorWall) / 1000), REAL_REPLAY_MAX_EXTRAPOLATE_S);
     const anchorTime = replayTimeAtFrame(realReplayAnchorFrame);
     const cursor = LIVE.cursorFrac != null ? LIVE.cursorFrac : LIVE.cursor;
-    const frame = Math.max(cursor, replayFrameAtTime(anchorTime + elapsed));
+    const masterReady = master && !master.error && master.readyState >= 2 &&
+      Number.isFinite(master.currentTime);
+    const frame = masterReady
+      ? Math.max(cursor, replayFrameAtTime(master.currentTime))
+      : Math.max(cursor, replayFrameAtTime(anchorTime + elapsed));
     setReplayCursorFrame(frame, false);
-    const now = performance.now();
+    if (masterReady) syncReplayVideos(frame, master);
     if (now - realReplayLastVideoSync > 250) {
       syncReplayVideos(frame);
       playStageVideos();
@@ -531,7 +567,10 @@ function stopRealReplayVisual(frame) {
   }
 
 function mountEpisodeVideos({ datasetDir, episodeId, videoKeys }) {
-    const cams = (S.CFG && S.CFG.camera_keys) || [];
+    // The recorded episode decides which cameras exist; the configured list is only a
+    // fallback for datasets whose image columns could not be mapped to camera keys.
+    const mapped = Object.keys(videoKeys || {});
+    const cams = mapped.length ? mapped : ((S.CFG && S.CFG.camera_keys) || []);
     replaceCamStripContent(cams.map((k) => {
       const params = new URLSearchParams({
         cam: k,
@@ -545,7 +584,7 @@ function mountEpisodeVideos({ datasetDir, episodeId, videoKeys }) {
         `src="/api/replay_poster?${params.toString()}" ` +
         `onload="this.closest('.cam-cell').classList.remove('loading')" ` +
         `onerror="this.closest('.cam-cell').classList.add('failed')">` +
-        `<video class="cam cam-video" data-key="${k}" muted playsinline preload="none" ` +
+        `<video class="cam cam-video" data-key="${k}" muted playsinline preload="auto" ` +
         `data-poster="/api/replay_poster?${params.toString()}" ` +
         `data-src="/api/replay_video?${params.toString()}" ` +
         `oncanplay="this.closest('.cam-cell').classList.add('video-ready')" ` +
@@ -610,7 +649,15 @@ function setStageVideoLoading(on, text) {
   }
 
 function videoReady(v) {
-    return v.error || v.readyState >= 3;
+    if (v.error) return false;
+    if (v.readyState < 2 || !Number.isFinite(v.duration)) return false;
+    const target = replayTimeAtFrame(LIVE.cursor);
+    if (target > v.duration + 0.01) return false;
+    const end = Math.min(v.duration, target + REPLAY_VIDEO_PREBUFFER_SECONDS);
+    for (let i = 0; i < v.buffered.length; i += 1) {
+      if (v.buffered.start(i) <= target && v.buffered.end(i) >= end - 0.01) return true;
+    }
+    return false;
   }
 
 function ensureVideoSource(v) {
@@ -621,30 +668,32 @@ function ensureVideoSource(v) {
     v.setAttribute("src", src);
   }
 
-function waitForVideoReady(v) {
-    const signal = replayVideoAbortController ? replayVideoAbortController.signal : null;
-    if (videoReady(v)) return Promise.resolve();
+function waitForVideoReady(v, signal = replayVideoAbortController?.signal) {
+    if (signal?.aborted || v.error) return Promise.resolve(false);
+    if (videoReady(v)) return Promise.resolve(true);
     return new Promise((resolve) => {
-      let done = false;
-      const finish = () => {
-        if (done) return;
-        done = true;
-        v.removeEventListener("canplay", finish);
-        v.removeEventListener("canplaythrough", finish);
-        v.removeEventListener("error", finish);
-        if (signal) signal.removeEventListener("abort", finish);
-        resolve();
+      const events = ["loadedmetadata", "durationchange", "progress", "canplay", "canplaythrough", "seeked", "error"];
+      const finish = (ready) => {
+        events.forEach((event) => v.removeEventListener(event, check));
+        if (signal) signal.removeEventListener("abort", abort);
+        resolve(ready);
+      };
+      const abort = () => finish(false);
+      const check = () => {
+        if (v.error) { finish(false); return; }
+        const target = replayTimeAtFrame(LIVE.cursor);
+        if (Number.isFinite(v.duration) && target > v.duration + 0.01) { finish(false); return; }
+        if (v.readyState >= 1 && Math.abs(v.currentTime - target) > 0.001) {
+          v.currentTime = target;
+        }
+        if (videoReady(v)) finish(true);
       };
       if (signal) {
-        signal.addEventListener("abort", finish, { once: true });
-        if (signal.aborted) { finish(); return; }
+        signal.addEventListener("abort", abort, { once: true });
       }
-      v.addEventListener("canplay", finish);
-      v.addEventListener("canplaythrough", finish);
-      v.addEventListener("error", finish);
+      events.forEach((event) => v.addEventListener(event, check));
       ensureVideoSource(v);
-      try { v.load(); } catch (e) { finish(); }
-      if (videoReady(v)) finish();
+      check();
     });
   }
 
@@ -674,8 +723,7 @@ function waitForBrowserPaint() {
 
 async function waitForVideoPainted(v) {
     const signal = replayVideoAbortController ? replayVideoAbortController.signal : null;
-    if (v.error) return;
-    await waitForVideoReady(v);
+    if (!(await waitForVideoReady(v))) return;
     if (signal && signal.aborted) return;
     await new Promise((resolve) => {
       let done = false;
@@ -702,22 +750,32 @@ async function waitForStageVideosReady() {
     const signal = replayVideoAbortController ? replayVideoAbortController.signal : null;
     if (!videos.length) {
       clientTrace("review.videos.ready", { count: 0, errors: 0 });
-      return false;
+      return true;
     }
-    setVideosLoading(videos, true, "loading video");
-    await Promise.all(videos.map((v) => waitForVideoReady(v)));
+    setVideosLoading(videos, true, "buffering 5s of video");
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    if (signal?.aborted) controller.abort();
+    else if (signal) signal.addEventListener("abort", abort, { once: true });
+    const ready = await Promise.all(videos.map((v) =>
+      waitForVideoReady(v, controller.signal).then((ok) => {
+        if (!ok) controller.abort();
+        return ok;
+      })
+    ));
+    if (signal) signal.removeEventListener("abort", abort);
     if (signal && signal.aborted) return;
     clientTrace("review.videos.ready", {
       count: videos.length,
       errors: videos.filter((v) => !!v.error).length,
       states: videos.map((v) => ({ camera: v.dataset.key || "", ready_state: v.readyState })),
     });
-    return videos.length > 0 && videos.every((v) => !v.error && v.readyState >= 3);
+    return ready.every(Boolean);
   }
 
 async function waitForStageVideosPainted() {
     const videos = replayVideos();
-    if (!videos.length) return false;
+    if (!videos.length) return true;
     const signal = replayVideoAbortController ? replayVideoAbortController.signal : null;
     setVideosLoading(videos, true, "rendering video");
     await Promise.all(videos.map((v) => waitForVideoPainted(v)));
@@ -768,6 +826,28 @@ function syncReplayVideos(frame, master = null, force = false) {
         LIVE.replaySync.playbackRateCorrections += 1;
       } else {
         v.playbackRate = 1;
+      }
+    });
+  }
+
+function syncReplayVideosToFrame(frame, force = false) {
+    const target = replayTimeAtFrame(frame);
+    if (!Number.isFinite(target)) return;
+    const hardTolerance = 0.75 / replayVideoFps;
+    replayVideos().forEach((video) => {
+      if (video.error) return;
+      ensureVideoSource(video);
+      const drift = (video.currentTime || 0) - target;
+      if (!force && Math.abs(drift) <= hardTolerance) return;
+      const seek = () => {
+        if (!video.error) {
+          try { video.currentTime = target; } catch (e) { /* metadata not ready */ }
+        }
+      };
+      if (video.readyState >= 1) seek();
+      else {
+        video.addEventListener("loadedmetadata", seek, { once: true });
+        try { video.load(); } catch (e) { /* transient */ }
       }
     });
   }
@@ -863,6 +943,11 @@ function setReplayCursorFrame(frame, syncVideos = false) {
     LIVE.cursor = Math.max(0, Math.min(Math.floor(frac), LIVE.n - 1));
     replaySetUrdfFrame(frac);
     if (syncVideos) syncReplayVideos(frac, null, true);
+    const now = performance.now();
+    if (now - replayLastUiUpdateAt < REPLAY_UI_UPDATE_MS &&
+        Math.abs(frac - replayLastUiFrame) < 0.5) return;
+    replayLastUiUpdateAt = now;
+    replayLastUiFrame = frac;
     recordReplaySync(frac);
     updateScrub();
     drawReplayCharts();
@@ -907,12 +992,8 @@ async function replayPlay() {
     syncReplayRunButtons();
     const videos = replayVideos();
     const master = replayMasterVideo();
-    if (!master) {
-      LIVE.playing = false;
-      LIVE.replayError = "replay master camera unavailable";
-      updateScrub();
-      return;
-    }
+    const visualStartWall = performance.now();
+    const visualStartTime = replayTimeAtFrame(LIVE.cursor);
     pauseStageVideos();
     await alignStageVideos(LIVE.cursor);
     await Promise.all(videos.map((video) => video.play().catch(() => null)));
@@ -928,10 +1009,15 @@ async function replayPlay() {
       replayLastRafAt = now;
       setStageVideoLoading(false, "");
       const cursor = LIVE.cursorFrac != null ? LIVE.cursorFrac : LIVE.cursor;
-      const framePos = Math.max(cursor, replayFrameAtTime(master.currentTime));
+      const masterReady = master && !master.error && master.readyState >= 2 &&
+        Number.isFinite(master.currentTime);
+      const framePos = masterReady
+        ? Math.max(cursor, replayFrameAtTime(master.currentTime))
+        : Math.max(cursor, replayFrameAtTime(
+            visualStartTime + Math.max(0, (now - visualStartWall) / 1000),
+          ));
       setReplayCursorFrame(framePos, false);
-      syncReplayVideos(framePos, master);
-      recordReplaySync(framePos);
+      if (masterReady) syncReplayVideos(framePos, master);
       if (framePos >= LIVE.n - 1) { replayStop(); return; }
       LIVE.raf = requestAnimationFrame(frame);
     };
@@ -973,6 +1059,61 @@ function drawReplayCharts(force = false) {
 
 let framePolling = false;
 
+// Read a single JPEG from the existing MJPEG endpoint, then release its HTTP
+// connection. Three permanent streams can starve control requests on HTTP/1.1.
+async function readCameraJpeg(response) {
+  if (!response.ok || !response.body) throw new Error("Camera feed unavailable");
+  const reader = response.body.getReader();
+  let bytes = new Uint8Array(0);
+  let start = -1;
+  try {
+    while (bytes.length < 4 * 1024 * 1024) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      const previousLength = bytes.length;
+      const next = new Uint8Array(previousLength + chunk.value.length);
+      next.set(bytes);
+      next.set(chunk.value, previousLength);
+      bytes = next;
+      if (start < 0) {
+        for (let i = Math.max(0, previousLength - 1); i < bytes.length - 1; i++) {
+          if (bytes[i] === 255 && bytes[i + 1] === 216) { start = i; break; }
+        }
+      }
+      if (start >= 0) {
+        for (let i = Math.max(start + 2, previousLength - 1); i < bytes.length - 1; i++) {
+          if (bytes[i] === 255 && bytes[i + 1] === 217) return bytes.slice(start, i + 2);
+        }
+      }
+    }
+    throw new Error("Camera returned no complete JPEG");
+  } finally {
+    await reader.cancel().catch(() => {});
+  }
+}
+
+async function refreshLiveCameraImage(img, key) {
+  if (img._cameraAbort || !liveStageActive()) return;
+  const controller = new AbortController();
+  img._cameraAbort = controller;
+  const timeout = setTimeout(() => controller.abort(), 3000);
+  try {
+    const response = await fetch(`/api/camera/${encodeURIComponent(key)}`, { signal: controller.signal, cache: "no-store" });
+    const jpeg = await readCameraJpeg(response);
+    if (controller.signal.aborted || !img.isConnected || !liveStageActive() || LIVE.replayMode) return;
+    const previous = img.getAttribute("src");
+    img.src = URL.createObjectURL(new Blob([jpeg], { type: "image/jpeg" }));
+    img.onload = () => { img.closest(".cam-cell")?.classList.add("has-frame"); };
+    if (previous && previous.startsWith("blob:")) URL.revokeObjectURL(previous);
+  } catch {
+    // Keep the most recent valid frame through a transient reconnect.
+  } finally {
+    clearTimeout(timeout);
+    controller.abort();
+    if (img._cameraAbort === controller) img._cameraAbort = null;
+  }
+}
+
 function refreshCameraStreams() {
     // Never replace replay <video> elements while their owner is active. On a tab
     // switch away from replay, exitReplayMode() has already dropped them. For live
@@ -1010,6 +1151,7 @@ async function pollFrame() {
       // flight. Do not resurrect camera streams after the visibility handler has
       // already released them.
       if (!liveStageActive() || S.ACTIVE_TAB === "replay" || LIVE.replayMode) return;
+      syncGripperState(f.qpos);
       const strip = $("cam-strip");
       const keys = f.cameras || [];
       // REPLAY owns the cam strip with native <video> elements driven by the scrub
@@ -1025,18 +1167,24 @@ async function pollFrame() {
             keys.every((k, i) => existing[i].dataset.key === k);
           if (!sameSet) {
             replaceCamStripContent(keys.map((k) =>
-              `<div class="cam-cell"><div class="cam-lbl">${k}</div><img class="cam" data-key="${k}" src="/api/camera/${encodeURIComponent(k)}"></div>`
+              `<div class="cam-cell"><div class="cam-lbl">${k}</div><img class="cam" data-key="${k}"></div>`
             ).join(""));
           }
         }
+        strip.querySelectorAll("img.cam").forEach((img) => {
+          const key = img.dataset.key;
+          void refreshLiveCameraImage(img, key);
+        });
       }
-      // manual mode: seed sliders (once) from command qpos. Fall back to live qpos
-      // only to seed the very first build; once built, never feed the lagging
-      // real-robot position back into the sliders or they snap backward mid-drag.
-      if (S.manualActive && uiMode(S.STATUS.cli_mode) === "manual") {
+      // DEVICE owns the manual controls. The backend mode can briefly lag behind
+      // the tab switch, and /api/frame returns qpos=null while Robot is stopped;
+      // neither condition should make the already-visible slider panel disappear.
+      // Seed from live qpos only for the first build. Once built, never feed the
+      // lagging real-robot position back into the sliders during a drag.
+      if (S.ACTIVE_TAB === "manual" && S.manualActive) {
         renderManualTarget(S.STATUS.manual_qpos || (S._manualSlidersBuilt ? null : f.qpos));
         renderManualCurrent(f.qpos);
-      } else if (S._manualSlidersBuilt) {
+      } else if (S.ACTIVE_TAB !== "manual" && S._manualSlidersBuilt) {
         S._manualSlidersBuilt = false;
         $("manual-sliders-m").innerHTML = "";
       }

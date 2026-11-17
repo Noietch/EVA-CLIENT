@@ -10,14 +10,14 @@ import logging
 from typing import ClassVar
 
 from core.registry import STRATEGY_REGISTRY
-from strategy.base_strategy import BackgroundLoopInferStrategy
+from strategy.base_strategy import LinearOverlapInferStrategy
 
 logger = logging.getLogger(__name__)
 
 
 @STRATEGY_REGISTRY.register("RtcInferStrategy")
 @dataclasses.dataclass
-class RtcInferStrategy(BackgroundLoopInferStrategy):
+class RtcInferStrategy(LinearOverlapInferStrategy):
     """RTC (Real-Time Chunking) strategy: fixed-Hz background loop with the RTC
     protocol (handled by RtcOpenPiPolicyClient, not here) and StreamActionBuffer
     linear-overlap smoothing.

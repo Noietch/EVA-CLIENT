@@ -1,15 +1,17 @@
 // collect.js: data-collection tab (collect) + QC/annotation review &
 // stage-video playback control (review).
 import { $, LIVE, S, apiGet, apiPost, clientTrace } from "./core.js";
+import { t } from "./i18n.js";
 import { updateScrub } from "./charts.js";
 import {
-  advanceCollectTask, collectTaskIndexValue, collectSetValue, collectTaskSelectionKey,
-  collectTaskTarget, collectTaskValue, setPanel, applyStatus, uiMode,
+  applyCollectTaskSelection, collectTaskIndexValue, collectSetValue, selectCollectSet, collectTaskValue,
+  setPanel, applyStatus, syncCollectTaskNavigation, uiMode,
 } from "./run.js";
 import {
   exitReplayMode, loadReviewPlayback, refreshCameraStreams, replayStop,
 } from "./replay.js";
 import { setActiveTab } from "./main.js";
+import { renderSceneGrid } from "./scene_map.js";
 
 // ===== collect =====
 
@@ -21,34 +23,442 @@ const qualityTransfer = {
   episodesCompleted: 0,
   episodesTotal: 0,
   uploading: false,
-  acceptedDir: "",
+  outputDir: "",
   uploadJobId: "",
+  uploadPlanId: "",
   uploadState: "idle",
   datasetFormat: "",
   filesCompleted: 0,
   filesTotal: 0,
   bytesCompleted: 0,
   bytesTotal: 0,
+  localFiles: 0,
+  localBytes: 0,
+  filesSkipped: 0,
+  bytesSkipped: 0,
+  newFiles: 0,
+  changedFiles: 0,
+  filesToDelete: 0,
+  filesDeleted: 0,
 };
 
 // Saved episode history is review data, not heartbeat data. Fetch only the
 // visible collection/RL scope and retain the last complete snapshot locally.
 const EPISODE_HISTORY_POLL_MS = 5000;
 const EPISODE_HISTORY_PAGE_SIZE = 128;
+const COLLECTION_SLOT_POLL_MS = 2000;
 let episodeHistoryPolling = false;
+let collectionSlotsController = null;
+let currentSceneGridRender = null;
 let collectItemsRenderKey = "";
 let rolloutItemsRenderKey = "";
-const collectAutoAdvanceState = {
-  selectionKey: "",
-  historyReady: false,
-  usableCollected: null,
-  completionPending: false,
-  scheduledKey: "",
-};
+let collectionSlotClickTimer = null;
+let collectionQcTarget = null;
+const episodeQcPending = new Set();
+let collectionPipelineSnapshot = null;
+let collectionSaveRefreshPending = false;
+let collectionSaveRefreshInFlight = false;
+
+function scenePlanTasks() {
+  return (S.SCENE_PLAN && Array.isArray(S.SCENE_PLAN.tasks)) ? S.SCENE_PLAN.tasks : [];
+}
+
+function scenePlanTask() {
+  return scenePlanTasks().find((task) => task.task_id === S.scenePlanTaskId) || null;
+}
+
+function scenePlanScene() {
+  const task = scenePlanTask();
+  const scenes = (S.SCENE_PLAN && Array.isArray(S.SCENE_PLAN.scenes))
+    ? S.SCENE_PLAN.scenes : [];
+  if (!task || !task.scene_ids.length) return null;
+  const preferredIndex = task.scene_ids.indexOf(S.scenePlanSceneId);
+  const index = preferredIndex >= 0
+    ? preferredIndex
+    : Math.max(0, Math.min(S.scenePlanSceneIndex, task.scene_ids.length - 1));
+  S.scenePlanSceneIndex = index;
+  S.scenePlanSceneId = task.scene_ids[index];
+  const scene = scenes.find((item) => item.scene_id === task.scene_ids[index]);
+  return scene
+    ? { ...scene, index, target: Number(task.scene_epsiodes_count[index] || 0) }
+    : null;
+}
+
+function scenePlanStartMetadata() {
+  const scene = scenePlanScene();
+  const task = scenePlanTask();
+  const slot = S.collectionSlots && S.collectionSlots.active;
+  if (!task || !scene || !slot || (task.runtime_prompt || task.prompt_en) !== collectTaskValue()) return {};
+  return {
+    scene_id: scene.scene_id,
+    scene_round: S.scenePlanRoundIndex,
+    slot_id: slot.slot_id,
+    task_id: slot.task_id,
+  };
+}
+
+function syncScenePlanTask(prompt) {
+  if (S.scenePlanTaskPromptKey === prompt) return;
+  const linked = scenePlanTasks().find((task) => (task.runtime_prompt || task.prompt_en) === prompt);
+  S.scenePlanTaskId = linked ? linked.task_id : "";
+  const preferredIndex = linked && S.scenePlanSceneId
+    ? linked.scene_ids.indexOf(S.scenePlanSceneId) : -1;
+  S.scenePlanSceneIndex = preferredIndex >= 0 ? preferredIndex : 0;
+  S.scenePlanSceneId = linked ? linked.scene_ids[S.scenePlanSceneIndex] || "" : "";
+  S.scenePlanRoundIndex = 0;
+  S.scenePlanTaskPromptKey = prompt;
+}
+
+function adoptCollectionSlot(slot) {
+  if (!slot) return;
+  const task = scenePlanTasks().find((entry) => entry.task_id === slot.task_id);
+  S.scenePlanTaskId = slot.task_id;
+  S.scenePlanTaskPromptKey = slot.task;
+  S.scenePlanSceneId = slot.scene_id;
+  S.scenePlanSceneIndex = task ? Math.max(0, task.scene_ids.indexOf(slot.scene_id)) : 0;
+  S.scenePlanRoundIndex = Number(slot.round_index) || 0;
+  S.scenePlanSelectionManual = false;
+}
+
+function collectionSlotQuery(dataset) {
+  const state = S.collectionSlots;
+  const params = new URLSearchParams({ dataset, page: String(state.page || 1) });
+  if (state.sceneFilter) params.set("scene", state.sceneFilter);
+  if (state.taskFilter) params.set("task", state.taskFilter);
+  if (state.showAll) params.set("all", "1");
+  if (state.scenePlanVersion) params.set("scene_plan_version", state.scenePlanVersion);
+  return `/api/collection_slots?${params.toString()}`;
+}
+
+function collectionPipelineState(status) {
+  const collect = status || {};
+  return {
+    collecting: collect.collecting === true,
+    saving: collect.saving === true || collect.pipeline_state === "SAVING" ||
+      Number(collect.queued_jobs || 0) > 0,
+  };
+}
+
+function collectionSaveRefreshNeeded(previous, current) {
+  // This only schedules a slot read. The response's save_revision remains the
+  // authority for advancing after a confirmed save.
+  if (!previous || current.collecting) return false;
+  const stopped = previous.collecting && !current.collecting;
+  const drained = previous.saving && !current.saving;
+  return stopped || drained;
+}
+
+function requestCollectionSaveRefresh() {
+  if (!collectionSaveRefreshPending || collectionSaveRefreshInFlight ||
+      S.collectTaskSelectionPending || collectionSlotClickTimer !== null ||
+      collectionPipelineSnapshot?.collecting || collectionPipelineSnapshot?.saving) return;
+  collectionSaveRefreshInFlight = true;
+  pollCollectionSlots(true).finally(() => {
+    collectionSaveRefreshInFlight = false;
+  });
+  collectionSaveRefreshPending = false;
+}
+
+function applyCollectionSlotsPayload(payload) {
+  const state = S.collectionSlots;
+  if (payload.scene_plan) S.SCENE_PLAN = payload.scene_plan;
+  state.scenePlanVersion = payload.scene_plan_version;
+  state.loaded = true;
+  state.dataset = String(payload.dataset || state.dataset || "");
+  state.datasetDir = String(payload.dataset_dir || "");
+  state.active = payload.active || null;
+  state.counts = payload.counts || {};
+  if (payload.scenes) state.scenes = payload.scenes;
+  if (payload.tasks) state.tasks = payload.tasks;
+  state.slots = Array.isArray(payload.slots) ? payload.slots : [];
+  state.page = Number(payload.page) || 1;
+  state.pageCount = Number(payload.page_count) || 1;
+  state.filteredTotal = Number(payload.filtered_total) || 0;
+  state.viewerActive = !!payload.viewer_active;
+  state.lastSaveRevision = Number(payload.save_revision) || 0;
+  state.sessionDataset = String(payload.session_dataset || "");
+  state.sessionSlotId = String(payload.session_slot_id || "");
+  if (state.active) adoptCollectionSlot(state.active);
+  syncCollectionSlotCursor();
+}
+
+function setCollectError(message = "") {
+  const node = $("collect-err");
+  if (node) node.textContent = message === "collection recording is unavailable"
+    ? t("collect.recordingUnavailable") : message;
+}
+
+async function activateCollectionSlot(slot, { manual = false } = {}) {
+  if (!slot || S.collectTaskSelectionPending) return false;
+  if (S.STATUS.collect && S.STATUS.collect.collecting) return false;
+  const state = S.collectionSlots;
+  if (manual) state.followActivePage = false;
+  const previousActive = state.active;
+  const previousSessionDataset = state.sessionDataset;
+  const previousSessionSlotId = state.sessionSlotId;
+  const previousStatus = {
+    task: S.STATUS.selected_collect_task,
+    dataset: S.STATUS.selected_collect_set,
+    taskIndex: S.STATUS.selected_collect_task_index,
+    slotId: S.STATUS.collection_slot_id,
+    taskId: S.STATUS.collection_task_id,
+  };
+  setCollectError();
+  S.collectTaskSelectionPending = true;
+  if (slot.task) state.active = { ...slot, state: "active" };
+  if (manual) pinCollectionSlotCursor(slot.slot_id);
+  adoptCollectionSlot(state.active);
+  renderCollect();
+  let activated = false;
+  try {
+    const response = await apiPost("/api/select_collection_slot", {
+      dataset: slot.dataset,
+      slot_id: slot.slot_id,
+      // An automatically chosen repair must stay selected until its retry starts.
+      manual: manual || !!slot.repair,
+    }, { concurrent: true, timeoutMs: 5000 });
+    if (!response.ok || !response.active) {
+      setCollectError(response.error || "Unable to select this slot");
+      return false;
+    }
+    // The console owns slot validity; the local task picker may lag a task-set
+    // edit, and that lag must not undo a switch the console already accepted.
+    applyCollectTaskSelection(
+      response.active.task,
+      response.active.dataset,
+      Number(response.active.task_index),
+      response.active.scene_id
+    );
+    state.active = response.active;
+    state.sessionDataset = response.active.dataset;
+    state.sessionSlotId = response.active.slot_id;
+    state.counts = response.counts || state.counts;
+    S.STATUS.collection_slot_id = response.active.slot_id;
+    S.STATUS.collection_task_id = response.active.task_id;
+    adoptCollectionSlot(response.active);
+    activated = true;
+    return true;
+  } catch (error) {
+    setCollectError(error.message || "Unable to select this slot");
+    return false;
+  } finally {
+    if (!activated) {
+      state.active = previousActive;
+      state.sessionDataset = previousSessionDataset;
+      state.sessionSlotId = previousSessionSlotId;
+      S.STATUS.selected_collect_task = previousStatus.task;
+      S.STATUS.selected_collect_set = previousStatus.dataset;
+      S.STATUS.selected_collect_task_index = previousStatus.taskIndex;
+      S.STATUS.collection_slot_id = previousStatus.slotId;
+      S.STATUS.collection_task_id = previousStatus.taskId;
+      if (previousActive) adoptCollectionSlot(previousActive);
+    }
+    // Either way the cursor lands on the slot that is really armed, so the grid
+    // never frames a tile the next recording would not use.
+    S.collectTaskSelectionPending = false;
+    const queued = queuedCollectionSlotSwitch;
+    queuedCollectionSlotSwitch = null;
+    if (queued && queued.slot_id !== S.STATUS.collection_slot_id) {
+      switchCollectionSlotCursor(queued);
+    } else {
+      syncCollectionSlotCursor();
+      renderCollect();
+    }
+  }
+}
+
+async function pollCollectionSlots(force = false, { autoActivate = true, preserveView = false } = {}) {
+  const state = S.collectionSlots;
+  const dataset = state.dataset || collectSetValue();
+  if (!dataset) return;
+  if (collectionSlotsController) {
+    if (!force) return;
+    collectionSlotsController.abort();
+  }
+  const now = performance.now();
+  if (!force && state.lastAttemptAt && now - state.lastAttemptAt < COLLECTION_SLOT_POLL_MS) return;
+  state.lastAttemptAt = now;
+  const controller = new AbortController();
+  collectionSlotsController = controller;
+  state.loading = (force && !preserveView) || !state.loaded;
+  if (state.error) setCollectError();
+  state.error = "";
+  if (state.loading) {
+    state.slots = [];
+    renderCollect();
+  }
+  const previousActiveId = String((state.active && state.active.slot_id) || "");
+  try {
+    let payload = await apiGet(collectionSlotQuery(dataset), { timeoutMs: 20000, signal: controller.signal });
+    if (controller.signal.aborted) return;
+    if (!payload.ok) throw new Error(payload.error || "Unable to load collection slots");
+    const activeChanged = String((payload.active && payload.active.slot_id) || "") !== previousActiveId;
+    if (dataset !== (state.dataset || collectSetValue()) ||
+        collectionSlotClickTimer !== null || S.collectTaskSelectionPending) return;
+    const previousSaving = (payload.slots || []).some(
+      (slot) => slot.slot_id === previousActiveId && slot.state === "saving"
+    );
+    const savedSelectionChanged = state.loaded && !!payload.active &&
+      Number(payload.save_revision) > state.lastSaveRevision &&
+      payload.completed_dataset === dataset &&
+      payload.active.slot_id !== payload.completed_slot_id;
+    const savedAdvance = savedSelectionChanged && state.cursorPinned &&
+      state.selectedSlotId === payload.completed_slot_id;
+    if (savedAdvance) {
+      clearCollectionSlotCursor();
+      state.followActivePage = true;
+    }
+    if (state.followActivePage && !previousSaving &&
+        (activeChanged || savedSelectionChanged) && payload.active_page &&
+        Number(payload.active_page) !== Number(payload.page)) {
+      state.page = Number(payload.active_page);
+      payload = await apiGet(collectionSlotQuery(dataset), { timeoutMs: 20000, signal: controller.signal });
+      if (controller.signal.aborted) return;
+      if (!payload.ok) throw new Error(payload.error || "Unable to load collection slots");
+    }
+    // A dataset switch can happen while the previous request is in flight.
+    if (dataset !== (state.dataset || collectSetValue()) ||
+        collectionSlotClickTimer !== null || S.collectTaskSelectionPending) return;
+    applyCollectionSlotsPayload(payload);
+    if (!previousSaving && (activeChanged || savedSelectionChanged) && state.active) {
+      applyCollectTaskSelection(
+        state.active.task, state.active.dataset, Number(state.active.task_index),
+        state.active.scene_id
+      );
+      adoptCollectionSlot(state.active);
+    }
+    const active = state.active;
+    const collecting = !!(S.STATUS.collect && S.STATUS.collect.collecting);
+    // A confirmed save already switched the backend session to the next slot.
+    if (autoActivate && active && state.followActivePage && !savedSelectionChanged && !previousSaving &&
+        !collecting && !S.collectTaskSelectionPending &&
+        (!payload.session_slot_id || payload.session_dataset === dataset) &&
+        payload.session_slot_id !== active.slot_id) {
+      queueMicrotask(() => activateCollectionSlot(active));
+    }
+  } catch (error) {
+    if (!controller.signal.aborted) {
+      state.error = t("collect.error.page", { error: error.message });
+      setCollectError(state.error);
+    }
+  } finally {
+    if (collectionSlotsController === controller) {
+      collectionSlotsController = null;
+      state.loading = false;
+      renderCollect();
+    }
+  }
+}
+
+async function selectCollectionDataset(dataset) {
+  const value = String(dataset || "").trim();
+  if (!value || S.collectTaskSelectionPending || S.STATUS.collect?.collecting) return false;
+  const entry = S.CFG.collect_tasks[value]?.[0];
+  if (!entry) return false;
+  setCollectError();
+  clearTimeout(collectionSlotClickTimer);
+  collectionSlotClickTimer = null;
+  queuedCollectionSlotSwitch = null;
+  S.collectTaskSelectionPending = true;
+  syncCollectTaskNavigation();
+  try {
+    const response = await apiPost("/api/select_collect_task", {
+      dataset: value, task: entry[0], task_index: 0,
+    }, { concurrent: true, timeoutMs: 5000 });
+    if (!response.ok) {
+      setCollectError(response.error || "Unable to select this dataset");
+      return false;
+    }
+    applyCollectTaskSelection(response.task, response.dataset, response.task_index);
+    selectCollectSet(value);
+  } catch (error) {
+    setCollectError(error.message || "Unable to select this dataset");
+    return false;
+  } finally {
+    S.collectTaskSelectionPending = false;
+    syncCollectTaskNavigation();
+  }
+  const state = S.collectionSlots;
+  if (state.dataset !== value) setCollectTransferInfo("");
+  state.dataset = value;
+  state.loaded = false;
+  state.scenePlanVersion = "";
+  state.active = null;
+  state.slots = [];
+  state.scenes = [];
+  state.tasks = [];
+  S.SCENE_PLAN = { tasks: [], scenes: [], positions: [], objects: [] };
+  state.page = 1;
+  state.sceneFilter = "";
+  state.taskFilter = "";
+  state.showAll = true;
+  clearCollectionSlotCursor();
+  state.followActivePage = true;
+  const select = $("collect-set-list");
+  if (select) select.value = value;
+  await pollCollectionSlots(true, { autoActivate: false });
+  if (state.dataset !== value || !state.loaded) return false;
+  if (state.active &&
+      (state.sessionDataset !== value || state.sessionSlotId !== state.active.slot_id)) {
+    return activateCollectionSlot(state.active);
+  }
+  return true;
+}
+
+function changeCollectionSlotFilter(kind, value) {
+  const state = S.collectionSlots;
+  if (kind === "scene") state.sceneFilter = String(value || "");
+  if (kind === "task") state.taskFilter = String(value || "");
+  state.showAll = !state.sceneFilter && !state.taskFilter;
+  state.page = 1;
+  clearCollectionSlotCursor();
+  state.followActivePage = false;
+  pollCollectionSlots(true);
+  renderCollect();
+}
+
+function toggleCollectionSlotAll() {
+  const state = S.collectionSlots;
+  state.showAll = !state.showAll;
+  state.sceneFilter = "";
+  state.taskFilter = "";
+  clearCollectionSlotCursor();
+  state.followActivePage = false;
+  state.page = state.showAll && state.active
+    ? Math.floor(Number(state.active.ordinal) / 50) + 1 : 1;
+  pollCollectionSlots(true);
+  renderCollect();
+}
+
+function changeCollectionSlotPage(delta) {
+  const state = S.collectionSlots;
+  const page = Math.max(1, Math.min(state.pageCount, Number(state.page) + delta));
+  if (page === state.page) return;
+  state.page = page;
+  clearCollectionSlotCursor();
+  state.followActivePage = false;
+  pollCollectionSlots(true);
+  renderCollect();
+}
+
+function renderCurrentSceneGrid(scene, task) {
+  const host = $("collect-current-scene-grid");
+  if (!host) return;
+  if (currentSceneGridRender && currentSceneGridRender.host === host &&
+      currentSceneGridRender.scene === scene && currentSceneGridRender.task === task &&
+      currentSceneGridRender.plan === S.SCENE_PLAN) return;
+  currentSceneGridRender = { host, scene, task, plan: S.SCENE_PLAN };
+  renderSceneGrid(host, S.SCENE_PLAN, scene, task);
+}
 
 function itemsForPrompt(items, prompt) {
+  const task = scenePlanTasks().find((entry) => (
+    (entry.runtime_prompt || entry.prompt_en) === prompt
+  ));
   return (items || []).filter(
-    (item) => String((item && (item.task || item.prompt)) || "") === prompt
+    (item) => task && item && item.task_id
+      ? String(item.task_id) === task.task_id
+      : String((item && (item.task || item.prompt)) || "") === prompt
   );
 }
 
@@ -98,6 +508,14 @@ function episodeItemsSummary(items) {
       item && item.status,
       item && item.quality,
       item && item.qc_verdict,
+      item && item.qc_auto_verdict,
+      item && item.replay_required,
+      item && item.replay_verified,
+      item && item.replay_qc_reason,
+      item && item.qc_note,
+      item && item.qc_reason,
+      item && item.qc_auto_note,
+      item && item.qc_auto_reason,
       item && item.length,
       item && item.error,
       item && item.quality_issue_count,
@@ -219,7 +637,10 @@ async function pollEpisodeHistory(force = false) {
     }
     cache.version = String(payload.version || "");
     cache.cursor = nextCursor;
-    if (scope === "collect") renderCollect();
+    if (scope === "collect") {
+      renderCollect();
+      pollCollectionSlots(force);
+    }
     else renderRolloutSave();
   } catch {
     // Keep the last complete snapshot while the low-frequency endpoint recovers.
@@ -255,20 +676,29 @@ function qualityTransferFormatLabel(value) {
 function changeCollectionExportFormat() {
   const select = $("collect-export-format");
   if (!select || qualityTransfer.exporting || qualityTransfer.uploading) return;
-  if (qualityTransfer.datasetFormat === select.value && !qualityTransfer.acceptedDir) return;
+  if (qualityTransfer.datasetFormat === select.value && !qualityTransfer.outputDir) return;
 
   qualityTransfer.phase = "export";
   qualityTransfer.exportState = "idle";
   qualityTransfer.uploadState = "idle";
-  qualityTransfer.acceptedDir = "";
+  qualityTransfer.outputDir = "";
   qualityTransfer.exportJobId = "";
   qualityTransfer.uploadJobId = "";
+  qualityTransfer.uploadPlanId = "";
   qualityTransfer.episodesCompleted = 0;
   qualityTransfer.episodesTotal = 0;
   qualityTransfer.filesCompleted = 0;
   qualityTransfer.filesTotal = 0;
   qualityTransfer.bytesCompleted = 0;
   qualityTransfer.bytesTotal = 0;
+  qualityTransfer.localFiles = 0;
+  qualityTransfer.localBytes = 0;
+  qualityTransfer.filesSkipped = 0;
+  qualityTransfer.bytesSkipped = 0;
+  qualityTransfer.newFiles = 0;
+  qualityTransfer.changedFiles = 0;
+  qualityTransfer.filesToDelete = 0;
+  qualityTransfer.filesDeleted = 0;
   qualityTransfer.datasetFormat = select.value;
   const status = $("collect-quality-status");
   if (status) {
@@ -374,7 +804,7 @@ function controlFeedback() {
       holdProgress: keyboardControlState.holdProgress,
     };
   }
-  const teleop = (S.STATUS && S.STATUS.teleop) || {};
+  const teleop = S.TELEOP_FEEDBACK || (S.STATUS && S.STATUS.teleop) || {};
   return {
     pressed: new Set(teleop.pressed_controls || []),
     holdProgress: teleop.hold_progress || {},
@@ -430,7 +860,11 @@ function buildControlGroups(groups) {
     row.dataset.group = String(group.id || "");
     const name = document.createElement("span");
     name.className = "collect-state-name";
-    name.textContent = String(group.label || group.id || "ARM").toUpperCase();
+    const id = String(group.id || "").trim().toLowerCase();
+    const label = String(group.label || group.id || "ARM").trim();
+    const key = id === "left_arm" || id === "left" ? "teleop.arm.left.label"
+      : id === "right_arm" || id === "right" ? "teleop.arm.right.label" : "";
+    name.textContent = key ? t(key) : label.toUpperCase();
     const value = document.createElement("span");
     value.className = "collect-state-value";
     value.textContent = "UNAVAILABLE";
@@ -460,12 +894,22 @@ function renderCollectControls() {
   $("collect-control-groups").querySelectorAll(".collect-control-state").forEach((row) => {
     const group = groups.find((item) => String(item.id) === row.dataset.group);
     if (!group) return;
-    let state = "disabled";
+    // "off" is the MOTION gate itself and "waiting" is that gate being open while
+    // this arm's grip is still untouched. Neither says anything about the arm
+    // hardware, so only a missing VR link reports as unavailable.
+    let state = "off";
     if (!connected) state = "unavailable";
     else if (armEnabled && engaged.has(group.id)) state = "active";
     else if (armEnabled && authorized.has(group.id)) state = "ready";
+    else if (armEnabled) state = "waiting";
     const value = row.querySelector(".collect-state-value");
-    if (value) value.textContent = state.toUpperCase();
+    if (value) value.textContent = t({
+      unavailable: "collect.controlUnavailable",
+      off: "collect.controlOff",
+      waiting: "collect.controlWaiting",
+      active: "collect.controlActive",
+      ready: "collect.controlReady",
+    }[state] || "collect.controlOff");
     row.dataset.state = state;
     const armBinding = controlBinding(group.binding) || {};
     updateControlHint(row.querySelector(".control-hint"), {
@@ -489,6 +933,33 @@ function triggerKeyboardAction(action) {
   target.click();
 }
 
+function keyboardHint(action) {
+  if (action === "motion") return $("collect-hint-motion");
+  if (action === "record_toggle") return $("collect-hint-record-toggle");
+  if (action === "record_cancel") return $("collect-hint-record-cancel");
+  if (action === "home") return $("collect-hint-home");
+  return null;
+}
+
+function updateKeyboardHoldVisual(entry, progress) {
+  const host = keyboardHint(entry.action);
+  if (!host) return;
+  const percent = Math.round(progress * 100);
+  host.classList.add("pressed");
+  host.classList.toggle("holding", progress > 0);
+  host.classList.toggle("complete", progress >= 1);
+  host.style.setProperty("--control-progress", String(progress * 100));
+  host.style.setProperty("--control-fill-width", `${progress * 100}%`);
+  const label = host.querySelector(".control-key-label");
+  if (label) {
+    const display = `${percent}%`;
+    if (label.textContent !== display) label.textContent = display;
+    label.dataset.label = display;
+  }
+  const gesture = host.querySelector(".control-gesture");
+  if (gesture && gesture.textContent !== `${percent}%`) gesture.textContent = `${percent}%`;
+}
+
 function keyboardShortcutAllowed(event) {
   if (S.ACTIVE_TAB !== "collect" || collectControlsConfig().mode !== "keyboard") return false;
   if (event.altKey || event.ctrlKey || event.metaKey) return false;
@@ -509,7 +980,7 @@ function animateKeyboardHold(entry) {
   const holdMs = Math.max(1, Number(binding.hold_ms || 1000));
   const progress = Math.min(1, (performance.now() - entry.startedAt) / holdMs);
   keyboardControlState.holdProgress[binding.control] = progress;
-  renderCollectControls();
+  updateKeyboardHoldVisual(entry, progress);
   if (progress >= 1) {
     if (!entry.triggered) {
       entry.triggered = true;
@@ -567,28 +1038,49 @@ function installCollectKeyboardControls() {
 }
 
 async function startCollectFromTab() {
+    if (collectionSlotClickTimer !== null) {
+      S.collectToggleBusy = null;
+      return;
+    }
     if (S.reviewKind === "collect") {
       returnReviewToLive();
     }
     const task = collectTaskValue();
     const collectionSet = collectSetValue();
     const taskIndex = collectTaskIndexValue();
-    const needsSelection = task && (
-      task !== S.STATUS.selected_collect_task ||
-      collectionSet !== S.STATUS.selected_collect_set ||
-      taskIndex !== S.STATUS.selected_collect_task_index
-    );
-    if (needsSelection) {
-      S.STATUS.selected_collect_task = task;
-      S.STATUS.selected_collect_set = collectionSet;
-      S.STATUS.selected_collect_task_index = taskIndex;
-      await apiPost("/api/select_collect_task", {
-        task,
-        dataset: collectionSet,
-        task_index: taskIndex,
-      });
+    // A fully collected dataset has no next unresolved slot, so the retake target is
+    // whatever the operator selected, down to the grid's first tile; recording into
+    // anything else would leave the reviewed slot's old take in place.
+    const state = S.collectionSlots || {};
+    const slots = state.slots || [];
+    const slot = state.active || slots.find((row) => row.slot_id === state.selectedSlotId)
+      || slots[0];
+    if (!task || !slot || S.collectTaskSelectionPending) {
+      S.collectToggleBusy = null;
+      renderCollect();
+      return;
     }
-    await apiPost("/api/operator_action", { intent: "start" });
+    const confirmed = (state.sessionDataset === slot.dataset &&
+      state.sessionSlotId === slot.slot_id) ||
+      await activateCollectionSlot(slot, { manual: state.active !== slot });
+    if (!confirmed) {
+      S.collectToggleBusy = null;
+      renderCollect();
+      return;
+    }
+    S.STATUS.selected_collect_task = task;
+    S.STATUS.selected_collect_set = collectionSet;
+    S.STATUS.selected_collect_task_index = taskIndex;
+    let started;
+    try {
+      started = await apiPost("/api/collect_start", scenePlanStartMetadata());
+    } catch {
+      started = null;
+    }
+    if (!started || !started.ok) {
+      S.collectToggleBusy = null;
+      renderCollect();
+    }
   }
 
 function fmtEta(sec) {
@@ -606,13 +1098,32 @@ function collectEnabled() {
     return !!(collectConfigured() && S.STATUS.collect);
   }
 
+function collectQcState(item) {
+    if (savedEpisodeId(item) == null) return "pending";
+    const verdict = String(item.qc_verdict || "").trim().toLowerCase();
+    if (verdict === "pass") return "passed";
+    let state = {fail: "failed", unreviewed: "unreviewed"}[verdict]
+      || (String(item.quality || "").toLowerCase() === "red" ? "failed" : "unreviewed");
+    if (verdict !== "fail" && item.qc_auto_verdict === "fail") {
+      state = "failed";
+    }
+    if (item.replay_required && item.replay_verified === false) return "failed";
+    return state;
+}
+
+function collectQcLabel(state) {
+    return {pending: "TO COLLECT", unreviewed: "UNREVIEWED", passed: "PASSED", failed: "FAILED"}[state];
+  }
+
 function collectOutcome(item) {
-    if (item.status === "failed") return "rejected";
-    if (item.qc_verdict === "pass") return "usable";
-    if (item.qc_verdict === "fail") return "rejected";
-    if (item.quality === "red") return "rejected";
-    if (savedEpisodeId(item) != null && item.quality === "green") return "usable";
-    return "pending";
+    if (item && item.status === "failed") return "rejected";
+    const state = collectQcState(item);
+    return state === "failed" ? "rejected" : state === "pending" ? "pending" : "usable";
+  }
+
+function collectResultLabel(item) {
+    if (!item) return "UNKNOWN";
+    return `QC ${collectQcLabel(collectQcState(item))}`;
   }
 
 function collectTone(item) {
@@ -638,15 +1149,72 @@ function collectIssueText(item) {
     )).join(", ");
   }
 
+function collectQualityReason(item) {
+    if (!item) return "";
+    const issues = (item.quality_issues || []).map((issue) => {
+      const detail = issue.detail || issue.message || issue.code || "";
+      return `${detail}${Number(issue.count || 1) > 1 ? ` ×${issue.count}` : ""}`;
+    }).filter(Boolean);
+    const values = [
+      item.qc_auto_note,
+      item.qc_auto_reason,
+      item.qc_note,
+      item.qc_reason,
+      ...issues,
+      item.error,
+      collectReplayFailureReason(item),
+    ];
+    return collectReasonText(values);
+  }
+
+function collectReplayFailureReason(item) {
+    if (!item || item.replay_verified !== false) return "";
+    const raw = String(item.replay_qc_reason || "").trim();
+    if (!raw) return "";
+    const key = {
+      replay_summary_failed: "collect.qc.replay_summary_failed",
+      replay_report_invalid: "collect.qc.replay_report_invalid",
+      replay_evaluation_missing: "collect.qc.replay_evaluation_missing",
+    }[raw];
+    return key ? t(key) : raw;
+  }
+
+function collectReasonText(values) {
+    return [...new Set(values.map((value) => String(value || "").trim()).filter(Boolean))].join(" · ");
+  }
+
 function savedEpisodeId(item) {
     if (!item || item.status !== "saved") return null;
     const episode = Number(item.episode_index);
     return Number.isFinite(episode) ? episode : null;
   }
 
+function syncScenePlanToEpisode(item) {
+    const prompt = String((item && (item.task || item.prompt)) || "");
+    const taskId = String((item && item.task_id) || "");
+    const task = taskId
+      ? scenePlanTasks().find((entry) => entry.task_id === taskId)
+      : scenePlanTasks().find((entry) => (entry.runtime_prompt || entry.prompt_en) === prompt);
+    if (!task) return;
+    S.scenePlanTaskId = task.task_id;
+    const sceneIndex = task.scene_ids.indexOf(String((item && item.scene_id) || ""));
+    if (sceneIndex >= 0) {
+      S.scenePlanSceneIndex = sceneIndex;
+      S.scenePlanSceneId = task.scene_ids[sceneIndex];
+    }
+    const roundIndex = Number(item && item.scene_round);
+    if (Number.isInteger(roundIndex) && roundIndex >= 0) {
+      S.scenePlanRoundIndex = roundIndex;
+    }
+    S.scenePlanTaskPromptKey = prompt;
+    S.scenePlanSelectionManual = true;
+  }
+
 function selectCollectEpisode(item) {
     const episode = savedEpisodeId(item);
     if (episode == null) return;
+    selectCollectionQcTarget(item);
+    syncScenePlanToEpisode(item);
     S.collectReplayEpisode = episode;
     reviewEpisode("collect", item);
     renderCollect();
@@ -665,82 +1233,420 @@ function selectCollectEpisodePointer(event, item) {
     selectCollectEpisode(item);
   }
 
+function selectCollectionQcTarget(item) {
+    collectionQcTarget = savedEpisodeId(item) == null ? null : {
+      item: { ...item },
+      dataset: S.collectionSlots.dataset,
+      dataset_dir: reviewDatasetFor("collect"),
+      task: String(item.task || item.prompt || collectTaskValue()),
+    };
+    const note = $("collect-qc-note");
+    if (note) {
+      note.value = note.defaultValue = "";
+      syncCollectionQcNote(item);
+    }
+    if ($("collect-qc-status")) $("collect-qc-status").textContent = "";
+  }
+
+function collectionMachineFinding(episode) {
+    const saved = savedEpisodeId(episode) != null;
+    const note = saved
+      ? (episode.qc_auto_note || (episode.qc_auto ? episode.qc_note : "")) : "";
+    const reason = saved
+      ? (episode.qc_auto_reason || (episode.qc_auto ? episode.qc_reason : "")) : "";
+    const replayFinding = saved ? collectReplayFailureReason(episode) : "";
+    return collectReasonText([note || reason, replayFinding]);
+  }
+
+function syncCollectionQcNote(episode) {
+    const note = $("collect-qc-note");
+    if (note.value !== note.defaultValue) return;
+    note.value = note.defaultValue = episode && (
+      episode.qc_note || collectionMachineFinding(episode) || collectQualityReason(episode)
+    ) || "";
+  }
+
+function renderCollectionQcControls(enabled, pending) {
+    pending = pending || episodeQcPending.has("collect");
+    const episode = selectedCollectEpisodeItem();
+    const saved = savedEpisodeId(episode) != null;
+    syncCollectionQcNote(episode);
+    $("collect-qc-target").textContent = saved
+      ? `EPISODE ${episode.episode_index} · ${collectResultLabel(episode)}` : "--";
+    $("b-collect-qc-pass").disabled = !enabled || !saved || pending;
+    $("b-collect-qc-unreviewed").disabled = !enabled || !saved || pending;
+    $("b-goto-qc").disabled = !enabled || !saved || pending;
+    $("b-collect-note-save").disabled = !saved || pending;
+    return saved;
+  }
+
 function selectedCollectEpisodeItem() {
-    const episode = S.collectReplayEpisode;
-    if (episode == null) return null;
-    if (!collectReviewMatchesSelection()) return null;
+    if (!collectionQcTarget || collectionQcTarget.dataset !== S.collectionSlots.dataset) return null;
+    const episode = collectionQcTarget.item.episode_index;
+    const slotEpisode = (S.collectionSlots.slots || []).map((slot) => slot.episode).find(
+      (item) => savedEpisodeId(item) === episode
+    );
+    if (slotEpisode) return slotEpisode;
     const collect = S.STATUS.collect || {};
     const history = historyFor("collect", collect);
     const items = history.episodes.concat(history.queue);
-    return items.find((item) => savedEpisodeId(item) === episode) || null;
+    return items.find((item) => savedEpisodeId(item) === episode) || collectionQcTarget.item;
+  }
+
+// Input events retain IDs through the VR retry and SSE transports. Consume each
+// once, and baseline new connections so reopening the page cannot mark old data.
+let collectionReviewSeen = null;
+let collectionReviewBusy = false;
+let collectionReviewClick = null;
+
+function cancelCollectionReviewClick() {
+  if (collectionReviewClick) clearTimeout(collectionReviewClick.timer);
+  collectionReviewClick = null;
+}
+
+// One cursor drives the slot grid: the stick or the mouse pins it where the
+// operator put it, and the console records into that slot as soon as it moves.
+let queuedCollectionSlotSwitch = null;
+
+function pinCollectionSlotCursor(slotId) {
+  S.collectionSlots.selectedSlotId = String(slotId || "");
+  S.collectionSlots.cursorPinned = true;
+}
+
+function clearCollectionSlotCursor() {
+  S.collectionSlots.selectedSlotId = "";
+  S.collectionSlots.cursorPinned = false;
+}
+
+function syncCollectionSlotCursor() {
+  const state = S.collectionSlots;
+  const onPage = (slotId) => !!slotId &&
+    (state.slots || []).some((slot) => slot.slot_id === slotId);
+  if (state.cursorPinned && onPage(state.selectedSlotId)) return;
+  const activeId = String((state.active && state.active.slot_id) || "");
+  state.selectedSlotId = onPage(activeId) ? activeId : "";
+  state.cursorPinned = false;
+}
+
+function collectionRecordingSlotId() {
+  const state = S.collectionSlots;
+  if (!S.STATUS.collect?.collecting || !state.dataset ||
+      !state.sessionDataset || state.sessionDataset !== state.dataset) return "";
+  // Both fields mirror the same session slot; the slot payload keeps the dataset pair.
+  return String(state.sessionSlotId || S.STATUS.collection_slot_id || "");
+}
+
+// The cursor is the capture slot: a move switches the console over at once, and
+// a sweep only has to deliver the step it ends on.
+function switchCollectionSlotCursor(slot) {
+  pinCollectionSlotCursor(slot.slot_id);
+  selectCollectionQcTarget(slot.episode);
+  renderCollect();
+  const host = $("collect-queue-tiles");
+  Array.from(host?.querySelectorAll("[data-slot-id]") || [])
+    .find((tile) => tile.dataset.slotId === slot.slot_id)
+    ?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  if (S.collectTaskSelectionPending) {
+    queuedCollectionSlotSwitch = slot;
+    return;
+  }
+  activateCollectionSlot(slot, { manual: true });
+}
+
+function previewCollectionSlot(slot) {
+  if (!slot || savedEpisodeId(slot.episode) == null || slot.state === "saving" ||
+      slot.dataset !== S.collectionSlots.dataset ||
+      S.STATUS.collect?.collecting) return;
+  pinCollectionSlotCursor(slot.slot_id);
+  S.collectionSlots.followActivePage = false;
+  selectCollectEpisode(slot.episode);
+}
+
+function clickCollectionReviewSlot(slot) {
+  const previous = collectionReviewClick;
+  cancelCollectionReviewClick();
+  if (previous && previous.slotId === slot.slot_id && previous.dataset === slot.dataset) {
+    previewCollectionSlot(slot);
+    return;
+  }
+  // Match the mouse double-click window; don't switch the capture target on
+  // the first half of a double click. Cancel if the cursor/context changes.
+  collectionReviewClick = {
+    slotId: slot.slot_id,
+    dataset: slot.dataset,
+    timer: setTimeout(() => {
+      collectionReviewClick = null;
+      const state = S.collectionSlots;
+      const current = (state.slots || []).find((item) => item.slot_id === slot.slot_id);
+      if (S.ACTIVE_TAB !== "collect" || state.dataset !== slot.dataset ||
+          state.selectedSlotId !== slot.slot_id || !current || current.state === "saving" ||
+          S.STATUS.collect?.collecting || collectionReviewBusy) return;
+      // The cursor already armed this slot; a press only re-asserts it.
+      switchCollectionSlotCursor(current);
+    }, 300),
+  };
+}
+
+function resetCollectionReviewInput() {
+  cancelCollectionReviewClick();
+  collectionReviewSeen = null;
+}
+
+function handleCollectionReviewInput(feedback) {
+  const events = feedback.review_events || [];
+  const ids = new Set(events.map((event) => event.id));
+  if (collectionReviewSeen === null) {
+    collectionReviewSeen = ids;
+    return;
+  }
+  const fresh = events.filter((event) => !collectionReviewSeen.has(event.id));
+  // The server keeps a short replay window. Keep a bounded history instead of
+  // replacing it with the current window, otherwise an event can be processed
+  // twice when SSE reconnects or the window rolls over.
+  for (const id of ids) collectionReviewSeen.add(id);
+  if (collectionReviewSeen.size > 256) {
+    collectionReviewSeen = new Set([...collectionReviewSeen].slice(-128));
+  }
+  if (!feedback.connected || S.ACTIVE_TAB !== "collect" ||
+      collectControlsConfig().mode !== "vr" || !collectEnabled()) {
+    cancelCollectionReviewClick();
+    return;
+  }
+  for (const event of fresh) {
+    const direction = ["left", "right", "up", "down"].includes(event.action);
+    if (event.action !== "select") cancelCollectionReviewClick();
+    if (direction && reviewActiveInCurrentTab()) {
+      returnReviewToLive();
+      continue;
+    }
+    // A move is local and coalesced, and a press only re-asserts the slot the
+    // cursor armed, so neither waits for a switch; a verdict acts on data and
+    // needs the page to settle first.
+    if (collectionReviewBusy || collectionSlotClickTimer !== null) continue;
+    if (!direction && event.action !== "select" && S.collectTaskSelectionPending) continue;
+    if (event.action === "select") {
+      const state = S.collectionSlots;
+      const slot = (state.slots || []).find((item) => item.slot_id === state.selectedSlotId);
+      if (!slot) {
+        setCollectError("Select a capture slot with the left stick first");
+        continue;
+      }
+      if (S.STATUS.collect?.collecting || slot.state === "saving") {
+        setCollectError("Wait for recording or saving to finish before selecting a slot");
+        continue;
+      }
+      clickCollectionReviewSlot(slot);
+      continue;
+    }
+    if (event.action === "toggle_qc" || event.action === "mark_red") {
+      const selectedSlot = (S.collectionSlots.slots || []).find(
+        (slot) => slot.slot_id === S.collectionSlots.selectedSlotId
+      );
+      const targeted = selectedCollectEpisodeItem();
+      // Resolve the episode from the cursor's current slot. The cached QC target
+      // may refer to the previous slot while a poll or a stick move is settling.
+      // Keep the explicit target when it is the same episode; this preserves
+      // note/verdict edits made by the review panel while the slot payload refreshes.
+      const selected = selectedSlot && savedEpisodeId(selectedSlot.episode) != null
+        ? (targeted && savedEpisodeId(targeted) === savedEpisodeId(selectedSlot.episode)
+          ? targeted : selectedSlot.episode)
+        : targeted;
+      if (!selected) {
+        if ($("collect-qc-status")) $("collect-qc-status").textContent = "Select a saved episode first";
+        continue;
+      }
+      selectCollectionQcTarget(selected);
+      // A verdict must not move the tile the operator is judging.
+      pinCollectionSlotCursor(S.collectionSlots.selectedSlotId);
+      collectionReviewBusy = true;
+      const verdict = event.action === "mark_red"
+        ? "fail"
+        : ({ passed: "fail", failed: "unreviewed", unreviewed: "pass" }[
+          collectQcState(selected)
+        ] || "pass");
+      submitEpisodeQc("collect", verdict)
+        .catch((error) => {
+          if ($("collect-qc-status")) $("collect-qc-status").textContent = `Failed to change status: ${error.message || error}`;
+        })
+        .finally(() => { collectionReviewBusy = false; });
+      continue;
+    }
+    moveCollectionReviewCursor(event.action);
+  }
+}
+
+function moveCollectionReviewCursor(direction) {
+  if (!["left", "right", "up", "down"].includes(direction)) return;
+  // The visible tiles are the page being loaded; stepping on stale ones jumps.
+  if (S.collectionSlots.loading) return;
+  // A move selects, and the console locks the target while it records.
+  if (S.STATUS.collect && S.STATUS.collect.collecting) return;
+  const host = $("collect-queue-tiles");
+  const tiles = Array.from(host?.querySelectorAll("[data-slot-id]") || []);
+  if (!tiles.length) return;
+  const state = S.collectionSlots;
+  const current = tiles.find((tile) => tile.dataset.slotId === state.selectedSlotId);
+  let target = tiles[0];
+  if (current) {
+    const index = tiles.indexOf(current);
+    const firstRowY = tiles[0].getBoundingClientRect().y;
+    const columns = tiles.filter((tile) => Math.abs(tile.getBoundingClientRect().y - firstRowY) < 2).length;
+    const offset = { left: -1, right: 1, up: -columns, down: columns }[direction];
+    const nextIndex = index + offset;
+    if (nextIndex >= 0 && nextIndex < tiles.length) {
+      target = tiles[nextIndex];
+    } else {
+      const delta = offset < 0 ? -1 : 1;
+      const page = Math.max(1, Math.min(state.pageCount, Number(state.page) + delta));
+      if (page === state.page) return;
+      const dataset = state.dataset;
+      const column = index % columns;
+      collectionReviewBusy = true;
+      state.page = page;
+      clearCollectionSlotCursor();
+      state.followActivePage = false;
+      selectCollectionQcTarget(null);
+      pollCollectionSlots(true).then(() => {
+        if (state.dataset !== dataset || Number(state.page) !== page) return;
+        const slots = state.slots || [];
+        const lastRow = Math.floor((slots.length - 1) / columns) * columns;
+        const destination = direction === "up" ? lastRow + column
+          : direction === "down" ? column
+          : delta > 0 ? 0 : slots.length - 1;
+        const slot = slots[Math.min(slots.length - 1, destination)];
+        if (slot) switchCollectionSlotCursor(slot);
+        else renderCollect();
+      }).catch((error) => {
+        setCollectError(`Failed to change page: ${error.message || error}`);
+      }).finally(() => { collectionReviewBusy = false; });
+      return;
+    }
+  }
+  const slot = (state.slots || []).find((item) => item.slot_id === target.dataset.slotId);
+  if (!slot) return;
+  state.followActivePage = false;
+  switchCollectionSlotCursor(slot);
+}
+
+function renderCollectionSlotFilters() {
+    const state = S.collectionSlots;
+    const scene = $("collect-slot-scene-filter");
+    const task = $("collect-slot-task-filter");
+    const sceneIds = [...new Set((state.scenes || []).map((entry) => entry.id).filter(Boolean))].sort();
+    const taskIds = [...new Set((state.tasks || []).map((entry) => entry.id).filter(Boolean))].sort(
+      (left, right) => String(left).localeCompare(String(right), "en", { numeric: true, sensitivity: "base" })
+    );
+    const sceneKey = JSON.stringify(sceneIds);
+    const taskKey = JSON.stringify(taskIds);
+    if (scene.dataset.options !== sceneKey) {
+      scene.replaceChildren(new Option(t("collect.allScenes"), ""));
+      sceneIds.forEach((id) => {
+        const option = document.createElement("option");
+        option.value = id;
+        option.textContent = id;
+        scene.appendChild(option);
+      });
+      scene.dataset.options = sceneKey;
+    }
+    if (task.dataset.options !== taskKey) {
+      task.replaceChildren(new Option(t("collect.allTasks"), ""));
+      taskIds.forEach((id) => {
+        const option = document.createElement("option");
+        option.value = id;
+        option.textContent = id;
+        task.appendChild(option);
+      });
+      task.dataset.options = taskKey;
+    }
+    scene.value = state.sceneFilter || "";
+    task.value = state.taskFilter || "";
+    scene.disabled = !state.loaded;
+    task.disabled = !state.loaded;
   }
 
 function renderCollectTiles(items) {
     const host = $("collect-queue-tiles");
+    const recordingSlotId = collectionRecordingSlotId();
+    const focusedSlotId = host.contains(document.activeElement)
+      ? document.activeElement.dataset.slotId : null;
     host.innerHTML = "";
-    const hint = $("collect-tiles-hint");
-    const anyReplayable = items.some((item) => savedEpisodeId(item) != null);
-    if (hint) hint.style.display = anyReplayable ? "block" : "none";
     if (!items.length) {
       const empty = document.createElement("span");
       empty.className = "collect-empty";
-      empty.textContent = "no episodes";
+      empty.textContent = S.collectionSlots.loading ? t("word.loading") :
+        (S.collectionSlots.error || (S.collectionSlots.viewerActive
+          ? t("collect.noMatchingSlots") : t("collect.filterOff")));
       host.appendChild(empty);
       return;
     }
-    items.forEach((item) => {
+    items.forEach((slot) => {
       const tile = document.createElement("button");
       tile.type = "button";
-      tile.className = `collect-tile ${collectTone(item)}`;
-      const episode = savedEpisodeId(item);
-      if (episode != null) {
-        tile.classList.add("replayable");
-        tile.title = `episode ${item.episode_index}`;
-        if (collectReviewMatchesSelection() && episode === S.collectReplayEpisode) {
-          tile.classList.add("selected");
-        }
-        tile.onpointerdown = (event) => selectCollectEpisodePointer(event, item);
-        tile.onclick = () => selectCollectEpisode(item);
-      } else {
-        tile.title = `episode ${item.episode_index} · ${item.status}`;
+      tile.dataset.slotId = slot.slot_id;
+      tile.title = `${slot.scene_id} · ${slot.task} · ` +
+        `${t("collect.round")} ${Number(slot.round_index) + 1}/${slot.round_total}`;
+      const episode = savedEpisodeId(slot.episode);
+      const recording = recordingSlotId === String(slot.slot_id);
+      const saving = slot.state === "saving";
+      tile.title = `${t("collect.slot")} ${Number(slot.ordinal)} · ${tile.title}`;
+      if (episode != null) tile.title += ` · ${t("collect.episodeLabel")} ${episode}`;
+      tile.textContent = String(Number(slot.ordinal));
+      const saved = episode != null;
+      const renderPending = !recording && !saving && saved &&
+        slot.episode.replay_required === true && slot.episode.replay_verified === null;
+      const current = S.collectionSlots.active &&
+        S.collectionSlots.active.slot_id === slot.slot_id;
+      const visibleState = recording ? "unreviewed" : (slot.qc_state || collectQcState(slot.episode));
+      if (recording) tile.title += " · RECORDING";
+      else if (saving) tile.title += " · SAVING";
+      else tile.title += ` · ${collectQcLabel(visibleState)}`;
+      if (renderPending) tile.title += ` · ${t("collect.renderPending")}`;
+      if (!recording && !saving) {
+        const reason = collectQualityReason(slot.episode);
+        if (reason) tile.title += ` · ${reason}`;
       }
-      const episodeIndex = Number(item.episode_index);
-      tile.textContent = Number.isFinite(episodeIndex)
-        ? String(episodeIndex).padStart(3, "0")
-        : "---";
       tile.setAttribute("aria-label", tile.title);
+      tile.setAttribute("aria-busy", String(recording || saving || renderPending));
+      tile.className = `collect-tile slot-${visibleState}` +
+        `${renderPending ? " slot-render-pending" : ""}` +
+        `${saving ? " slot-saving" : ""}`;
+      // One cursor: the armed slot is framed only while it is where the operator is.
+      if (slot.slot_id === S.collectionSlots.selectedSlotId) tile.classList.add("selected");
+      const locked = slot.state === "saving" ||
+        !!(S.STATUS.collect && S.STATUS.collect.collecting);
+      tile.disabled = locked || (current && !saved);
+      tile.classList.toggle("actionable", !tile.disabled);
+      tile.onclick = (event) => {
+        cancelCollectionReviewClick();
+        clearTimeout(collectionSlotClickTimer);
+        if (event.detail > 1) return;
+        // The cursor lands at once; only the switch waits out the double click,
+        // and it stays cancelled when the stick has moved on since.
+        pinCollectionSlotCursor(slot.slot_id);
+        selectCollectionQcTarget(slot.episode);
+        renderCollect();
+        collectionSlotClickTimer = setTimeout(() => {
+          collectionSlotClickTimer = null;
+          if (slot.dataset !== S.collectionSlots.dataset ||
+              S.collectionSlots.selectedSlotId !== slot.slot_id ||
+              S.collectTaskSelectionPending || (S.STATUS.collect && S.STATUS.collect.collecting)) return;
+          switchCollectionSlotCursor(slot);
+        }, 300);
+      };
+      tile.ondblclick = (event) => {
+        event.preventDefault();
+        clearTimeout(collectionSlotClickTimer);
+        collectionSlotClickTimer = null;
+        cancelCollectionReviewClick();
+        previewCollectionSlot(slot);
+      };
       host.appendChild(tile);
     });
-  }
-
-function renderCollectList(items) {
-    const host = $("collect-queue-list");
-    host.style.display = S.collectQueueExpanded ? "block" : "none";
-    $("collect-queue-toggle").textContent = S.collectQueueExpanded ? "COLLAPSE" : "EXPAND";
-    host.innerHTML = "";
-    if (!items.length) return;
-    items.slice().reverse().forEach((item) => {
-      const row = document.createElement("div");
-      const episode = savedEpisodeId(item);
-      const selected = collectReviewMatchesSelection() && episode === S.collectReplayEpisode;
-      row.className = `collect-row ${episode != null ? "replayable" : ""}${selected ? " selected" : ""}`;
-      const ep = document.createElement("span");
-      const frames = document.createElement("span");
-      const issue = document.createElement("span");
-      ep.textContent = `#${String(item.episode_index).padStart(3, "0")}`;
-      frames.textContent = `${item.length || 0}f`;
-      issue.className = "issue";
-      issue.textContent = collectIssueText(item);
-      row.appendChild(ep);
-      row.appendChild(frames);
-      row.appendChild(issue);
-      if (episode != null) {
-        row.title = "select episode";
-        row.onpointerdown = (event) => selectCollectEpisodePointer(event, item);
-        row.onclick = () => selectCollectEpisode(item);
-      }
-      host.appendChild(row);
-    });
+    if (focusedSlotId) {
+      Array.from(host.querySelectorAll("[data-slot-id]"))
+        .find((tile) => tile.dataset.slotId === focusedSlotId && !tile.disabled)
+        ?.focus({ preventScroll: true });
+    }
   }
 
 function pipeBadge(el, text) {
@@ -757,7 +1663,7 @@ function renderRolloutSaveTiles(items) {
     if (!items.length) {
       const empty = document.createElement("span");
       empty.className = "collect-empty";
-      empty.textContent = "no saved rollouts";
+      empty.textContent = t("collect.noSavedRollouts");
       host.appendChild(empty);
       return;
     }
@@ -779,7 +1685,8 @@ function renderRolloutSaveList(items) {
     const host = $("rollout-save-queue-list");
     if (!host) return;
     host.style.display = S.rolloutSaveQueueExpanded ? "block" : "none";
-    $("rollout-save-queue-toggle").textContent = S.rolloutSaveQueueExpanded ? "COLLAPSE" : "EXPAND";
+    $("rollout-save-queue-toggle").textContent = S.rolloutSaveQueueExpanded
+      ? t("collect.collapse") : t("collect.expand");
     host.innerHTML = "";
     if (!items.length) return;
     items.slice().reverse().forEach((item) => {
@@ -822,7 +1729,8 @@ function renderRolloutSave() {
 
     pipeBadge($("rollout-save-pipeline"), enabled ? (rollout.pipeline_state || "IDLE") : "DISABLED");
     $("rollout-save-dir").style.display = savedComplete ? "block" : "none";
-    $("rollout-save-dir").textContent = savedComplete ? `saved to ${rollout.dataset_dir || "—"}` : "";
+    $("rollout-save-dir").textContent = savedComplete
+      ? `${t("word.saved")}：${rollout.dataset_dir || "—"}` : "";
     $("rollout-save-count").textContent = `${episodes.length}/${totalItems}`;
     $("rollout-save-progress-fill").style.width = `${progress * 100}%`;
     $("rollout-save-eta").textContent = fmtEta(rollout.eta_sec);
@@ -832,7 +1740,7 @@ function renderRolloutSave() {
       ? (saveBlocked
           ? `continue or abandon intervention · active ${activeInterventionFrames}f · accepted ${acceptedInterventions}`
           : (saveReady ? `ready after ${rollout.reason || "stop"}` : ""))
-      : "rollout saving is disabled";
+      : t("rl.savingDisabled");
     const hasFrames = Number(rollout.current_episode_frames || 0) > 0;
     $("b-rollout-save").disabled = !enabled || (!saveReady && !running) || !hasFrames || saveBlocked;
     $("b-rollout-qc-pass").disabled = !enabled || S.rolloutSaveEpisode == null;
@@ -852,63 +1760,210 @@ function renderRolloutSave() {
     }
 
     if (S.rolloutSaveEpisode == null) {
-      $("rollout-review-title").textContent = "no rollout selected";
+      $("rollout-review-title").textContent = t("collect.noRolloutSelected");
     }
   }
 
-function collectHistoryReadyFor(collectionSet, prompt) {
-    const cache = S.episodeHistory && S.episodeHistory.collect;
-    return !!(
-      cache && cache.loaded &&
-      cache.collectionSet === collectionSet && cache.task === prompt
+function renderCollectionTransfer(enabled, usableCount, rejectedCount) {
+  const exportButton = $("b-collect-quality-export");
+  const uploadButton = $("b-collect-quality-upload");
+  const exportFormat = $("collect-export-format");
+  const selectedFormat = exportFormat ? exportFormat.value : "";
+  const selectedExportReady = !!qualityTransfer.outputDir &&
+    qualityTransfer.datasetFormat === selectedFormat;
+  const upload = (S.CFG && S.CFG.collection && S.CFG.collection.upload) || {};
+  if (exportButton) {
+    exportButton.disabled = !enabled || usableCount + rejectedCount === 0 ||
+      qualityTransfer.exporting || qualityTransfer.uploading || datasetSyncBusy;
+  }
+  if (uploadButton) {
+    const uploadPlanReady = qualityTransfer.uploadState === "ready" &&
+      !!qualityTransfer.uploadPlanId;
+    uploadButton.disabled = !upload.configured || !selectedExportReady ||
+      qualityTransfer.exporting || qualityTransfer.uploading || datasetSyncBusy;
+    const backendLabel = (upload.backends || []).map((value) => String(value).toUpperCase());
+    const targetLabel = backendLabel.length ? backendLabel.join(" + ") : "TARGET";
+    const operationCount = qualityTransfer.filesTotal + qualityTransfer.filesToDelete;
+    uploadButton.textContent = uploadPlanReady
+      ? `CONFIRM ${targetLabel} · ${operationCount} CHANGES`
+      : `SCAN ${targetLabel}`;
+  }
+  if (exportFormat) {
+    exportFormat.disabled = qualityTransfer.exporting || qualityTransfer.uploading || datasetSyncBusy;
+  }
+  datasetSyncButtons.forEach((id) => {
+    $(id).disabled = datasetSyncBusy || qualityTransfer.exporting || qualityTransfer.uploading;
+  });
+  if (processProgressOwner === "sync") return;
+  const transferProgressBar = $("collect-dataset-sync-progress");
+  const transferProgressFill = $("collect-dataset-sync-progress-fill");
+  const transferProgressLabel = $("collect-dataset-sync-progress-label");
+  const transferProgressDetail = $("collect-quality-progress-detail");
+  const showingExport = qualityTransfer.phase !== "upload";
+  const formatLabel = qualityTransferFormatLabel(
+    qualityTransfer.datasetFormat || selectedFormat
+  );
+  const transferFraction = showingExport
+    ? (qualityTransfer.episodesTotal > 0
+        ? qualityTransfer.episodesCompleted / qualityTransfer.episodesTotal
+        : (qualityTransfer.exportState === "completed" ? 1 : 0))
+    : (qualityTransfer.bytesTotal > 0
+        ? qualityTransfer.bytesCompleted / qualityTransfer.bytesTotal
+        : (qualityTransfer.filesTotal > 0
+            ? qualityTransfer.filesCompleted / qualityTransfer.filesTotal
+            : (qualityTransfer.uploadState === "completed" ? 1 : 0)));
+  const transferPercent = Math.round(Math.max(0, Math.min(1, transferFraction)) * 100);
+  if (transferProgressBar) {
+    transferProgressBar.classList.remove("in-progress");
+    transferProgressBar.removeAttribute("aria-valuetext");
+    transferProgressBar.setAttribute("aria-valuenow", String(transferPercent));
+    transferProgressBar.setAttribute(
+      "aria-label", `${formatLabel} ${showingExport ? "export" : "upload"} progress`
     );
   }
-
-function maybeAutoAdvanceCollectTask(prompt, usableCollected, required, collecting) {
-    const selectionKey = collectTaskSelectionKey();
-    const historyReady = collectHistoryReadyFor(collectSetValue(), prompt);
-    if (collectAutoAdvanceState.selectionKey !== selectionKey) {
-      collectAutoAdvanceState.selectionKey = selectionKey;
-      collectAutoAdvanceState.historyReady = false;
-      collectAutoAdvanceState.usableCollected = null;
-      collectAutoAdvanceState.completionPending = false;
-      collectAutoAdvanceState.scheduledKey = "";
-    }
-    if (!historyReady) {
-      collectAutoAdvanceState.historyReady = false;
-      collectAutoAdvanceState.usableCollected = null;
-      return;
-    }
-    if (!collectAutoAdvanceState.historyReady) {
-      collectAutoAdvanceState.historyReady = true;
-      collectAutoAdvanceState.usableCollected = usableCollected;
-      return;
-    }
-    if (collectAutoAdvanceState.usableCollected === null) {
-      collectAutoAdvanceState.usableCollected = usableCollected;
-      return;
-    }
-    const crossedTarget = Number.isInteger(required) && required > 0 &&
-      collectAutoAdvanceState.usableCollected < required && usableCollected >= required;
-    collectAutoAdvanceState.usableCollected = usableCollected;
-    if (crossedTarget) collectAutoAdvanceState.completionPending = true;
-    if (usableCollected < required) collectAutoAdvanceState.completionPending = false;
-    if (!collectAutoAdvanceState.completionPending || collecting) return;
-    if (collectAutoAdvanceState.scheduledKey === selectionKey) return;
-    collectAutoAdvanceState.scheduledKey = selectionKey;
-    queueMicrotask(() => {
-      const stillCollecting = !!(S.STATUS.collect && S.STATUS.collect.collecting);
-      if (collectTaskSelectionKey() !== selectionKey || stillCollecting) return;
-      collectAutoAdvanceState.completionPending = false;
-      collectAutoAdvanceState.scheduledKey = "";
-      advanceCollectTask();
-    });
+  if (transferProgressFill) transferProgressFill.style.width = `${transferPercent}%`;
+  if (transferProgressLabel) transferProgressLabel.textContent = `${transferPercent}%`;
+  if (transferProgressDetail) {
+    transferProgressDetail.textContent = showingExport
+      ? `${qualityTransfer.episodesCompleted}/${qualityTransfer.episodesTotal} episodes · ${formatLabel}`
+      : (qualityTransfer.uploadState === "ready"
+          ? (`${qualityTransfer.filesTotal} upload · ${qualityTransfer.filesToDelete} remove · ` +
+            `${qualityTransfer.filesSkipped} same · ` +
+            `${qualityTransfer.localFiles} local · ${formatLabel}`)
+      : (`${qualityTransfer.filesCompleted}/${qualityTransfer.filesTotal} files · ` +
+        `${formatTransferBytes(qualityTransfer.bytesCompleted)}/` +
+        `${formatTransferBytes(qualityTransfer.bytesTotal)} · ${formatLabel}`));
   }
+}
+
+const datasetSyncButtons = [
+  "b-collect-dataset-upload", "b-collect-assets-download",
+  "b-collect-task-set-download",
+];
+let datasetSyncBusy = false;
+let processProgressOwner = "convert";
+
+function setCollectTransferInfo(message, tone = "") {
+  const info = $("collect-transfer-info");
+  info.textContent = message;
+  info.title = message;
+  info.classList.toggle("ok", tone === "ok");
+  info.classList.toggle("err", tone === "err");
+  info.style.display = S.ACTIVE_TAB === "collect" && message ? "" : "none";
+}
+
+function setDatasetSyncProgress(state, label) {
+  const bar = $("collect-dataset-sync-progress");
+  const fill = $("collect-dataset-sync-progress-fill");
+  const text = $("collect-dataset-sync-progress-label");
+  $("collect-quality-progress-detail").textContent = label;
+  bar.classList.toggle("in-progress", state === "running");
+  if (state === "running") {
+    bar.removeAttribute("aria-valuenow");
+    bar.setAttribute("aria-valuetext", `${label} in progress`);
+    fill.style.width = "35%";
+    text.textContent = `${label}…`;
+  } else {
+    const percent = state === "done" ? 100 : 0;
+    bar.setAttribute("aria-valuenow", String(percent));
+    bar.setAttribute("aria-valuetext", state === "done" ? `${label} complete` : `${label} failed`);
+    fill.style.width = `${percent}%`;
+    text.textContent = state === "done" ? "100%" : "ERROR";
+  }
+}
+
+async function runDatasetSync(label, request, onSuccess) {
+  if (datasetSyncBusy || qualityTransfer.exporting || qualityTransfer.uploading) return;
+  processProgressOwner = "sync";
+  datasetSyncBusy = true;
+  renderCollect();
+  datasetSyncButtons.forEach((id) => { $(id).disabled = true; });
+  const status = $("collect-quality-status");
+  status.textContent = `${label}…`;
+  setCollectTransferInfo(`${label}…`);
+  setDatasetSyncProgress("running", label);
+  let succeeded = false;
+  try {
+    const result = await request();
+    if (!result.ok) throw new Error(result.error || `${label} failed`);
+    await onSuccess(result, status);
+    setCollectTransferInfo(status.textContent, "ok");
+    succeeded = true;
+  } catch (error) {
+    status.textContent = error.message || String(error);
+    setCollectTransferInfo(`${label}: ${status.textContent}`, "err");
+  } finally {
+    setDatasetSyncProgress(succeeded ? "done" : "failed", label);
+    datasetSyncButtons.forEach((id) => { $(id).disabled = false; });
+    datasetSyncBusy = false;
+    renderCollect();
+  }
+}
+
+async function downloadCollectionTaskSetFromHf() {
+  // Task sets always sync as a whole: every set this machine is configured with.
+  const status = $("collect-quality-status");
+  await runDatasetSync("下载任务集",
+    () => apiPost("/api/hf/task_set/sync", {}, {timeoutMs: 0, concurrent: true}),
+    async (result, output) => {
+      const missing = result.missing?.length ? `, ${result.missing.length} not published` : "";
+      output.textContent = `task sets: ${result.fetched?.length || 0} updated${missing}`;
+      await pollCollectionSlots(true);
+    });
+  if (!status.textContent) status.textContent = "task sets synced";
+}
+
+async function downloadCollectionAssetsFromHf() {
+  const dataset = collectSetValue();
+  const status = $("collect-quality-status");
+  if (!dataset) { status.textContent = "Select a set"; return; }
+  await runDatasetSync("DOWNLOAD ASSETS",
+    () => apiPost("/api/hf/assets/download", {dataset}, {timeoutMs: 0, concurrent: true}),
+    async (result, output) => {
+      output.textContent = `assets downloaded for ${dataset}: ${result.files || 0} files`;
+    });
+}
+
+async function uploadCollectionDatasetToHf() {
+  const dataset = collectSetValue();
+  const status = $("collect-quality-status");
+  if (!dataset) { status.textContent = "Select a dataset"; return; }
+  await runDatasetSync("UPLOAD DATA",
+    () => apiPost("/api/hf/dataset/upload", {dataset}, {timeoutMs: 0, concurrent: true}),
+    async (result, output) => {
+      output.textContent = `${dataset} uploaded: ${result.revision || "done"}`;
+    });
+}
+
+function renderCollectionReplayStatus(selectedEpisodeSaved) {
+  const replayStatus = $("collect-replay-status");
+  const history = historyFor("collect", S.STATUS.collect || {});
+  const item = history.episodes.find((entry) => savedEpisodeId(entry) === S.collectReplayEpisode);
+  const label = `episode ${S.collectReplayEpisode} · ${collectResultLabel(item)}`;
+  if (S.reviewKind === "collect" && LIVE.replayOwner === "collect") {
+    replayStatus.textContent = LIVE.replayError
+      ? `${label} · error · ${LIVE.replayError}`
+      : (LIVE.replayLoading
+          ? `${label} · loading`
+          : `${label} · review`);
+    replayStatus.style.display = S.ACTIVE_TAB === "collect" ? "" : "none";
+  } else {
+    replayStatus.textContent = "";
+    replayStatus.style.display = "none";
+  }
+}
 
 function renderCollect() {
     if (!$("collect-control-col")) return;
     const collect = S.STATUS.collect || {};
+    const pipeline = collectionPipelineState(collect);
+    if (collectionSaveRefreshNeeded(collectionPipelineSnapshot, pipeline)) {
+      collectionSaveRefreshPending = true;
+    }
+    collectionPipelineSnapshot = pipeline;
+    requestCollectionSaveRefresh();
     const history = historyFor("collect", collect);
+    const slotPlan = S.collectionSlots;
     const enabled = collectEnabled();
     const collecting = !!collect.collecting;
     // The toggle's action depends on the polled `collecting` flag, which lags the
@@ -918,49 +1973,80 @@ function renderCollect() {
       S.collectToggleBusy = null;
     }
     const toggleBusy = S.collectToggleBusy !== null;
-    const prompt = collectTaskValue();
-    const collectionSet = collectSetValue();
-    const hasPrompt = !!prompt;
+    const activeSlot = slotPlan.active;
+    const cursorSlot = (slotPlan.slots || []).find(
+      (slot) => slot.slot_id === slotPlan.selectedSlotId
+    );
+    // The cursor is the selection: panels and readouts describe the framed tile,
+    // and the first slot stands in until the operator picks one.
+    const displaySlot = cursorSlot || activeSlot || (slotPlan.slots || [])[0];
+    const prompt = activeSlot ? activeSlot.task : collectTaskValue();
+    const collectionSet = slotPlan.dataset || collectSetValue();
+    const hasPrompt = !!displaySlot;
     const queueFull = collect.pipeline_state === "QUEUE_FULL";
-    // historyFor is the collection view's set+prompt scope boundary.
     const episodes = history.episodes;
     const queue = history.queue;
-    const totalItems = episodes.length + queue.length;
-    const required = collectTaskTarget(prompt);
-    const hasRequirement = Number.isInteger(required) && required > 0;
-    const unlimited = required === -1;
-    const usableCollected = history.summary.usable;
-    const requirementComplete = hasRequirement && usableCollected >= required;
-    maybeAutoAdvanceCollectTask(prompt, usableCollected, required, collecting);
-    const queueSummary = episodeItemsSummary(queue);
-    const usableCount = history.summary.usable + queueSummary.usable;
-    const rejectedCount = history.summary.rejected + queueSummary.rejected;
-    const pendingCount = history.summary.pending + queueSummary.pending;
-    const progress = totalItems === 0
-      ? 0 : Math.max(0, Math.min(1, (usableCount + rejectedCount) / totalItems));
+    const counts = slotPlan.counts || {};
+    const totalSlots = Number(counts.total) || 0;
+    const usableCount = Number(counts.passed) || 0;
+    const unreviewedCount = Number(counts.unreviewed) || 0;
+    const rejectedCount = Number(counts.failed) || 0;
+    const pendingCount = Math.max(0, totalSlots - usableCount - unreviewedCount - rejectedCount);
+    const progress = totalSlots > 0 ? usableCount / totalSlots : 0;
+    const requirementComplete = totalSlots > 0 && usableCount >= totalSlots;
 
+    if (activeSlot) adoptCollectionSlot(activeSlot);
     const collectFps = S.CFG && S.CFG.collection ? S.CFG.collection.fps : null;
     $("collect-fps").textContent = collectFps ? `${collectFps} FPS` : "";
-    $("collect-count").textContent = `${episodes.length}/${totalItems}`;
+    $("collect-count").textContent = `${usableCount}/${totalSlots}`;
     $("collect-usable-count").textContent = threeDigitCount(usableCount);
+    $("collect-unreviewed-count").textContent = threeDigitCount(unreviewedCount);
     $("collect-rejected-count").textContent = threeDigitCount(rejectedCount);
     $("collect-pending-count").textContent = threeDigitCount(pendingCount);
-    $("collect-requirement-count").textContent = `${usableCollected} / ${unlimited ? "∞" : (hasRequirement ? required : "--")}`;
-    $("collect-requirement-status").textContent = unlimited
-      ? "NO LIMIT"
-      : hasRequirement
-      ? (requirementComplete ? "COMPLETE" : `${required - usableCollected} REMAINING`)
-      : "TARGET NOT SET";
+    $("collect-requirement-count").textContent = `${usableCount} / ${totalSlots || "--"}`;
+    $("collect-requirement-status").textContent = requirementComplete
+      ? t("collect.requirementComplete")
+      : t("collect.remaining", {count: Math.max(0, totalSlots - usableCount)});
     $("collect-requirement").classList.toggle("complete", requirementComplete);
-    $("collect-requirement").classList.toggle("unset", !hasRequirement && !unlimited);
+    $("collect-requirement").classList.toggle("unset", totalSlots === 0);
     $("collect-progress-label").textContent = `${Math.round(progress * 100)}%`;
     $("collect-progress-fill").style.width = `${progress * 100}%`;
     $("collect-eta").textContent = fmtEta(collect.eta_sec);
 
+    $("collect-current-position").textContent = displaySlot
+      ? `${Number(displaySlot.ordinal)} / ${totalSlots}` : `-- / ${totalSlots}`;
+    const displayTask = scenePlanTasks().find((task) => task.task_id === displaySlot?.task_id);
+    const displayScene = (S.SCENE_PLAN?.scenes || []).find(
+      (scene) => scene.scene_id === displaySlot?.scene_id
+    );
+    renderCurrentSceneGrid(displayScene, displayTask);
+    $("collect-current-task").textContent = displaySlot
+      ? (displaySlot.task_zh || displaySlot.task || displaySlot.episode?.task || displaySlot.episode?.prompt || "--") : "--";
+    $("collect-current-task-en").textContent = displaySlot && displaySlot.task_zh
+      ? (displayTask?.prompt_en || displaySlot.task || "") : "";
+    $("collect-current-round").textContent = displaySlot
+      ? t("collect.roundValue", {
+        round: Number(displaySlot.round_index) + 1,
+        total: displaySlot.round_total,
+      }) : "ROUND -- / --";
+    renderCollectionSlotFilters();
+    if ($("collect-vr-review-hint")) {
+      $("collect-vr-review-hint").hidden = collectControlsConfig().mode !== "vr";
+    }
+    const allButton = $("collect-queue-toggle");
+    allButton.setAttribute("aria-pressed", slotPlan.showAll ? "true" : "false");
+    const page = $("collect-slot-page");
+    page.hidden = !slotPlan.viewerActive || slotPlan.pageCount <= 1;
+    $("collect-slot-page-label").textContent = `${slotPlan.page} / ${slotPlan.pageCount}`;
+    $("collect-queue-tiles").setAttribute("aria-busy", String(slotPlan.loading));
+    $("b-collect-slot-prev").disabled = slotPlan.page <= 1;
+    $("b-collect-slot-next").disabled = slotPlan.page >= slotPlan.pageCount;
+
     const armSwitch = $("collect-arm-enable");
     if (armSwitch) {
       armSwitch.checked = S.collectArmEnabled;
-      armSwitch.disabled = !enabled || (!hasPrompt && !S.collectArmEnabled);
+      // Arming never waits on a slot: the plan's first slot is the default target.
+      armSwitch.disabled = !enabled;
       const gate = armSwitch.closest(".collect-arm-gate");
       if (gate) {
         gate.classList.toggle("on", S.collectArmEnabled);
@@ -968,124 +2054,62 @@ function renderCollect() {
       }
     }
     const armLabel = $("collect-arm-label");
-    if (armLabel) armLabel.textContent = S.collectArmEnabled ? "ENABLED" : "LOCKED";
+    if (armLabel) armLabel.textContent = S.collectArmEnabled ? t("state.enabled") : t("state.locked");
 
     const toggle = $("b-collect-toggle");
-    toggle.disabled = toggleBusy ||
+    toggle.disabled = toggleBusy || S.collectTaskSelectionPending ||
       (collecting ? false : (!enabled || !hasPrompt || queueFull || !S.collectArmEnabled));
     toggle.classList.toggle("recording", collecting);
     toggle.classList.toggle("primary", !collecting);
-    toggle.querySelector(".rec-label").textContent = collecting ? "END / SAVE" : "START RECORD";
+    toggle.querySelector(".rec-label").textContent = collecting ? t("collect.endSave") : t("collect.startRecord");
     $("b-collect-cancel").disabled = !collecting;
     const home = $("b-collect-home");
     if (home) {
       home.disabled = S.collectHomeBusy || S.collectArmEnabled || collecting || !!S.STATUS.setup_stage;
     }
-    const selectedEpisode = selectedCollectEpisodeItem();
-    const selectedEpisodeSaved = savedEpisodeId(selectedEpisode) != null;
-    $("b-collect-qc-pass").disabled = !enabled || !selectedEpisodeSaved;
-    $("b-goto-qc").disabled = !enabled || !selectedEpisodeSaved;
-    $("b-collect-note-save").disabled = !selectedEpisodeSaved;
-    const exportButton = $("b-collect-quality-export");
-    const uploadButton = $("b-collect-quality-upload");
-    const exportFormat = $("collect-export-format");
-    const selectedFormat = exportFormat ? exportFormat.value : "";
-    const selectedExportReady = !!qualityTransfer.acceptedDir &&
-      qualityTransfer.datasetFormat === selectedFormat;
-    const upload = (S.CFG && S.CFG.collection && S.CFG.collection.upload) || {};
-    if (exportButton) {
-      exportButton.disabled = !enabled || !episodes.length ||
-        qualityTransfer.exporting || qualityTransfer.uploading;
-    }
-    if (uploadButton) {
-      uploadButton.disabled = !upload.configured || !selectedExportReady ||
-        qualityTransfer.exporting || qualityTransfer.uploading;
-      const backendLabel = (upload.backends || []).map((value) => String(value).toUpperCase());
-      uploadButton.textContent = backendLabel.length
-        ? `UPLOAD ${backendLabel.join(" + ")}`
-        : "UPLOAD ACCEPTED";
-    }
-    if (exportFormat) {
-      exportFormat.disabled = qualityTransfer.exporting || qualityTransfer.uploading;
-    }
-    const transferProgressBar = $("collect-quality-progress-bar");
-    const transferProgressFill = $("collect-quality-progress-fill");
-    const transferProgressLabel = $("collect-quality-progress-label");
-    const transferProgressDetail = $("collect-quality-progress-detail");
-    const showingExport = qualityTransfer.phase !== "upload";
-    const formatLabel = qualityTransferFormatLabel(
-      qualityTransfer.datasetFormat || selectedFormat
-    );
-    const transferFraction = showingExport
-      ? (qualityTransfer.episodesTotal > 0
-          ? qualityTransfer.episodesCompleted / qualityTransfer.episodesTotal
-          : (qualityTransfer.exportState === "completed" ? 1 : 0))
-      : (qualityTransfer.bytesTotal > 0
-          ? qualityTransfer.bytesCompleted / qualityTransfer.bytesTotal
-          : (qualityTransfer.filesTotal > 0
-              ? qualityTransfer.filesCompleted / qualityTransfer.filesTotal
-              : (qualityTransfer.uploadState === "completed" ? 1 : 0)));
-    const transferPercent = Math.round(Math.max(0, Math.min(1, transferFraction)) * 100);
-    if (transferProgressBar) {
-      transferProgressBar.setAttribute("aria-valuenow", String(transferPercent));
-      transferProgressBar.setAttribute(
-        "aria-label", `${formatLabel} ${showingExport ? "export" : "upload"} progress`
-      );
-    }
-    if (transferProgressFill) transferProgressFill.style.width = `${transferPercent}%`;
-    if (transferProgressLabel) transferProgressLabel.textContent = `${transferPercent}%`;
-    if (transferProgressDetail) {
-      transferProgressDetail.textContent = showingExport
-        ? `${qualityTransfer.episodesCompleted}/${qualityTransfer.episodesTotal} episodes · ${formatLabel}`
-        : (`${qualityTransfer.filesCompleted}/${qualityTransfer.filesTotal} files · ` +
-          `${formatTransferBytes(qualityTransfer.bytesCompleted)}/` +
-          `${formatTransferBytes(qualityTransfer.bytesTotal)} · ${formatLabel}`);
-    }
+    const qcPending = S.collectTaskSelectionPending || collectionSlotClickTimer !== null;
+    const selectedEpisodeSaved = renderCollectionQcControls(enabled, qcPending);
+    renderCollectionTransfer(enabled, usableCount + unreviewedCount, rejectedCount);
 
     const recordState = collecting || (hasPrompt && !S.collectArmEnabled)
       ? "active"
       : (hasPrompt ? "done" : "pending");
     setPanel("collect-panel-task", enabled && hasPrompt ? "done" : "active");
     setPanel("collect-panel-record", recordState);
-    const queueEnabled = enabled && (S.collectQueueEnabled || episodes.length > 0 || queue.length > 0);
-    setPanel("collect-panel-queue", queue.length ? "active" : (queueEnabled ? "done" : "pending"));
-    setPanel("collect-panel-replay", selectedEpisodeSaved ? "active" : "pending");
+    setPanel("collect-panel-queue", slotPlan.viewerActive ? "active" : (slotPlan.loaded ? "done" : "pending"));
+    setPanel("collect-panel-replay", selectedEpisodeSaved || episodes.length ? "active" : "pending");
 
     const renderKey = [
       collectionSet,
-      prompt,
-      history.summary.signature,
-      queueSummary.signature,
-      selectedEpisodeSaved ? S.collectReplayEpisode : "",
-      S.collectQueueExpanded ? "expanded" : "collapsed",
+      collectionRecordingSlotId(),
+      activeSlot ? activeSlot.slot_id : "",
+      slotPlan.page,
+      slotPlan.sceneFilter,
+      slotPlan.taskFilter,
+      slotPlan.showAll,
+      S.collectTaskSelectionPending,
+      slotPlan.loading,
+      slotPlan.error,
+      JSON.stringify(slotPlan.slots || []),
     ].join("\n");
     if (renderKey !== collectItemsRenderKey) {
       collectItemsRenderKey = renderKey;
-      const items = episodes.concat(queue);
-      renderCollectTiles(items);
-      renderCollectList(items);
+      renderCollectTiles(slotPlan.slots || []);
     }
+    $("collect-queue-tiles").querySelectorAll("[data-slot-id]").forEach((tile) => {
+      tile.classList.toggle("selected", tile.dataset.slotId === slotPlan.selectedSlotId);
+    });
     renderCollectControls();
-
-    const replayStatus = $("collect-replay-status");
-    if (S.reviewKind === "collect" && LIVE.replayOwner === "collect") {
-      replayStatus.textContent = LIVE.replayError
-        ? `episode ${S.collectReplayEpisode} · error · ${LIVE.replayError}`
-        : (LIVE.replayLoading
-            ? `episode ${S.collectReplayEpisode} · loading`
-            : `episode ${S.collectReplayEpisode} · review`);
-      replayStatus.style.display = S.ACTIVE_TAB === "collect" ? "" : "none";
-    } else if (selectedEpisodeSaved) {
-      replayStatus.textContent = `episode ${S.collectReplayEpisode} selected`;
-      replayStatus.style.display = S.ACTIVE_TAB === "collect" ? "" : "none";
-    } else {
-      replayStatus.textContent = "";
-      replayStatus.style.display = "none";
+    if (collectionSet && !collectionSlotsController) {
+      queueMicrotask(() => pollCollectionSlots());
     }
+
+    renderCollectionReplayStatus(selectedEpisodeSaved);
   }
 
 async function exportCollectionQuality() {
-    if (qualityTransfer.exporting || qualityTransfer.uploading) return;
+    if (qualityTransfer.exporting || qualityTransfer.uploading || datasetSyncBusy) return;
+    processProgressOwner = "convert";
     const status = $("collect-quality-status");
     const datasetFormat = $("collect-export-format").value;
     const formatLabel = qualityTransferFormatLabel(datasetFormat);
@@ -1095,13 +2119,15 @@ async function exportCollectionQuality() {
     qualityTransfer.exportState = "queued";
     qualityTransfer.episodesCompleted = 0;
     qualityTransfer.episodesTotal = 0;
-    qualityTransfer.acceptedDir = "";
+    qualityTransfer.outputDir = "";
+    qualityTransfer.uploadPlanId = "";
     qualityTransfer.datasetFormat = datasetFormat;
     if (status) status.textContent = `exporting ${formatLabel}…`;
     renderCollect();
     try {
       const result = await apiPost("/api/collect_quality_export", {
         task: collectTaskValue(),
+        dataset: S.collectionSlots.dataset || collectSetValue(),
         dataset_format: datasetFormat,
       }, { concurrent: true });
       if (!result.ok) {
@@ -1120,12 +2146,12 @@ async function exportCollectionQuality() {
         qualityTransfer.episodesTotal = Number(job.episodes_total || 0);
         renderCollect();
         if (job.state === "completed") {
-          qualityTransfer.acceptedDir = job.accepted_dir || "";
+          qualityTransfer.outputDir = job.output_dir || "";
           qualityTransfer.datasetFormat = job.dataset_format || datasetFormat;
           if (status) {
             const completedFormat = qualityTransferFormatLabel(qualityTransfer.datasetFormat);
             status.textContent = `${completedFormat} export complete · ` +
-              `${job.accepted_episodes || 0} accepted · ${job.rejected_episodes || 0} rejected`;
+              `${job.episodes || 0} episodes`;
           }
           return;
         }
@@ -1146,11 +2172,12 @@ async function exportCollectionQuality() {
   }
 
 async function uploadCollectionQuality() {
-    if (qualityTransfer.exporting || qualityTransfer.uploading) return;
+    if (qualityTransfer.exporting || qualityTransfer.uploading || datasetSyncBusy) return;
+    processProgressOwner = "convert";
     const status = $("collect-quality-status");
     const selectedFormat = $("collect-export-format").value;
     const datasetFormat = qualityTransfer.datasetFormat;
-    if (!qualityTransfer.acceptedDir || datasetFormat !== selectedFormat) {
+    if (!qualityTransfer.outputDir || datasetFormat !== selectedFormat) {
       if (status) {
         status.textContent = `${qualityTransferFormatLabel(selectedFormat)} export required before upload`;
       }
@@ -1158,20 +2185,41 @@ async function uploadCollectionQuality() {
       return;
     }
     const formatLabel = qualityTransferFormatLabel(datasetFormat);
+    const confirmed = qualityTransfer.uploadState === "ready" &&
+      !!qualityTransfer.uploadPlanId;
+    const planId = confirmed ? qualityTransfer.uploadPlanId : "";
     qualityTransfer.phase = "upload";
     qualityTransfer.uploading = true;
     qualityTransfer.uploadJobId = "";
     qualityTransfer.uploadState = "queued";
     qualityTransfer.filesCompleted = 0;
-    qualityTransfer.filesTotal = 0;
     qualityTransfer.bytesCompleted = 0;
-    qualityTransfer.bytesTotal = 0;
-    if (status) status.textContent = `uploading ${formatLabel} accepted export…`;
+    if (!confirmed) {
+      qualityTransfer.uploadPlanId = "";
+      qualityTransfer.filesTotal = 0;
+      qualityTransfer.bytesTotal = 0;
+      qualityTransfer.localFiles = 0;
+      qualityTransfer.localBytes = 0;
+      qualityTransfer.filesSkipped = 0;
+      qualityTransfer.bytesSkipped = 0;
+      qualityTransfer.newFiles = 0;
+      qualityTransfer.changedFiles = 0;
+      qualityTransfer.filesToDelete = 0;
+      qualityTransfer.filesDeleted = 0;
+    }
+    if (status) {
+      status.textContent = confirmed
+        ? `uploading ${formatLabel} accepted export…`
+        : `scanning ${formatLabel} accepted export…`;
+    }
     renderCollect();
     try {
       const result = await apiPost("/api/collect_quality_upload", {
+        dataset: S.collectionSlots.dataset || collectSetValue(),
         task: collectTaskValue(),
         dataset_format: datasetFormat,
+        confirmed,
+        plan_id: planId,
       }, { concurrent: true });
       if (!result.ok) {
         qualityTransfer.uploadState = "failed";
@@ -1189,16 +2237,44 @@ async function uploadCollectionQuality() {
         qualityTransfer.filesTotal = Number(job.files_total || 0);
         qualityTransfer.bytesCompleted = Number(job.bytes_completed || 0);
         qualityTransfer.bytesTotal = Number(job.bytes_total || 0);
+        qualityTransfer.localFiles = Number(job.local_files || 0);
+        qualityTransfer.localBytes = Number(job.local_bytes || 0);
+        qualityTransfer.filesSkipped = Number(job.files_skipped || 0);
+        qualityTransfer.bytesSkipped = Number(job.bytes_skipped || 0);
+        qualityTransfer.newFiles = Number(job.new_files || 0);
+        qualityTransfer.changedFiles = Number(job.changed_files || 0);
+        qualityTransfer.filesToDelete = Number(job.files_to_delete || 0);
+        qualityTransfer.filesDeleted = Number(job.files_deleted || 0);
         renderCollect();
+        if (job.state === "ready") {
+          const operationCount = qualityTransfer.filesTotal + qualityTransfer.filesToDelete;
+          qualityTransfer.uploadPlanId = operationCount > 0
+            ? job.job_id || result.job_id || ""
+            : "";
+          if (status) {
+            status.textContent = operationCount > 0
+              ? `${formatLabel} scan complete · ${qualityTransfer.newFiles} new · ` +
+                `${qualityTransfer.changedFiles} changed · ` +
+                `${qualityTransfer.filesToDelete} remove · ` +
+                `${qualityTransfer.filesSkipped} same`
+              : `${formatLabel} scan complete · all ${qualityTransfer.filesSkipped} files same`;
+          }
+          return;
+        }
         if (job.state === "completed") {
           if (status) {
             const remoteDir = job.remote_dir || "remote target";
-            status.textContent = `${formatLabel} accepted upload complete · ` +
-              `${job.files_total || 0} files · ${remoteDir}`;
+            status.textContent = job.skipped
+              ? `${formatLabel} accepted upload skipped · all files same · ${remoteDir}`
+              : `${formatLabel} accepted upload complete · ` +
+                `${job.files_completed || 0} uploaded · ` +
+                `${job.files_deleted || 0} removed · ` +
+                `${job.files_skipped || 0} same · ${remoteDir}`;
           }
           return;
         }
         if (job.state === "failed") {
+          qualityTransfer.uploadPlanId = "";
           if (status) status.textContent = `✗ ${formatLabel} upload · ${job.error || "job failed"}`;
           return;
         }
@@ -1230,7 +2306,8 @@ let reviewRequestId = 0;
 
 function reviewDatasetFor(kind) {
     if (kind === "rollout") return (S.STATUS.rollout || {}).dataset_dir || "";
-    return (S.STATUS.collect || {}).dataset_dir ||
+    return (S.collectionSlots && S.collectionSlots.datasetDir) ||
+      (S.STATUS.collect || {}).dataset_dir ||
       (S.CFG && S.CFG.collection ? (S.CFG.collection.dataset_dir || "") : "");
   }
 
@@ -1254,7 +2331,7 @@ function episodeQcEndpoint(kind) {
   }
 
 function collectReviewMatchesSelection() {
-    return reviewTask === collectTaskValue() && reviewCollectionSet === collectSetValue();
+    return reviewCollectionSet === (S.collectionSlots.dataset || collectSetValue());
   }
 
 function reviewActiveInCurrentTab() {
@@ -1309,8 +2386,8 @@ async function reviewCollectEpisode(item) {
     });
     exitReplayMode();
     S.collectReplayEpisode = episode;
-    reviewTask = collectTaskValue();
-    reviewCollectionSet = collectSetValue();
+    reviewTask = String(item.task || item.prompt || collectTaskValue());
+    reviewCollectionSet = S.collectionSlots.dataset || collectSetValue();
     S.reviewKind = "collect";
     reviewDatasetDir = reviewDatasetFor("collect");
     reviewEpisodeId = episode;
@@ -1320,13 +2397,17 @@ async function reviewCollectEpisode(item) {
     LIVE.replayError = "";
     updateScrub();
     const title = reviewTitleFor("collect");
-    if (title) title.textContent = `episode ${episode} · loading`;
+    const qualityLabel = collectResultLabel(item);
+    if (title) title.textContent = `episode ${episode} · ${qualityLabel} · loading`;
     const err = reviewErrorFor("collect");
     if (err) err.textContent = "";
-    const r = await apiPost("/api/review_episode", {
-      dataset_dir: reviewDatasetDir,
-      episode: String(reviewEpisodeId),
-    });
+    const r = await apiPost("/api/review_episode",
+      {
+        dataset_dir: reviewDatasetDir,
+        episode: String(reviewEpisodeId),
+      },
+      { timeoutMs: 0 },
+    );
     if (requestId !== reviewRequestId) return;
     if (!r.ok) {
       clientTrace("review.collect.error", { episode, request_id: requestId, error: r.error || "review failed" });
@@ -1343,7 +2424,7 @@ async function reviewCollectEpisode(item) {
       return;
     }
     clientTrace("review.collect.ready", { episode, request_id: requestId, frames: LIVE.n });
-    if (title) title.textContent = `episode ${episode} · review`;
+    if (title) title.textContent = `episode ${episode} · ${qualityLabel} · review`;
   }
 
 async function reviewRolloutEpisode(item) {
@@ -1366,10 +2447,13 @@ async function reviewRolloutEpisode(item) {
     const err = reviewErrorFor("rollout");
     if (title) title.textContent = `episode ${episode} · loading`;
     if (err) err.textContent = "";
-    const r = await apiPost("/api/review_episode", {
-      dataset_dir: reviewDatasetDir,
-      episode: String(reviewEpisodeId),
-    });
+    const r = await apiPost("/api/review_episode",
+      {
+        dataset_dir: reviewDatasetDir,
+        episode: String(reviewEpisodeId),
+      },
+      { timeoutMs: 0 },
+    );
     if (requestId !== reviewRequestId) return;
     if (!r.ok) {
       showReviewError("rollout", r.error || "review failed");
@@ -1385,53 +2469,85 @@ async function reviewRolloutEpisode(item) {
   }
 
 async function submitEpisodeQc(kind, verdict) {
-    const episode = kind === "rollout" ? S.rolloutSaveEpisode : S.collectReplayEpisode;
-    if (episode == null) return;
-    S.reviewKind = kind;
-    reviewDatasetDir = reviewDatasetFor(kind);
-    reviewEpisodeId = episode;
-    clientTrace("review.qc.begin", { kind, episode, verdict, dataset_dir: reviewDatasetDir });
-    const r = await apiPost(episodeQcEndpoint(kind), {
-      dataset_dir: reviewDatasetDir,
-      task: reviewTask,
-      dataset: kind === "collect" ? reviewCollectionSet : "",
-      episode: String(reviewEpisodeId),
-      verdict,
-      note: reviewNoteFor(kind).value || "",
-    });
-    const title = reviewTitleFor(kind);
+    if (episodeQcPending.has(kind)) return false;
+    if (kind === "collect" && (collectionSlotClickTimer !== null || S.collectTaskSelectionPending)) return false;
+    const target = kind === "collect" && selectedCollectEpisodeItem() ? collectionQcTarget : null;
+    const episode = kind === "rollout" ? S.rolloutSaveEpisode : target && target.item.episode_index;
+    if (episode == null) return false;
+    const datasetDir = target ? target.dataset_dir : reviewDatasetFor(kind);
+    const note = reviewNoteFor(kind).value || "";
+    const title = kind === "collect" ? $("collect-qc-target") : reviewTitleFor(kind);
     const status = kind === "rollout" ? $("rollout-save-err") : $("collect-qc-status");
-    clientTrace("review.qc.end", {
-      kind, episode, verdict, ok: !!r.ok, error: r.error || "",
-    });
-    if (!r.ok) {
+    episodeQcPending.add(kind);
+    if (status) status.textContent = "saving…";
+    if (kind === "collect") renderCollect();
+    try {
+      clientTrace("review.qc.begin", { kind, episode, verdict, dataset_dir: datasetDir });
+      const r = await apiPost(episodeQcEndpoint(kind), {
+        dataset_dir: datasetDir,
+        task: target ? target.task : reviewTask,
+        dataset: target ? target.dataset : "",
+        episode: String(episode),
+        verdict,
+        note,
+      });
+      clientTrace("review.qc.end", {
+        kind, episode, verdict, ok: !!r.ok, error: r.error || "",
+      });
+      if (!r.ok) throw new Error(r.error || "QC failed");
+      if (target) {
+        const patch = (item) => {
+          if (!item || item.episode_index !== episode) return;
+          if (item.qc_auto === true) {
+            item.qc_auto_verdict = item.qc_verdict || "";
+            item.qc_auto_note = item.qc_note || "";
+            item.qc_auto_reason = item.qc_reason || "";
+          }
+          Object.assign(item, {qc_verdict: verdict, qc_auto: false, qc_note: note, qc_reason: ""});
+        };
+        patch(target.item);
+        if (target.dataset === S.collectionSlots.dataset) {
+          (S.collectionSlots.slots || []).forEach((slot) => {
+            if (savedEpisodeId(slot.episode) !== episode) return;
+            patch(slot.episode);
+            slot.qc_state = collectQcState(slot.episode);
+          });
+          const cache = S.episodeHistory && S.episodeHistory.collect;
+          if (cache && cache.collectionSet === target.dataset) (cache.episodes || []).forEach(patch);
+          // Refresh counts without blanking the selected tile or waiting on playback/status.
+          pollCollectionSlots(true, { preserveView: true });
+        }
+      }
+      if (title) title.textContent = `episode ${episode} · ${verdict}`;
+      if (status) status.textContent = `episode ${episode} marked ${verdict}`;
+      invalidateEpisodeHistory(kind);
+      if (kind !== "collect") await pollEpisodeHistory(true);
+      return true;
+    } catch (error) {
       if (title) title.textContent = `episode ${episode} · QC failed`;
-      if (status) status.textContent = `✗ ${r.error || "QC failed"}`;
-      return;
+      if (status) status.textContent = `✗ ${error.message || error}`;
+      return false;
+    } finally {
+      episodeQcPending.delete(kind);
+      if (kind === "collect") renderCollect();
     }
-    if (title) title.textContent = `episode ${episode} · ${verdict}`;
-    if (status) status.textContent = `episode ${episode} marked ${verdict}`;
-    invalidateEpisodeHistory(kind);
-    pollEpisodeHistory(true);
-    applyStatus(await apiGet("/api/status"));
   }
 
 async function submitEpisodeNote(kind) {
-    const episode = kind === "rollout" ? S.rolloutSaveEpisode : S.collectReplayEpisode;
+    if (kind === "collect" && (collectionSlotClickTimer !== null || S.collectTaskSelectionPending)) return;
+    const target = kind === "collect" && selectedCollectEpisodeItem() ? collectionQcTarget : null;
+    const episode = kind === "rollout" ? S.rolloutSaveEpisode : target && target.item.episode_index;
     const status = kind === "rollout" ? $("rollout-save-err") : $("collect-qc-status");
     if (episode == null) {
       if (status) status.textContent = "✗ select an episode first";
       return;
     }
-    S.reviewKind = kind;
-    reviewDatasetDir = reviewDatasetFor(kind);
-    reviewEpisodeId = episode;
     if (status) status.textContent = "saving…";
     const r = await apiPost(episodeQcEndpoint(kind), {
-      dataset_dir: reviewDatasetDir,
-      task: reviewTask,
-      dataset: kind === "collect" ? reviewCollectionSet : "",
-      episode: String(reviewEpisodeId),
+      dataset_dir: target ? target.dataset_dir : reviewDatasetFor(kind),
+      task: target ? target.task : reviewTask,
+      dataset: target ? target.dataset : "",
+      episode: String(episode),
       verdict: "",
       note: reviewNoteFor(kind).value || "",
     });
@@ -1454,9 +2570,11 @@ async function saveAnnotation() {
     const dir = ($("replay-dataset-input").value || "").trim();
     const ep = S.qcEpisode;
     $("replay-anno-status").textContent = "saving…";
-    const r = await apiPost("/api/annotate", {
-      dataset_dir: dir, episode: ep, annotation: $("replay-anno-text").value || "",
-    });
+    const r = await apiPost(
+      "/api/annotate",
+      { dataset_dir: dir, episode: ep, annotation: $("replay-anno-text").value || "" },
+      { timeoutMs: 0 },
+    );
     $("replay-anno-status").textContent = r.ok ? `episode ${ep} annotation saved` : `✗ ${r.error || "save failed"}`;
   }
 
@@ -1485,5 +2603,10 @@ export {
   clearReviewPlayback, loadAnnotation, reviewActiveInCurrentTab, reviewEpisode,
   exportCollectionQuality, saveAnnotation, submitEpisodeNote, submitEpisodeQc, submitQc,
   installCollectKeyboardControls, renderCollectControls, uploadCollectionQuality,
+  handleCollectionReviewInput, resetCollectionReviewInput,
   changeCollectionExportFormat, invalidateEpisodeHistory, pollEpisodeHistory,
+  downloadCollectionTaskSetFromHf, downloadCollectionAssetsFromHf,
+  uploadCollectionDatasetToHf,
+  pollCollectionSlots, selectCollectionDataset,
+  changeCollectionSlotFilter, changeCollectionSlotPage, toggleCollectionSlotAll,
 };

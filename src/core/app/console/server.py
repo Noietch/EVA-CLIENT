@@ -29,16 +29,26 @@ from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import cv2
 import imageio_ffmpeg
 import numpy as np
+import yaml
 from tqdm import tqdm
 
 from core.app.command_catalog import control_command_catalog
-from core.app.console.dashboard import build_dashboard
+from core.app.console.collection_slots import (
+    build_collection_slots,
+    collection_slot_status,
+    defer_active_slot,
+    load_slot_state,
+    select_collection_slot,
+)
+from core.app.console.dashboard import build_dashboard, discover_dashboard_upload_candidates
+from core.app.console.episode_preview import read_result_rows
 from core.app.console.transform_worker import build_transform_blob
+from core.app.control_channel import _haptic_request
 from core.app.handlers import (
     _resolve_runtime_path,
     build_policy_observation,
@@ -48,34 +58,72 @@ from core.app.handlers import (
     rollout_hil_status,
     rollout_intervention_source,
     rollout_save_status,
+    send_teleop_haptic,
     teleop_status,
 )
 from core.app.handlers.io import load_replay_dataset
+from core.app.local_history import history_enabled, history_status, history_store
 from core.app.rl import build_rl_critic_observation, rl_live_series
 from core.app.state import (
     RuntimeState,
     SessionMode,
     SessionState,
+    SessionStatus,
     format_task_label,
     resolve_inference_strategy_label,
+    set_phase,
 )
-from core.config import ConfigDict
+from core.config import ConfigDict, deployment_models
+from core.devices.service import DeviceSettings
+from core.utils.collection_paths import (
+    dataset_location,
+    discover_task_sets,
+    resolve_task_set,
+    slot_state_path,
+)
 from core.utils.dataset_upload import (
-    DatasetUploadProgress,
+    DatasetUploadPlan,
     DatasetUploadSpec,
+    record_dataset_upload_receipt,
     resolve_dataset_uploads,
+    scan_dataset_directory,
     upload_dataset_directory,
 )
 from core.utils.lerobot import LeRobotDatasetIO
+from core.utils.scene_plan import (
+    evaluation_task_sets,
+    plan_reference_images,
+    read_plan_csv,
+    read_plan_yaml,
+    scene_plan_from_dir,
+)
+from core.utils.upload_plan import UploadProgress
 from tools.conversion import (
     DATASET_EXPORT_FORMATS,
     DatasetExportProgress,
-    export_dataset_by_quality,
+    export_dataset,
+)
+from tools.datasets.dataset_transfer import DatasetTransfer
+from tools.datasets.hf_task_sets import (
+    fetch_assets,
+    fetch_qc,
+    fetch_task_sets,
+    publish_dataset,
+    publish_qc,
 )
 from transport.base import ObservationSource
 from transport.dataset import DatasetTransport
 
 logger = logging.getLogger(__name__)
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[4]
+
+
+class ReusableThreadingHTTPServer(ThreadingHTTPServer):
+    """Allow the console port to be rebound during EVA's in-process restart."""
+
+    allow_reuse_address = True
+
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -90,7 +138,10 @@ _EPISODE_HISTORY_MAX_LIMIT = 512
 # Transports that talk to a real arm: they track receipt freshness, so "no message
 # yet" means offline (not merely "configured"). debug/dataset are not in this set.
 _LIVE_TRANSPORT_TYPES = {"zmq", "ros1", "ros2"}
-_VIDEO_CACHE_CONTROL = "public, max-age=3600"
+# A retake replaces its slot's mp4 at the same URL, so the browser must revalidate
+# instead of trusting a fresh-cached copy of the take it replaced. The ETag below
+# turns the revalidation into a 304 while the file is unchanged.
+_VIDEO_CACHE_CONTROL = "no-cache"
 _VIDEO_FASTSTART_CACHE_ENV = "EVA_VIDEO_CACHE_DIR"
 _VIDEO_FASTSTART_LOCK = threading.Lock()
 _VIDEO_POSTER_LOCK = threading.Lock()
@@ -101,6 +152,12 @@ _TRANSFORM_EXECUTOR_LOCK = threading.Lock()
 _TRACE_EVENT_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,96}$")
 _REVIEW_DATA_CACHE_MAX = 8
 _REVIEW_DATA_CACHE_LOCK = threading.RLock()
+_SCENE_PLAN_CACHE_MAX = 8
+_SCENE_PLAN_CACHE_LOCK = threading.RLock()
+_SCENE_PLAN_CACHE: OrderedDict[tuple[Any, ...], dict[str, Any]] = OrderedDict()
+_COLLECTION_SLOT_PLAN_CACHE_MAX = 8
+_COLLECTION_SLOT_PLAN_CACHE_LOCK = threading.RLock()
+_COLLECTION_SLOT_PLAN_CACHE: OrderedDict[tuple[Any, ...], tuple[Any, ...]] = OrderedDict()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -119,6 +176,7 @@ _REVIEW_DATA_CACHE: OrderedDict[tuple[str, int], _CachedReviewEpisode] = Ordered
 class _QualityUploadJob:
     job_id: str
     local_dir: str
+    source_dir: str
     remote_dir: str
     backends: tuple[str, ...] = ()
     state: str = "queued"
@@ -126,9 +184,19 @@ class _QualityUploadJob:
     files_total: int = 0
     bytes_completed: int = 0
     bytes_total: int = 0
+    local_files: int = 0
+    local_bytes: int = 0
+    files_skipped: int = 0
+    bytes_skipped: int = 0
+    new_files: int = 0
+    changed_files: int = 0
+    files_to_delete: int = 0
+    files_deleted: int = 0
     current_file: str = ""
     destination: str = ""
     error: str = ""
+    skipped: bool = False
+    _plan: DatasetUploadPlan | None = dataclasses.field(default=None, repr=False)
 
     def payload(self) -> dict[str, Any]:
         if self.bytes_total > 0:
@@ -137,28 +205,26 @@ class _QualityUploadJob:
             progress = self.files_completed / self.files_total
         else:
             progress = 1.0 if self.state == "completed" else 0.0
-        return {
-            **dataclasses.asdict(self),
-            "progress": max(0.0, min(1.0, progress)),
+        payload = {
+            field.name: getattr(self, field.name)
+            for field in dataclasses.fields(self)
+            if not field.name.startswith("_")
         }
+        payload["progress"] = max(0.0, min(1.0, progress))
+        return payload
 
 
 @dataclasses.dataclass
 class _QualityExportJob:
     job_id: str
     source_dir: str
-    accepted_dir: str
-    rejected_dir: str
+    output_dir: str
     dataset_format: str
     state: str = "queued"
     episodes_completed: int = 0
     episodes_total: int = 0
-    subset: str = ""
     source_episode_index: int | None = None
-    accepted_episodes: int = 0
-    rejected_episodes: int = 0
-    accepted_frames: int = 0
-    rejected_frames: int = 0
+    episodes: int = 0
     error: str = ""
 
     def payload(self) -> dict[str, Any]:
@@ -496,6 +562,12 @@ def _open_review_episode(
     )
 
 
+def _review_episode_signature(dataset_dir: Path, episode_index: int) -> tuple[int, int]:
+    """Mtime and size of one episode's parquet, the cache key for its projected data."""
+    stat = LeRobotDatasetIO(dataset_dir).episode_parquet(episode_index).stat()
+    return int(stat.st_mtime_ns), int(stat.st_size)
+
+
 def _cached_review_episode(
     ctx: ConsoleContext,
     dataset_dir: str | Path,
@@ -511,7 +583,8 @@ def _cached_review_episode(
     Returns:
         Cached state/action series, camera mapping, and scene qpos rows.
     """
-    key = (str(Path(dataset_dir).resolve()), int(episode_index))
+    root = Path(dataset_dir).resolve()
+    key = (str(root), int(episode_index), *_review_episode_signature(root, episode_index))
     with _REVIEW_DATA_CACHE_LOCK:
         cached = _REVIEW_DATA_CACHE.get(key)
         if cached is not None:
@@ -558,6 +631,15 @@ def _resolve_initial_tab(config: ConfigDict) -> str:
     return "eval" if config.eval else "debug"
 
 
+def _collection_upload_payload(config: ConfigDict) -> dict[str, Any]:
+    uploads = resolve_dataset_uploads(config.collection.storage)
+    return {
+        "configured": bool(uploads),
+        "backends": [spec.backend for spec in uploads],
+        "targets": [spec.display_root for spec in uploads],
+    }
+
+
 @dataclasses.dataclass
 class ConsoleContext:
     """Shared state for the console request handler."""
@@ -565,7 +647,9 @@ class ConsoleContext:
     config: ConfigDict
     runtime: RuntimeState
     session: SessionState
+    device_settings: DeviceSettings = dataclasses.field(default_factory=DeviceSettings)
     obs_reader: ObservationSource | None = None  # independent source for visualization
+    camera_preview: Any = None
     scene: object | None = None  # UrdfScene, lazily built (None if URDF unavailable)
     scene_cache_key: object | None = None  # last qpos signature fed to scene.transforms
     scene_cache: dict | None = None  # cached transforms payload for that signature
@@ -573,9 +657,20 @@ class ConsoleContext:
     scene_batch_loading: threading.Event = dataclasses.field(default_factory=threading.Event)
     scene_pbar: tqdm | None = None  # collection-replay playback progress bar
     active_tab: str = "debug"
+    language: str = "en"
     output_dir: str = ""  # results root; debug results land in <output_dir>/console/
+    collection_save_revision: int = 0
+    completed_collection_dataset: str = ""
+    completed_collection_slot_id: str = ""
+    pending_collection_saves: dict[int, dict[str, Any]] = dataclasses.field(default_factory=dict)
     preview: Any = None  # EpisodePreview for RESULT-tab playback (lazily set)
+    collection_save_lock: threading.RLock = dataclasses.field(default_factory=threading.RLock)
+    collection_selection_lock: threading.RLock = dataclasses.field(default_factory=threading.RLock)
+    eval_start_lock: threading.Lock = dataclasses.field(default_factory=threading.Lock)
     quality_upload_lock: threading.RLock = dataclasses.field(default_factory=threading.RLock)
+    dataset_manager: DatasetTransfer = dataclasses.field(
+        default_factory=lambda: DatasetTransfer(_PROJECT_ROOT)
+    )
     quality_upload_jobs: OrderedDict[str, _QualityUploadJob] = dataclasses.field(
         default_factory=OrderedDict
     )
@@ -591,18 +686,120 @@ class ConsoleContext:
         """Folder name of the active model's eval dataset (matches the recorder's rooting)."""
         return eval_model_name(self.config, self.runtime)
 
+    def sync_collection_slot(self, completed_slot_id: str | None = None) -> dict[str, Any] | None:
+        """Resolve the backend collection cursor after a confirmed save."""
+        return _sync_collection_slot_session(self, completed_slot_id)
 
-def _run_quality_upload(
+    def register_collection_save_job(self, job: Any, dataset: str) -> None:
+        """Track one queued collection save without treating it as committed."""
+        key = id(job)
+        with self.collection_save_lock:
+            record = {
+                "dataset": dataset,
+                "slot_id": str((job.episode_meta or {}).get("slot_id") or ""),
+                "episode_index": int(job.episode_index),
+                "status": job.status,
+                "error": str(job.error or ""),
+            }
+            if not record["slot_id"]:
+                return
+            self.pending_collection_saves[key] = record
+            if job.status in {"saved", "failed"}:
+                self._finish_collection_save_locked(key, job.status)
+
+    def collection_save_job_finished(self, job: Any) -> None:
+        """Publish one async save result; failed jobs remain visible to slot polling."""
+        key = id(job)
+        status = str(job.status or "")
+        with self.collection_save_lock:
+            if key not in self.pending_collection_saves:
+                return
+            self.pending_collection_saves[key]["error"] = str(job.error or "")
+            self.pending_collection_saves[key]["episode_index"] = int(job.episode_index)
+            self._finish_collection_save_locked(key, status)
+
+    def _finish_collection_save_locked(self, key: int, status: str) -> None:
+        record = self.pending_collection_saves.get(key)
+        if record is None:
+            return
+        record["status"] = status
+        if status != "saved":
+            return
+        self.completed_collection_dataset = str(record["dataset"])
+        self.completed_collection_slot_id = str(record["slot_id"])
+        self.collection_save_revision += 1
+        del self.pending_collection_saves[key]
+
+    def collection_save_snapshot(self, dataset: str) -> list[dict[str, Any]]:
+        """Return queued/failed saves for one dataset for the slots API."""
+        with self.collection_save_lock:
+            return [
+                dict(record)
+                for record in self.pending_collection_saves.values()
+                if record.get("dataset") == dataset
+            ]
+
+
+def _run_quality_upload_scan(
     ctx: ConsoleContext,
     job_id: str,
     local_dir: Path,
+    source_dir: Path,
     upload_specs: tuple[DatasetUploadSpec, ...],
 ) -> None:
     with ctx.quality_upload_lock:
         job = ctx.quality_upload_jobs[job_id]
-        job.state = "running"
+        job.state = "scanning"
 
-    def update_progress(progress: DatasetUploadProgress) -> None:
+    try:
+        plan = scan_dataset_directory(local_dir, upload_specs)
+        if plan.files_to_upload == 0 and plan.files_to_delete == 0:
+            record_dataset_upload_receipt(
+                local_dir,
+                source_dir=source_dir,
+                destination=", ".join(
+                    backend_plan.destination for _, backend_plan in plan.backends
+                ),
+                remote_dir=", ".join(spec.target for spec, _ in plan.backends),
+            )
+    except Exception:
+        logger.exception("Failed to scan accepted collection dataset upload")
+        with ctx.quality_upload_lock:
+            job = ctx.quality_upload_jobs.get(job_id)
+            if job is not None:
+                job.state = "failed"
+                job.error = "dataset upload scan failed"
+        return
+
+    with ctx.quality_upload_lock:
+        job = ctx.quality_upload_jobs.get(job_id)
+        if job is not None:
+            job.state = "ready"
+            job.files_total = plan.files_to_upload
+            job.bytes_total = plan.bytes_to_upload
+            job.local_files = plan.files_total
+            job.local_bytes = plan.bytes_total
+            job.files_skipped = plan.files_skipped
+            job.bytes_skipped = plan.bytes_skipped
+            job.new_files = plan.new_files
+            job.changed_files = plan.changed_files
+            job.files_to_delete = plan.files_to_delete
+            job._plan = plan
+
+
+def _run_quality_upload(ctx: ConsoleContext, job_id: str) -> None:
+    with ctx.quality_upload_lock:
+        job = ctx.quality_upload_jobs[job_id]
+        plan = job._plan
+        if plan is None:
+            job.state = "failed"
+            job.error = "dataset upload scan is required"
+            return
+        job.state = "running"
+        local_dir = Path(job.local_dir)
+        upload_specs = tuple(spec for spec, _ in plan.backends)
+
+    def update_progress(progress: UploadProgress) -> None:
         with ctx.quality_upload_lock:
             active_job = ctx.quality_upload_jobs.get(job_id)
             if active_job is None:
@@ -617,15 +814,26 @@ def _run_quality_upload(
         result = upload_dataset_directory(
             local_dir,
             upload_specs,
+            plan=plan,
             progress_callback=update_progress,
         )
-    except Exception:
+        record_dataset_upload_receipt(
+            local_dir,
+            source_dir=Path(job.source_dir),
+            destination=result.destination,
+            remote_dir=result.remote_dir,
+        )
+    except Exception as error:
         logger.exception("Failed to upload accepted collection dataset")
         with ctx.quality_upload_lock:
             job = ctx.quality_upload_jobs.get(job_id)
             if job is not None:
                 job.state = "failed"
-                job.error = _QUALITY_UPLOAD_FAILED_ERROR
+                job.error = (
+                    "upload content changed after scan; scan again"
+                    if "changed after scan" in str(error)
+                    else _QUALITY_UPLOAD_FAILED_ERROR
+                )
         return
 
     with ctx.quality_upload_lock:
@@ -633,30 +841,24 @@ def _run_quality_upload(
         if job is not None:
             job.state = "completed"
             job.files_completed = result.files
-            job.files_total = result.files
             job.bytes_completed = result.bytes
-            job.bytes_total = result.bytes
             job.current_file = ""
             job.destination = result.destination
             job.remote_dir = result.remote_dir
+            job.skipped = result.skipped
+            job.files_deleted = result.files_deleted
 
 
-def _quality_export_paths(dataset_dir: Path, dataset_format: str) -> tuple[Path, Path]:
-    export_root = (
-        dataset_dir.parent / "export"
-        if dataset_dir.name == "raw"
-        else dataset_dir.with_name(f"{dataset_dir.name}_export")
-    )
-    format_root = export_root / dataset_format
-    return format_root / "accepted", format_root / "rejected"
+def _quality_export_paths(dataset_dir: Path, dataset_format: str) -> Path:
+    """The converted dataset: a sibling of the source named ``<name>_<format>``."""
+    return dataset_dir.with_name(f"{dataset_dir.name}_{dataset_format}")
 
 
 def _run_quality_export(
     ctx: ConsoleContext,
     job_id: str,
     source_dir: Path,
-    accepted_dir: Path,
-    rejected_dir: Path,
+    output_dir: Path,
     dataset_format: str,
 ) -> None:
     with ctx.quality_upload_lock:
@@ -670,20 +872,18 @@ def _run_quality_export(
                 return
             active_job.episodes_completed = progress.episodes_completed
             active_job.episodes_total = progress.episodes_total
-            active_job.subset = progress.subset
             active_job.source_episode_index = progress.source_episode_index
 
     try:
-        summary = export_dataset_by_quality(
+        summary = export_dataset(
             source_dir,
-            accepted_dir,
-            rejected_dir,
+            output_dir,
             dataset_format=dataset_format,
             replace_existing=True,
             progress_callback=update_progress,
         )
     except Exception as error:
-        logger.exception("Failed to export collection quality split")
+        logger.exception("Failed to export collection dataset")
         with ctx.quality_upload_lock:
             job = ctx.quality_export_jobs.get(job_id)
             if job is not None:
@@ -695,14 +895,10 @@ def _run_quality_export(
         job = ctx.quality_export_jobs.get(job_id)
         if job is not None:
             job.state = "completed"
-            job.episodes_completed = summary.source_episodes
-            job.episodes_total = summary.source_episodes
-            job.subset = ""
+            job.episodes_completed = summary.episodes
+            job.episodes_total = summary.episodes
             job.source_episode_index = None
-            job.accepted_episodes = summary.accepted_episodes
-            job.rejected_episodes = summary.rejected_episodes
-            job.accepted_frames = summary.accepted_frames
-            job.rejected_frames = summary.rejected_frames
+            job.episodes = summary.episodes
 
 
 def _serialize_prompt_config(prompt: Any) -> dict:
@@ -713,20 +909,94 @@ def _serialize_prompt_config(prompt: Any) -> dict:
         "prompt_en": prompt.prompt_en,
         "prompt_zh": prompt.get("prompt_zh"),
         "milestones": [{"id": mid, "label": label} for mid, label in milestones],
+        **{key: prompt[key] for key in ("task_id", "task_set") if key in prompt},
     }
 
 
-def _collection_set_for_prompt(config: ConfigDict, prompt: str) -> str | None:
-    for dataset_name, entries in config.collection.tasks.items():
-        if prompt in {str(entry[0]) for entry in entries}:
-            return str(dataset_name)
-    return None
+def _eval_attempt_cell(ctx: ConsoleContext, body: dict) -> dict[str, Any]:
+    """Bind the requested task and scene to one immutable evaluation attempt."""
+    prompt, trial = body.get("prompt"), body.get("trial")
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise ValueError("evaluation prompt must be non-empty")
+    if type(trial) is not int or trial < 1:
+        raise ValueError("evaluation trial must be a positive integer")
+    cell: dict[str, Any] = {"prompt": prompt, "trial": trial}
+    sim_metadata = body.get("sim_metadata")
+    if sim_metadata is not None:
+        if not isinstance(sim_metadata, dict):
+            raise ValueError("sim_metadata must be an object")
+        for key in ("scene", "task_item"):
+            if key in sim_metadata and not isinstance(sim_metadata[key], dict):
+                raise ValueError(f"sim_metadata.{key} must be an object")
+        cell["sim_metadata"] = copy.deepcopy(sim_metadata)
+    identity = {key: body.get(key) for key in ("task_set", "task_id", "scene_id")}
+    if not any(identity.values()):
+        return cell
+    if any(not isinstance(value, str) or not value.strip() for value in identity.values()):
+        raise ValueError("task_set, task_id and scene_id must be supplied together")
+    plan = _load_scene_plan(ctx.config, identity["task_set"], scope="eval")
+    task = next((row for row in plan["tasks"] if row["task_id"] == identity["task_id"]), None)
+    scene = next((row for row in plan["scenes"] if row["scene_id"] == identity["scene_id"]), None)
+    if task is None or scene is None or identity["scene_id"] not in task["scene_ids"]:
+        raise ValueError("evaluation task and scene do not belong to the selected task set")
+    prompts = {task["prompt_en"], task["runtime_prompt"]}
+    for authored in (ctx.config.eval or {}).get("tasks", []):
+        if authored.get("task_id") == task["task_id"] and authored.get("task_set") in {
+            None,
+            "",
+            identity["task_set"],
+        }:
+            prompts.add(authored.prompt_en)
+    if prompt not in prompts:
+        raise ValueError("evaluation prompt does not match the selected task")
+    if sim_metadata is not None:
+        actual_scene = (sim_metadata.get("scene") or {}).get("scene_id")
+        actual_task = (sim_metadata.get("task_item") or {}).get("task_item_id")
+        if actual_scene is not None and actual_scene != identity["scene_id"]:
+            raise ValueError("simulator scene does not match the selected evaluation scene")
+        if actual_task is not None and actual_task not in {
+            identity["task_id"],
+            f"{identity['task_id']}__{identity['scene_id']}",
+        }:
+            raise ValueError("simulator task does not match the selected evaluation task")
+    cell.update(identity)
+    cell["scene_map"] = {
+        "task_set": identity["task_set"],
+        "layout_id": plan["layout_id"],
+        "coordinate_frame": plan["coordinate_frame"],
+        "positions": plan["positions"],
+        "display_grid": plan["display_grid"],
+        "tasks": [task],
+        "scenes": [scene],
+    }
+    return cell
+
+
+def _enqueue_eval_start(ctx: ConsoleContext, body: dict) -> str:
+    with ctx.eval_start_lock:
+        runtime = ctx.runtime
+        if runtime.web_phase != "ready":
+            raise RuntimeError("evaluation is not ready to start")
+        clip_id = body.get("clip_id")
+        if not isinstance(clip_id, str) or not clip_id.strip():
+            raise ValueError("clip_id required")
+        if body.get("model_name") not in (None, "", ctx.active_model_name()):
+            raise RuntimeError("evaluation model has changed")
+        cell = _eval_attempt_cell(ctx, body)
+        runtime.current_clip_id = clip_id
+        runtime.current_cell = cell
+        # Reserve the run before returning to either control client. The main loop
+        # may not consume the command until another HTTP request has arrived.
+        set_phase(runtime, "starting")
+        assert runtime.command_queue is not None
+        runtime.command_queue.put("web:start")
+        return clip_id
 
 
 def _trim_finished_jobs(jobs: OrderedDict[str, Any], limit: int = _QUALITY_JOB_LIMIT) -> None:
     while len(jobs) >= limit:
         oldest_id, oldest = next(iter(jobs.items()))
-        if oldest.state in {"queued", "running"}:
+        if oldest.state in {"queued", "scanning", "running"}:
             break
         jobs.pop(oldest_id)
 
@@ -736,7 +1006,7 @@ def _quality_job_payload(jobs: OrderedDict[str, Any], job_id: str) -> dict[str, 
     return None if job is None else job.payload()
 
 
-def _serialize_eval(ctx: ConsoleContext) -> dict:
+def _serialize_eval(ctx: ConsoleContext, scene_plan_sets: list[str]) -> dict:
     # Eval block for the EVAL/RESULT tabs. Empty dict when the config carries no eval,
     # which the frontend reads as "disable those tabs". Each checkpoint exposes its
     # anonymized slot label (Model A/B/...) plus its real ckpt name for the MODEL picker.
@@ -753,6 +1023,7 @@ def _serialize_eval(ctx: ConsoleContext) -> dict:
         "trials_per_prompt": eval_cfg.trials_per_prompt,
         "cli_mode": eval_cfg.cli_mode,
         "init_pose_enabled": init_pose_enabled,
+        "scene_plan_sets": scene_plan_sets,
         "tasks": [
             {
                 **_serialize_prompt_config(t),
@@ -785,9 +1056,7 @@ def _serialize_rl(ctx: ConsoleContext) -> dict:
         "backend_ready": True,
         "cli_mode": str(rl_cfg.cli_mode),
         "inference_strategy": str(rl_cfg.inference_strategy),
-        "rollout_intervention_source": str(
-            (rl_cfg.get("intervention") or {}).get("source", "transport")
-        ),
+        "rollout_intervention_source": rollout_intervention_source(config),
         "tasks": [str(task) for task in rl_cfg.tasks],
         "policies": [
             {"slot": slot, "name": str(model.name)} for slot, model in enumerate(rl_cfg.policies)
@@ -803,16 +1072,32 @@ def _serialize_rl(ctx: ConsoleContext) -> dict:
     }
 
 
-def _serialize_gripper_controls(ctx: ConsoleContext) -> list[dict[str, str]]:
-    gripper_groups = [g for g in ctx.runtime.robot.actuator_groups if g.gripper_index is not None]
-    if len(gripper_groups) == 0:
+def _serialize_gripper_controls(ctx: ConsoleContext) -> list[dict[str, object]]:
+    config = ctx.runtime.active_config or ctx.config
+    controls: list[dict[str, object]] = []
+    offset = 0
+    for group in ctx.runtime.robot.actuator_groups:
+        if group.gripper_index is not None:
+            controls.append(
+                {
+                    "group": group.name,
+                    "qpos_index": offset + group.gripper_index,
+                    "initial_value": float(
+                        ctx.runtime.robot.initial_qpos[offset + group.gripper_index]
+                    ),
+                    "open_value": float(config.robot.gripper_open),
+                    "close_value": float(config.robot.gripper_close),
+                }
+            )
+        offset += group.dof
+    if not controls:
         return []
-    if len(gripper_groups) == 1:
-        return [{"side": "l", "label": "GRIPPER", "group": gripper_groups[0].name}]
-    return [
-        {"side": "l", "label": "LEFT", "group": gripper_groups[0].name},
-        {"side": "r", "label": "RIGHT", "group": gripper_groups[1].name},
-    ]
+    if len(controls) == 1:
+        controls[0].update(side="l", label="GRIPPER")
+        return controls
+    for control, side, label in zip(controls[:2], ("l", "r"), ("LEFT", "RIGHT"), strict=True):
+        control.update(side=side, label=label)
+    return controls[:2]
 
 
 def _serialize_manual_qpos_limits(ctx: ConsoleContext) -> list[dict[str, float]]:
@@ -836,6 +1121,118 @@ def _resolve_dataset_dir(dataset_dir: str) -> str:
     if not dataset_dir:
         return dataset_dir
     return str(_resolve_runtime_path(dataset_dir))
+
+
+def _scene_plan_root(
+    config: ConfigDict | None = None, dataset: str | None = None, *, scope: str = "collect"
+) -> Path:
+    if scope not in {"collect", "eval"}:
+        raise ValueError("scene plan scope must be collect or eval")
+    if scope == "eval" and config is not None:
+        roots = evaluation_task_sets(config)
+        root = roots.get(dataset) if dataset else next(iter(roots.values()), None)
+        if root is None:
+            raise ValueError(f"unknown evaluation task-set directory: {dataset or '(none)'}")
+        if not (root / "tasks.csv").is_file():
+            raise ValueError(f"evaluation task-set is missing {root / 'tasks.csv'}")
+        return root
+    directories = (config.get("collection") or {}).get("task_set_dir") if config else None
+    if not directories:
+        raise ValueError("collection task-set directory is not configured")
+    if isinstance(directories, (str, Path)):
+        directories = [directories]
+    for directory in directories:
+        root = _resolve_runtime_path(str(directory)).expanduser().resolve()
+        if (root / "tasks.csv").is_file():
+            alias = (config.get("collection") or {}).get("task_set_name") or root.name
+            if dataset is None or dataset in {alias, root.name}:
+                return root
+        elif root.is_dir():
+            selected = (
+                resolve_task_set(root, dataset)
+                if dataset
+                else next(iter(discover_task_sets(root).values()), None)
+            )
+            if selected is not None:
+                return selected
+    raise ValueError(f"unknown collection task-set directory: {dataset or '(none)'}")
+
+
+def _scene_plan_signature(root: Path) -> tuple[Any, ...]:
+    signature: list[Any] = [str(root)]
+    info = read_plan_yaml(root, "info.yaml")
+    objects_file = str(info.get("objects_file", "objects.csv") or "objects.csv")
+    paths = [root / name for name in ("info.yaml", "tasks.csv", "scene.csv", "layout.yaml")]
+    paths.append(root / objects_file)
+    for path in paths:
+        try:
+            signature.append(path.read_bytes())
+        except FileNotFoundError:
+            signature.append(None)
+    for task_id, path in plan_reference_images(root).items():
+        try:
+            stat = path.stat()
+            signature.append((task_id, str(path), stat.st_mtime_ns, stat.st_size))
+        except FileNotFoundError:
+            signature.append((task_id, str(path), None))
+    return tuple(signature)
+
+
+def _build_scene_plan(
+    root: Path, scope: str = "collect", task_set: str | None = None
+) -> dict[str, Any]:
+    """Parse one normalized scene catalog directory for the console UI."""
+
+    def photo_url(object_id: str, photo_name: str) -> str:
+        return (
+            f"/api/scene_plan/object-photo/{quote(object_id)}/{quote(photo_name)}"
+            f"?set={quote(task_set or root.name, safe='')}&scope={scope}"
+        )
+
+    plan = scene_plan_from_dir(root, photo_url)
+    for task in plan["tasks"]:
+        if task["reference_image"]:
+            task["reference_image_url"] = (
+                f"/api/scene_plan/reference-image/{quote(task['task_id'], safe='')}"
+                f"?set={quote(task_set or root.name, safe='')}&scope={scope}"
+            )
+    return plan
+
+
+def _load_scene_plan(
+    config: ConfigDict | None = None, dataset: str | None = None, *, scope: str = "collect"
+) -> dict[str, Any]:
+    """Load and signature-cache the workspace's normalized scene plan."""
+    root = (
+        _scene_plan_root(config, dataset)
+        if scope == "collect"
+        else _scene_plan_root(config, dataset, scope=scope)
+    )
+    collection = (config.get("collection") or {}) if config is not None else {}
+    bindings = (
+        ((collection.get("task_prompt_bindings") or {}).get(dataset) or {})
+        if scope == "collect"
+        else {}
+    )
+    task_set = dataset or root.name
+    if scope == "eval" and dataset is None and config is not None:
+        task_set = next(iter(evaluation_task_sets(config)))
+    signature = (*_scene_plan_signature(root), scope, task_set, tuple(sorted(bindings.items())))
+    with _SCENE_PLAN_CACHE_LOCK:
+        cached = _SCENE_PLAN_CACHE.get(signature)
+        if cached is not None:
+            _SCENE_PLAN_CACHE.move_to_end(signature)
+            return cached
+        payload = _build_scene_plan(root, scope, task_set)
+        payload["task_set"] = task_set
+        payload["version"] = uuid.uuid4().hex
+        for task in payload["tasks"]:
+            task["runtime_prompt"] = bindings.get(task["task_id"], task["prompt_en"])
+        _SCENE_PLAN_CACHE[signature] = payload
+        _SCENE_PLAN_CACHE.move_to_end(signature)
+        while len(_SCENE_PLAN_CACHE) > _SCENE_PLAN_CACHE_MAX:
+            _SCENE_PLAN_CACHE.popitem(last=False)
+    return payload
 
 
 def _serialize_config(ctx: ConsoleContext) -> dict:
@@ -862,8 +1259,11 @@ def _serialize_config(ctx: ConsoleContext) -> dict:
     teleop_config = config.collection.get("teleop") or {}
     teleop_client_config = teleop_config.get("client") or {}
     controls_config = config.collection.get("controls") or {}
+    device_selection = ctx.device_settings.workspace.initial_selection(config)
+    teleop_options = ctx.device_settings.workspace.hardware.options(config.robot.type)["teleop"]
+    teleop_operation = str(teleop_options.get(device_selection["teleop"], {}).get("operation", ""))
     is_vr = str(teleop_client_config.get("type", "")) == "vr_webxr"
-    control_mode = "vr" if is_vr else "keyboard"
+    control_mode = "vr" if is_vr else "leader" if teleop_operation == "leader" else "keyboard"
     controls = {
         str(action): dict(binding)
         for action, binding in (controls_config.get(control_mode) or {}).items()
@@ -885,18 +1285,36 @@ def _serialize_config(ctx: ConsoleContext) -> dict:
                 }
             )
     collection_storage = config.collection.storage
-    collection_uploads = resolve_dataset_uploads(collection_storage)
     collection_sftp = collection_storage.get("sftp") or {}
+    scene_plan_sets = {
+        "collect": list(ctx.config.collection.tasks)
+        if ctx.config.collection.get("task_set_dir")
+        else [],
+        "eval": [],
+    }
+    scene_plan_errors = {}
+    try:
+        scene_plan_sets["eval"] = list(evaluation_task_sets(ctx.config))
+    except (OSError, ValueError) as error:
+        scene_plan_errors["eval"] = str(error)
     return {
         "initial_tab": _resolve_initial_tab(ctx.config),
         "robot_type": config.robot.type,
+        "device_selection": device_selection,
         "transport_type": config.transport.type,
         "policy": {
             "type": config.policy.type,
             "host": config.policy.host,
             "port": config.policy.port,
         },
+        "models": [
+            {"index": index, "name": model.name}
+            for index, model in enumerate(deployment_models(ctx.config))
+        ],
+        "local_history": history_status(config, ctx.runtime),
         "tasks": list(config.inference_cfg.debug_tasks),
+        "scene_plan_sets": scene_plan_sets,
+        "scene_plan_errors": scene_plan_errors,
         "collect_tasks": {
             str(dataset_name): [[str(prompt), int(target)] for prompt, target in entries]
             for dataset_name, entries in config.collection.tasks.items()
@@ -911,6 +1329,10 @@ def _serialize_config(ctx: ConsoleContext) -> dict:
         "strategies": strategies,
         "gripper_controls": _serialize_gripper_controls(ctx),
         "manual_qpos_limits": _serialize_manual_qpos_limits(ctx),
+        "manual_joint_groups": [
+            {"name": group.name, "joints": list(group.joint_names)}
+            for group in ctx.runtime.robot.actuator_groups
+        ],
         "obs_mode": config.inference_cfg.obs_space.type,
         "policy_action_mode": config.inference_cfg.action_space.type,
         "publish_mode": "joint",
@@ -931,17 +1353,15 @@ def _serialize_config(ctx: ConsoleContext) -> dict:
             "teleop": {
                 "control_source": str(teleop_config.get("control_source", "transport")),
                 "client_type": str(teleop_client_config.get("type", "")),
+                "client": dict(teleop_client_config),
+                "safety": dict(teleop_config.get("safety") or {}),
             },
             "controls": {
                 "mode": control_mode,
                 "bindings": controls,
                 "groups": control_groups,
             },
-            "upload": {
-                "configured": bool(collection_uploads),
-                "backends": [spec.backend for spec in collection_uploads],
-                "targets": [spec.display_root for spec in collection_uploads],
-            },
+            "upload": _collection_upload_payload(config),
             "sftp": {
                 "configured": bool(
                     collection_sftp.get("host") and collection_sftp.get("remote_dir")
@@ -951,7 +1371,7 @@ def _serialize_config(ctx: ConsoleContext) -> dict:
                 "remote_dir": str(collection_sftp.get("remote_dir", "")),
             },
         },
-        "eval": _serialize_eval(ctx),
+        "eval": _serialize_eval(ctx, scene_plan_sets["eval"]),
         "rl": _serialize_rl(ctx),
         "run_id": Path(ctx.output_dir).name,
     }
@@ -961,20 +1381,202 @@ def _status_snapshot_for_poll(
     logger_obj: Any,
     task: str | None = None,
     collection_dataset: str | None = None,
+    *,
+    include_history: bool = False,
 ) -> dict[str, Any]:
-    """Request a recorder snapshot without disk-backed history."""
+    """Request a recorder snapshot, optionally including disk-backed history."""
     snapshot = dict(
         logger_obj.status_snapshot(
             task,
-            include_history=False,
+            include_history=include_history,
             collection_dataset=collection_dataset,
         )
     )
-    snapshot.pop("episodes", None)
+    if not include_history:
+        snapshot.pop("episodes", None)
     return snapshot
 
 
-def _serialize_status(ctx: ConsoleContext) -> dict:
+def _cached_collection_slots(
+    config: ConfigDict,
+    scene_plan: dict[str, Any],
+    dataset: str,
+) -> list[Any]:
+    entries = tuple(
+        (str(entry[0]), int(entry[1])) for entry in config.collection.tasks.get(dataset, ())
+    )
+    key = (id(scene_plan), dataset, entries)
+    with _COLLECTION_SLOT_PLAN_CACHE_LOCK:
+        cached = _COLLECTION_SLOT_PLAN_CACHE.get(key)
+        if cached is not None and cached[0] is scene_plan:
+            _COLLECTION_SLOT_PLAN_CACHE.move_to_end(key)
+            return list(cached[1])
+    slots = tuple(build_collection_slots(config, scene_plan, dataset))
+    with _COLLECTION_SLOT_PLAN_CACHE_LOCK:
+        _COLLECTION_SLOT_PLAN_CACHE[key] = (scene_plan, slots)
+        _COLLECTION_SLOT_PLAN_CACHE.move_to_end(key)
+        while len(_COLLECTION_SLOT_PLAN_CACHE) > _COLLECTION_SLOT_PLAN_CACHE_MAX:
+            _COLLECTION_SLOT_PLAN_CACHE.popitem(last=False)
+    return list(slots)
+
+
+def _collection_transfer_path(config: ConfigDict, dataset: str) -> tuple[Path, str]:
+    """The dataset's single directory and its remote path (one rule, both apps)."""
+    plan_root = _scene_plan_root(config, dataset) if config.collection.get("task_set_dir") else None
+    return dataset_location(config, dataset, plan_root=plan_root)
+
+
+def _collection_slots_snapshot(ctx: ConsoleContext, dataset: str) -> dict[str, Any]:
+    """Resolve one dataset's fixed plan against saved and in-flight episodes."""
+    config = ctx.runtime.active_config or ctx.config
+    if dataset not in config.collection.tasks:
+        raise ValueError("unknown collection dataset")
+    scene_plan = (
+        _load_scene_plan(config, dataset)
+        if config.collection.get("task_set_dir")
+        else {"tasks": [], "scenes": [], "positions": [], "objects": [], "version": "unconfigured"}
+    )
+    slots = _cached_collection_slots(config, scene_plan, dataset)
+    logger_obj = ctx.runtime.episode_logger
+    dataset_dir: Path | None = None
+    queue: list[dict[str, Any]] = []
+    episodes: list[dict[str, Any]] = []
+    if logger_obj is not None and slots:
+        status = _status_snapshot_for_poll(logger_obj, slots[0].task, dataset)
+        raw_dataset_dir = str(status.get("dataset_dir") or "")
+        dataset_dir = Path(raw_dataset_dir).resolve() if raw_dataset_dir else None
+        queue = list(status.get("queue") or [])
+        if dataset_dir is not None:
+            episodes = list(
+                load_episode_history(dataset_dir, qc_path=dataset_dir / "meta" / "qc.jsonl").get(
+                    "episodes"
+                )
+                or []
+            )
+    slot_state = load_slot_state(slot_state_path(config, dataset))
+    rows, active, counts = collection_slot_status(slots, episodes, queue, slot_state)
+    next_candidate = None
+    logger_collecting = bool(
+        getattr(logger_obj, "is_collection_enabled", False)
+        and getattr(logger_obj, "has_active_episode", False)
+    )
+    if (
+        logger_collecting
+        and str(ctx.session.selected_collect_set or "") == dataset
+        and ctx.session.collection_slot_id
+    ):
+        projected_queue = [*queue, {"slot_id": ctx.session.collection_slot_id, "status": "saving"}]
+        _, next_candidate, _ = collection_slot_status(slots, episodes, projected_queue, slot_state)
+        if next_candidate is not None:
+            next_candidate = dict(next_candidate)
+        elif any(
+            slot.slot_id == ctx.session.collection_slot_id and slot.unbounded for slot in slots
+        ):
+            next_candidate = next(
+                row for row in rows if row["slot_id"] == ctx.session.collection_slot_id
+            ).copy()
+            next_candidate["state"] = "active"
+            next_candidate["repair"] = False
+    scenes: list[dict[str, str]] = []
+    tasks: list[dict[str, str]] = []
+    seen_scenes: set[str] = set()
+    seen_tasks: set[str] = set()
+    for row in rows:
+        if row["scene_id"] not in seen_scenes:
+            scenes.append({"id": row["scene_id"], "label": row["scene_label"]})
+            seen_scenes.add(row["scene_id"])
+        if row["task_id"] not in seen_tasks:
+            tasks.append(
+                {
+                    "id": row["task_id"],
+                    "label": row["task_zh"] or row["task"],
+                    "prompt": row["task"],
+                }
+            )
+            seen_tasks.add(row["task_id"])
+    return {
+        "dataset": dataset,
+        "scene_plan": scene_plan,
+        "dataset_dir": "" if dataset_dir is None else str(dataset_dir),
+        "rows": rows,
+        "active": active,
+        "next_candidate": next_candidate,
+        "pending_saves": ctx.collection_save_snapshot(dataset),
+        "counts": counts,
+        "scenes": scenes,
+        "tasks": tasks,
+        "slot_state": slot_state,
+    }
+
+
+def _apply_collection_slot_session(session: SessionState, slot: dict[str, Any] | None) -> None:
+    if (
+        slot is None
+        or session.collection_slot_id != slot["slot_id"]
+        or session.selected_collect_set != slot["dataset"]
+    ):
+        session.collection_sim_metadata = None
+    if slot is None:
+        session.collection_scene_id = None
+        session.collection_scene_round = None
+        session.collection_slot_id = None
+        session.collection_task_id = None
+        return
+    session.selected_collect_task = slot["task"]
+    session.selected_collect_set = slot["dataset"]
+    session.selected_collect_task_index = int(slot["task_index"])
+    session.collection_scene_id = slot["scene_id"]
+    session.collection_scene_round = int(slot["round_index"])
+    session.collection_slot_id = slot["slot_id"]
+    session.collection_task_id = slot["task_id"]
+
+
+def _sync_collection_slot_session(
+    ctx: ConsoleContext, completed_slot_id: str | None = None
+) -> dict[str, Any] | None:
+    """Select the next unresolved slot without waiting for a browser poll."""
+    with ctx.collection_selection_lock:
+        return _sync_collection_slot_session_locked(ctx, completed_slot_id)
+
+
+def _sync_collection_slot_session_locked(
+    ctx: ConsoleContext, completed_slot_id: str | None
+) -> dict[str, Any] | None:
+    dataset = str(ctx.session.selected_collect_set or "").strip()
+    logger_obj = ctx.runtime.episode_logger
+    if not dataset or logger_obj is None or bool(getattr(logger_obj, "has_active_episode", False)):
+        return None
+    config = ctx.runtime.active_config or ctx.config
+    state_path = slot_state_path(config, dataset)
+    if completed_slot_id:
+        slot_state = load_slot_state(state_path)
+        if slot_state.selected_slot_id == completed_slot_id:
+            select_collection_slot(state_path, completed_slot_id, slot_state)
+    snapshot = _collection_slots_snapshot(ctx, dataset)
+    active = snapshot["active"]
+    if active is not None:
+        select_collection_slot(
+            state_path,
+            active["slot_id"],
+            snapshot["slot_state"],
+            episode_index=(active.get("episode") or {}).get("episode_index"),
+            # Retain an automatic retake just like an explicitly selected retake.
+            manual=bool(active.get("repair")),
+        )
+    _apply_collection_slot_session(ctx.session, active)
+    if completed_slot_id:
+        ctx.completed_collection_dataset = dataset
+        ctx.completed_collection_slot_id = completed_slot_id
+        ctx.collection_save_revision += 1
+    logger.info(
+        "[COLLECTION_SLOT_SYNC] dataset=%s active=%s",
+        dataset,
+        None if active is None else active["slot_id"],
+    )
+    return active
+
+
+def _serialize_status(ctx: ConsoleContext, *, include_history: bool = False) -> dict:
     # Live snapshot polled by the frontend (~1 Hz). Mirrors the session/runtime
     # state machine so the UI can gate buttons and show telemetry.
     s = ctx.session
@@ -1047,6 +1649,8 @@ def _serialize_status(ctx: ConsoleContext) -> dict:
         "transport_connected": transport_connected,
         "image_min_hz": image_min_hz,
         "policy_connected": r.policy is not None,
+        "model_index": r.active_model_index,
+        "local_history": history_status(config, r),
         "policy_error": r.last_policy_error,
         "cli_mode": s.mode.value,
         "session_status": s.status.value,
@@ -1054,6 +1658,17 @@ def _serialize_status(ctx: ConsoleContext) -> dict:
         "selected_collect_task": s.selected_collect_task,
         "selected_collect_set": s.selected_collect_set,
         "selected_collect_task_index": s.selected_collect_task_index,
+        "collection_scene_id": s.collection_scene_id,
+        "collection_scene_round": s.collection_scene_round,
+        "collection_slot_id": s.collection_slot_id,
+        "collection_task_id": s.collection_task_id,
+        "collection_sim_metadata_ready": s.collection_sim_metadata is not None,
+        "collection_scene_reset_requests": s.collection_scene_reset_requests,
+        "collection_sim_metadata_schema_version": (
+            s.collection_sim_metadata.get("schema_version")
+            if s.collection_sim_metadata is not None
+            else None
+        ),
         "selected_strategy": (
             resolve_inference_strategy_label(config, r.selected_inference_strategy_key)
             if r.selected_inference_strategy_key is not None
@@ -1072,7 +1687,13 @@ def _serialize_status(ctx: ConsoleContext) -> dict:
             None if s.manual_qpos is None else np.asarray(s.manual_qpos, dtype=float).tolist()
         ),
         "pending_chunk": None if s.pending_real_chunk is None else len(s.pending_real_chunk),
+        "step_operation": getattr(r, "step_operation", ""),
+        "step_preview_version": getattr(r, "step_preview_version", 0),
         "current_episode": getattr(r.replay_source or r.transport, "episode_id", None),
+        "eval_saving": bool(
+            getattr(r, "episode_logger", None) is not None
+            and getattr(r.episode_logger, "is_saving", False)
+        ),
         "last_error": s.last_error,
         "replay_dataset_dir": r.replay_dataset_dir,
         "replay_episode_id": r.replay_episode_id,
@@ -1108,10 +1729,18 @@ def _serialize_status(ctx: ConsoleContext) -> dict:
             else len(r.rollout_intervention_active_segment.frames)
         ),
         "rollout_intervention_segments": len(r.rollout_intervention_segments),
-        "rollout": rollout_save_status(config, r, include_history=False),
+        "rollout": rollout_save_status(config, r, include_history=include_history),
         "eval_recorder": (
-            _status_snapshot_for_poll(r.episode_logger, format_task_label(s.selected_task))
-            if config.eval and r.episode_logger is not None
+            _status_snapshot_for_poll(
+                r.episode_logger,
+                format_task_label(s.selected_task),
+                include_history=include_history,
+            )
+            if (
+                config.eval
+                and bool((config.eval.get("storage") or {}).get("enabled", True))
+                and r.episode_logger is not None
+            )
             else None
         ),
         "collect": (
@@ -1119,6 +1748,7 @@ def _serialize_status(ctx: ConsoleContext) -> dict:
                 r.episode_logger,
                 format_task_label(s.selected_collect_task),
                 s.selected_collect_set,
+                include_history=include_history,
             )
             if r.episode_logger is not None
             else None
@@ -1192,7 +1822,7 @@ def _camera_jpeg_payload(
 def _list_camera_keys(ctx: ConsoleContext) -> list[str]:
     # Cameras the visualization stream may expose, in schema order minus disabled ones.
     disabled = set(ctx.config.transport.disabled_cameras)
-    reader = _observation_reader(ctx)
+    reader = _camera_reader(ctx)
     available = getattr(reader, "available_camera_keys", None)
     if available is not None:
         return [key for key in available() if key not in disabled]
@@ -1204,15 +1834,26 @@ def _list_camera_keys(ctx: ConsoleContext) -> list[str]:
 
 
 def _live_camera_keys(ctx: ConsoleContext) -> list[str]:
-    reader = _observation_reader(ctx)
+    reader = _camera_reader(ctx)
     get_keys = getattr(reader, "get_camera_keys", None)
-    if get_keys is not None:
-        return list(get_keys())
-    return _list_camera_keys(ctx)
+    keys = list(get_keys()) if get_keys is not None else _list_camera_keys(ctx)
+    get_frame = getattr(reader, "get_camera_frame", None)
+    if get_frame is not None:
+        # Empty MJPEG responses can occupy all browser HTTP/1 connection slots,
+        # preventing Start/Stop requests from reaching the server.
+        return [key for key in keys if get_frame(key) is not None]
+    return keys
 
 
 def _uses_replay_observation(ctx: ConsoleContext) -> bool:
     return ctx.active_tab == "replay" and ctx.runtime.replay_source is not None
+
+
+def _camera_reader(ctx: ConsoleContext):
+    preview = getattr(ctx, "camera_preview", None)
+    if preview is not None and not _uses_replay_observation(ctx):
+        return preview
+    return _observation_reader(ctx)
 
 
 def _observation_reader(ctx: ConsoleContext) -> ObservationSource:
@@ -1301,14 +1942,24 @@ def _serialize_scene(ctx: ConsoleContext) -> dict:
     if collection_qpos is not None:
         qpos = collection_qpos
         source = f"collection_replay:{collection_frame_index}"
-    # MANUAL mode: the solid arm follows the hand-set command qpos. Bypass the cache
-    # since manual_qpos moves freely with the sliders.
-    elif session.mode is SessionMode.MANUAL:
+    # MANUAL mode: the solid arm follows live robot feedback. The hand-set command
+    # is rendered separately as a ghost so entering START never snaps the solid arm
+    # to the initial/target pose.
+    elif session.mode is SessionMode.MANUAL and ctx.active_tab != "collect":
+        state = reader.get_latest_qpos()
+        if state is None:
+            state = ctx.runtime.robot.initial_qpos
+        command = session.manual_qpos
         return {
             "available": True,
-            "arms": ctx.scene.transforms(session.manual_qpos),  # type: ignore[attr-defined]
+            "arms": ctx.scene.transforms(state),  # type: ignore[attr-defined]
+            "ghost": (
+                ctx.scene.transforms(command)  # type: ignore[attr-defined]
+                if command is not None
+                else None
+            ),
         }
-    elif session.sim_preview_qpos is not None:
+    elif session.sim_preview_qpos is not None and ctx.active_tab != "collect":
         # SIM run/preview: render the last command directly. A replay source may
         # still be mounted after visiting REPLAY, but active SIM commands should
         # drive the console canvas.
@@ -1325,6 +1976,9 @@ def _serialize_scene(ctx: ConsoleContext) -> dict:
     else:
         qpos = reader.get_latest_qpos()
         source = "reader.get_latest_qpos"
+    if qpos is None:
+        qpos = ctx.runtime.robot.initial_qpos
+        source = "robot.initial_qpos"
     key = None if qpos is None else np.asarray(qpos, dtype=float).round(5).tobytes()
     replay_source = ctx.runtime.replay_source
     replay_frame = None if replay_source is None else getattr(replay_source, "frame_index", None)
@@ -1464,11 +2118,13 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _send_static(self, path: Path) -> None:
+    def _send_static(self, path: Path, replacements: dict[bytes, bytes] | None = None) -> None:
         if not path.exists():
             self._send_empty(404)
             return
         body = path.read_bytes()
+        for old, new in (replacements or {}).items():
+            body = body.replace(old, new)
         ctype = {
             ".html": "text/html; charset=utf-8",
             ".js": "application/javascript; charset=utf-8",
@@ -1476,6 +2132,10 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             ".woff2": "font/woff2",
             ".woff": "font/woff",
             ".ttf": "font/ttf",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".png": "image/png",
+            ".webp": "image/webp",
         }.get(path.suffix.lower(), "application/octet-stream")
         self.send_response(200)
         self.send_header("Content-Type", ctype)
@@ -1529,6 +2189,8 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             getattr(self, "_active_trace_id", "none"),
             _command_summary(command),
         )
+        if command == "web:warmup" and self.ctx.runtime.web_phase == "ready":
+            self.ctx.session.is_setup_done = False
         self.ctx.runtime.command_queue.put(command)
 
     def _invalidate_scene_cache(self) -> None:
@@ -1615,34 +2277,70 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         # recorded lerobot episode itself owns the trial identity — no separate
         # results.jsonl. An unrun trial simply has no episode row yet (and so can't be
         # scored), which is the gate we want.
-        runtime = self.ctx.runtime
-        clip_id = body.get("clip_id") or None
-        prompt = body.get("prompt")
-        trial = body.get("trial")
-        runtime.current_clip_id = clip_id
-        runtime.current_cell = {"prompt": prompt, "trial": trial} if clip_id else None
-        self._enqueue("web:start")
+        try:
+            clip_id = _enqueue_eval_start(self.ctx, body)
+        except RuntimeError as error:
+            self._send_json(409, {"ok": False, "error": str(error)})
+            return
+        except (OSError, ValueError) as error:
+            self._send_json(400, {"ok": False, "error": str(error)})
+            return
         self._send_json(200, {"ok": True, "clip_id": clip_id})
+
+    def _saved_eval_attempt(self, body: dict) -> tuple[Any, dict[str, Any]] | None:
+        """Resolve the saved attempt an EVAL score/cancel request refers to.
+
+        The attempt is the recorded lerobot episode of the active model keyed by the
+        body's clip_id; identity fields the body carries must match the saved row.
+
+        Returns:
+            (recorder, record) for the saved attempt, or None after sending the error
+            response (no clip_id, model switched, nothing recorded or saved yet, or an
+            identity mismatch).
+        """
+        runtime = self.ctx.runtime
+        clip_id = body.get("clip_id")
+        if not clip_id:
+            self._send_json(400, {"ok": False, "error": "clip_id required"})
+            return None
+        model_name = self.ctx.active_model_name()
+        if body.get("model_name") not in {None, "", model_name}:
+            self._send_json(409, {"ok": False, "error": "evaluation model has changed"})
+            return None
+        if runtime.episode_logger is None:
+            self._send_json(
+                409,
+                {"ok": False, "error": "no recorded episode for this trial yet — run it first"},
+            )
+            return None
+        recorder = runtime.episode_logger
+        target = eval_episode_dir(self.ctx.output_dir, model_name)
+        if Path(recorder._log_dir) != target:
+            self._send_json(409, {"ok": False, "error": "evaluation recorder is changing models"})
+            return None
+        record = next((row for row in read_result_rows(target) if row["clip_id"] == clip_id), None)
+        if record is None:
+            self._send_json(409, {"ok": False, "error": "evaluation attempt is not saved yet"})
+            return None
+        identity_fields = ("prompt", "trial", "task_set", "task_id", "scene_id")
+        if any(
+            key in body and (body[key] or "") != (record.get(key) or "") for key in identity_fields
+        ):
+            self._send_json(409, {"ok": False, "error": "evaluation attempt identity mismatch"})
+            return None
+        return recorder, record
 
     def _eval_score(self, body: dict) -> None:
         # Submit/overwrite a trial's score+milestones+note. The score is written ONLY into
         # the recorded lerobot episode (meta/episodes.jsonl + per-frame parquet columns +
         # info.json), keyed by clip_id -> episode_index. Gate: refuse to score a clip that
         # has no recorded episode yet (model still initializing, or the trial never ran).
-        runtime = self.ctx.runtime
-        clip_id = body.get("clip_id")
-        if not clip_id:
-            self._send_json(400, {"ok": False, "error": "clip_id required"})
+        resolved = self._saved_eval_attempt(body)
+        if resolved is None:
             return
-        if runtime.episode_logger is None:
-            self._send_json(
-                409,
-                {"ok": False, "error": "no recorded episode for this trial yet — run it first"},
-            )
-            return
+        recorder, _record = resolved
+        clip_id = body["clip_id"]
         fields = dict(
-            prompt=body.get("prompt"),
-            trial=body.get("trial"),
             score=body.get("score"),
             max_score=body.get("max_score"),
             milestones=body.get("milestones", {}),
@@ -1650,21 +2348,39 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             scored_at=_dt.datetime.now().isoformat(timespec="seconds"),
             duration_ms=body.get("duration_ms", 0),
         )
-        ep = runtime.episode_logger.patch_episode_meta_by_clip(
+        ep = recorder.patch_episode_meta_by_clip(
             str(clip_id),
             **fields,
         )
         if ep is None:
-            self._sync_preview_to_active_model()
-            if self.ctx.preview is not None:
-                ep = self.ctx.preview.episode_index_by_clip().get(clip_id)
-            if ep is None:
-                self._send_json(
-                    409,
-                    {"ok": False, "error": "no recorded episode for this trial yet — run it first"},
-                )
-                return
-            runtime.episode_logger.patch_episode_meta(int(ep), **fields)
+            self._send_json(409, {"ok": False, "error": "evaluation attempt is not saved yet"})
+            return
+        self._send_json(200, {"ok": True, "episode_index": ep})
+
+    def _eval_discard(self, body: dict) -> None:
+        # Cancel an attempt that already ended and is not scored yet. Its saved episode is
+        # flagged ``cancelled`` (kept on disk, dropped from the results), so the trial
+        # reads as untested and can run again. A run still in flight is cancelled through
+        # /api/eval_cancel instead, which discards the episode before it is saved.
+        clip_id = body.get("clip_id")
+        if clip_id and clip_id == self.ctx.runtime.current_clip_id:
+            self._send_json(409, {"ok": False, "error": "evaluation attempt is still running"})
+            return
+        resolved = self._saved_eval_attempt(body)
+        if resolved is None:
+            return
+        recorder, record = resolved
+        if record.get("score") is not None:
+            self._send_json(409, {"ok": False, "error": "evaluation attempt is already scored"})
+            return
+        ep = recorder.patch_episode_meta_by_clip(
+            str(clip_id),
+            cancelled=True,
+            cancelled_at=_dt.datetime.now().isoformat(timespec="seconds"),
+        )
+        if ep is None:
+            self._send_json(409, {"ok": False, "error": "evaluation attempt is not saved yet"})
+            return
         self._send_json(200, {"ok": True, "episode_index": ep})
 
     def _stream_camera(self, key: str) -> None:
@@ -1699,10 +2415,13 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                 tick = time.monotonic()
                 # Re-resolve per tick so mounting/clearing a replay source mid-stream
                 # swaps the feed without the client reopening the <img> connection.
-                reader = _observation_reader(ctx)
+                reader = _camera_reader(ctx)
                 jpeg = None
                 payload, sig = _camera_jpeg_payload(reader, key, convert, last_sig)
-                if payload is not None and sig != last_sig:
+                if payload is None:
+                    last_sig = None
+                    last_jpeg = None
+                elif sig != last_sig:
                     jpeg = payload
                     last_sig = sig
                     last_jpeg = jpeg
@@ -1727,6 +2446,49 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             # Browser closed the tab / swapped the <img> src — expected, end quietly.
             return
 
+    def _stream_teleop_feedback(self) -> None:
+        """Stream the small, high-rate VR control snapshot used by Collect hints."""
+        self.close_connection = True
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache, no-store, must-revalidate, private")
+        self.send_header("Connection", "keep-alive")
+        # Prevent buffering when the console is served behind nginx.
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+        self.wfile.write(b"retry: 1000\n\n")
+        self.wfile.flush()
+
+        period = 1.0 / 60.0
+        next_tick = time.monotonic()
+        try:
+            while not self.ctx.runtime.transport.is_shutdown():
+                status = teleop_status(self.ctx.runtime) or {}
+                payload = {
+                    "connected": bool(status.get("connected", False)),
+                    "pressed_controls": status.get("pressed_controls", []),
+                    "hold_progress": status.get("hold_progress", {}),
+                    "review_events": [
+                        {"id": event["id"], "action": event["action"]}
+                        for event in self.ctx.runtime.collection_review_events
+                        if time.monotonic() - float(event["created_at"]) < 2.0
+                    ],
+                }
+                body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+                self.wfile.write(f"data: {body}\n\n".encode())
+                self.wfile.flush()
+
+                next_tick += period
+                delay = next_tick - time.monotonic()
+                if delay > 0:
+                    time.sleep(delay)
+                else:
+                    # Do not accumulate lag if the process was briefly busy.
+                    next_tick = time.monotonic()
+        except (BrokenPipeError, ConnectionResetError):
+            # Browser closed the EventSource or navigated away.
+            return
+
     # --- routing ---
 
     def do_GET(self) -> None:
@@ -1734,7 +2496,13 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         # Prefix routes (streams + static assets) come first; they own a path subtree.
         if path in {"/", "/index.html"}:
-            self._send_static(STATIC_DIR / "index.html")
+            self._send_static(
+                STATIC_DIR / "index.html",
+                {b"__EVA_LANGUAGE__": self.ctx.language.encode("ascii")},
+            )
+            return
+        if path == "/task_preview.html":
+            self._send_static(STATIC_DIR / "task_preview.html")
             return
         if path.startswith("/api/camera/"):
             self._stream_camera(unquote(path[len("/api/camera/") :]))
@@ -1749,6 +2517,12 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             return
         if path.startswith("/meshes/"):
             self._send_mesh(path[len("/meshes/") :])
+            return
+        if path.startswith("/api/scene_plan/object-photo/"):
+            self._send_scene_plan_photo(path[len("/api/scene_plan/object-photo/") :])
+            return
+        if path.startswith("/api/scene_plan/reference-image/"):
+            self._send_plan_reference_image(path[len("/api/scene_plan/reference-image/") :])
             return
         handler = _GET_ROUTES.get(path)
         if handler is None:
@@ -1768,6 +2542,136 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
 
     def _get_config(self) -> None:
         self._send_json(200, _serialize_config(self.ctx))
+
+    def _get_scene_plan(self) -> None:
+        try:
+            plan = _load_scene_plan(
+                self.ctx.config,
+                self._query_str("set").strip() or None,
+                scope=self._query_str("scope").strip() or "collect",
+            )
+        except (OSError, ValueError) as error:
+            self._send_json(400, {"ok": False, "error": str(error)})
+            return
+        self._send_json(200, plan)
+
+    def _send_scene_plan_photo(self, suffix: str) -> None:
+        parts = [unquote(part) for part in suffix.split("/")]
+        if len(parts) != 2:
+            self._send_empty(404)
+            return
+        try:
+            root = _scene_plan_root(
+                self.ctx.config,
+                self._query_str("set").strip() or None,
+                scope=self._query_str("scope").strip() or "collect",
+            ).resolve()
+        except (OSError, ValueError):
+            self._send_empty(404)
+            return
+        info = read_plan_yaml(root, "info.yaml")
+        objects_file = str(info.get("objects_file", "objects.csv") or "objects.csv")
+        row = next(
+            (
+                item
+                for item in read_plan_csv(root, objects_file)
+                if str(item.get("object_id") or item.get("物品代码") or "").strip() == parts[0]
+            ),
+            None,
+        )
+        if not row:
+            self._send_empty(404)
+            return
+        objects_path = (root / objects_file).resolve()
+        photo_dir = str(
+            row.get("photo_dir") or row.get("照片目录") or row.get("名称") or ""
+        ).strip()
+        photo_root = (objects_path.parent / "object_photos").resolve()
+        target = (photo_root / photo_dir / parts[1]).resolve()
+        if photo_root not in target.parents or not target.is_file():
+            self._send_empty(404)
+            return
+        self._send_static(target)
+
+    def _send_plan_reference_image(self, task_id: str) -> None:
+        """Serve one of the task set's authored reference images."""
+        try:
+            root = _scene_plan_root(
+                self.ctx.config,
+                self._query_str("set").strip() or None,
+                scope=self._query_str("scope").strip() or "collect",
+            ).resolve()
+        except (OSError, ValueError):
+            self._send_empty(404)
+            return
+        target = plan_reference_images(root).get(unquote(task_id))
+        if target is None or not target.is_file():
+            self._send_empty(404)
+            return
+        self._send_static(target)
+
+    def _get_collection_slots(self) -> None:
+        dataset = self._query_str("dataset").strip()
+        try:
+            snapshot = _collection_slots_snapshot(self.ctx, dataset)
+            requested_page = max(1, self._query_int("page", 1))
+        except ValueError as error:
+            self._send_json(400, {"ok": False, "error": str(error)})
+            return
+        scene_id = self._query_str("scene").strip()
+        task_id = self._query_str("task").strip()
+        show_all = self._query_str("all") == "1"
+        rows = snapshot["rows"]
+        if scene_id:
+            rows = [row for row in rows if row["scene_id"] == scene_id]
+        if task_id:
+            rows = [row for row in rows if row["task_id"] == task_id]
+        if not show_all and not scene_id and not task_id:
+            rows = []
+        page_size = 50
+        active_slot_id = str((snapshot["active"] or {}).get("slot_id") or "")
+        active_index = next(
+            (index for index, row in enumerate(rows) if row["slot_id"] == active_slot_id),
+            -1,
+        )
+        active_page = active_index // page_size + 1 if active_index >= 0 else None
+        page_count = max(1, (len(rows) + page_size - 1) // page_size)
+        page = min(requested_page, page_count)
+        start = (page - 1) * page_size
+        plan_version = snapshot["scene_plan"]["version"]
+        plan_fields = {}
+        if self._query_str("scene_plan_version") != plan_version:
+            plan_fields = {
+                "scene_plan": snapshot["scene_plan"],
+                "scenes": snapshot["scenes"],
+                "tasks": snapshot["tasks"],
+            }
+        self._send_json(
+            200,
+            {
+                "ok": True,
+                "dataset": snapshot["dataset"],
+                "scene_plan_version": plan_version,
+                **plan_fields,
+                "dataset_dir": snapshot["dataset_dir"],
+                "active": snapshot["active"],
+                "next_candidate": snapshot.get("next_candidate"),
+                "pending_saves": snapshot.get("pending_saves", []),
+                "session_slot_id": self.ctx.session.collection_slot_id,
+                "session_dataset": self.ctx.session.selected_collect_set,
+                "save_revision": self.ctx.collection_save_revision,
+                "completed_dataset": self.ctx.completed_collection_dataset,
+                "completed_slot_id": self.ctx.completed_collection_slot_id,
+                "counts": snapshot["counts"],
+                "slots": rows[start : start + page_size],
+                "filtered_total": len(rows),
+                "page": page,
+                "page_size": page_size,
+                "page_count": page_count,
+                "active_page": active_page,
+                "viewer_active": show_all or bool(scene_id or task_id),
+            },
+        )
 
     def _get_status(self) -> None:
         # This poll doubles as the client-liveness heartbeat the main loop watches.
@@ -1801,6 +2705,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         queue: list[dict[str, Any]] = []
         dataset_dir: str = ""
         task_filter = None
+        task_id_filter = None
         collection_set = None
         if scope == "rollout":
             status = rollout_save_status(config, runtime, include_history=False)
@@ -1814,6 +2719,22 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                 else format_task_label(self.ctx.session.selected_task)
             ) or None
             collection_set = self._query_str("set").strip() or None
+            if (
+                scope == "collect"
+                and collection_set
+                and task_filter
+                and config.collection.get("task_set_dir")
+            ):
+                plan = _load_scene_plan(config, collection_set)
+                linked = next(
+                    (
+                        task
+                        for task in plan["tasks"]
+                        if task.get("runtime_prompt", task["prompt_en"]) == task_filter
+                    ),
+                    None,
+                )
+                task_id_filter = linked["task_id"] if linked else None
             if logger_obj is not None:
                 status = _status_snapshot_for_poll(
                     logger_obj,
@@ -1826,7 +2747,11 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
                     queue = [
                         row
                         for row in queue
-                        if str(row.get("task") or row.get("prompt") or "") == task_filter
+                        if (
+                            str(row["task_id"]) == task_id_filter
+                            if task_id_filter and row.get("task_id")
+                            else str(row.get("task") or row.get("prompt") or "") == task_filter
+                        )
                     ]
 
         explicit_dir = self._query_str("dataset_dir")
@@ -1860,7 +2785,13 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
 
         history = load_episode_history(
             Path(dataset_dir),
+            qc_path=(
+                _collection_transfer_path(config, collection_set)[0] / "meta" / "qc.jsonl"
+                if scope == "collect" and collection_set
+                else None
+            ),
             task=task_filter,
+            task_id=task_id_filter,
             since=since,
             limit=limit,
             cursor=cursor,
@@ -1881,19 +2812,48 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         )
 
     def _get_dashboard(self) -> None:
-        config = self.ctx.runtime.active_config or self.ctx.config
-        work_root = Path(_resolve_dataset_dir(str(config.get("work_dir") or "work_dirs")))
-        roots = [work_root]
-        if self.ctx.output_dir:
-            roots.append(Path(self.ctx.output_dir))
+        config = self.ctx.config
+        roots = self._dashboard_roots(config)
+        scene_scope = self._query_str("scene_scope")
+        if scene_scope not in {"", "collect", "eval"}:
+            self._send_json(400, {"ok": False, "error": "invalid dashboard scene scope"})
+            return
+        payload = build_dashboard(
+            roots,
+            start_date=self._query_str("from"),
+            end_date=self._query_str("to"),
+            scene_scope=scene_scope,
+            task_set=self._query_str("task_set"),
+            task_id=self._query_str("task_id"),
+            scene_id=self._query_str("scene_id"),
+        )
+        payload["upload"] = _collection_upload_payload(config)
+        for candidate in payload["upload_candidates"]:
+            specs = resolve_dataset_uploads(
+                config.collection.storage,
+                str(candidate["dataset"]),
+            )
+            candidate["remote_dirs"] = [spec.target for spec in specs]
         self._send_json(
             200,
-            build_dashboard(
-                roots,
-                start_date=self._query_str("from"),
-                end_date=self._query_str("to"),
-            ),
+            payload,
         )
+
+    def _dashboard_roots(self, config: ConfigDict | None = None) -> tuple[Path, ...]:
+        active_config = config or self.ctx.runtime.active_config or self.ctx.config
+        dashboard = active_config.get("dashboard") or {}
+        roots = []
+        raw_roots = dashboard.get("raw_roots") or []
+        if isinstance(raw_roots, (str, Path)):
+            raw_roots = [raw_roots]
+        for raw_root in raw_roots:
+            value = str(raw_root).strip()
+            if not value:
+                continue
+            resolved = Path(_resolve_dataset_dir(value))
+            if resolved not in roots:
+                roots.append(resolved)
+        return tuple(roots)
 
     def _get_collect_quality_upload(self) -> None:
         query = parse_qs(urlparse(self.path).query)
@@ -1984,10 +2944,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         self._sync_preview_to_active_model()
 
     def _get_results_all(self) -> None:
-        # Cross-model aggregation for the RESULT browser: one record list per model
-        # discovered under the eval run root, plus the eval prompt/milestone config.
-        # Each model's raw dataset lives at <output_dir>/<model>/episodes/raw.
-        # whose meta/episodes.jsonl exists so prior evals auto-load.
+        # Read only configured checkpoints and explicitly named historical models.
         from core.app.console.episode_preview import read_result_rows
         from core.recorder.episode import sanitize_path_component
 
@@ -1998,20 +2955,17 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             configured = [c.name for c in eval_cfg.checkpoints]
         elif eval_cfg is not None:
             configured = [self.ctx.active_model_name() or "model"]
+        if eval_cfg is not None:
+            configured.extend(eval_cfg.get("result_models") or [])
         seen: set[str] = set()
         models: list[dict] = []
         for name in configured:
-            seen.add(sanitize_path_component(name))
+            identity = sanitize_path_component(name)
+            if identity in seen:
+                continue
+            seen.add(identity)
             rows = read_result_rows(eval_episode_dir(str(root), name))
             models.append({"model_name": name, "records": rows})
-        # Pick up any other recorded model dirs (e.g. a renamed ckpt from a prior run).
-        if root.exists():
-            for sub in sorted(p for p in root.iterdir() if p.is_dir()):
-                if sub.name in seen or sub.name == "console":
-                    continue
-                rows = read_result_rows(sub / "episodes" / "raw")
-                if rows:
-                    models.append({"model_name": sub.name, "records": rows})
         tasks = []
         if eval_cfg is not None:
             tasks = [_serialize_prompt_config(t) for t in eval_cfg.tasks]
@@ -2410,9 +3364,20 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             if handler is None:
                 self._send_empty(404)
                 return
-            handler(self, body)
-        except Exception:
+            if path in {
+                "/api/select_collect_task",
+                "/api/select_collection_slot",
+                "/api/skip_collection_slot",
+            }:
+                with self.ctx.collection_selection_lock:
+                    handler(self, body)
+            else:
+                handler(self, body)
+        except Exception as error:
             logger.exception("[HTTP_POST_ERROR] trace=%s path=%s", trace_id, path)
+            if path.startswith("/api/hf/") and self._response_status is None:
+                self._send_json(500, {"ok": False, "error": str(error)})
+                return
             raise
         finally:
             if path != "/api/client_trace":
@@ -2599,6 +3564,298 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
     def _post_select_task(self, body: dict) -> None:
         self._enqueue_ok(f"web:switch_task:{body.get('task', '')}")
 
+    def _get_local_sessions(self) -> None:
+        config = self.ctx.runtime.active_config or self.ctx.config
+        enabled = history_enabled(config, self.ctx.runtime)
+        self._send_json(
+            200,
+            {
+                **history_status(config, self.ctx.runtime),
+                "sessions": history_store(config, self.ctx.runtime).list() if enabled else [],
+            },
+        )
+
+    def _get_local_session(self) -> None:
+        config = self.ctx.runtime.active_config or self.ctx.config
+        try:
+            data = history_store(config, self.ctx.runtime).read(self._query_str("id"))
+        except (OSError, ValueError, KeyError, TypeError):
+            self._send_json(404, {"ok": False, "error": "local session not found"})
+            return
+        self._send_json(200, {"ok": True, "session": data})
+
+    def _post_local_replay(self, body: dict) -> None:
+        runtime = self.ctx.runtime
+        if runtime.local_rollout_id or self.ctx.session.status is SessionStatus.RUNNING:
+            self._send_json(409, {"ok": False, "error": "stop the current run before reviewing"})
+            return
+        config = runtime.active_config or self.ctx.config
+        try:
+            store = history_store(config, runtime)
+            data = store.read(str(body.get("session_id", "")))
+            record = next(item for item in data["rollouts"] if item["id"] == body.get("rollout_id"))
+            if not record["playable"]:
+                raise ValueError("this execution has no saved recording")
+            dataset_dir = str(store.dataset_path(record["id"]))
+            cached = _cached_review_episode(self.ctx, dataset_dir, 0)
+            payload = {
+                "ok": True,
+                "dataset_dir": dataset_dir,
+                "episode": 0,
+                "frames": len(cached.scene_qpos),
+                "fps": cached.fps,
+                "task": cached.task,
+                "video_keys": cached.video_keys,
+                **cached.series,
+            }
+        except (OSError, ValueError, KeyError, TypeError, StopIteration) as error:
+            self._send_json(404, {"ok": False, "error": str(error)})
+            return
+        self._send_json(200, payload)
+
+    def _local_history_mutation_allowed(self) -> bool:
+        runtime = self.ctx.runtime
+        config = runtime.active_config or self.ctx.config
+        if not history_enabled(config, runtime):
+            self._send_json(409, {"ok": False, "error": "local session history is disabled"})
+            return False
+        if (
+            runtime.local_rollout_id
+            or self.ctx.session.status is SessionStatus.RUNNING
+            or runtime.web_phase in {"starting", "running", "stopping", "resetting"}
+            or runtime.setup_stage
+            or runtime.step_operation
+        ):
+            self._send_json(409, {"ok": False, "error": "finish the current execution first"})
+            return False
+        return True
+
+    def _post_debug_record(self, body: dict) -> None:
+        enabled = body.get("enabled")
+        if not isinstance(enabled, bool):
+            self._send_json(400, {"ok": False, "error": "enabled must be a boolean"})
+            return
+        if self._local_history_mutation_allowed():
+            self._enqueue_ok(f"web:debug_record:{int(enabled)}")
+
+    def _post_new_debug_run(self, _body: dict) -> None:
+        if self.ctx.active_tab != "debug":
+            self._send_json(409, {"ok": False, "error": "New run is available in Debug"})
+            return
+        if self._local_history_mutation_allowed():
+            self._enqueue_ok("web:new_debug_run")
+
+    def _set_local_run_deleted(self, body: dict, deleted: bool) -> None:
+        config = self.ctx.runtime.active_config or self.ctx.config
+        if not history_enabled(config, self.ctx.runtime):
+            self._send_json(409, {"ok": False, "error": "local session history is disabled"})
+            return
+        if deleted and self.ctx.runtime.local_rollout_id == body.get("rollout_id"):
+            self._send_json(409, {"ok": False, "error": "stop this run before deleting it"})
+            return
+        try:
+            history_store(config, self.ctx.runtime).set_deleted(
+                str(body.get("session_id", "")), str(body.get("rollout_id", "")), deleted
+            )
+            if deleted and self.ctx.runtime.local_current_rollout_id == body.get("rollout_id"):
+                self.ctx.runtime.local_current_rollout_id = None
+                self.ctx.runtime.local_session_id = None
+                self.ctx.runtime.debug_record_dataset_dir = ""
+        except (FileNotFoundError, KeyError):
+            self._send_json(404, {"ok": False, "error": "local run not found"})
+            return
+        except (ValueError, OSError) as error:
+            self._send_json(409, {"ok": False, "error": str(error)})
+            return
+        self._send_json(200, {"ok": True})
+
+    def _post_delete_local_run(self, body: dict) -> None:
+        self._set_local_run_deleted(body, True)
+
+    def _post_restore_local_run(self, body: dict) -> None:
+        self._set_local_run_deleted(body, False)
+
+    def _post_select_model(self, body: dict) -> None:
+        index = body.get("index")
+        if (
+            isinstance(index, bool)
+            or not isinstance(index, int)
+            or not 0 <= index < len(deployment_models(self.ctx.config))
+        ):
+            self._send_json(400, {"ok": False, "error": "invalid model index"})
+            return
+        if (
+            self.ctx.config.eval
+            or self.ctx.runtime.web_phase in {"starting", "running", "stopping", "resetting"}
+            or self.ctx.session.status is SessionStatus.RUNNING
+        ):
+            self._send_json(
+                409, {"ok": False, "error": "stop the operation before selecting a deploy model"}
+            )
+            return
+        self._enqueue_ok(f"web:select_model:{index}")
+
+    def _get_dataset_manager(self) -> None:
+        config = self.ctx.runtime.active_config or self.ctx.config
+        rows = []
+        for dataset in config.collection.tasks:
+            try:
+                snapshot = _collection_slots_snapshot(self.ctx, dataset)
+                counts = snapshot["counts"]
+                rows.append(
+                    {
+                        "name": dataset,
+                        "robot": config.robot.type,
+                        "total": counts["total"],
+                        "collected": counts["total"] - counts.get("qc_pending", counts["pending"]),
+                        "accept": counts.get("passed", 0),
+                        "fail": counts.get("failed", 0),
+                        "unreviewed": counts.get("unreviewed", 0),
+                    }
+                )
+            except Exception as exc:
+                rows.append({"name": dataset, "error": str(exc)})
+        self._send_json(200, {"ok": True, "datasets": rows, **self.ctx.dataset_manager.snapshot()})
+
+    def _get_dataset_manager_job(self) -> None:
+        self._send_json(200, {"ok": True, **self.ctx.dataset_manager.snapshot()})
+
+    def _post_dataset_manager(self, body: dict) -> None:
+        manager = self.ctx.dataset_manager
+        if body.get("action") == "stop":
+            try:
+                manager.stop(str(body.get("job_id", "")))
+            except ValueError as exc:
+                self._send_json(400, {"ok": False, "error": str(exc)})
+                return
+            self._send_json(200, {"ok": True})
+            return
+        config = self.ctx.runtime.active_config or self.ctx.config
+        names = body.get("datasets")
+        if (
+            not isinstance(names, list)
+            or not names
+            or any(not isinstance(n, str) or n not in config.collection.tasks for n in names)
+        ):
+            self._send_json(400, {"ok": False, "error": "Select configured datasets"})
+            return
+        try:
+            targets = []
+            for name in dict.fromkeys(names):
+                _collection_slots_snapshot(self.ctx, name)
+                entries = config.collection.tasks[name]
+                logger_obj = self.ctx.runtime.episode_logger
+                if logger_obj and entries:
+                    status = _status_snapshot_for_poll(logger_obj, str(entries[0][0]), name)
+                    if any(
+                        status.get(k)
+                        for k in ("collecting", "saving", "queued_jobs", "save_queue_size")
+                    ):
+                        raise ValueError(
+                            "Dataset is recording or saving; retry after collection finishes"
+                        )
+                dataset_dir, remote = _collection_transfer_path(config, name)
+                targets.append(
+                    {
+                        "name": name,
+                        "plan": _scene_plan_root(config, name),
+                        "dataset_dir": dataset_dir,
+                        "remote_path": remote,
+                    }
+                )
+            manager.start(str(body.get("action", "")), targets, config.collection.storage)
+        except ValueError as exc:
+            self._send_json(409, {"ok": False, "error": str(exc)})
+            return
+        self._send_json(200, {"ok": True, **manager.snapshot()})
+
+    def _post_hf_task_set_sync(self, body: dict) -> None:
+        """Sync every task set this machine is configured with, never a selection."""
+        config = self.ctx.runtime.active_config or self.ctx.config
+        names = sorted(config.collection.tasks)
+        if not names:
+            self._send_json(409, {"ok": False, "error": "no collection task sets are configured"})
+            return
+        destinations: dict[str, Path] = {}
+        for name in names:
+            try:
+                destinations[name] = _scene_plan_root(config, name).parent
+            except ValueError:
+                continue
+        result = fetch_task_sets(
+            Path(__file__).resolve().parents[4], destinations, config.collection.storage
+        )
+        self._send_json(200, {"ok": True, "total": len(names), **result})
+
+    def _post_hf_assets_download(self, body: dict) -> None:
+        config = self.ctx.runtime.active_config or self.ctx.config
+        dataset = str(body.get("dataset", "")).strip()
+        if dataset not in config.collection.tasks:
+            self._send_json(409, {"ok": False, "error": "unknown collection set"})
+            return
+        project_root = Path(__file__).resolve().parents[4]
+        plan_root = _scene_plan_root(config, dataset)
+        destination = (
+            plan_root.parent.parent / "assets"
+            if plan_root.parent.name == "task_sets"
+            else project_root / "datasets/data_collection/assets"
+        )
+        result = fetch_assets(project_root, plan_root, destination, config.collection.storage)
+        self._send_json(200, {"ok": True, **result})
+
+    def _post_hf_dataset_upload(self, body: dict) -> None:
+        dataset_name = str(body.get("dataset", "")).strip()
+        dataset_dir = self._active_collection_dataset(body)
+        if dataset_dir is None:
+            return
+        config = self.ctx.runtime.active_config or self.ctx.config
+        plan_root = _scene_plan_root(config, dataset_name)
+        info = read_plan_yaml(plan_root, "info.yaml")
+        result = publish_dataset(
+            Path(__file__).resolve().parents[4],
+            dataset_dir,
+            dataset_name,
+            config.collection.storage,
+            new_remote_path=str(info.get("collection_dir") or "").strip() or None,
+        )
+        self._send_json(200, {"ok": True, **result})
+
+    def _post_hf_qc_sync(self, body: dict) -> None:
+        config = self.ctx.runtime.active_config or self.ctx.config
+        dataset_name = str(body.get("dataset", "")).strip()
+        if (
+            not dataset_name
+            or dataset_name not in config.collection.tasks
+            or Path(dataset_name).name != dataset_name
+        ):
+            self._send_json(409, {"ok": False, "error": "unknown collection dataset"})
+            return
+        try:
+            dataset_dir, remote_path = _collection_transfer_path(config, dataset_name)
+        except ValueError as error:
+            self._send_json(409, {"ok": False, "error": str(error)})
+            return
+        if body.get("direction") == "upload":
+            result = publish_qc(
+                Path(__file__).resolve().parents[4],
+                dataset_dir,
+                dataset_name,
+                config.collection.storage,
+                expected_path=remote_path,
+            )
+        elif body.get("direction") == "download":
+            result = fetch_qc(
+                Path(__file__).resolve().parents[4],
+                dataset_name,
+                dataset_dir,
+                config.collection.storage,
+                expected_path=remote_path,
+            )
+        else:
+            self._send_json(400, {"ok": False, "error": "invalid QC direction"})
+            return
+        self._send_json(200, {"ok": True, **result})
+
     def _post_select_collect_task(self, body: dict) -> None:
         task = str(body.get("task", "")).strip()
         dataset = str(body.get("dataset", "")).strip()
@@ -2639,9 +3896,126 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         self.ctx.session.selected_collect_task = task
         self.ctx.session.selected_collect_set = dataset
         self.ctx.session.selected_collect_task_index = task_index
+        self.ctx.session.collection_scene_id = None
+        self.ctx.session.collection_scene_round = None
+        self.ctx.session.collection_slot_id = None
+        self.ctx.session.collection_task_id = None
+        self.ctx.session.collection_sim_metadata = None
         self._send_json(
             200,
             {"ok": True, "task": task, "dataset": dataset, "task_index": task_index},
+        )
+
+    def _apply_collection_slot(self, slot: dict[str, Any] | None) -> None:
+        _apply_collection_slot_session(self.ctx.session, slot)
+
+    def _post_select_collection_slot(self, body: dict) -> None:
+        dataset = str(body.get("dataset") or "").strip()
+        slot_id = str(body.get("slot_id") or "").strip()
+        has_sim_metadata = "sim_metadata" in body
+        sim_metadata = body.get("sim_metadata")
+        if has_sim_metadata and sim_metadata is not None and not isinstance(sim_metadata, dict):
+            self._send_json(400, {"ok": False, "error": "sim_metadata must be an object"})
+            return
+        logger_obj = self.ctx.runtime.episode_logger
+        if logger_obj is not None and bool(getattr(logger_obj, "has_active_episode", False)):
+            self._send_json(409, {"ok": False, "error": "cannot switch slot while recording"})
+            return
+        try:
+            snapshot = _collection_slots_snapshot(self.ctx, dataset)
+        except ValueError as error:
+            self._send_json(400, {"ok": False, "error": str(error)})
+            return
+        selected = next((row for row in snapshot["rows"] if row["slot_id"] == slot_id), None)
+        if selected is None:
+            self._send_json(400, {"ok": False, "error": "unknown collection slot"})
+            return
+        if selected["state"] == "saving":
+            self._send_json(409, {"ok": False, "error": "collection slot is not selectable"})
+            return
+        if body.get("metadata_only") is True:
+            if not has_sim_metadata:
+                self._send_json(400, {"ok": False, "error": "sim_metadata is required"})
+                return
+            active = snapshot["active"]
+            session = self.ctx.session
+            if (
+                active is None
+                or active["slot_id"] != slot_id
+                or session.selected_collect_set != dataset
+                or session.collection_slot_id not in {None, slot_id}
+                or (
+                    session.collection_slot_id is None
+                    and session.selected_collect_task_index != active["task_index"]
+                )
+            ):
+                self._send_json(409, {"ok": False, "error": "collection selection changed"})
+                return
+            self._apply_collection_slot(active)
+            session.collection_sim_metadata = copy.deepcopy(sim_metadata)
+            self._send_json(
+                200,
+                {
+                    "ok": True,
+                    "active": active,
+                    "counts": snapshot["counts"],
+                    "sim_metadata_attached": session.collection_sim_metadata is not None,
+                },
+            )
+            return
+        config = self.ctx.runtime.active_config or self.ctx.config
+        select_collection_slot(
+            slot_state_path(config, dataset),
+            slot_id,
+            snapshot["slot_state"],
+            episode_index=(selected.get("episode") or {}).get("episode_index"),
+            manual=bool(body.get("manual", True)),
+        )
+        previous_slot_id = self.ctx.session.collection_slot_id
+        active = dict(selected)
+        active["repair"] = active["state"] in {"complete", "deferred", "rejected"}
+        active["state"] = "active"
+        self._apply_collection_slot(active)
+        if has_sim_metadata:
+            self.ctx.session.collection_sim_metadata = (
+                copy.deepcopy(sim_metadata) if sim_metadata is not None else None
+            )
+        elif previous_slot_id != slot_id:
+            self.ctx.session.collection_sim_metadata = None
+        self._send_json(
+            200,
+            {
+                "ok": True,
+                "active": active,
+                "counts": snapshot["counts"],
+                "sim_metadata_attached": self.ctx.session.collection_sim_metadata is not None,
+            },
+        )
+
+    def _post_skip_collection_slot(self, body: dict) -> None:
+        dataset = str(body.get("dataset") or "").strip()
+        slot_id = str(body.get("slot_id") or "").strip()
+        logger_obj = self.ctx.runtime.episode_logger
+        if logger_obj is not None and bool(getattr(logger_obj, "has_active_episode", False)):
+            self._send_json(409, {"ok": False, "error": "cannot skip slot while recording"})
+            return
+        try:
+            snapshot = _collection_slots_snapshot(self.ctx, dataset)
+        except ValueError as error:
+            self._send_json(400, {"ok": False, "error": str(error)})
+            return
+        active = snapshot["active"]
+        if active is None or active["slot_id"] != slot_id:
+            self._send_json(409, {"ok": False, "error": "collection slot is no longer active"})
+            return
+        config = self.ctx.runtime.active_config or self.ctx.config
+        defer_active_slot(slot_state_path(config, dataset), slot_id, snapshot["slot_state"])
+        updated = _collection_slots_snapshot(self.ctx, dataset)
+        self.ctx.session.collection_sim_metadata = None
+        self._apply_collection_slot(updated["active"])
+        self._send_json(
+            200,
+            {"ok": True, "active": updated["active"], "counts": updated["counts"]},
         )
 
     def _post_select_episode(self, body: dict) -> None:
@@ -2659,6 +4033,96 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         if enabled:
             self.ctx.active_tab = "collect"
         self._enqueue_ok(f"web:collect_arm:{'on' if enabled else 'off'}")
+
+    def _post_control_arm(self, body: dict) -> None:
+        if self.ctx.active_tab != "manual":
+            self._send_json(409, {"ok": False, "error": "Open DEVICE before enabling teleop"})
+            return
+        self._enqueue_ok(f"web:control_arm:{'on' if body.get('enabled') else 'off'}")
+
+    def _get_device_settings(self) -> None:
+        self._send_json(200, self.ctx.device_settings.status())
+
+    def _post_device_command(self, body: dict) -> None:
+        command = self.path.split("?", 1)[0].removeprefix("/api/")
+        if command == "device_control":
+            if self.ctx.active_tab != "manual":
+                self._send_json(409, {"ok": False, "error": "Open DEVICE before enabling control"})
+                return
+            argument = "on" if body.get("enabled") else "off"
+        else:
+            argument = body.get("component") or ""
+            if argument not in {"", "robot", "teleop", "camera"}:
+                self._send_json(400, {"ok": False, "error": "Unknown device component"})
+                return
+        if command in {"device_start", "device_stop"}:
+            try:
+                request_id = self.ctx.device_settings.queue_command(
+                    command.removeprefix("device_"), argument or None
+                )
+            except ValueError as error:
+                self._send_json(409, {"ok": False, "error": str(error)})
+                return
+            self._enqueue(f"web:{command}:{argument}:{request_id}")
+            self._send_json(200, {"ok": True, "request_id": request_id})
+            return
+        self._enqueue_ok(f"web:{command}:{argument}")
+
+    def _post_device_open_pico(self, body: dict) -> None:
+        try:
+            self.ctx.device_settings.service.request("open_pico")
+        except (ValueError, OSError, RuntimeError) as error:
+            self._send_json(400, {"ok": False, "error": str(error)})
+            return
+        self._send_json(200, {"ok": True})
+
+    def _post_device_kill_all(self, body: dict) -> None:
+        try:
+            result = self.ctx.device_settings.kill_all()
+            result.pop("commands", None)
+        except (ValueError, OSError, RuntimeError) as error:
+            self._send_json(409, {"ok": False, "error": str(error)})
+            return
+        self._send_json(200, {"ok": True, **result})
+
+    def _get_devices(self) -> None:
+        workspace = self.ctx.device_settings.workspace
+        config = self.ctx.runtime.active_config or self.ctx.config
+        selected = workspace.initial_selection(config)
+        for kind in selected:
+            selected[kind] = self._query_str(kind, selected[kind])
+        try:
+            values = workspace.resolve(selected)
+        except (ValueError, KeyError) as error:
+            self._send_json(400, {"ok": False, "error": str(error)})
+            return
+        self._send_json(
+            200,
+            {
+                "catalog": workspace.hardware.options(selected["robot"]),
+                "selected": selected,
+                "values": values,
+            },
+        )
+
+    def _post_device_selection(self, body: dict) -> None:
+        if self.ctx.device_settings.state in {"queued", "applying", "restarting"}:
+            self._send_json(409, {"ok": False, "error": "A device update is already pending"})
+            return
+        self.ctx.device_settings.state = "queued"
+        self._enqueue_ok("web:device_selection:" + json.dumps(body))
+
+    def _post_camera_profile(self, body: dict) -> None:
+        workspace = self.ctx.device_settings.workspace
+        try:
+            camera = body["camera"]
+            filename = str(body.get("path", ""))
+            if "content" in body:
+                filename = str(workspace.import_profile(camera, body["content"]))
+            data, settings = workspace.profile_values(camera, filename)
+            self._send_json(200, {"path": filename, "data": data, "settings": settings})
+        except (ValueError, TypeError, KeyError, OSError, yaml.YAMLError) as error:
+            self._send_json(400, {"ok": False, "error": str(error)})
 
     def _post_load_replay_dataset(self, body: dict) -> None:
         self._clear_collection_replay()
@@ -2724,6 +4188,23 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         if intent not in {"start", "accept", "cancel"}:
             self._send_json(400, {"ok": False, "error": f"unsupported operator intent: {intent}"})
             return
+        if intent == "start" and self.ctx.active_tab == "collect":
+            task = str(body.get("task", "")).strip()
+            dataset = str(body.get("dataset", "")).strip()
+            task_index = body.get("task_index")
+            session = self.ctx.session
+            if (
+                task != str(session.selected_collect_task or "")
+                or dataset != str(session.selected_collect_set or "")
+                or task_index != session.selected_collect_task_index
+            ):
+                self._send_json(
+                    409,
+                    {"ok": False, "error": "collection task selection is not confirmed"},
+                )
+                return
+            self._post_collect_start(body)
+            return
         self._enqueue_ok(f"web:operator_action:{intent}:ui")
 
     def _post_manual_qpos(self, body: dict) -> None:
@@ -2741,19 +4222,92 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         side = body.get("side", "l")
         state = body.get("state")
         if state in {"open", "close"}:
-            lock = "1" if body.get("lock", True) else "0"
+            lock = "1" if body.get("lock", False) else "0"
             self._enqueue_ok(f"web:gripper:{side}:{state}:{lock}")
             return
         value = body.get("value")
         arg = f"{side}:{value}" if value is not None else side
         self._enqueue_ok(f"web:gripper:{arg}")
 
-    def _post_collect_start(self, _body: dict) -> None:
+    def _post_gripper_unlock(self, _body: dict) -> None:
+        self._enqueue_ok("web:gripper_unlock")
+
+    def _post_haptic(self, body: dict) -> None:
+        """Vibrate the controllers for one explicit request from the orchestrator."""
+        try:
+            hands, intensity, duration_ms = _haptic_request(body, "")
+        except ValueError as error:
+            self._send_json(400, {"ok": False, "error": str(error)})
+            return
+        sent = [
+            hand
+            for hand in hands
+            if send_teleop_haptic(
+                self.ctx.runtime,
+                hand=hand,
+                intensity=intensity,
+                duration_ms=duration_ms,
+            )
+        ]
+        self._send_json(200, {"ok": bool(sent), "hands": sent})
+
+    def _post_collect_start(self, body: dict) -> None:
         self._clear_collection_replay()
         if self.ctx.active_tab != "collect" or not self.ctx.runtime.collection_teleop_armed:
             self.ctx.session.last_error = "Collection teleop requires COLLECT activation"
             self._send_json(200, {"ok": False, "error": self.ctx.session.last_error})
             return
+        session = self.ctx.session
+        sim_metadata = body.get("sim_metadata")
+        if (
+            "sim_metadata" in body
+            and sim_metadata is not None
+            and not isinstance(sim_metadata, dict)
+        ):
+            self._send_json(400, {"ok": False, "error": "sim_metadata must be an object"})
+            return
+        scene_id = str(body.get("scene_id") or session.collection_scene_id or "").strip()
+        slot_id = str(body.get("slot_id") or session.collection_slot_id or "").strip()
+        task_id = str(body.get("task_id") or session.collection_task_id or "").strip()
+        raw_round = body.get("scene_round", session.collection_scene_round)
+        scene_round = (
+            raw_round
+            if isinstance(raw_round, int) and not isinstance(raw_round, bool) and raw_round >= 0
+            else None
+        )
+        if session.collection_slot_id and (
+            slot_id != session.collection_slot_id
+            or scene_id != session.collection_scene_id
+            or task_id != session.collection_task_id
+            or scene_round != session.collection_scene_round
+        ):
+            self._send_json(
+                409,
+                {"ok": False, "error": "collection slot selection is not confirmed"},
+            )
+            return
+        if session.collection_slot_id:
+            try:
+                snapshot = _collection_slots_snapshot(
+                    self.ctx, str(session.selected_collect_set or "")
+                )
+            except ValueError:
+                snapshot = {"active": None}
+            active = snapshot["active"]
+            if active is None or active["slot_id"] != session.collection_slot_id:
+                self._send_json(
+                    409,
+                    {"ok": False, "error": "collection slot is no longer active"},
+                )
+                return
+        session.collection_scene_id = scene_id[:128] or None
+        session.collection_slot_id = slot_id[:256] or None
+        session.collection_task_id = task_id[:128] or None
+        session.collection_scene_round = scene_round
+        if "sim_metadata" in body:
+            session.collection_sim_metadata = (
+                copy.deepcopy(sim_metadata) if sim_metadata is not None else None
+            )
         self._enqueue_ok("web:collect_start")
 
     def _post_exit_collection_replay(self, _body: dict) -> None:
@@ -2801,7 +4355,7 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             )
             return
         verdict = str(body.get("verdict", ""))
-        if verdict not in {"", "pass", "fail"}:
+        if verdict not in {"", "pass", "fail", "unreviewed"}:
             self._send_json(
                 400,
                 {"ok": False, "error": f"unsupported QC verdict: {verdict}"},
@@ -2816,12 +4370,26 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             return
         task = str(body.get("task", ""))
         collection_dataset = str(body.get("dataset", "")).strip() or None
-        active_task = format_task_label(self.ctx.session.selected_collect_task)
-        active_set = self.ctx.session.selected_collect_set
-        if task != active_task or collection_dataset != active_set:
+        config = self.ctx.runtime.active_config or self.ctx.config
+        if collection_dataset is not None:
+            # Saved episodes retain their original wording after task edits.
+            # Resolve the named dataset with a current configured prompt; the
+            # recorder validates the saved episode ID and pending writes there.
+            entries = config.collection.tasks.get(collection_dataset)
+            valid_target = bool(entries)
+            if valid_target:
+                task = str(entries[0][0])
+        else:
+            # Legacy requests without a dataset still need an exact prompt to
+            # select the correct dataset.
+            valid_target = any(
+                any(str(entry[0]) == task for entry in entries)
+                for entries in config.collection.tasks.values()
+            )
+        if not valid_target:
             self._send_json(
                 409,
-                {"ok": False, "error": "collection review task is no longer active"},
+                {"ok": False, "error": "unknown collection review target"},
             )
             return
         ok = logger_obj.mark_collection_qc(
@@ -2844,18 +4412,24 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         if logger_obj is None:
             self._send_json(409, {"ok": False, "error": "collection recording is unavailable"})
             return None
-        task = str(body.get("task", ""))
-        active_task = format_task_label(self.ctx.session.selected_collect_task)
-        collection_dataset = str(body.get("dataset", "")).strip() or None
-        active_set = self.ctx.session.selected_collect_set
-        if task != active_task or collection_dataset not in {None, active_set}:
+        collection_dataset = str(
+            body.get("dataset") or self.ctx.session.selected_collect_set or ""
+        ).strip()
+        config = self.ctx.runtime.active_config or self.ctx.config
+        entries = config.collection.tasks.get(collection_dataset)
+        if not entries:
             self._send_json(
                 409,
-                {"ok": False, "error": "collection task is no longer active"},
+                {"ok": False, "error": "unknown collection dataset"},
             )
             return None
-        snapshot = _status_snapshot_for_poll(logger_obj, task, active_set)
-        dataset_dir = Path(str(snapshot.get("dataset_dir", ""))).resolve()
+        # Export belongs to the dataset, independently of the capture cursor.
+        snapshot = _status_snapshot_for_poll(logger_obj, str(entries[0][0]), collection_dataset)
+        raw_dataset_dir = str(snapshot.get("dataset_dir") or "")
+        if not raw_dataset_dir:
+            self._send_json(404, {"ok": False, "error": "collection dataset is unavailable"})
+            return None
+        dataset_dir = Path(raw_dataset_dir).resolve()
         if not dataset_dir.is_dir():
             self._send_json(404, {"ok": False, "error": "collection dataset is unavailable"})
             return None
@@ -2878,10 +4452,11 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
         dataset_format = self._requested_dataset_format(body)
         if dataset_format is None:
             return
-        accepted_dir, rejected_dir = _quality_export_paths(dataset_dir, dataset_format)
+        output_dir = _quality_export_paths(dataset_dir, dataset_format)
         with self.ctx.quality_upload_lock:
             if any(
-                existing.local_dir == str(accepted_dir) and existing.state in {"queued", "running"}
+                existing.local_dir == str(output_dir)
+                and existing.state in {"queued", "scanning", "running"}
                 for existing in self.ctx.quality_upload_jobs.values()
             ):
                 self._send_json(
@@ -2905,36 +4480,27 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             job = _QualityExportJob(
                 job_id=job_id,
                 source_dir=str(dataset_dir),
-                accepted_dir=str(accepted_dir),
-                rejected_dir=str(rejected_dir),
+                output_dir=str(output_dir),
                 dataset_format=dataset_format,
             )
             self.ctx.quality_export_jobs[job_id] = job
 
         threading.Thread(
             target=_run_quality_export,
-            args=(
-                self.ctx,
-                job_id,
-                dataset_dir,
-                accepted_dir,
-                rejected_dir,
-                dataset_format,
-            ),
+            args=(self.ctx, job_id, dataset_dir, output_dir, dataset_format),
             name=f"quality-export-{job_id[:8]}",
             daemon=True,
         ).start()
         self._send_json(202, {"ok": True, **job.payload()})
 
     def _post_collect_quality_upload(self, body: dict) -> None:
-        config = self.ctx.runtime.active_config or self.ctx.config
         dataset_dir = self._active_collection_dataset(body)
         if dataset_dir is None:
             return
         dataset_format = self._requested_dataset_format(body)
         if dataset_format is None:
             return
-        local_dir, _ = _quality_export_paths(dataset_dir, dataset_format)
+        local_dir = _quality_export_paths(dataset_dir, dataset_format)
         with self.ctx.quality_upload_lock:
             exports = [
                 job
@@ -2945,48 +4511,137 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             if (
                 latest_export is None
                 or latest_export.state != "completed"
-                or latest_export.accepted_dir != str(local_dir)
+                or latest_export.output_dir != str(local_dir)
             ):
                 self._send_json(
                     409,
                     {"ok": False, "error": "export the current dataset before upload"},
                 )
                 return
-        marker_path = local_dir / "meta" / "quality_split.json"
+        dataset_name = self.ctx.session.selected_collect_set or dataset_dir.name
+        self._post_quality_upload(
+            body,
+            dataset_dir=dataset_dir,
+            local_dir=local_dir,
+            dataset_format=dataset_format,
+            dataset_name=dataset_name,
+        )
+
+    def _post_dashboard_upload(self, body: dict) -> None:
+        dataset_format = self._requested_dataset_format(body)
+        if dataset_format is None:
+            return
+        source_value = body.get("source_dir")
+        if not isinstance(source_value, str) or not source_value.strip():
+            self._send_json(400, {"ok": False, "error": "source_dir is required"})
+            return
         try:
-            marker = json.loads(marker_path.read_text())
+            source_dir = Path(source_value).resolve()
         except (OSError, ValueError):
-            logger.warning("Invalid accepted collection export marker", exc_info=True)
-            self._send_json(400, {"ok": False, "error": "invalid accepted export"})
+            self._send_json(400, {"ok": False, "error": "invalid source_dir"})
             return
-        if marker.get("subset") != "accepted":
-            self._send_json(400, {"ok": False, "error": "only accepted exports can be uploaded"})
+        candidate = next(
+            (
+                item
+                for item in discover_dashboard_upload_candidates(self._dashboard_roots())
+                if item["source_dir"] == str(source_dir)
+                and item["dataset_format"] == dataset_format
+            ),
+            None,
+        )
+        if candidate is None:
+            self._send_json(404, {"ok": False, "error": "dataset export is unavailable"})
             return
-        if marker.get("dataset_format") != dataset_format:
-            self._send_json(400, {"ok": False, "error": "accepted export format mismatch"})
+        self._post_quality_upload(
+            body,
+            dataset_dir=source_dir,
+            local_dir=Path(str(candidate["output_dir"])),
+            dataset_format=dataset_format,
+            dataset_name=str(candidate["dataset"]),
+        )
+
+    def _post_quality_upload(
+        self,
+        body: dict,
+        *,
+        dataset_dir: Path,
+        local_dir: Path,
+        dataset_format: str,
+        dataset_name: str,
+    ) -> None:
+        config = self.ctx.runtime.active_config or self.ctx.config
+        dataset_dir = dataset_dir.resolve()
+        local_dir = local_dir.resolve()
+        if local_dir != _quality_export_paths(dataset_dir, dataset_format):
+            self._send_json(400, {"ok": False, "error": "export path mismatch"})
             return
-        try:
-            marker_source = Path(str(marker.get("source_dir", ""))).resolve()
-        except (OSError, ValueError):
-            marker_source = Path()
-        if marker_source != dataset_dir:
-            self._send_json(400, {"ok": False, "error": "accepted export source mismatch"})
+        if not (local_dir / "meta" / "episodes.jsonl").is_file():
+            self._send_json(400, {"ok": False, "error": "export the dataset before upload"})
             return
 
-        dataset_name = self.ctx.session.selected_collect_set or (
-            dataset_dir.parent.name if dataset_dir.name == "raw" else dataset_dir.name
-        )
         upload_specs = resolve_dataset_uploads(config.collection.storage, dataset_name)
         if not upload_specs:
             self._send_json(409, {"ok": False, "error": "dataset upload is not configured"})
             return
         remote_dir = ", ".join(spec.target for spec in upload_specs)
-        with self.ctx.quality_upload_lock:
-            for existing in self.ctx.quality_upload_jobs.values():
-                if existing.local_dir == str(local_dir) and existing.state in {"queued", "running"}:
+        confirmed = body.get("confirmed") is True
+        plan_id = str(body.get("plan_id", "") or "").strip()
+        if confirmed:
+            with self.ctx.quality_upload_lock:
+                job = self.ctx.quality_upload_jobs.get(plan_id)
+                if job is None:
+                    self._send_json(404, {"ok": False, "error": "upload scan not found"})
+                    return
+                plan = job._plan
+                if (
+                    job.local_dir != str(local_dir)
+                    or plan is None
+                    or tuple(spec for spec, _ in plan.backends) != upload_specs
+                ):
+                    self._send_json(409, {"ok": False, "error": "upload scan no longer matches"})
+                    return
+                if job.state != "ready":
+                    self._send_json(409, {"ok": False, "error": "upload scan is not ready"})
+                    return
+                if any(
+                    existing is not job
+                    and existing.local_dir == str(local_dir)
+                    and existing.state in {"queued", "scanning", "running"}
+                    for existing in self.ctx.quality_upload_jobs.values()
+                ):
                     self._send_json(
                         409,
                         {"ok": False, "error": "dataset upload is already running"},
+                    )
+                    return
+                job.state = "queued"
+                job.error = ""
+                job.files_completed = 0
+                job.bytes_completed = 0
+                job.current_file = ""
+
+            threading.Thread(
+                target=_run_quality_upload,
+                args=(self.ctx, plan_id),
+                name=f"quality-upload-{plan_id[:8]}",
+                daemon=True,
+            ).start()
+            self._send_json(202, {"ok": True, **job.payload()})
+            return
+        if plan_id:
+            self._send_json(400, {"ok": False, "error": "confirmed is required for upload"})
+            return
+
+        with self.ctx.quality_upload_lock:
+            for existing in self.ctx.quality_upload_jobs.values():
+                if existing.local_dir == str(local_dir) and existing.state in {
+                    "queued",
+                    "scanning",
+                    "running",
+                }:
+                    self._send_json(
+                        409,
+                        {"ok": False, "error": "dataset upload scan is already running"},
                     )
                     return
             _trim_finished_jobs(self.ctx.quality_upload_jobs)
@@ -2994,15 +4649,16 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
             job = _QualityUploadJob(
                 job_id=job_id,
                 local_dir=str(local_dir),
+                source_dir=str(dataset_dir),
                 remote_dir=remote_dir,
                 backends=tuple(spec.backend for spec in upload_specs),
             )
             self.ctx.quality_upload_jobs[job_id] = job
 
         threading.Thread(
-            target=_run_quality_upload,
-            args=(self.ctx, job_id, local_dir, upload_specs),
-            name=f"quality-upload-{job_id[:8]}",
+            target=_run_quality_upload_scan,
+            args=(self.ctx, job_id, local_dir, dataset_dir, upload_specs),
+            name=f"quality-upload-scan-{job_id[:8]}",
             daemon=True,
         ).start()
         self._send_json(202, {"ok": True, **job.payload()})
@@ -3047,9 +4703,19 @@ class ConsoleRequestHandler(BaseHTTPRequestHandler):
 # do_GET because they own a path subtree). Values are unbound handler methods.
 _GET_ROUTES = {
     "/api/config": ConsoleRequestHandler._get_config,
+    "/api/local_sessions": ConsoleRequestHandler._get_local_sessions,
+    "/api/local_session": ConsoleRequestHandler._get_local_session,
+    "/api/device_settings": ConsoleRequestHandler._get_device_settings,
+    "/api/devices": ConsoleRequestHandler._get_devices,
+    "/api/scene_plan": ConsoleRequestHandler._get_scene_plan,
+    "/api/collection_slots": ConsoleRequestHandler._get_collection_slots,
     "/api/status": ConsoleRequestHandler._get_status,
+    "/api/teleop/feedback": ConsoleRequestHandler._stream_teleop_feedback,
     "/api/episodes": ConsoleRequestHandler._get_episodes,
     "/api/dashboard": ConsoleRequestHandler._get_dashboard,
+    "/api/dashboard_upload": ConsoleRequestHandler._get_collect_quality_upload,
+    "/api/dataset_manager": ConsoleRequestHandler._get_dataset_manager,
+    "/api/dataset_manager/job": ConsoleRequestHandler._get_dataset_manager_job,
     "/api/collect_quality_export": ConsoleRequestHandler._get_collect_quality_export,
     "/api/collect_quality_upload": ConsoleRequestHandler._get_collect_quality_upload,
     "/api/frame": ConsoleRequestHandler._get_frame,
@@ -3094,6 +4760,7 @@ _POST_COMMANDS = {
     "/api/rollout_intervention_abandon": "web:rollout_intervention_abandon",
     "/api/warmup": "web:warmup",
     "/api/eval_stop": "web:stop",
+    "/api/eval_cancel": "web:eval_cancel",
     "/api/eval_reset": "web:reset",
     "/api/init_done": "web:init_done",
 }
@@ -3101,6 +4768,11 @@ _POST_COMMANDS = {
 # POST endpoints needing a body-derived command arg, a runtime mutation, or a custom
 # response. Each handler owns its own _send_json. Values are unbound (self, body) methods.
 _POST_ROUTES = {
+    "/api/device_start": ConsoleRequestHandler._post_device_command,
+    "/api/device_open_pico": ConsoleRequestHandler._post_device_open_pico,
+    "/api/device_kill_all": ConsoleRequestHandler._post_device_kill_all,
+    "/api/device_stop": ConsoleRequestHandler._post_device_command,
+    "/api/device_control": ConsoleRequestHandler._post_device_command,
     "/api/client_trace": ConsoleRequestHandler._post_client_trace,
     "/api/rl/select_task": ConsoleRequestHandler._post_rl_select_task,
     "/api/rl/select_policy": ConsoleRequestHandler._post_rl_select_policy,
@@ -3119,15 +4791,32 @@ _POST_ROUTES = {
     "/api/exit_collect_replay": ConsoleRequestHandler._post_exit_collection_replay,
     "/api/review_episode": ConsoleRequestHandler._post_review_episode,
     "/api/select_task": ConsoleRequestHandler._post_select_task,
+    "/api/select_model": ConsoleRequestHandler._post_select_model,
+    "/api/debug_record": ConsoleRequestHandler._post_debug_record,
+    "/api/new_debug_run": ConsoleRequestHandler._post_new_debug_run,
+    "/api/delete_local_run": ConsoleRequestHandler._post_delete_local_run,
+    "/api/restore_local_run": ConsoleRequestHandler._post_restore_local_run,
+    "/api/local_replay": ConsoleRequestHandler._post_local_replay,
+    "/api/hf/task_set/sync": ConsoleRequestHandler._post_hf_task_set_sync,
+    "/api/hf/assets/download": ConsoleRequestHandler._post_hf_assets_download,
+    "/api/hf/dataset/upload": ConsoleRequestHandler._post_hf_dataset_upload,
+    "/api/hf/qc/sync": ConsoleRequestHandler._post_hf_qc_sync,
     "/api/select_collect_task": ConsoleRequestHandler._post_select_collect_task,
+    "/api/select_collection_slot": ConsoleRequestHandler._post_select_collection_slot,
+    "/api/skip_collection_slot": ConsoleRequestHandler._post_skip_collection_slot,
     "/api/select_episode": ConsoleRequestHandler._post_select_episode,
     "/api/tab_switch": ConsoleRequestHandler._post_tab_switch,
     "/api/collect_arm": ConsoleRequestHandler._post_collect_arm,
+    "/api/control_arm": ConsoleRequestHandler._post_control_arm,
+    "/api/device_selection": ConsoleRequestHandler._post_device_selection,
+    "/api/camera_profile": ConsoleRequestHandler._post_camera_profile,
     "/api/inspect_dataset": ConsoleRequestHandler._post_inspect_dataset,
     "/api/qc_mark": ConsoleRequestHandler._post_qc_mark,
     "/api/collect_qc_mark": ConsoleRequestHandler._post_collect_qc_mark,
     "/api/collect_quality_export": ConsoleRequestHandler._post_collect_quality_export,
     "/api/collect_quality_upload": ConsoleRequestHandler._post_collect_quality_upload,
+    "/api/dashboard_upload": ConsoleRequestHandler._post_dashboard_upload,
+    "/api/dataset_manager": ConsoleRequestHandler._post_dataset_manager,
     "/api/annotate": ConsoleRequestHandler._post_annotate,
     "/api/episode_annotation": ConsoleRequestHandler._post_episode_annotation,
     "/api/load_replay_dataset": ConsoleRequestHandler._post_load_replay_dataset,
@@ -3142,12 +4831,15 @@ _POST_ROUTES = {
     "/api/manual_send": ConsoleRequestHandler._post_manual_send,
     "/api/manual_dispatch": ConsoleRequestHandler._post_manual_dispatch,
     "/api/gripper": ConsoleRequestHandler._post_gripper,
+    "/api/gripper_unlock": ConsoleRequestHandler._post_gripper_unlock,
+    "/api/haptic": ConsoleRequestHandler._post_haptic,
     "/api/collect_start": ConsoleRequestHandler._post_collect_start,
     "/api/select_ckpt": ConsoleRequestHandler._post_select_ckpt,
     "/api/init_move": ConsoleRequestHandler._post_init_move,
     "/api/init_gripper": ConsoleRequestHandler._post_init_gripper,
     "/api/eval_start": ConsoleRequestHandler._eval_start,
     "/api/score": ConsoleRequestHandler._eval_score,
+    "/api/eval_discard": ConsoleRequestHandler._eval_discard,
 }
 
 
@@ -3157,6 +4849,7 @@ def build_console_context(
     session: SessionState,
     output_dir: str = "",
     *,
+    language: str = "en",
     with_scene: bool = True,
     with_obs_reader: bool = True,
     with_preview: bool = True,
@@ -3188,9 +4881,26 @@ def build_console_context(
         obs_reader=runtime.transport.create_observation_reader() if with_obs_reader else None,
         scene=scene,
         active_tab=_resolve_initial_tab(config),
+        language=language if language in {"zh", "en"} else "en",
         output_dir=output_dir,
     )
     # RESULT-tab playback reads recorded episodes under <output_dir>/episodes.
+    # ROS transports already subscribe to the configured image topics.  A
+    # separate ZMQ preview is only needed for non-ROS hardware launchers;
+    # creating it for ROS would hide the live ROS frames behind an idle socket.
+    if with_obs_reader and config.transport.type not in {"dataset", "ros1", "ros2"}:
+        workspace = ctx.device_settings.workspace
+        selected = workspace.initial_selection(config)
+        spec = workspace.hardware.options(selected["robot"])["camera"][selected["camera"]]
+        if spec.get("separate"):
+            from core.devices.camera import CameraPreview
+
+            values = workspace.resolve(selected)
+            ctx.camera_preview = CameraPreview(
+                values["robot"]["settings"]["camera_endpoint"],
+                list(config.collection.schema.cameras),
+                runtime.transport.is_shutdown,
+            )
     if with_preview and output_dir:
         from core.app.console.episode_preview import EpisodePreview
 
@@ -3206,11 +4916,13 @@ def start_console_server(
     port: int,
     host: str = "0.0.0.0",
     output_dir: str = "",
+    language: str = "en",
 ) -> threading.Thread:
     """Launch a daemon HTTP server thread bound to ``host:port``."""
-    ctx = build_console_context(config, runtime, session, output_dir)
+    ctx = build_console_context(config, runtime, session, output_dir, language=language)
     ConsoleRequestHandler.ctx = ctx
-    server = ThreadingHTTPServer((host, port), ConsoleRequestHandler)
+    server = ReusableThreadingHTTPServer((host, port), ConsoleRequestHandler)
+    runtime.console_server = server
 
     def serve() -> None:
         """Thread body: serve requests until the server is shut down."""
@@ -3219,7 +4931,27 @@ def start_console_server(
         server.serve_forever()
 
     thread = threading.Thread(target=serve, name="eva-console-server", daemon=True)
+    runtime.console_server_thread = thread
     thread.start()
     if str(config.transport.type) in _LIVE_TRANSPORT_TYPES:
         _prewarm_transform_worker(config, runtime)
     return thread
+
+
+def stop_console_server(runtime: RuntimeState) -> None:
+    """Release the console listener before the process is restarted or exits."""
+    server = getattr(runtime, "console_server", None)
+    thread = getattr(runtime, "console_server_thread", None)
+    if server is None:
+        return
+    try:
+        # ``shutdown`` must be called outside the serve_forever thread. The application
+        # loop owns this cleanup, so it also guarantees the socket is closed before
+        # ``run()`` returns and main.py invokes os.execv for a device selection.
+        server.shutdown()
+    finally:
+        server.server_close()
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=2.0)
+        runtime.console_server = None
+        runtime.console_server_thread = None

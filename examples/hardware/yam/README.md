@@ -1,10 +1,31 @@
 # YAM YAM Hardware
 
+## Startup and Normal Stop Poses
+
+`config.yaml` defines `robot.config.robot.initial_qpos` and `safe_qpos` as 14 values:
+left six joints, left gripper, right six joints, right gripper. Joint angles are
+in radians. YAM gripper values use `1=open` and `0=closed`; the console remaps
+that convention to the URDF so the 3D fingers match the physical grippers. The
+console preserves measured gripper positions during these moves.
+If `safe_qpos` is omitted, it defaults to `initial_qpos`. The configured YAM
+initial joint targets match the X5 nominal
+targets; this does not imply identical Cartesian poses between the two robots.
+Validate the pose and unobstructed path on your installation before a real move.
+
+Robot Start moves to `initial_qpos`. Normal Robot Stop locks teleoperation, moves
+to `safe_qpos`, checks fresh feedback and settling, then closes the hardware node.
+Failure or interruption withholds shutdown and leaves the process available for
+recovery. Robot shutdown is not forcibly killed on timeout. The YAM SDK releases
+motor torque when closing; this is not a mains-power relay operation. Zero joint
+angles alone do not prove mechanical support or power-loss safety.
+
+This normal shutdown sequence is not an emergency stop. Use the physical emergency
+stop when immediate intervention is necessary; do not wait for a parking move.
+
 This adapter connects a two-follower YAM Cell-style pair (`dual_yam`) to
-EVA through the existing ZMQ transport. The overhead and two wrist Orbbec
-cameras are bound by serial number so camera roles remain stable across reboots.
-An Intel RealSense D405 remains available as an optional alternative overhead
-camera. The adapter
+EVA through ZMQ. The default camera combination uses a RealSense D405 overhead
+and two Orbbec Gemini 305 wrist cameras, bound by serial number. An Orbbec
+Gemini 355 is available as an alternative overhead camera. The adapter
 intentionally targets the base YAM arm; YAM Pro, YAM Ultra, and Big YAM need
 their own limits and robot descriptions before they can be enabled safely.
 
@@ -13,18 +34,14 @@ dependencies therefore live in this directory's own `pyproject.toml` and its
 environment is created under `examples/hardware/yam/.venv`; the two processes
 exchange only ZMQ messages.
 
-## 1. One-time SDK setup
+## 1. Runtime and SDK
 
-From the EVA Client root:
-
-```bash
-bash examples/hardware/yam/setup_sdk.sh
-```
-
-The SDK is a Git submodule pinned to the tested `Noietch/i2rt` fork
-(`main`, commit `70a053b`), based on the official v1.2.4 release. The fork
-contains the reviewed EVA compatibility and safety changes, so setup initializes
-that exact revision directly and runs `uv sync --project examples/hardware/yam`.
+Reuse the existing Python 3.11 environment at `examples/hardware/yam/.venv`.
+The SDK is a Git submodule at `SDK/i2rt`; the repository's Git submodule entry
+defines its revision. The legacy `setup_sdk.sh` synchronizes dependencies and
+also checks a separate hardcoded SDK revision, so it is not a repair command
+for an existing environment. Add only missing dependencies after confirming
+that the plan preserves installed versions and files.
 The subproject declares `i2rt`, `pyrealsense2`, `pyorbbecsdk2`, OpenCV, `pyzmq`,
 the EVA PyRoki/JAX FK stack, and the SDK's NumPy/build constraints. The hardware node uses the same
 registered EVA kinematics model as inference, replay, and visualization.
@@ -60,6 +77,13 @@ sh examples/hardware/yam/SDK/i2rt/scripts/reset_all_can.sh
 
 ## 3. Run dual YAM followers
 
+The DEVICE workflow defaults to `VR`, independently of the standalone shell
+launcher's dual-leader default below. Select `Dual YAM`, a camera combination,
+and `VR`, `EVA-VR (PICO)`, or `Leader` under Operation, then apply. Robot,
+Camera, and Operation have separate Start controls; Leader adds the teaching
+handle parameters to the robot process. Stop device processes explicitly from
+DEVICE when finished, because they survive EVA client exit.
+
 `run_hardware.sh` defaults to the dual-YAM layout, enables both teaching-handle
 leaders, and maps followers/leaders to `can0` through `can3` when persistent CAN
 names are unavailable. No robot or leader enable switch is required:
@@ -80,26 +104,45 @@ stops. A verified `YAM_GRIPPER_LIMITS=CLOSED,OPEN` override skips calibration.
 Then launch EVA:
 
 ```bash
-eva --config configs/01_deploy/dual_yam/openpi_qpos.py --web-port 8080
+.venv/bin/eva --config configs/01_deploy/dual_yam/openpi_qpos.py --web-port 8080
 ```
 
-The default three-camera mapping is:
+The default three-camera combination is:
 
-- `cam_high=CP0HC530000Z` (Orbbec Gemini 335)
-- `cam_left_wrist=CV2R1610003Z` (Orbbec Gemini 305)
-- `cam_right_wrist=CV2L360000CL` (Orbbec Gemini 305)
+- `cam_high=260422275306` (RealSense D405)
+- `cam_left_wrist=CV2L360000CL` (Orbbec Gemini 305)
+- `cam_right_wrist=CV2R1610003Z` (Orbbec Gemini 305)
 
-The launcher enables all three Orbbec keys by default. For single-camera
-diagnosis, set `ORBBEC_ENABLED_CAMERAS=cam_right_wrist`. Streams default to
-`640x480` MJPG at 30 FPS, the highest rate verified with all three cameras on
-this workstation. A 60 FPS override is available, but all three devices are not
-reliably concurrent at that rate. Override mappings with
+The DEVICE camera dropdown exposes two named three-camera combinations:
+`1 D405 + 2 Orbbec 305` (default) and
+`2 Orbbec 305 + 1 Orbbec 355`. `None` disables all camera streams. Each
+combination is a list of three entries from `camera_devices` in `config.yaml`.
+
+The DEVICE camera combinations configure each wrist independently with brightness
+`0`, manual exposure `100` (Orbbec SDK units), and gain `16`. These settings were
+checked under the current workcell lighting to reduce temporal noise; lighting
+changes may require retuning. The overhead camera retains its own settings.
+The node accepts repeatable `--orbbec-camera-brightness KEY=VALUE`,
+`--orbbec-camera-exposure KEY=VALUE`, and `--orbbec-camera-gain KEY=VALUE` options.
+An exposure override disables auto exposure for that camera; remove both exposure
+and gain overrides to return to auto exposure. Values apply on camera startup.
+The standalone shell launcher below retains its separate defaults.
+DEVICE combinations also enable `--orbbec-reset-on-start`: selected Orbbec
+devices reboot once in a temporary process before capture starts. This clears
+stale streams after Stop/Kill; capture uses a fresh SDK context after reboot.
+Allow several seconds for the cameras to reconnect before they become ready.
+
+For single-camera diagnosis with `run_hardware.sh`, set
+`D405_ENABLED_CAMERAS=` and `ORBBEC_ENABLED_CAMERAS=cam_right_wrist`. Streams
+default to `640x480` MJPG at 30 FPS. Override mappings with
 `ORBBEC_CAM_HIGH_SERIAL`, `ORBBEC_CAM_LEFT_WRIST_SERIAL`, and
 `ORBBEC_CAM_RIGHT_WRIST_SERIAL`; tune the stream with `ORBBEC_CAMERA_WIDTH`,
 `ORBBEC_CAMERA_HEIGHT`, `ORBBEC_CAMERA_FPS`, `ORBBEC_CAMERA_FORMAT`, and
-`ORBBEC_CAMERA_TIMEOUT_MS`. Auto exposure remains enabled and a small default
-brightness compensation of `+5` is applied; override it with
-`ORBBEC_CAMERA_BRIGHTNESS` (`-64..64`).
+`ORBBEC_CAMERA_TIMEOUT_MS`. Auto exposure remains enabled and a moderate default
+brightness compensation of `+25` is applied; override it with
+`ORBBEC_CAMERA_BRIGHTNESS` (`-64..64`). Color anti-flicker defaults to `50 Hz`
+for the local power grid; use `ORBBEC_POWER_LINE_FREQUENCY=60` for 60 Hz lighting
+or `ORBBEC_POWER_LINE_FREQUENCY=0` to disable it.
 
 All enabled Orbbec streams share one isolated SDK process and one SDK context.
 The launcher starts the left, right, and overhead streams sequentially and
@@ -126,14 +169,10 @@ color auto exposure, and discard 30 frames before publishing. Camera waits do
 not run in the motor SDK process. Override the warmup with
 `ORBBEC_CAMERA_WARMUP_FRAMES`.
 
-To use the optional D405 overhead camera, disable the Orbbec `cam_high` mapping
-and enable the D405, for example
-`ORBBEC_ENABLED_CAMERAS=cam_left_wrist,cam_right_wrist D405_ENABLED_CAMERAS=cam_high`.
-For the D405, every `run_hardware.sh` launch loads
-`profiles/d405_workcell.json`. It enables automatic exposure, turns on the D405
-exposure/gain limit toggles, caps exposure at 33 ms and gain at 64, and discards
-90 startup frames while exposure converges. Override the profile with
-`D405_CAMERA_PROFILE`; the individual
+The default `run_hardware.sh` launch enables the D405 `cam_high` mapping and the
+two Orbbec wrist mappings. The matching `camera_devices.d405_high` entry in
+`config.yaml` enables automatic exposure, caps exposure at 16 ms and gain at 32,
+and discards 90 startup frames while exposure converges. The individual
 `D405_CAMERA_AUTO_EXPOSURE_LIMIT_US`, `D405_CAMERA_AUTO_GAIN_LIMIT`,
 `D405_CAMERA_EXPOSURE_US`, and `D405_CAMERA_WARMUP_FRAMES` variables remain
 available for temporary tuning.
@@ -152,7 +191,7 @@ LEFT_LEADER_CAN=can_leader_l \
 RIGHT_LEADER_CAN=can_leader_r \
   bash examples/hardware/yam/run_hardware.sh
 
-eva --config configs/02_collection/dual_yam.py --web-port 8080
+.venv/bin/eva --config configs/02_collection/dual_yam.py --web-port 8080
 ```
 
 The real node publishes leader positions as `action.qpos` while commanding the
@@ -175,6 +214,31 @@ thread sends cached camera/state observations at 30 Hz. The publisher never
 touches the CAN SDK. Override the rates independently with `CONTROL_RATE` and
 `PUBLISH_RATE`. The periodic hardware status log includes the achieved control
 rate and per-joint `target - current` tracking error in radians.
+
+Follower grippers independently limit fast target changes to `2.0` normalized
+travel units per second by default, giving a minimum full-stroke target ramp of
+0.5 seconds without slowing the six arm joints. Actual travel can take longer
+under the existing torque limits and damping. Slow teaching-handle motion is
+passed through unchanged. Configure
+`robot.dual_yam.settings.gripper_max_speed` in `config.yaml`; set it to `0` to
+disable the limiter.
+
+Follower grippers use bounded software impedance on every SDK control tick:
+`torque = clip(kp * (target - position) - damping * velocity, torque_limits)`.
+The calculation uses motor radians and rad/s, and limits the complete torque
+command before sending it through MIT mode with onboard gripper kp/kd set to
+zero. The six arm joints retain their existing control. There is no contact
+state machine, blocked-gripper correction, or added gripper friction torque.
+
+Configure `gripper_kp: 5.0`, `gripper_damping: 0.5`,
+`gripper_close_torque_limit: 0.29` and `gripper_open_torque_limit: 0.29` under
+`robot.dual_yam.settings` in `config.yaml`. Torque limits are motor Nm, not
+measured fingertip force limits. They apply during position tracking and
+hold-position idle; gravity-comp idle retains zero gripper output. Restart the
+Robot process to apply changes. Automatic limit calibration uses its existing
+separate torque procedure and must run with an empty gripper. The former
+`gripper_force_limit` and `gripper_force_compensation` settings are replaced by
+these torque limits; remove any saved overrides for the former settings.
 
 After selecting a collection task and switching `ARM ON` in the Collection page,
 either leader's `RECORD` button starts an episode when idle and ends/saves it

@@ -4,21 +4,9 @@ _base_ = ["../../00_base/defaults.py"]
 
 console = dict(initial_tab="debug")
 
-robot = dict(
-    type="agibot_g2",
-    gripper_threshold=-0.4,
-    gripper_open=0.0,
-    gripper_close=-0.785,
-)
+robot = dict(type="agibot_g2")
 
-transport = dict(
-    type="zmq",
-)
-
-policy = dict(
-    type="openpi_rtc",
-    backend_options=dict(latency_k=4),
-)
+policy = dict(type="openpi_rtc", backend_options=dict(latency_k=4))
 
 inference_cfg = dict(
     debug_tasks=[

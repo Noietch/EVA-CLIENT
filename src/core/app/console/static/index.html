@@ -1,16 +1,30 @@
 <!doctype html>
-<html lang="zh">
+<html lang="__EVA_LANGUAGE__" data-eva-language="__EVA_LANGUAGE__">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>EVA · INSTRUMENT CONSOLE</title>
+<title>EVA · CLIENT</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='30 35 190 190'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='70' y1='58' x2='196' y2='140' gradientUnits='userSpaceOnUse'%3E%3Cstop stop-color='%23FFC98A'/%3E%3Cstop offset='.45' stop-color='%23FB8C2E'/%3E%3Cstop offset='1' stop-color='%23C2410C'/%3E%3C/linearGradient%3E%3C/defs%3E%3Cpath d='M192.09 91 A74 74 0 1 1 85.56 67.38' fill='none' stroke='%23AAAAAF' stroke-width='26'/%3E%3Cpath d='M85.56 67.38 A74 74 0 0 1 192.09 91' fill='none' stroke='url(%23g)' stroke-width='26'/%3E%3C/svg%3E" />
 <link rel="stylesheet" href="/css/console.css" />
 </head>
 <body>
 
   <!-- ============ telemetry bar ============ -->
   <div class="telemetry">
-    <span class="brand">EVA <b>CONSOLE</b></span>
+    <span class="brand">
+      <svg class="brand-icon" viewBox="30 35 190 190" aria-hidden="true" focusable="false">
+        <defs>
+          <linearGradient id="brand-piece" x1="70" y1="58" x2="196" y2="140" gradientUnits="userSpaceOnUse">
+            <stop offset="0" stop-color="#FFC98A" />
+            <stop offset="0.45" stop-color="#FB8C2E" />
+            <stop offset="1" stop-color="#C2410C" />
+          </linearGradient>
+        </defs>
+        <path d="M192.09 91 A74 74 0 1 1 85.56 67.38" fill="none" stroke="#AAAAAF" stroke-width="26" />
+        <path d="M85.56 67.38 A74 74 0 0 1 192.09 91" fill="none" stroke="url(#brand-piece)" stroke-width="26" />
+      </svg>
+      <span>EVA · <b>CLIENT</b></span>
+    </span>
     <span class="tele-seg"><span class="lbl">robot</span><span class="val" id="t-robot">—</span></span>
     <span class="tele-seg"><span class="dot" id="t-tx-dot"></span><span class="lbl">tx</span><span class="val" id="t-tx">—</span></span>
     <span class="tele-seg"><span class="dot" id="t-state-dot"></span><span class="lbl">state</span><span class="val" id="t-state">—</span></span>
@@ -26,7 +40,7 @@
     <span class="tab-thumb" id="tab-thumb"></span>
     <button class="tab" data-tab="dashboard"><span class="idx">00</span> DASHBOARD</button>
     <button class="tab active" data-tab="debug"><span class="idx">01</span> DEBUG</button>
-    <button class="tab" data-tab="manual"><span class="idx">02</span> MANUAL</button>
+      <button class="tab" data-tab="manual"><span class="idx">02</span> DEVICE</button>
     <button class="tab" data-tab="collect"><span class="idx">03</span> COLLECT</button>
     <button class="tab" data-tab="replay"><span class="idx">04</span> REPLAY</button>
     <button class="tab" data-tab="rl"><span class="idx">05</span> RL</button>
@@ -41,6 +55,7 @@
     <span class="timer" id="be-elapsed" style="display:none">⏱ 0.0s</span>
     <span class="gb-status" id="replay-episode-task" style="display:none">no episode selected</span>
     <span class="gb-status" id="collect-replay-status" style="display:none"></span>
+    <span class="gb-status collect-transfer-info" id="collect-transfer-info" role="status" style="display:none"></span>
     <span class="gb-status" id="manual-conn" style="display:none"></span>
     <span class="gb-msg" id="gb-msg"></span>
     <span class="gb-hint" id="gb-hint">Follow steps 1 → 4 on the left to run</span>
@@ -73,14 +88,29 @@
 
         <div class="dashboard-error" id="dashboard-error" style="display:none"></div>
 
+        <section class="dashboard-section dashboard-scene-map" aria-label="Scene map">
+          <div class="dashboard-section-head"><div><span class="dashboard-section-label">SCENE MAP</span><h2>Scene layouts</h2></div><span id="dashboard-scene-filter-label">ALL DATA</span><button class="btn" id="dashboard-scene-all" type="button">ALL DATA</button><button class="btn" id="dashboard-scene-refresh" type="button">RELOAD</button></div>
+          <div class="dashboard-scene-selectors">
+            <label>WORKSPACE<select id="dashboard-scene-scope" aria-label="Scene workspace"><option value="collect">COLLECTION</option><option value="eval">EVALUATION</option></select></label>
+            <label>TASK SET<select id="dashboard-scene-set" aria-label="Scene task set"></select></label>
+            <label>TASK<select id="dashboard-scene-task" aria-label="Scene task"></select></label>
+            <label>SCENE<select id="dashboard-scene-list" aria-label="Scene layout"></select></label>
+          </div>
+          <div id="dashboard-scene-status" role="status" aria-live="polite"></div>
+          <div class="collect-scene-grid" id="dashboard-scene-grid" aria-label="Scene positions" hidden></div>
+        </section>
+
         <section class="dashboard-mode-panel" id="dashboard-collection">
-          <div class="dashboard-mode-head"><span class="dashboard-mode-index">01</span><div><h2>Dataset overview</h2><p>Raw data output, efficiency, and task demand</p></div></div>
+          <div class="dashboard-mode-head"><span class="dashboard-mode-index">01</span><div><h2>Dataset overview</h2><p>Raw data output, efficiency, and task demand</p></div><button class="dashboard-overview-scope" id="collection-overview-scope" disabled>ALL DATA</button></div>
           <section class="dashboard-metrics" aria-label="Collection metrics">
             <div class="dashboard-metric"><span>DATA RECORDED</span><strong id="collection-duration">0m</strong><small>raw episode time</small></div>
             <div class="dashboard-metric"><span>EPISODES</span><strong id="collection-episodes">0</strong><small id="collection-valid-count">0 valid</small></div>
+            <div class="dashboard-metric"><span>FRAMES</span><strong id="collection-frames">0</strong><small>raw frames</small></div>
             <div class="dashboard-metric"><span>AVG DURATION</span><strong id="collection-average">0s</strong><small>per episode</small></div>
             <div class="dashboard-metric accent"><span>EFFICIENCY</span><strong id="collection-efficiency">--</strong><small>valid recording / collection window</small></div>
             <div class="dashboard-metric"><span>VALID RATE</span><strong id="collection-valid-rate">0%</strong><small>QC pass</small></div>
+            <div class="dashboard-metric upload"><span>UPLOADED</span><strong id="collection-uploaded">0</strong><small>raw episodes in confirmed uploads</small></div>
+            <div class="dashboard-metric"><span>NOT UPLOADED</span><strong id="collection-not-uploaded">0</strong><small>raw episodes without upload receipt</small></div>
           </section>
           <div class="dashboard-grid">
             <section class="dashboard-section dashboard-trend-section">
@@ -95,9 +125,63 @@
               <div class="dashboard-health-row"><span>Raw datasets</span><b id="collection-sources">0</b></div>
             </section>
           </div>
-          <section class="dashboard-section dashboard-demand-section">
-            <div class="dashboard-section-head"><div><span class="dashboard-section-label">TASK DEMAND</span><h2>Collection requirements</h2></div><span class="dashboard-section-note">Collected against target</span></div>
-            <div class="dashboard-table-wrap"><table class="dashboard-table dashboard-demand-table"><thead><tr><th>DATASET / TASK</th><th>ROBOT</th><th>COLLECTED</th><th>REQUIRED</th><th>GAP</th><th>PROGRESS</th></tr></thead><tbody id="collection-demand"></tbody></table><div class="dashboard-empty" id="collection-demand-empty" style="display:none">No collection tasks found</div></div>
+          <section class="dashboard-section dashboard-upload-section">
+            <div class="dashboard-section-head"><div><span class="dashboard-section-label">DATA DELIVERY</span><h2>Upload sync</h2></div><span class="dashboard-section-note" id="dashboard-upload-config">NOT CONFIGURED</span></div>
+            <div class="dashboard-upload-route">
+              <label class="dashboard-upload-endpoint"><span>LOCAL ACCEPTED</span><select id="dashboard-upload-dataset" aria-label="Accepted dataset export"></select><small id="dashboard-upload-local">--</small></label>
+              <span class="dashboard-upload-arrow" aria-hidden="true">&#8594;</span>
+              <div class="dashboard-upload-endpoint"><span>REMOTE DATASET</span><strong id="dashboard-upload-remote">--</strong><small>exact accepted contents</small></div>
+              <button class="btn primary dashboard-upload-action" id="dashboard-upload-action" disabled>SCAN TARGET</button>
+            </div>
+            <div class="dashboard-upload-stats" aria-label="Upload scan result">
+              <div><span>LOCAL FILES</span><strong id="dashboard-upload-local-files">--</strong></div>
+              <div><span>NEW</span><strong id="dashboard-upload-new">--</strong></div>
+              <div><span>CHANGED</span><strong id="dashboard-upload-changed">--</strong></div>
+              <div><span>SAME</span><strong id="dashboard-upload-same">--</strong></div>
+              <div><span>REMOVE</span><strong id="dashboard-upload-remove">--</strong></div>
+            </div>
+            <div class="dashboard-upload-progress"><i id="dashboard-upload-progress"></i></div>
+            <div class="dashboard-upload-status" id="dashboard-upload-status">No accepted export found</div>
+          </section>
+          <section class="dashboard-section dashboard-demand-section" translate="no">
+            <div class="dashboard-section-head"><h2>数据集管理</h2><div class="dm-selection-summary"><span id="dm-selected">已选 0</span><button class="btn" id="dm-clear" disabled>清空选择</button></div></div>
+            <div class="dm-toolbar">
+              <button class="btn" data-dm-action="download_qc">下载 QC</button>
+              <button class="btn" data-dm-action="upload_qc">上传 QC</button>
+              <button class="btn" data-dm-action="upload_data">上传数据</button>
+              <button class="btn" data-dm-action="download_data" title="把选中的数据从云端下载到本地；本地已有的质检记录按更新时间合并，不会被覆盖">下载数据</button>
+              <button class="btn" data-dm-action="upload_task">上传任务</button>
+              <button class="btn" data-dm-action="download_task">下载任务</button>
+              <button class="btn" id="dm-refresh" title="刷新选中数据集的云端信息并校验数据、任务和 QC">刷新云端并校验</button>
+            </div>
+            <div class="dm-toolbar">
+              <input id="dm-search" type="search" placeholder="搜索数据集" aria-label="搜索数据集">
+              <select id="dm-sort" aria-label="数据集排序">
+                <option value="name">名称 ↑</option><option value="name-desc">名称 ↓</option>
+                <option value="progress">采集比例 ↓</option><option value="pending">待采集 ↓</option>
+                <option value="fail">QC 失败 ↓</option><option value="unreviewed">未标注 ↓</option>
+              </select>
+              <button class="btn" id="dm-select-all" aria-pressed="false">全选筛选结果</button>
+            </div>
+            <div class="dm-job" aria-live="polite">
+              <span id="dm-status">尚未刷新云端</span><span id="dm-eta">ETA --</span>
+              <progress id="dm-progress" value="0" max="1" aria-label="数据集操作进度"></progress>
+            </div>
+            <div id="dm-jobs" aria-live="polite"></div>
+            <div class="dashboard-table-wrap"><table class="dashboard-table dm-table">
+              <colgroup><col class="dm-col-select"><col class="dm-col-name"><col span="11" class="dm-col-number"><col span="3" class="dm-col-check"><col class="dm-col-result"></colgroup>
+              <thead>
+                <tr><th rowspan="2" scope="col">选择</th><th rowspan="2" scope="col"><button data-dm-sort="name">数据集</button></th><th colspan="3" scope="colgroup">本地采集</th><th colspan="3" scope="colgroup">本地 QC</th><th colspan="2" scope="colgroup">云端数据</th><th colspan="3" scope="colgroup">云端 QC</th><th colspan="3" scope="colgroup">一致性校验</th><th rowspan="2" scope="col">最近刷新 / 操作结果</th></tr>
+                <tr>
+                  <th scope="col"><button data-dm-sort="collected">已采</button></th><th scope="col"><button data-dm-sort="total">目标</button></th><th scope="col"><button data-dm-sort="progress">比例</button></th>
+                  <th scope="col"><button data-dm-sort="accept">通过</button></th><th scope="col"><button data-dm-sort="fail">失败</button></th><th scope="col"><button data-dm-sort="unreviewed">未标注</button></th>
+                  <th scope="col"><button data-dm-sort="cloud_episodes">条数</button></th><th scope="col"><button data-dm-sort="cloud_tasks">任务数</button></th>
+                  <th scope="col"><button data-dm-sort="cloud_accept">通过</button></th><th scope="col"><button data-dm-sort="cloud_fail">失败</button></th><th scope="col"><button data-dm-sort="cloud_unreviewed">未标注</button></th>
+                  <th scope="col"><button data-dm-sort="verify_data">数据</button></th><th scope="col"><button data-dm-sort="verify_task">任务</button></th><th scope="col"><button data-dm-sort="verify_qc">QC</button></th>
+                </tr>
+              </thead>
+              <tbody id="dm-rows"></tbody>
+            </table><div class="dashboard-empty" id="dm-empty" hidden>没有匹配的数据集</div></div>
           </section>
           <section class="dashboard-section dashboard-recent-section">
             <div class="dashboard-section-head"><div><span class="dashboard-section-label">EPISODE LOG</span><h2>Collection activity</h2></div><span class="dashboard-section-note">Exact local timestamps</span></div>
@@ -110,6 +194,7 @@
           <section class="dashboard-metrics" aria-label="Eval metrics">
             <div class="dashboard-metric"><span>TRIAL TIME</span><strong id="eval-duration">0m</strong><small>raw trial time</small></div>
             <div class="dashboard-metric"><span>TRIALS</span><strong id="eval-episodes">0</strong><small id="eval-valid-count">0 valid</small></div>
+            <div class="dashboard-metric"><span>FRAMES</span><strong id="eval-frames">0</strong><small>raw trial frames</small></div>
             <div class="dashboard-metric"><span>AVG DURATION</span><strong id="eval-average">0s</strong><small>per trial</small></div>
             <div class="dashboard-metric accent"><span>EFFICIENCY</span><strong id="eval-efficiency">--</strong><small>valid trial time / evaluation window</small></div>
             <div class="dashboard-metric"><span>SUCCESS RATE</span><strong id="eval-valid-rate">--</strong><small>completed eval results</small></div>
@@ -128,92 +213,16 @@
 
     <!-- ---- DEBUG ---- -->
     <div class="view active" id="view-debug">
-
-      <!-- control column -->
-      <div class="col col-control" id="debug-control-col">
-        <div class="panel" id="panel-prompt">
-          <div class="panel-h"><span class="step-badge">1</span><span id="prompt-title">PROMPT</span> <span class="n" id="prompt-n"></span><span class="sel-chip" id="prompt-chip"></span></div>
-          <select class="choice-select task-select" id="prompt-list" aria-label="Task"></select>
-        </div>
-
-        <div class="panel" id="panel-config">
-          <div class="panel-h"><span class="step-badge">2</span>CONFIG</div>
-          <div class="card">
-            <div class="sub-h">MODE<span class="sel-chip" id="mode-chip"></span></div>
-            <div class="row-2" id="mode-list"></div>
-            <div class="sub-h" id="strategy-h">STRATEGY<span class="sel-chip" id="strategy-chip"></span></div>
-            <select class="choice-select strategy-select" id="strategy-list" aria-label="Strategy"></select>
-            <div class="lock-note">↑ select a task first</div>
-          </div>
-        </div>
-
-        <div class="panel setup-panel" id="panel-setup">
-          <div class="panel-h"><span class="step-badge">3</span>SETUP</div>
-          <div class="card">
-            <div class="auto-setup" id="auto-setup">
-              <div class="auto-setup-row">
-                <span class="auto-spinner"></span>
-                <span class="auto-setup-msg" id="auto-setup-msg">AUTO · PREPARING ROBOT…</span>
-              </div>
-              <div class="auto-bar"><i></i></div>
-            </div>
-            <div class="setup-ctl" style="margin-top:8px">
-              <button class="btn danger full" id="b-setup-pause" style="display:none">PAUSE ‖</button>
-              <button class="btn primary full" id="b-setup-resume" style="display:none">RESUME ▶</button>
-              <button class="btn danger full" id="b-setup-retry" style="display:none">RETRY ↻</button>
-            </div>
-            <div class="lock-note">↑ finish task &amp; config first</div>
-            <div class="errline" id="err"></div>
-          </div>
-        </div>
-
-        <div class="panel" id="panel-control">
-          <div class="panel-h"><span class="step-badge">4</span>CONTROL</div>
-          <div class="card">
-            <!-- continuous controls: shown for REAL / SIM modes -->
-            <div class="btn-grid" id="control-run">
-              <button class="btn primary full" id="b-run"><span class="rec-dot"></span><span class="rec-label">RUN ▶</span></button>
-              <button class="btn full" id="b-reset">RESET ⟲</button>
-            </div>
-            <!-- breakpoint controls: shown for STEP (sim_real) mode -->
-            <div id="control-step" style="display:none">
-              <div class="step-state" id="step-state">IDLE</div>
-              <div class="btn-grid">
-                <button class="btn primary" id="b-step">SIM ↻</button>
-                <button class="btn primary" id="b-commit">REAL ▶</button>
-                <button class="btn danger" id="b-step-halt">STOP ■</button>
-                <button class="btn" id="b-step-reset">RESET ⟲</button>
-              </div>
-            </div>
-            <div class="lock-note">↑ run SETUP first</div>
-          </div>
-        </div>
-
-        <div class="panel" id="panel-gripper">
-          <div class="panel-h">GRIPPER</div>
-          <div class="card">
-            <div class="btn-grid" id="gripper-buttons"></div>
-          </div>
-        </div>
-
-        <div class="panel" id="panel-tune">
-          <div class="panel-h">TUNING</div>
-          <div class="card">
-            <div class="sub-h">RATES</div>
-            <div class="tune-row"><span>inference rate Hz</span><input type="number" id="tune-inference-rate" min="0.1" step="0.1" /></div>
-            <div class="tune-row"><span>publish rate Hz</span><input type="number" id="tune-publish-rate" min="1" step="1" /></div>
-            <div class="sub-h" id="tune-strategy-h">STRATEGY · <span id="tune-strategy-key">—</span></div>
-            <div id="tune-strategy-args"></div>
-            <button class="btn primary full" id="b-tune-apply" style="margin-top:6px">APPLY ⤓</button>
-            <div class="tune-status" id="tune-status"></div>
-          </div>
-        </div>
-      </div>
-
+      <aside class="debug-history-sidebar" id="debug-history-sidebar" aria-label="Local sessions">
+        <div class="debug-history-heading"><span>Runs</span><button type="button" id="debug-new-run" class="debug-new-run" title="New run" aria-label="New run"><span aria-hidden="true">＋</span> New run</button></div>
+        <nav id="debug-session-list" aria-label="Executed sessions"></nav>
+        <div id="debug-history-status" role="status"></div>
+        <small class="debug-history-local" title="~/.eva-client/">On this device</small>
+      </aside>
       <!-- collection column -->
       <div class="col col-control" id="collect-control-col">
         <div class="panel" id="collect-panel-task">
-          <div class="panel-h"><span class="step-badge">1</span>TASK <span class="n" id="collect-fps"></span><span class="sel-chip" id="collect-prompt-chip"></span></div>
+          <div class="panel-h"><span class="step-badge">1</span>DATASET <span class="n" id="collect-fps"></span></div>
           <div class="card">
             <div class="collect-task-field-label">DATASET NAME</div>
             <div class="collect-task-selector">
@@ -221,17 +230,10 @@
               <select class="choice-select task-select" id="collect-set-list" aria-label="Collection dataset set"></select>
               <button class="btn collect-nav-btn" id="b-collect-next-set" title="Next dataset set" aria-label="Next dataset set">&#8594;</button>
             </div>
-            <div class="collect-task-field-label">TASK / PROMPT</div>
-            <div class="collect-task-selector">
-              <button class="btn collect-nav-btn" id="b-collect-prev-task" title="Previous task in this set" aria-label="Previous task in this set">&#8592;</button>
-              <select class="choice-select task-select" id="collect-prompt-list" aria-label="Collection task"></select>
-              <button class="btn collect-nav-btn" id="b-collect-next-task" title="Next task in this set" aria-label="Next task in this set">&#8594;</button>
-            </div>
           </div>
         </div>
-
         <div class="panel" id="collect-panel-record">
-          <div class="panel-h"><span class="step-badge">2</span>RECORD</div>
+          <div class="panel-h"><span class="step-badge">1</span>RECORD</div>
           <div class="card">
             <div class="collect-actions">
               <div class="collect-motion-row">
@@ -252,35 +254,46 @@
         </div>
 
         <div class="panel" id="collect-panel-queue">
-          <div class="panel-h"><span class="step-badge">3</span>CONVERT QUEUE <span class="n" id="collect-progress-label">0%</span></div>
+          <div class="panel-h"><span class="step-badge">2</span>COLLECTION SLOTS <span class="n" id="collect-progress-label">0%</span></div>
           <div class="card">
             <div class="collect-queue-head">
-              <span><span id="collect-count">0/0</span> done</span>
-              <button class="btn" id="collect-queue-toggle">EXPAND</button>
+              <span><span id="collect-count">0/0</span> complete</span>
+              <button class="btn" id="collect-queue-toggle" aria-pressed="true">ALL</button>
+            </div>
+            <div class="collect-slot-filters">
+              <label><small>SCENE</small><select class="choice-select" id="collect-slot-scene-filter" aria-label="Filter collection slots by scene"><option value="">ALL SCENES</option></select></label>
+              <label><small>TASK</small><select class="choice-select" id="collect-slot-task-filter" aria-label="Filter collection slots by task"><option value="">ALL TASKS</option></select></label>
             </div>
             <div class="collect-episode-summary" aria-label="Collection episode counts">
-              <span class="usable"><b id="collect-usable-count">000</b><small>USABLE</small></span>
-              <span class="rejected"><b id="collect-rejected-count">000</b><small>REJECTED</small></span>
-              <span class="pending"><b id="collect-pending-count">000</b><small>PENDING</small></span>
+              <span class="unreviewed"><b id="collect-unreviewed-count">000</b><small>UNREVIEWED</small></span>
+              <span class="usable"><b id="collect-usable-count">000</b><small>PASSED</small></span>
+              <span class="rejected"><b id="collect-rejected-count">000</b><small>FAILED</small></span>
+              <span class="pending"><b id="collect-pending-count">000</b><small>TO COLLECT</small></span>
             </div>
             <div class="collect-requirement" id="collect-requirement">
-              <span><small>COLLECTION TARGET · USABLE ONLY</small><b id="collect-requirement-count">0 / --</b></span>
-              <strong id="collect-requirement-status">TARGET NOT SET</strong>
+              <span><small data-i18n="collect.fixedPlanPassed">FIXED PLAN · QC PASSED</small><b id="collect-requirement-count">0 / --</b></span>
+              <strong id="collect-requirement-status">PENDING</strong>
             </div>
             <div class="collect-progress"><i id="collect-progress-fill"></i></div>
             <div class="kv"><span class="k">eta</span><span class="v tnum" id="collect-eta">—</span></div>
-            <div class="collect-tiles" id="collect-queue-tiles"></div>
-            <div class="collect-tiles-hint" id="collect-tiles-hint" style="display:none">Pass green / fail red</div>
-            <div class="collect-list" id="collect-queue-list" style="display:none"></div>
+            <div class="collect-tiles" id="collect-queue-tiles" aria-label="采集数据：左摇杆移动光标即选中采集位置、双击回放、拨动返回实时，左手 Y 键切换通过或不合格" data-i18n-aria-label="collect.vrReviewAria"></div>
+            <div class="collect-tiles-hint" id="collect-vr-review-hint" data-i18n="collect.vrReviewHint" hidden>左摇杆：移动即选中采集位置、边缘自动翻页 · 双击下压：回放 · 回放时拨动：返回实时 · Y：PASS ↔ FAIL</div>
+            <div class="collect-slot-page" id="collect-slot-page" hidden>
+              <button class="btn collect-page-btn" id="b-collect-slot-prev" title="Previous 50 slots" aria-label="Previous 50 slots">&#8592;</button>
+              <span id="collect-slot-page-label">1 / 1</span>
+              <button class="btn collect-page-btn" id="b-collect-slot-next" title="Next 50 slots" aria-label="Next 50 slots">&#8594;</button>
+            </div>
           </div>
         </div>
 
         <div class="panel" id="collect-panel-replay">
-          <div class="panel-h"><span class="step-badge">4</span>QUALITY CHECK</div>
+          <div class="panel-h"><span class="step-badge">3</span>QUALITY CHECK</div>
           <div class="card">
+            <div class="kv"><span class="k">SELECTED</span><span class="v" id="collect-qc-target">--</span></div>
             <div class="review-actions">
               <button class="btn" id="b-collect-qc-pass">PASS ✓</button>
               <button class="btn danger" id="b-goto-qc">FAIL ✗</button>
+              <button class="btn full" id="b-collect-qc-unreviewed">UNREVIEWED</button>
             </div>
             <textarea class="review-note" id="collect-qc-note" rows="3" placeholder="QC note (optional)" style="margin-top:8px"></textarea>
             <button class="btn full" id="b-collect-note-save" style="margin-top:6px">SAVE NOTE</button>
@@ -288,31 +301,35 @@
           </div>
         </div>
 
-        <div class="panel" id="collect-panel-export">
-          <div class="panel-h"><span class="step-badge">5</span>QUALITY EXPORT <span class="n" id="collect-quality-progress-label">0%</span></div>
+        <div class="panel" id="collect-panel-sync">
+          <div class="panel-h"><span class="step-badge">4</span>DATA PROCESS <span class="n" id="collect-dataset-sync-progress-label">0%</span></div>
           <div class="card">
-            <div class="quality-export-actions">
-              <label class="quality-export-format">
-                <span>EXPORT FORMAT</span>
-                <select id="collect-export-format" aria-label="Dataset export format">
-                  <option value="lerobot_v21">LeRobot v2.1</option>
-                  <option value="lerobot_v3">LeRobot v3</option>
-                  <option value="hdf5">HDF5</option>
-                  <option value="mcap">MCAP</option>
-                </select>
-              </label>
-              <button class="btn full" id="b-collect-quality-export">EXPORT DATASET</button>
-              <button class="btn primary full" id="b-collect-quality-upload">UPLOAD ACCEPTED</button>
+            <div class="dataset-sync-content" aria-label="Dataset synchronization">
+              <div class="dataset-sync-actions">
+                <button class="btn primary" id="b-collect-dataset-upload">UPLOAD DATA</button>
+                <button class="btn" id="b-collect-assets-download">DOWNLOAD ASSETS</button>
+                <button class="btn" id="b-collect-task-set-download">下载任务集</button>
+              </div>
             </div>
-            <div class="collect-progress" role="progressbar" aria-label="Dataset transfer progress"
-                 aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"
-                 id="collect-quality-progress-bar">
-              <i id="collect-quality-progress-fill"></i>
+
+            <div class="collect-format-process">
+              <label for="collect-export-format">FORMAT</label>
+              <select class="choice-select has-value" id="collect-export-format" aria-label="Dataset export format">
+                <option value="lerobot_v21">LeRobot v2.1</option>
+                <option value="lerobot_v3">LeRobot v3</option>
+                <option value="hdf5">HDF5</option>
+                <option value="mcap">MCAP</option>
+              </select>
+              <div class="dataset-sync-actions">
+                <button class="btn" id="b-collect-quality-export">CONVERT DATASET</button>
+              </div>
+              <div class="collect-progress" role="progressbar" aria-label="Dataset conversion progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="collect-dataset-sync-progress"><i id="collect-dataset-sync-progress-fill"></i></div>
+              <div class="kv"><span class="k">progress</span><span class="v" id="collect-quality-progress-detail">0/0 episodes</span></div>
+              <div class="qc-status" id="collect-quality-status" role="status" aria-live="polite"></div>
             </div>
-            <div class="kv"><span class="k">progress</span><span class="v tnum" id="collect-quality-progress-detail">0/0 episodes</span></div>
-            <div class="qc-status" id="collect-quality-status" role="status" aria-live="polite"></div>
           </div>
         </div>
+
       </div>
 
       <!-- ============ stage (shared, reparented between tabs) ============
@@ -321,18 +338,145 @@
            #stage node is moved into the active view. -->
       <div class="stage no-series" id="stage">
 
-        <!-- row 1: 3D canvas + camera strip -->
+        <!-- row 1: 3D robot canvas beside the camera strip -->
         <div class="stage-top">
-          <div class="col-canvas" id="canvas-col">
-            <div class="ticks"><i></i></div>
-            <span class="canvas-tag">3D · URDF</span>
-            <canvas id="gl"></canvas>
-            <div class="canvas-empty" id="canvas-empty">
-              <div class="big">LOADING 3D…</div>
-              <div>fetching URDF meshes</div>
+          <div class="stage-visual-stack">
+            <div class="collect-current-slot collect-stage-scene-card" id="collect-current-slot" data-state="pending">
+              <div class="collect-current-copy">
+                <div class="collect-current-head">
+                  <span id="collect-current-position">-- / --</span>
+                </div>
+                <div class="collect-current-field">
+                  <small>TASK</small>
+                  <b id="collect-current-task">--</b>
+                  <span id="collect-current-task-en"></span>
+                </div>
+                <div class="collect-current-foot">
+                  <span id="collect-current-round">ROUND -- / --</span>
+                </div>
+              </div>
+              <div class="collect-scene-grid" id="collect-current-scene-grid" aria-label="Collection reference"></div>
             </div>
-            <div class="canvas-readout" id="readout" style="display:none">
-              <div><span class="k">STEP </span><span id="r-step">0</span> · <span class="k">CHUNK </span><span id="r-chunk">0</span></div>
+            <section class="eval-scene-map" aria-label="Evaluation scene map">
+              <div class="collect-current-copy">
+                <div class="collect-current-head">SCENE MAP</div>
+                <div class="collect-current-foot"><button class="btn" id="eval-scene-refresh" type="button">RELOAD</button></div>
+                <div class="collect-current-field"><b id="eval-scene-task">—</b></div>
+              </div>
+              <select class="choice-select task-select" id="eval-scene-set-list" aria-label="Evaluation scene task set" hidden></select>
+              <select class="choice-select task-select" id="eval-scene-list" aria-label="Evaluation scene"></select>
+              <div id="eval-scene-status" role="status" aria-live="polite"></div>
+              <div class="collect-scene-grid" id="eval-scene-grid" aria-label="Evaluation scene positions" hidden></div>
+            </section>
+            <div class="col-canvas" id="canvas-col">
+              <section class="debug-composer" aria-label="Debug prompt controls">
+                <div class="debug-status-above" aria-live="polite">
+        <div class="panel setup-panel" id="panel-setup" hidden>
+          <div class="panel-h"><span class="step-badge">3</span>SETUP</div>
+          <div class="card">
+            <div class="auto-setup" id="auto-setup">
+              <div class="auto-setup-row">
+                <span class="auto-spinner"></span>
+                <span class="auto-setup-msg" id="auto-setup-msg">AUTO · PREPARING ROBOT…</span>
+              </div>
+              <div class="auto-bar"><i></i></div>
+            </div>
+            <div class="setup-ctl" style="margin-top:8px">
+              <button type="button" class="btn danger full" id="b-setup-pause" style="display:none">PAUSE ‖</button>
+              <button type="button" class="btn primary full" id="b-setup-resume" style="display:none">RESUME ▶</button>
+              <button type="button" class="btn danger full" id="b-setup-retry" style="display:none">RETRY ↻</button>
+            </div>
+            <div class="lock-note">↑ finish task &amp; config first</div>
+            <div class="errline" id="err"></div>
+          </div>
+        </div>
+
+          <div id="debug-prompt-status" role="status" aria-live="polite" hidden></div>
+                  <div id="debug-execution-status" hidden></div>
+                </div>
+<div class="panel" id="panel-prompt">
+          <div class="panel-h" hidden><span id="prompt-title">PROMPT</span><span id="prompt-n"></span><span id="prompt-chip"></span></div>
+          <select class="choice-select task-select" id="prompt-list" aria-label="Task" hidden></select>
+          <form id="debug-prompt-form" class="debug-prompt-form">
+            <textarea id="debug-prompt-input" rows="2" maxlength="2000" aria-label="Custom prompt" placeholder="What should the robot do?"></textarea>
+<div class="debug-input-footer">
+<div class="debug-composer-controls" id="debug-control-col">
+        <button type="button" class="debug-record-toggle" id="debug-record-toggle" aria-label="Record rollout" aria-pressed="false" title="Record rollout"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3" fill="currentColor" stroke="none"/></svg></button>
+        <details class="debug-presets-menu debug-more"><summary aria-label="Preset prompts" title="Preset prompts"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 8h6M9 12h6M9 16h3"/></svg></summary><div id="debug-prompt-presets" aria-label="Preset prompts"></div></details>
+
+
+
+        <div class="panel" id="panel-config">
+          <div class="panel-h"><span class="step-badge">2</span>CONFIG</div>
+          <div class="card">
+            <div class="sub-h">MODE<span class="sel-chip" id="mode-chip"></span></div>
+            <details class="debug-mode-menu"><summary id="debug-mode-label" aria-label="Ask for approval" title="Ask for approval"></summary><div class="row-2" id="mode-list"></div></details>
+            <div class="sub-h" id="strategy-h">STRATEGY<span class="sel-chip" id="strategy-chip"></span></div>
+            <span class="debug-strategy-picker">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="5" r="2.5"/><circle cx="18" cy="7" r="2.5"/><circle cx="6" cy="19" r="2.5"/><path d="M6 7.5v9m0-5.5h7a5 5 0 0 0 5-1.5"/></svg>
+              <select class="choice-select strategy-select" id="strategy-list" aria-label="Strategy" title="Choose a strategy"></select>
+            </span>
+            <div class="lock-note">↑ select a task first</div>
+          </div>
+        </div>
+
+        <div class="panel" id="panel-control">
+          <div class="panel-h"><span class="step-badge">4</span>CONTROL</div>
+          <div class="card">
+            <!-- continuous controls: shown for REAL / SIM modes -->
+            <div class="btn-grid" id="control-run">
+              <button type="button" class="btn primary full" id="b-run"><span class="rec-dot"></span><span class="rec-label">RUN ▶</span></button>
+            </div>
+            <!-- breakpoint controls: shown for STEP (sim_real) mode -->
+            <div id="control-step" style="display:none">
+              <div class="step-state" id="step-state">IDLE</div>
+              <div class="btn-grid">
+                <button type="button" class="btn primary" id="b-step">Preview ↻</button>
+                <button type="button" class="btn primary" id="b-commit">Approve ✓</button>
+                <button type="button" class="btn danger" id="b-step-halt">STOP ■</button>
+                <button type="button" class="btn" id="b-step-reset">RESET ⟲</button>
+              </div>
+            </div>
+            <div class="lock-note">↑ run SETUP first</div>
+          </div>
+        </div>
+
+        <details class="panel debug-more" id="panel-tune">
+          <summary aria-label="Settings" title="Settings"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3" fill="white"/><circle cx="15" cy="17" r="3" fill="white"/></svg></summary>
+          <div class="card">
+            <div class="sub-h">RATES</div>
+            <div class="tune-row"><span>inference rate Hz</span><input type="number" id="tune-inference-rate" min="0.1" step="0.1" /></div>
+            <div class="tune-row"><span>publish rate Hz</span><input type="number" id="tune-publish-rate" min="1" step="1" /></div>
+            <div id="tune-strategy-args"></div>
+            <div class="panel" id="panel-gripper">
+              <div class="sub-h">GRIPPER</div>
+              <div class="btn-grid" id="gripper-buttons"></div>
+            </div>
+            <button type="button" class="btn primary full" id="b-tune-apply" style="margin-top:6px">APPLY ⤓</button>
+            <div class="tune-status" id="tune-status"></div>
+          </div>
+        </details>
+      </div>
+            <div class="debug-send-actions">
+              <span class="debug-model-picker"><select id="debug-model-list" aria-label="Model" title="Choose a model"></select></span>
+              <button type="button" class="btn" id="debug-approval-stop" title="Stop" aria-label="Stop" hidden><svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2"/></svg></button>
+              <button type="button" class="btn" id="b-reset" title="Reset" aria-label="Reset"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 10a9 9 0 1 1 2.5 8.2M3 4v6h6"/></svg></button>
+              <button class="btn primary" type="submit" id="debug-prompt-apply" aria-label="Run">↑</button>
+            </div>
+</div>
+          </form>
+        </div>
+              </section>
+              <div class="ticks"><i></i></div>
+              <span class="canvas-tag">3D · URDF</span>
+              <canvas id="gl"></canvas>
+              <div class="canvas-empty" id="canvas-empty">
+                <div class="big">LOADING 3D…</div>
+                <div>fetching URDF meshes</div>
+              </div>
+              <div class="canvas-readout" id="readout" style="display:none">
+                <div><span class="k">STEP </span><span id="r-step">0</span> · <span class="k">CHUNK </span><span id="r-chunk">0</span></div>
+              </div>
             </div>
           </div>
           <div class="cam-strip" id="cam-strip">
@@ -383,6 +527,7 @@
           <span class="control-legend"><i class="policy"></i>rollout <i class="intervention"></i>intervention</span>
           <span class="tnum scrub-pos" id="scrub-pos">0 / 0</span>
           <span class="tnum scrub-time" id="scrub-time">0.0s</span>
+          <button class="btn review-robot-replay" id="review-robot-replay" style="display:none">REPLAY ON ROBOT</button>
           <button class="btn review-return-live" id="review-return-live" style="display:none">RETURN TO LIVE</button>
         </div>
       </div>
@@ -595,40 +740,49 @@
 
       <!-- control column -->
       <div class="col col-control">
-        <div class="panel">
-          <div class="panel-h">MANUAL · REAL ROBOT</div>
-          <div class="card">
-            <div class="btn-grid">
-              <button class="btn primary full" id="bm-connect">CONNECT</button>
-            </div>
+
+        <div class="panel" id="device-workspace">
+          <div class="panel-h">
+            <span data-i18n="device.devices">DEVICES</span>
+            <button class="btn danger" id="device-kill-all" title="Stop every device process and clear device state" data-i18n="manual.killAll" data-i18n-title="device.killTitle">KILL ALL</button>
           </div>
+          <div class="card" id="device-selections"></div>
         </div>
 
-        <div class="panel">
+        <div class="panel control-joints">
           <div class="panel-h">DISPATCH</div>
           <div class="card">
+            <div class="btn-grid">
+              <button class="btn primary full" id="bm-connect" hidden>CONNECT</button>
+            </div>
             <div class="btn-grid">
               <button class="btn primary full" id="bm-send">SEND TO REAL ▶</button>
             </div>
             <div class="btn-grid">
               <button class="btn full" id="bm-home">HOME ⌂</button>
             </div>
+            <div id="control-teleop-controls" hidden>
+              <label class="collect-arm-gate" title="Enable teleop motion" data-i18n-title="manual.enableTeleop">
+                <input type="checkbox" id="control-arm-enable" aria-label="Enable teleop motion" data-i18n-aria-label="manual.enableTeleop">
+                <span class="ios-sw" aria-hidden="true"></span>
+              </label>
+            </div>
           </div>
         </div>
 
-        <div class="panel" id="manual-panel-tune">
+        <div class="panel control-joints" id="manual-panel-tune">
           <div class="panel-h">TUNING</div>
           <div class="card">
-            <div class="tune-row"><span>publish rate Hz</span><input type="number" id="manual-tune-publish-rate" min="1" step="1" /></div>
+            <div class="tune-row"><span data-i18n="manual.publishRate">publish rate Hz</span><input type="number" id="manual-tune-publish-rate" min="1" step="1" /></div>
             <button class="btn primary full" id="b-manual-tune-apply" style="margin-top:6px">APPLY ⤓</button>
             <div class="tune-status" id="manual-tune-status"></div>
           </div>
         </div>
 
-        <div class="panel">
-          <div class="panel-h">TARGET / CURRENT QPOS</div>
+        <div class="panel control-joints">
+          <div class="panel-h" data-i18n="manual.targetCurrentQpos">TARGET / CURRENT QPOS</div>
           <div class="card">
-            <div class="manual-pose-legend">target / current</div>
+            <div class="manual-pose-legend" data-i18n="manual.targetCurrent">target / current</div>
             <div class="manual-sliders" id="manual-sliders-m"></div>
           </div>
         </div>
@@ -656,7 +810,12 @@
 
         <div class="panel" id="eval-panel-task">
           <div class="panel-h"><span class="step-badge">2</span>TASK</div>
-          <select class="choice-select task-select" id="eval-prompt-list" aria-label="Evaluation task"></select>
+          <div class="collect-tiles eval-task-tiles" id="eval-prompt-list" role="listbox" aria-label="Evaluation task"></div>
+          <div class="collect-slot-page" id="eval-task-page" hidden>
+            <button class="btn collect-page-btn" id="b-eval-task-prev" title="Previous 50 tasks" aria-label="Previous 50 tasks">&#8592;</button>
+            <span id="eval-task-page-label">1 / 1</span>
+            <button class="btn collect-page-btn" id="b-eval-task-next" title="Next 50 tasks" aria-label="Next 50 tasks">&#8594;</button>
+          </div>
         </div>
 
         <div class="panel" id="eval-panel-trial">
@@ -696,16 +855,8 @@
           </div>
         </div>
 
-        <div class="panel" id="eval-panel-gripper">
-          <div class="panel-h"><span class="step-badge">6</span>GRIPPER</div>
-          <div class="card">
-            <div class="eval-gripper" id="eval-gripper-buttons"></div>
-            <div class="lock-note">↑ run SETUP first</div>
-          </div>
-        </div>
-
         <div class="panel" id="eval-panel-score">
-          <div class="panel-h"><span class="step-badge">7</span>SCORE</div>
+          <div class="panel-h"><span class="step-badge">6</span>SCORE</div>
           <div class="card">
             <div class="ms-wrap vertical">
               <div class="ms-top">
@@ -751,6 +902,8 @@
     <!-- shared trial replay (RESULT tab): docked into #rv-detail-replay by relocateTrialPop(),
          floats over .workspace otherwise. EVAL no longer uses it (its right column is live). -->
     <div class="trial-pop" id="trial-pop">
+      <div id="tp-scene-label"></div>
+      <div class="collect-scene-grid" id="tp-scene-grid" hidden></div>
       <!-- REPLAY-style stage: 3D URDF + all camera views laid out in one row -->
       <div class="rt-top">
         <div class="rt-pane" id="tp-urdf">
@@ -791,6 +944,7 @@
 } }
 </script>
 
+<script type="module" src="/js/i18n.js"></script>
 <script type="module" src="/js/scene.js"></script>
 
 

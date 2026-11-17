@@ -215,6 +215,9 @@ def ensure_ik_solver(config: ConfigDict, runtime: RuntimeState) -> Any:
     }
     if config.robot.eef_reference_frame in runtime.robot.supported_reference_frames:
         solver_kwargs["reference_frame"] = config.robot.eef_reference_frame
+    if config.robot.eef_links:
+        solver_kwargs["eef_links"] = config.robot.eef_links
+        solver_kwargs["reg_weight"] = config.robot.ik_reg_weight
     solver = runtime.robot.build_kinematics(**solver_kwargs)
     if solver is None:
         raise RuntimeError("EEF mode requires an IK solver but the robot does not provide one")
@@ -378,7 +381,10 @@ def fetch_action_chunk(
     while not runtime.transport.is_shutdown():
         observation = prebuilt_observation
         if observation is None:
-            frame = runtime.transport.get_frame()
+            get_policy_frame = getattr(
+                runtime.transport, "get_policy_frame", runtime.transport.get_frame
+            )
+            frame = get_policy_frame()
             if frame is None:
                 rate.sleep()
                 continue
@@ -395,6 +401,8 @@ def fetch_action_chunk(
         if "actions" not in response:
             raise KeyError(f"Response does not contain 'actions': {response}")
         original_chunk = normalize_action_chunk(response["actions"])
+        if len(original_chunk) == 0:
+            return original_chunk
         submit_rl_critic(runtime, observation, original_chunk, "policy")
         action_chunk = normalize_policy_action_chunk(
             config, runtime, original_chunk, response=response
@@ -423,7 +431,8 @@ def fetch_action_chunk(
 
 def _loop_observation(config: ConfigDict, runtime: RuntimeState, prompt: str) -> dict | None:
     """Build a policy observation from the latest frame; None if none is available."""
-    frame = runtime.transport.get_frame()
+    get_policy_frame = getattr(runtime.transport, "get_policy_frame", runtime.transport.get_frame)
+    frame = get_policy_frame()
     if frame is None:
         return None
     return build_policy_observation(frame, prompt, config, runtime)
@@ -482,7 +491,7 @@ def run_warmup_and_start(config: ConfigDict, runtime: RuntimeState, session: Ses
         session.sim_preview_qpos = None
         return True
 
-    warmup_n = max(1, config.inference_cfg.setup_warmup_chunks)
+    warmup_n = max(0, config.inference_cfg.setup_warmup_chunks)
 
     skip_warmup = config.eval and config.eval.skip_warmup_after_first and runtime._eval_warmup_done
 
@@ -493,8 +502,10 @@ def run_warmup_and_start(config: ConfigDict, runtime: RuntimeState, session: Ses
     session.chunk_index = 0
     _anchor_buffer_to_current_qpos(runtime)
 
-    if skip_warmup:
-        logger.info("Eval fast-path: skipping per-trial warmup")
+    if skip_warmup or warmup_n == 0:
+        logger.info(
+            "Eval fast-path: skipping per-trial warmup" if skip_warmup else "Warmup disabled"
+        )
         start_inference_loop(config, runtime, session)
         return True
 
@@ -580,7 +591,7 @@ def ensure_action_chunk(config: ConfigDict, runtime: RuntimeState, session: Sess
         logger.info("Action chunk preparation failed: %s", error)
         return False
     session.chunk_index = 0
-    if session.action_chunk is not None:
+    if session.action_chunk is not None and len(session.action_chunk) > 0:
         logger.info(
             "[CHUNK_READY] step=%d len=%d delta=%.4f first=%s last=%s",
             session.step_index,
@@ -589,7 +600,8 @@ def ensure_action_chunk(config: ConfigDict, runtime: RuntimeState, session: Sess
             _format_diag_vector(session.action_chunk[0]),
             _format_diag_vector(session.action_chunk[-1]),
         )
-    return True
+        return True
+    return False
 
 
 def _replay_total_frames(runtime: RuntimeState, replay: TransportBridge) -> int:
