@@ -1,7 +1,9 @@
 # Agent, IDE, and local workspace metadata.
 /AGENTS.md
 /CLAUDE.md
-.agents/
+.agents/*
+!.agents/skills/
+!.agents/skills/**
 .claude/
 .codex/
 .omc/
@@ -48,8 +50,6 @@ tools/datasets/static/*
 !tools/datasets/templates/
 tools/datasets/templates/*
 !tools/datasets/templates/*.html
-!tools/skills/
-!tools/skills/**
 tools/conversion/__pycache__/
 temp/
 
