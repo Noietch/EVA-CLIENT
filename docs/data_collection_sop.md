@@ -1,4 +1,4 @@
-[← Back to README](../README.md)
+[← Back to README](../README.md) ｜ [中文](data_collection_sop.zh.md)
 
 # Data collection SOP
 

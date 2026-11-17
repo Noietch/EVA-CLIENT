@@ -1,4 +1,4 @@
-[← Back to README](../README.md)
+[← Back to README](../README.md) ｜ [中文](collection_scene_plan.zh.md)
 
 # Collection scene plans
 

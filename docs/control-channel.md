@@ -1,4 +1,4 @@
-[← Back to README](../README.md)
+[← Back to README](../README.md) ｜ [中文](control-channel.zh.md)
 
 # Control channel (ZMQ)
 
