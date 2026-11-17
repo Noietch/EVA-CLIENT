@@ -1,8 +1,6 @@
 <p align="center">
-  <a href="https://colalab.net/projects/eva-client/"><img src="assets/eva-logo.svg" alt="EVA-Client Logo" width="60%"></a>
+  <a href="https://colalab.net/projects/eva-client/"><img src="assets/eva-logo.svg" alt="EVA-Client Logo" width="75%"></a>
 </p>
-
-<p align="center">One policy, any robot — the smooth all-in-one real-robot stack. Debug, record, evaluate, visualize, all in the browser.</p>
 
 <p align="center">
 <a href="https://colalab.net/projects/eva-client/"><img src="https://img.shields.io/badge/Project%20Page-colalab.net-blue?style=for-the-badge&logo=googlechrome&logoColor=white" alt="Project Page"></a>

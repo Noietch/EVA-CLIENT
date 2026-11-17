@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 340" role="img" aria-label="EVA-Client: Deploy, Evaluate, Collect on Real Robots">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="26 34 1124 266" role="img" aria-label="EVA-Client: Deploy, Evaluate, Collect on Real Robots">
   <defs>
     <linearGradient id="eva-piece" x1="106" y1="69" x2="239" y2="123" gradientUnits="userSpaceOnUse">
       <stop offset="0"    stop-color="#FFC98A"/>
@@ -6,16 +6,23 @@
       <stop offset="1"    stop-color="#C2410C"/>
     </linearGradient>
     <linearGradient id="eva-base" x1="0" y1="60" x2="0" y2="290" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#3a3a44"/>
-      <stop offset="1" stop-color="#1c1c21"/>
+      <stop offset="0" class="ring-a"/>
+      <stop offset="1" class="ring-b"/>
     </linearGradient>
     <filter id="eva-glow" x="-80%" y="-80%" width="260%" height="260%">
       <feGaussianBlur stdDeviation="8"/>
     </filter>
+    <style>
+      .ink { fill: #0a0a0a; }
+      .ring-a { stop-color: #3a3a44; }
+      .ring-b { stop-color: #1c1c21; }
+      @media (prefers-color-scheme: dark) {
+        .ink { fill: #f2f2f2; }
+        .ring-a { stop-color: #c4c4cc; }
+        .ring-b { stop-color: #8e8e98; }
+      }
+    </style>
   </defs>
-
-  <!-- warm off-white card -->
-  <rect width="1200" height="340" rx="20" fill="#FCFBF8"/>
 
   <!-- ring mark: dark arc + orange segment -->
   <path d="M 239.31 103.09 A 100 100 0 1 1 106.22 89.10"
@@ -28,11 +35,11 @@
   <!-- wordmark -->
   <text x="330" y="192"
         font-family="'Helvetica Neue', Helvetica, Arial, 'Inter', ui-sans-serif, system-ui, sans-serif"
-        font-size="162" font-weight="700" letter-spacing="-2" fill="#0a0a0a">EVA-Client</text>
+        font-size="162" font-weight="700" letter-spacing="-2" class="ink">EVA-Client</text>
 
   <!-- tagline with highlighter bar -->
   <rect x="332" y="256" width="792" height="20" fill="#FB8C2E" fill-opacity="0.55"/>
   <text x="336" y="268"
         font-family="'JetBrains Mono', 'SF Mono', SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace"
-        font-size="31" fill="#0a0a0a">Deploy · Evaluate · Collect on Real Robots</text>
+        font-size="31" class="ink">Deploy · Evaluate · Collect on Real Robots</text>
 </svg>
