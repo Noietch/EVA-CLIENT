@@ -1,0 +1,5 @@
+dataset_name: dual_yam_pickplace_example
+robot_type: dual_yam
+tasks_file: tasks.csv
+scenes_file: scene.csv
+collection_dir: datasets/real_robot/dual_yam/dual_yam_pickplace_example

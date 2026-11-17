@@ -1,0 +1,5 @@
+task_id,action,prompt_en,prompt_zh,total_epsiodes_count,scene_ids,scene_epsiodes_count,reference_image
+TASK-001,pickplace,pick up the star fruit and place it on the green plate with left hand.,左手拿起杨桃并放到绿色小盘子上,4,SC-001;SC-002,2;2,ref_imgs/TASK-001.jpg
+TASK-002,pickplace,pick up the red box and place it on the green plate with left hand.,左手拿起红色盒子并放到绿色小盘子上,2,SC-001,2,ref_imgs/TASK-002.jpg
+TASK-003,pickplace,pick up the sprite and place it on the green plate with left hand.,左手拿起雪碧并放到绿色小盘子上,2,SC-002,2,ref_imgs/TASK-003.jpg
+TASK-004,pickplace,pick up the cola and place it on the green plate with right hand.,右手拿起可乐并放到绿色小盘子上,2,SC-001;SC-002,1;1,

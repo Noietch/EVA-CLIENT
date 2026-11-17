@@ -41,7 +41,11 @@ collection = dict(
 
 [ARX X5 task-set collection](../configs/02_collection/arx_x5_tasks_set.py)
 and [dual Piper task-set collection](../configs/02_collection/dual_agilex_piper_tasks_set.py)
-are maintained config examples. Inline `collection.tasks` remains available for
+are maintained config examples.
+[`examples/task_sets/dual_yam_pickplace_example`](../examples/task_sets/dual_yam_pickplace_example)
+is a small complete plan (four tasks, two scenes, ten slots): three tasks carry a
+`reference_image` photo and one has none. It works as a template or as
+`collection.task_set_dir`. Inline `collection.tasks` remains available for
 workflows without scene files. A missing single task-set directory leaves the
 authored tasks in effect; a mounted directory must have a valid `tasks.csv`.
 

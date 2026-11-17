@@ -40,14 +40,12 @@
     <td><img src="assets/media/console/device.png" alt="DEVICE tab: live cameras and Dual YAM arms"></td>
   </tr>
   <tr>
-    <td><img src="assets/media/console/dashboard.png" alt="DASHBOARD tab: operations overview"></td>
-    <td><img src="assets/media/console/replay.png" alt="REPLAY tab: episode replay"></td>
+    <td><img src="assets/media/console/dashboard-overview.png" alt="DASHBOARD tab: dataset overview for a Dual YAM collection"></td>
+    <td><img src="assets/media/console/collect-scene.png" alt="COLLECT tab: photo-mode task with collection slots"></td>
   </tr>
 </table>
 
-* **[2026-11-17] EVA-Client 0.3.0: unified devices, scene-aware evaluation, and dataset dashboard.**
-  * Pick a robot from the DEVICE tab or `eva device`; evaluate with task sets, milestones, and attempt tracking; review, QC, and deliver data from the new DASHBOARD. See [`docs/quick-start.md`](./docs/quick-start.md) and [`docs/console.md`](./docs/console.md).
-  * Native [XPolicyLab](https://github.com/XPolicyLab/XPolicyLab) policy client, Dual YAM EEF configs, a refreshed console UI, and client-side EVA-SIM recording (simulator coming soon). Full list in [`CHANGELOG.md`](./CHANGELOG.md).
+* **[2026-11-17] EVA-Client 0.3.0: a redesigned console for the whole data loop.** Choose and bring up a robot from the new DEVICE tab, collect against scene plans with camera health checks, and browse, QC, and deliver every dataset from the new DASHBOARD (screenshots above). Evaluation now runs on task sets with milestones and per-attempt tracking, [XPolicyLab](https://github.com/XPolicyLab/XPolicyLab) policies connect natively, and coding-agent skills now live in [`.agents/skills`](./.agents/skills). Client-side EVA-SIM support is in place, with the simulator coming soon. See the [changelog](./CHANGELOG.md) for details.
 
 * **[2026-08-28] EVA-Client 0.2.0** EVA-Client now supports WebXR-based VR controller teleoperation, ARX X5 hardware, dual-YAM leader-follower data collection, export to LeRobot v3.0, MCAP, and HDF5, and multiple coding-agent skills for adding robots, calibrating cameras, and debugging robot SDKs.
 
@@ -68,7 +66,7 @@
   backend ([OpenPI](https://github.com/Physical-Intelligence/openpi), [OpenPI-RTC](https://www.pi.website/research/real_time_chunking), [StarVLA](https://github.com/starVLA/starVLA), [GR00T](https://github.com/Nvidia/Isaac-GR00T), mock, replay) → inference
   strategy (sync / [async](https://github.com/OpenDriveLab/kai0#train-deploy-alignment) / naive / [ACT-ensemble](https://github.com/tonyzhaozh/act) / RTC) with live latency
   compensation. **8 robots already** — joint-space or EEF-space (PyRoki IK),
-  all live-switchable from the DEBUG tab.
+  selected and brought up from the DEVICE tab.
 * **📊 Evaluation.** Multi-checkpoint sweeps with per-trial records: every
   rollout captures camera video, 3D URDF scene, per-dimension state charts,
   and per-prompt milestone scores into dataset metadata, then replays
@@ -77,7 +75,8 @@
 * **🎥 Data collection.** Teleop capture straight into [LeRobot](https://github.com/huggingface/lerobot) v2.1 episodes
   from the COLLECT tab — background saver, in-tab QC PASS/FAIL replay, camera
   streams encoded to mp4, per-frame green/red quality flags. Teleop demos and
-  model rollouts share one on-disk layout.
+  model rollouts share one on-disk layout, browsable and QC-able from the
+  DASHBOARD.
 
 ---
 
@@ -117,6 +116,7 @@
 | Policy backend | StarVLA | WebSocket + msgpack (typed envelope) | ✅ |
 | Policy backend | GR00T | ZeroMQ REQ/REP + msgpack-numpy (Isaac-GR00T) | ✅ |
 | Policy backend | Mock | Local (smooth random actions) | ✅ |
+| Policy backend | XPolicyLab | WebSocket (official XPolicyLab protocol) | ✅ |
 | Policy backend | Replay | Local (recorded trajectory replay) | ✅ |
 
 ---
