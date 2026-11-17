@@ -1,4 +1,4 @@
-[← 返回 README](../README_zh.md) ｜ [English](control-channel.md)
+[← 返回 README](../../README_zh.md) ｜ [English](../en/control-channel.md)
 
 # 控制通道（ZMQ）
 
@@ -29,7 +29,7 @@ control_channel = dict(
 | `{"query":"status"}` | `{"ok":true,"data":{...}}` |
 | 无效请求或不允许的命令 | `{"ok":false,"error":"..."}` |
 
-只允许 [`command_catalog.py`](../src/core/app/command_catalog.py) 中的 `web:*` 命令。`tab_switch` 会更新当前控制台页面并将对应的切换动作入队。触觉反馈会直接发送给 VR 客户端。带 `clip_id` 的 `web:start` 会先校验并绑定一次评测尝试，再将其入队。其他受支持的命令进入共享队列。
+只允许 [`command_catalog.py`](../../src/core/app/command_catalog.py) 中的 `web:*` 命令。`tab_switch` 会更新当前控制台页面并将对应的切换动作入队。触觉反馈会直接发送给 VR 客户端。带 `clip_id` 的 `web:start` 会先校验并绑定一次评测尝试，再将其入队。其他受支持的命令进入共享队列。
 
 ## 命令
 
@@ -65,7 +65,7 @@ control_channel = dict(
 
 挂载了场景规划时，必须先选择一个采集槽位。槽位选择以及跳过 / 推迟由 HTTP 采集 API 提供。仅选择数据集 / 任务并不能代替槽位绑定。请轮询 `status.collect` 获取录制 / 保存状态。
 
-对于配置了 `collection.sim_recording_url` 的场景（EVA-SIM，即将发布），请在 `web:collect_start` 中传入 `sim_metadata` 对象，其中包含所选仿真器场景 / 任务的元数据。录制器会将其与仿真器状态进行校验，并锁定 `scene_revision`。非对象类型的元数据会被拒绝。该快照只会被本次录制使用；下一次录制前需要重新绑定场景。详见[录制](./recording.zh.md#eva-sim-execution-recording)。
+对于配置了 `collection.sim_recording_url` 的场景（EVA-SIM，即将发布），请在 `web:collect_start` 中传入 `sim_metadata` 对象，其中包含所选仿真器场景 / 任务的元数据。录制器会将其与仿真器状态进行校验，并锁定 `scene_revision`。非对象类型的元数据会被拒绝。该快照只会被本次录制使用；下一次录制前需要重新绑定场景。详见[录制](./recording.md#eva-sim-execution-recording)。
 
 ## 评测尝试
 
@@ -110,7 +110,7 @@ web:haptic:right:0.6:80
 | `config` | 机器人 / 通信层、任务、模式、推理策略、评测 / RL 配置以及命令元数据 |
 | `frame` | 最新的可视化帧、qpos 和相机键 |
 
-[`eva_ctl.py`](../examples/control_channel/eva_ctl.py) 提供了一个 REQ 客户端：
+[`eva_ctl.py`](../../examples/control_channel/eva_ctl.py) 提供了一个 REQ 客户端：
 
 ```bash
 .venv/bin/python examples/control_channel/eva_ctl.py query config
@@ -121,8 +121,8 @@ web:haptic:right:0.6:80
 .venv/bin/python examples/control_channel/eva_ctl.py haptic right --intensity 0.6 --duration-ms 80
 ```
 
-请把 `pick_cup` 替换为已配置的任务字符串。`wait-idle` 会一直轮询，直到 `session_status` 不再是 `running`；由于命令是排队执行的，它并不能作为启动确认。自动化运行时，请先观察到预期的 running / 阶段切换。无界面模式还提供一个仅限 TTY 的 REAL 推理提示；见[控制台](./console.zh.md#headless--low-power-mode)。
+请把 `pick_cup` 替换为已配置的任务字符串。`wait-idle` 会一直轮询，直到 `session_status` 不再是 `running`；由于命令是排队执行的，它并不能作为启动确认。自动化运行时，请先观察到预期的 running / 阶段切换。无界面模式还提供一个仅限 TTY 的 REAL 推理提示；见[控制台](./console.md#headless--low-power-mode)。
 
 ## 扩展命令目录
 
-在 [`run.py`](../src/core/app/run.py) 中实现对应的状态机分支，并在共享命令目录中添加该命令的条目。命令目录同时提供 ZMQ 白名单和控制台快捷键元数据。需要像 HTTP 那样修改上下文的命令，还必须在 [`control_channel.py`](../src/core/app/control_channel.py) 中实现相应的绑定；仅仅把字符串放入队列，并不能复现 HTTP 处理函数对元数据的写入。
+在 [`run.py`](../../src/core/app/run.py) 中实现对应的状态机分支，并在共享命令目录中添加该命令的条目。命令目录同时提供 ZMQ 白名单和控制台快捷键元数据。需要像 HTTP 那样修改上下文的命令，还必须在 [`control_channel.py`](../../src/core/app/control_channel.py) 中实现相应的绑定；仅仅把字符串放入队列，并不能复现 HTTP 处理函数对元数据的写入。

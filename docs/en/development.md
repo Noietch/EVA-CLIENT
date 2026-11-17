@@ -1,4 +1,4 @@
-[← Back to README](../README.md) ｜ [中文](development.zh.md)
+[← Back to README](../../README.md) ｜ [中文](../zh/development.md)
 
 # Development
 

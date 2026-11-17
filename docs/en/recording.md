@@ -1,4 +1,4 @@
-[← Back to README](../README.md) ｜ [中文](recording.zh.md)
+[← Back to README](../../README.md) ｜ [中文](../zh/recording.md)
 
 # Recording
 

@@ -1,4 +1,4 @@
-[← 返回 README](../README_zh.md) ｜ [English](installation.md)
+[← 返回 README](../../README_zh.md) ｜ [English](../en/installation.md)
 
 # 安装
 
@@ -24,7 +24,7 @@ uv pip install --python .venv/bin/python -e ".[dev]"
 | `dev` | pytest、pytest-cov、Ruff、Pyright |
 | `viz` | `fast-simplification`，用于网格简化 |
 
-硬件 SDK、CAN 驱动、ROS 包和相机 SDK 都属于各自的硬件环境。在配置启动器之前，请先阅读[硬件指南](../examples/hardware/SUPPOTED_HARDWARE.md)以及对应机器人的 README。根项目没有 `franka`、`arx`、`ur5e` 或 `camera` 这些 extra。
+硬件 SDK、CAN 驱动、ROS 包和相机 SDK 都属于各自的硬件环境。在配置启动器之前，请先阅读[硬件指南](../../examples/hardware/SUPPOTED_HARDWARE.md)以及对应机器人的 README。根项目没有 `franka`、`arx`、`ur5e` 或 `camera` 这些 extra。
 
 ## 通信层依赖
 
@@ -53,4 +53,4 @@ uv pip install --python .venv/bin/python -e ".[dev]"
 .venv/bin/eva --config configs/00_openloop/dual_agilex_piper_openloop.py
 ```
 
-该预设指向 `examples/agilex_dataset`。可在 REPLAY 页查看录制的数据；DEBUG 页中的策略推理使用所配置的策略后端。接下来请继续阅读[快速开始](quick-start.zh.md)，了解设备、业务预设和无界面控制。
+该预设指向 `examples/agilex_dataset`。可在 REPLAY 页查看录制的数据；DEBUG 页中的策略推理使用所配置的策略后端。接下来请继续阅读[快速开始](quick-start.md)，了解设备、业务预设和无界面控制。

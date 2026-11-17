@@ -1,4 +1,4 @@
-[← Back to README](../README.md) ｜ [中文](installation.zh.md)
+[← Back to README](../../README.md) ｜ [中文](../zh/installation.md)
 
 # Installation
 
@@ -31,7 +31,7 @@ The only root-project extras currently declared in `pyproject.toml` are:
 | `viz` | `fast-simplification` for mesh simplification |
 
 Hardware SDKs, CAN drivers, ROS packages, and camera SDKs belong to their
-respective hardware environments. See the [hardware guide](../examples/hardware/SUPPOTED_HARDWARE.md)
+respective hardware environments. See the [hardware guide](../../examples/hardware/SUPPOTED_HARDWARE.md)
 and each robot's README before configuring a launcher. The root project has no
 `franka`, `arx`, `ur5e`, or `camera` extras.
 

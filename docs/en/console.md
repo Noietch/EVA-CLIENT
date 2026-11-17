@@ -1,4 +1,4 @@
-[← Back to README](../README.md) ｜ [中文](console.zh.md)
+[← Back to README](../../README.md) ｜ [中文](../zh/console.md)
 
 # Console
 
@@ -128,7 +128,7 @@ with progress, ETA, per-dataset results, and stop controls. Data downloads merge
 QC records with local records instead of simply overwriting the ledger. Data
 uploads exclude QC, so publish QC with its own action. Operations on a dataset
 that is recording or saving are rejected until capture finishes. The same
-transfer engine is used by the standalone [dataset service](../tools/datasets/app.py).
+transfer engine is used by the standalone [dataset service](../../tools/datasets/app.py).
 
 COLLECT also offers DOWNLOAD ASSETS, task-set synchronization, UPLOAD DATA, and
 format conversion. Task-set synchronization covers all configured task sets.

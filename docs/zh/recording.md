@@ -1,4 +1,4 @@
-[← 返回 README](../README_zh.md) ｜ [English](recording.md)
+[← 返回 README](../../README_zh.md) ｜ [English](../en/recording.md)
 
 # 录制
 
@@ -15,7 +15,7 @@ EVA 会把数据采集录制的 take 和策略 rollout 都保存为 LeRobot v2.1
 `collection.storage.data_root` 可覆盖采集根目录。未设置时，EVA 会根据外层的
 `task_sets/` 目录推断，否则默认为 `datasets/data_collection`。`collection.storage.log_dir`
 存放运行日志和界面状态，并不是采集数据集的根目录。任务集的发现规则和路径见
-[场景规划](./collection_scene_plan.zh.md)。
+[场景规划](./collection_scene_plan.md)。
 
 一个典型的原生数据集包含：
 

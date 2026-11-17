@@ -1,4 +1,4 @@
-[← Back to README](../README.md) ｜ [中文](collection_scene_plan.zh.md)
+[← Back to README](../../README.md) ｜ [中文](../zh/collection_scene_plan.md)
 
 # Collection scene plans
 
@@ -39,10 +39,10 @@ collection = dict(
 )
 ```
 
-[ARX X5 task-set collection](../configs/02_collection/arx_x5_tasks_set.py)
-and [dual Piper task-set collection](../configs/02_collection/dual_agilex_piper_tasks_set.py)
+[ARX X5 task-set collection](../../configs/02_collection/arx_x5_tasks_set.py)
+and [dual Piper task-set collection](../../configs/02_collection/dual_agilex_piper_tasks_set.py)
 are maintained config examples.
-[`examples/task_sets/dual_yam_pickplace_example`](../examples/task_sets/dual_yam_pickplace_example)
+[`examples/task_sets/dual_yam_pickplace_example`](../../examples/task_sets/dual_yam_pickplace_example)
 is a small complete plan (four tasks, two scenes, ten slots): three tasks carry a
 `reference_image` photo and one has none. It works as a template or as
 `collection.task_set_dir`. Inline `collection.tasks` remains available for
@@ -179,7 +179,7 @@ a text placeholder. The runtime does not discover a photo from a legacy
 ## Slot order, progress, and retakes
 
 The console and dataset tools use one slot planner in
-[`scene_plan.py`](../src/core/utils/scene_plan.py). Order is scene → task → round:
+[`scene_plan.py`](../../src/core/utils/scene_plan.py). Order is scene → task → round:
 
 1. Scenes follow the parsed scene order.
 2. With `task_order: spatial` (the default), tasks sort by first-mentioned hand

@@ -49,10 +49,10 @@ uv venv --python 3.11 .venv && uv pip install --python .venv/bin/python -e ".[de
 - **🧠 Multiple Policy Backends**: [OpenPI](https://github.com/Physical-Intelligence/openpi), [OpenPI-RTC](https://www.pi.website/research/real_time_chunking), [StarVLA](https://github.com/starVLA/starVLA), [GR00T](https://github.com/Nvidia/Isaac-GR00T), [XPolicyLab](https://github.com/XPolicyLab/XPolicyLab), plus mock and replay backends for debugging.
 - **📊 Real-robot Evaluation**: Multi-checkpoint sweeps on task sets with milestones and per-attempt records. Every rollout captures camera video, a 3D URDF scene, per-dimension state charts, and milestone scores, then replays in sync in the RESULT tab.
 - **🎥 Data Collection**: Teleop (including WebXR VR controllers) straight into [LeRobot](https://github.com/huggingface/lerobot) episodes, with a background saver, camera health checks, in-tab QC replay, and export to LeRobot v3.0, MCAP, and HDF5.
-- **🗂️ Collection Campaigns**: Plan tasks and scenes, collect slot by slot, monitor throughput and QC on the DASHBOARD, then review, retake, and deliver. See the [data collection SOP](./docs/data_collection_sop.md).
+- **🗂️ Collection Campaigns**: Plan tasks and scenes, collect slot by slot, monitor throughput and QC on the DASHBOARD, then review, retake, and deliver. See the [data collection SOP](./docs/en/data_collection_sop.md).
 - **🔁 RL & Human-in-the-loop**: Take over during policy rollouts and watch value curves in real time from the RL workspace.
 - **🖥️ Headless Control**: Every console button, HIL takeover included, is mirrored on a ZMQ control channel, so the full deploy / eval / RL / collect loop runs without a browser.
-- **🧩 Agent-friendly**: Built-in coding-agent skills in [`.agents/skills`](./.agents/skills) for adding robots, calibrating cameras, and debugging robot SDKs.
+- **🧩 Agent-friendly**: Built-in coding-agent skills in [`.agents/skills`](.agents/skills) for adding robots, calibrating cameras, and debugging robot SDKs.
 
 ## 📊 Console Preview
 
@@ -81,18 +81,18 @@ EVA-Client ships a web console that covers the whole loop, from bringing up devi
   </tr>
 </table>
 
-For a tour of all eight tabs, see [🧭 Web console](./docs/console.md).
+For a tour of all eight tabs, see [🧭 Web console](./docs/en/console.md).
 
 ## 🎉 What's New
 
-- 🔥 **[2026-11-17] EVA-Client 0.3.0: a redesigned console for the whole data loop.** Run a full collection campaign from one console: plan tasks with or without reference photos, bring up a robot from the new DEVICE tab, collect slot by slot with camera health checks, monitor throughput and QC from the new DASHBOARD, then review, retake, and deliver. Follow the end-to-end [data collection SOP](./docs/data_collection_sop.md). Evaluation now runs on task sets with milestones and per-attempt tracking, [XPolicyLab](https://github.com/XPolicyLab/XPolicyLab) policies connect natively, and coding-agent skills now live in [`.agents/skills`](./.agents/skills). Client-side EVA-SIM support is in place, with the simulator coming soon. See the [changelog](./CHANGELOG.md) for details.
+- 🔥 **[2026-11-17] EVA-Client 0.3.0: a redesigned console for the whole data loop.** Run a full collection campaign from one console: plan tasks with or without reference photos, bring up a robot from the new DEVICE tab, collect slot by slot with camera health checks, monitor throughput and QC from the new DASHBOARD, then review, retake, and deliver. Follow the end-to-end [data collection SOP](./docs/en/data_collection_sop.md). Evaluation now runs on task sets with milestones and per-attempt tracking, [XPolicyLab](https://github.com/XPolicyLab/XPolicyLab) policies connect natively, and coding-agent skills now live in [`.agents/skills`](.agents/skills). Client-side EVA-SIM support is in place, with the simulator coming soon. See the [changelog](./CHANGELOG.md) for details.
 - 🔥 **[2026-08-28] EVA-Client 0.2.0.** WebXR-based VR controller teleoperation, ARX X5 hardware, dual-YAM leader-follower data collection, export to LeRobot v3.0, MCAP, and HDF5, and coding-agent skills for adding robots, calibrating cameras, and debugging robot SDKs.
 - 🔥 **[2026-08-28] EVA-MHS Preview.** Inspired by Anthropic's [Model Hardware Standard (MHS) research preview](https://www.anthropic.com/news/model-hardware-standard-research-preview), EVA-MHS explores an MHS-style agent-to-hardware interface for robotics. Its MCP service lets coding agents inspect runtime state, call policy models, and directly control robots. EVA-MHS is available on the `dev/mcp_preview` branch and will be formally released in a future update.
-- 🔥 **[2026-07-22] New RL Workspace.** Human-in-the-loop (HIL) intervention during policy rollouts and real-time value-curve visualization. See the [RL workspace and HIL intervention demo](./docs/console.md#rl-and-human-intervention).
+- 🔥 **[2026-07-22] New RL Workspace.** Human-in-the-loop (HIL) intervention during policy rollouts and real-time value-curve visualization. See the [RL workspace and HIL intervention demo](./docs/en/console.md#rl-and-human-intervention).
 
 <details><summary>More historical updates</summary>
 
-- 🔥 **[2026-07-18] Headless CLI + ZMQ control channel.** Drive the full deploy / eval / RL / collect loop from a single `.py` config without the browser, with every console button (HIL takeover included) mirrored on a ZMQ socket. See [`docs/console.md`](./docs/console.md) and [`docs/control-channel.md`](./docs/control-channel.md).
+- 🔥 **[2026-07-18] Headless CLI + ZMQ control channel.** Drive the full deploy / eval / RL / collect loop from a single `.py` config without the browser, with every console button (HIL takeover included) mirrored on a ZMQ socket. See [`docs/en/console.md`](./docs/en/console.md) and [`docs/en/control-channel.md`](./docs/en/control-channel.md).
 - 🔥 **[2026-07-03] EVA-Client is open-sourced!**
 - 🔥 **[2026-07-03] Paper, docs, and project page are live!** Read the [Technical Report](https://colalab.net/projects/eva-client/paper/EVA_Client_Report.pdf), browse the [Documentation](https://colalab.net/projects/eva-client/docs/introduction.html) ([Chinese](https://colalab.net/projects/eva-client/docs/introduction.zh.html)), and visit the [Project Page](https://colalab.net/projects/eva-client/).
 
@@ -111,7 +111,7 @@ uv venv --python 3.11 .venv
 uv pip install --python .venv/bin/python -e ".[dev]"
 ```
 
-> For transport requirements (ROS 1 / ROS 2), hardware SDKs, and optional extras, see the [📦 Installation Guide](./docs/installation.md).
+> For transport requirements (ROS 1 / ROS 2), hardware SDKs, and optional extras, see the [📦 Installation Guide](./docs/en/installation.md).
 
 ### Method 1. Open the Console (Recommended)
 
@@ -165,7 +165,7 @@ ssh -N -L 9000:127.0.0.1:9000 '<user>@<policy-host>'
 
 </details>
 
-> Presets do not launch policy servers or simulators. Check paths, endpoints, and checkpoints before use. See the [🚀 Quick Start guide](./docs/quick-start.md) for hardware bring-up per robot.
+> Presets do not launch policy servers or simulators. Check paths, endpoints, and checkpoints before use. See the [🚀 Quick Start guide](./docs/en/quick-start.md) for hardware bring-up per robot.
 
 ## 🤖 Supported Robots
 
@@ -212,16 +212,16 @@ Per-robot launchers and setup guides live in [`examples/hardware/`](./examples/h
 
 | Guide | What's inside |
 |-------|---------------|
-| [📦 Installation](./docs/installation.md) | Requirements, `uv` setup, hardware extras, verify |
-| [🚀 Quick start](./docs/quick-start.md) | Device bring-up, workflow presets, remote access |
-| [🧭 Web console](./docs/console.md) | The eight tabs: DASHBOARD, DEBUG, DEVICE, COLLECT, REPLAY, RL, EVAL, RESULT |
-| [📚 Core concepts](./docs/concepts.md) | Transports, policy backends, inference strategies, robots, action spaces |
-| [⚙️ Configuration](./docs/configuration.md) | `_base_` inheritance, deep merge, startup pipeline |
-| [🎞️ Recording](./docs/recording.md) | On-disk layout, capture checks, QC, export and delivery |
-| [🧾 Data collection SOP](./docs/data_collection_sop.md) | End-to-end campaign: plan, collect, monitor, QC, repair, deliver |
-| [🗂️ Collection scene plans](./docs/collection_scene_plan.md) | Task sets, scenes, objects, and planned collection slots |
-| [🔌 Control channel](./docs/control-channel.md) | Headless ZMQ commands for deploy, eval, RL, and collection |
-| [🔬 Development](./docs/development.md) | Tests, lint, type-check, and how the robot side is faked |
+| [📦 Installation](./docs/en/installation.md) | Requirements, `uv` setup, hardware extras, verify |
+| [🚀 Quick start](./docs/en/quick-start.md) | Device bring-up, workflow presets, remote access |
+| [🧭 Web console](./docs/en/console.md) | The eight tabs: DASHBOARD, DEBUG, DEVICE, COLLECT, REPLAY, RL, EVAL, RESULT |
+| [📚 Core concepts](./docs/en/concepts.md) | Transports, policy backends, inference strategies, robots, action spaces |
+| [⚙️ Configuration](./docs/en/configuration.md) | `_base_` inheritance, deep merge, startup pipeline |
+| [🎞️ Recording](./docs/en/recording.md) | On-disk layout, capture checks, QC, export and delivery |
+| [🧾 Data collection SOP](./docs/en/data_collection_sop.md) | End-to-end campaign: plan, collect, monitor, QC, repair, deliver |
+| [🗂️ Collection scene plans](./docs/en/collection_scene_plan.md) | Task sets, scenes, objects, and planned collection slots |
+| [🔌 Control channel](./docs/en/control-channel.md) | Headless ZMQ commands for deploy, eval, RL, and collection |
+| [🔬 Development](./docs/en/development.md) | Tests, lint, type-check, and how the robot side is faked |
 
 ## 🗺️ Roadmap
 
@@ -240,7 +240,7 @@ For questions or collaboration, feel free to reach out via WeChat:
 
 ## 👷‍♂️ Contributing
 
-Contributions are welcome! To add a robot, policy backend, or feature, start with the [🔬 Development guide](./docs/development.md) and the coding-agent skills in [`.agents/skills`](./.agents/skills), then open a pull request.
+Contributions are welcome! To add a robot, policy backend, or feature, start with the [🔬 Development guide](./docs/en/development.md) and the coding-agent skills in [`.agents/skills`](.agents/skills), then open a pull request.
 
 Thanks to everyone who has contributed to EVA-Client!
 

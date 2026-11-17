@@ -1,4 +1,4 @@
-[← Back to README](../README.md) ｜ [中文](configuration.zh.md)
+[← Back to README](../../README.md) ｜ [中文](../zh/configuration.md)
 
 # Configuration
 
@@ -9,7 +9,7 @@ Paths in `_base_` are relative to the containing file. Dictionaries merge
 recursively; scalar values and whole lists replace their parent value.
 `_delete_=True` replaces an inherited dictionary subtree.
 
-[`configs/00_base/defaults.py`](../configs/00_base/defaults.py) supplies shared
+[`configs/00_base/defaults.py`](../../configs/00_base/defaults.py) supplies shared
 model and workflow defaults. Robot SDK settings, camera choices, endpoints, and
 hardware defaults live in `examples/hardware/*/config.yaml` and
 `examples/input_sources/*/config.yaml`. The loader puts the selected hardware
@@ -75,9 +75,9 @@ continues to work. Restart after changing the configured model list.
 
 | Preset | Model contract |
 | --- | --- |
-| [`dual_agilex_piper/xpolicylab.py`](../configs/01_deploy/dual_agilex_piper/xpolicylab.py) | XPolicyLab, port 19000, two 6D joint arms and 1D grippers, ZMQ images on demand |
-| [`dual_yam_eva_sim_eval.py`](../configs/03_evaluation/dual_yam_eva_sim_eval.py) | XPolicyLab EEF/TCP evaluation, two 7D pose arms and 1D grippers, ZMQ images on demand, control channel enabled |
-| [`dual_agilex_piper_xpolicylab.py`](../configs/00_openloop/dual_agilex_piper_xpolicylab.py) | Offline XPolicyLab example with dataset column mappings and an official [XPolicyLab](https://github.com/XPolicyLab/XPolicyLab) server command; customize local paths |
+| [`dual_agilex_piper/xpolicylab.py`](../../configs/01_deploy/dual_agilex_piper/xpolicylab.py) | XPolicyLab, port 19000, two 6D joint arms and 1D grippers, ZMQ images on demand |
+| [`dual_yam_eva_sim_eval.py`](../../configs/03_evaluation/dual_yam_eva_sim_eval.py) | XPolicyLab EEF/TCP evaluation, two 7D pose arms and 1D grippers, ZMQ images on demand, control channel enabled |
+| [`dual_agilex_piper_xpolicylab.py`](../../configs/00_openloop/dual_agilex_piper_xpolicylab.py) | Offline XPolicyLab example with dataset column mappings and an official [XPolicyLab](https://github.com/XPolicyLab/XPolicyLab) server command; customize local paths |
 
 For XPolicyLab, set `action_type="joint"` or `"ee"`, plus `arm_dims` and
 `gripper_dims` for one or two arms. EEF arms require `arm_dims` entries of 7
@@ -131,7 +131,7 @@ port 5757. See [control channel](control-channel.md) for automation.
 ## Evaluation and scene plans
 
 Inherit a deploy preset and
-[`configs/00_base/evaluation.py`](../configs/00_base/evaluation.py), then fill
+[`configs/00_base/evaluation.py`](../../configs/00_base/evaluation.py), then fill
 `eval_cfg`. Each checkpoint contains a name, a deploy `config` path relative to
 the evaluation preset, a `port`, and an optional `host` (default `127.0.0.1`).
 The loader resolves each deploy config independently and overrides its policy

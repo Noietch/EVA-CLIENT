@@ -1,9 +1,9 @@
-[← Back to README](../README.md) ｜ [中文](quick-start.zh.md)
+[← Back to README](../../README.md) ｜ [中文](../zh/quick-start.md)
 
 # Quick start
 
 Run commands from the repository root using the existing application environment.
-The `eva` entry point is implemented in [`src/main.py`](../src/main.py).
+The `eva` entry point is implemented in [`src/main.py`](../../src/main.py).
 
 ## Start with DEVICE
 
@@ -87,14 +87,14 @@ again through DEVICE. Use each robot's isolated SDK environment and launcher:
 
 | Robot | Default transport | Launcher / instructions |
 |-------|-------------------|-------------------------|
-| AgileX Piper | `ros1` | [`run_agilex_ros.sh`](../examples/hardware/agilex_piper/run_agilex_ros.sh), [guide](../examples/hardware/agilex_piper/README.md) |
-| Galaxea R1 Lite | `ros2` | [`run_hardware.sh`](../examples/hardware/r1_lite/run_hardware.sh), [guide](../examples/hardware/r1_lite/README.md) |
-| ARX R5 | `zmq` | [`run_hardware.sh`](../examples/hardware/arx_r5/run_hardware.sh), [guide](../examples/hardware/arx_r5/README.md) |
-| ARX X5 | `zmq` | [`run_hardware.sh`](../examples/hardware/arx_x5/run_hardware.sh), [guide](../examples/hardware/arx_x5/README.md) |
-| Dual Franka | `zmq` | [`run_hardware.sh`](../examples/hardware/franka/run_hardware.sh), [guide](../examples/hardware/franka/README.md) |
-| UR5e | `zmq` | [`run_hardware.sh`](../examples/hardware/ur5e/run_hardware.sh), [guide](../examples/hardware/ur5e/README.md) |
-| AgiBot G2 | `zmq` | [`node.py`](../examples/hardware/agibot_g2/node.py), [guide](../examples/hardware/agibot_g2/README.md) |
-| Dual YAM | `zmq` | [`run_hardware.sh`](../examples/hardware/yam/run_hardware.sh), [guide](../examples/hardware/yam/README.md) |
+| AgileX Piper | `ros1` | [`run_agilex_ros.sh`](../../examples/hardware/agilex_piper/run_agilex_ros.sh), [guide](../../examples/hardware/agilex_piper/README.md) |
+| Galaxea R1 Lite | `ros2` | [`run_hardware.sh`](../../examples/hardware/r1_lite/run_hardware.sh), [guide](../../examples/hardware/r1_lite/README.md) |
+| ARX R5 | `zmq` | [`run_hardware.sh`](../../examples/hardware/arx_r5/run_hardware.sh), [guide](../../examples/hardware/arx_r5/README.md) |
+| ARX X5 | `zmq` | [`run_hardware.sh`](../../examples/hardware/arx_x5/run_hardware.sh), [guide](../../examples/hardware/arx_x5/README.md) |
+| Dual Franka | `zmq` | [`run_hardware.sh`](../../examples/hardware/franka/run_hardware.sh), [guide](../../examples/hardware/franka/README.md) |
+| UR5e | `zmq` | [`run_hardware.sh`](../../examples/hardware/ur5e/run_hardware.sh), [guide](../../examples/hardware/ur5e/README.md) |
+| AgiBot G2 | `zmq` | [`node.py`](../../examples/hardware/agibot_g2/node.py), [guide](../../examples/hardware/agibot_g2/README.md) |
+| Dual YAM | `zmq` | [`run_hardware.sh`](../../examples/hardware/yam/run_hardware.sh), [guide](../../examples/hardware/yam/README.md) |
 
 Fake mode uses `zmq` for all registered robots. Its cameras and dynamics are
 synthetic and do not establish physical hardware readiness.

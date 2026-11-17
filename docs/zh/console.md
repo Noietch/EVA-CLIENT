@@ -1,4 +1,4 @@
-[← 返回 README](../README_zh.md) ｜ [English](console.md)
+[← 返回 README](../../README_zh.md) ｜ [English](../en/console.md)
 
 # 控制台
 
@@ -45,11 +45,11 @@ console = dict(
 
 ## 采集流程
 
-先在 COLLECT 页选择一个数据集，再在场景 / 任务 / 轮次网格中选择一个采集槽位。挂载的[场景规划](./collection_scene_plan.zh.md)为每个任务提供参考照片和目标数量。场景和任务筛选只改变显示的网格，采集槽位 ID 保持不变。内联的 `collection.tasks` 配置同样使用该选择器，此时只有一个 DEFAULT 场景，每个请求的 episode 对应一个采集槽位。目标数为 `-1` 的槽位始终可用，可重复采集。
+先在 COLLECT 页选择一个数据集，再在场景 / 任务 / 轮次网格中选择一个采集槽位。挂载的[场景规划](./collection_scene_plan.md)为每个任务提供参考照片和目标数量。场景和任务筛选只改变显示的网格，采集槽位 ID 保持不变。内联的 `collection.tasks` 配置同样使用该选择器，此时只有一个 DEFAULT 场景，每个请求的 episode 对应一个采集槽位。目标数为 `-1` 的槽位始终可用，可重复采集。
 
 启用 MOTION 以激活配置好的遥操作源。START RECORD 开始录制；STOP 结束录制，遥操作保持激活并停留在当前位姿。CANCEL 会丢弃当前这一条录制。执行 HOME 之前请先关闭 MOTION；遥操作处于待命或激活状态时，HOME 会被拒绝。保存队列已满时，无法开始新的录制。在将一条录制视为可用之前，请先确认其已保存 / 失败状态。
 
-网格区分 TO COLLECT、UNREVIEWED、PASSED 和 FAILED 四种状态。采集完成数与质检通过数是两个不同的计数。选中一个已保存的 episode 进行回放，然后使用 PASS、FAIL、UNREVIEWED 以及备注控件。重新录制某个已规划的采集槽位，会以相同的 episode 索引替换该槽位之前的 episode，而不会额外增加一个已完成的目标。存储、采集检查和质检优先级详见[录制](./recording.zh.md)。
+网格区分 TO COLLECT、UNREVIEWED、PASSED 和 FAILED 四种状态。采集完成数与质检通过数是两个不同的计数。选中一个已保存的 episode 进行回放，然后使用 PASS、FAIL、UNREVIEWED 以及备注控件。重新录制某个已规划的采集槽位，会以相同的 episode 索引替换该槽位之前的 episode，而不会额外增加一个已完成的目标。存储、采集检查和质检优先级详见[录制](./recording.md)。
 
 EVA-SIM（即将推出）配置会在录制前绑定所选的仿真场景 / 任务。仿真器写出执行过程的 MCAP；EVA 会对其进行校验，并在后台生成原生数据集。相机渲染可能稍后才进行，因此刚保存的 SIM 录制一开始可能没有视频。
 
@@ -58,7 +58,7 @@ EVA-SIM（即将推出）配置会在录制前绑定所选的仿真场景 / 任�
 
 DASHBOARD 页展示原始的采集和评测活动，支持按日期和场景筛选。其数据集管理器会列出当前采集配置所挂载的数据集、本地采集 / 质检计数、远端计数，以及数据 / 任务 / 质检的对比结果。选择数据集后，可分别上传或下载数据、任务定义或质检结果。Refresh cloud and verify 会执行远端检查和对比，但不会上传本地改动。
 
-这些操作使用 `collection.storage.huggingface`，以后台任务的形式运行，提供进度、预计剩余时间（ETA）、逐数据集结果和停止控制。下载数据时，会把质检记录与本地记录合并，而不是直接覆盖台账。上传数据时不包含质检结果，因此需要通过单独的操作发布质检结果。对正在录制或保存中的数据集执行的操作会被拒绝，直到采集完成。独立的[数据集服务](../tools/datasets/app.py)也使用同一套传输引擎。
+这些操作使用 `collection.storage.huggingface`，以后台任务的形式运行，提供进度、预计剩余时间（ETA）、逐数据集结果和停止控制。下载数据时，会把质检记录与本地记录合并，而不是直接覆盖台账。上传数据时不包含质检结果，因此需要通过单独的操作发布质检结果。对正在录制或保存中的数据集执行的操作会被拒绝，直到采集完成。独立的[数据集服务](../../tools/datasets/app.py)也使用同一套传输引擎。
 
 COLLECT 页还提供 DOWNLOAD ASSETS、任务集同步、UPLOAD DATA 和格式转换。任务集同步涵盖所有已配置的任务集。原生格式为 LeRobot v2.1；转换会在同级目录下生成 LeRobot v3、HDF5 或 MCAP。转换会携带质检元数据，并包含所有源 episode；由下游使用方自行应用验收过滤。可选的 SFTP/S3 交付和 Hugging Face 同步在 `collection.storage` 下配置。
 
@@ -84,7 +84,7 @@ EVAL 页使用 `eval_cfg.task_set_dir` 中配置的任务和任务集。对于�
 .venv/bin/eva --config configs/01_deploy/dual_yam/openpi_qpos.py --headless
 ```
 
-无界面模式会跳过 HTTP 服务、浏览器场景、MJPEG 流、额外的可视化读取器以及 RESULT 预览。通信层、策略、录制和状态机会继续运行。ZMQ [控制通道](./control-channel.zh.md)会自动启用，使用 `control_channel.host` 和 `port`（默认 `127.0.0.1:5757`）。在此模式下 `--web-port` 不起作用。
+无界面模式会跳过 HTTP 服务、浏览器场景、MJPEG 流、额外的可视化读取器以及 RESULT 预览。通信层、策略、录制和状态机会继续运行。ZMQ [控制通道](./control-channel.md)会自动启用，使用 `control_channel.host` 和 `port`（默认 `127.0.0.1:5757`）。在此模式下 `--web-port` 不起作用。
 
 当 stdin 是终端时，进程还会提供一个简单的 REAL 模式推理命令行：
 

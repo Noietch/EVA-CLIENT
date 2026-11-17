@@ -1,4 +1,4 @@
-[← 返回 README](../README_zh.md) ｜ [English](data_collection_sop.md)
+[← 返回 README](../../README_zh.md) ｜ [English](../en/data_collection_sop.md)
 
 # 数据采集 SOP
 
@@ -25,19 +25,19 @@
 
 ## 1. 规划任务集
 
-任务集定义了要采集什么：有哪些任务、每个任务在哪些场景中录制，以及每个任务/场景组合需要录制多少条。控制台会将其展开为固定的采集槽位（`<task_id>:<scene_id>:<round>`），因此进度始终以规划为基准来衡量。完整 schema 见[采集场景规划](./collection_scene_plan.zh.md)。
+任务集定义了要采集什么：有哪些任务、每个任务在哪些场景中录制，以及每个任务/场景组合需要录制多少条。控制台会将其展开为固定的采集槽位（`<task_id>:<scene_id>:<round>`），因此进度始终以规划为基准来衡量。完整 schema 见[采集场景规划](./collection_scene_plan.md)。
 
 每个任务会以以下两种方式之一展示给操作员：
 
 - **带照片。** 在 `tasks.csv` 中将 `reference_image` 设为预期布置的照片。操作员在录制前按照片摆好桌面。
 - **不带照片。** 将 `reference_image` 留空。操作员只能看到任务 prompt。
 
-可以从 [`examples/task_sets/dual_yam_pickplace_example`](../examples/task_sets/dual_yam_pickplace_example) 开始：四个任务、两个场景、十个槽位，其中三个任务带照片，一个不带。
+可以从 [`examples/task_sets/dual_yam_pickplace_example`](../../examples/task_sets/dual_yam_pickplace_example) 开始：四个任务、两个场景、十个槽位，其中三个任务带照片，一个不带。
 
 整场采集开始前：
 
 1. 填写 `info.yaml`（`dataset_name`、`robot_type`、`collection_dir`）、`tasks.csv` 和 `scene.csv`。
-2. 在[数据集浏览器](./console.zh.md#dataset-operations)中打开该任务集（`bash tools/datasets/start.sh --config <file.py>`）并运行校验。采集前修复所有报告的错误。
+2. 在[数据集浏览器](./console.md#dataset-operations)中打开该任务集（`bash tools/datasets/start.sh --config <file.py>`）并运行校验。采集前修复所有报告的错误。
 3. 一旦开始采集，就冻结 `task_id`、`scene_id` 和各项计数。修改它们会改变已保存录制与槽位之间的归属关系。
 4. 发布任务集（Hugging Face 任务集同步），确保每个采集站使用同一版本。
 

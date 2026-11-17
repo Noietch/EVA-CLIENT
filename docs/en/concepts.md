@@ -1,4 +1,4 @@
-[← Back to README](../README.md) ｜ [中文](concepts.zh.md)
+[← Back to README](../../README.md) ｜ [中文](../zh/concepts.md)
 
 # Core concepts
 
@@ -6,8 +6,8 @@
 
 EVA-CLIENT runs policy inference, operator controls, recording, and the console.
 Hardware SDKs and camera capture run in separate processes under
-[`examples/hardware/`](../examples/hardware/) and
-[`examples/input_sources/`](../examples/input_sources/). Device definitions in
+[`examples/hardware/`](../../examples/hardware/) and
+[`examples/input_sources/`](../../examples/input_sources/). Device definitions in
 their `config.yaml` files supply hardware defaults; Python presets select the
 model and workflow. The console's DEVICE workspace manages device selection,
 settings, startup, and health.

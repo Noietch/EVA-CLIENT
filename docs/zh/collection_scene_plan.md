@@ -1,4 +1,4 @@
-[← 返回 README](../README_zh.md) ｜ [English](collection_scene_plan.md)
+[← 返回 README](../../README_zh.md) ｜ [English](../en/collection_scene_plan.md)
 
 # 采集场景规划
 
@@ -30,7 +30,7 @@ collection = dict(
 )
 ```
 
-[ARX X5 任务集采集](../configs/02_collection/arx_x5_tasks_set.py)和[双 Piper 任务集采集](../configs/02_collection/dual_agilex_piper_tasks_set.py)是持续维护的配置示例。[`examples/task_sets/dual_yam_pickplace_example`](../examples/task_sets/dual_yam_pickplace_example) 是一份小而完整的规划（四个任务、两个场景、十个槽位）：其中三个任务带有 `reference_image` 照片，另一个没有。它既可以作为模板，也可以直接用作 `collection.task_set_dir`。对于不使用场景文件的工作流，仍可使用内联的 `collection.tasks`。如果单个任务集目录不存在，配置中编写的任务继续生效；而一旦挂载了目录，就必须包含有效的 `tasks.csv`。
+[ARX X5 任务集采集](../../configs/02_collection/arx_x5_tasks_set.py)和[双 Piper 任务集采集](../../configs/02_collection/dual_agilex_piper_tasks_set.py)是持续维护的配置示例。[`examples/task_sets/dual_yam_pickplace_example`](../../examples/task_sets/dual_yam_pickplace_example) 是一份小而完整的规划（四个任务、两个场景、十个槽位）：其中三个任务带有 `reference_image` 照片，另一个没有。它既可以作为模板，也可以直接用作 `collection.task_set_dir`。对于不使用场景文件的工作流，仍可使用内联的 `collection.tasks`。如果单个任务集目录不存在，配置中编写的任务继续生效；而一旦挂载了目录，就必须包含有效的 `tasks.csv`。
 
 `info.yaml` 可以定义：
 
@@ -130,7 +130,7 @@ COLLECT、EVAL、DASHBOARD 和 RESULT 页会把任务的 `reference_image` 作�
 
 ## 槽位顺序、进度与补采
 
-控制台和数据集工具共用 [`scene_plan.py`](../src/core/utils/scene_plan.py) 中的同一个槽位规划器，排序为 场景 → 任务 → 轮次：
+控制台和数据集工具共用 [`scene_plan.py`](../../src/core/utils/scene_plan.py) 中的同一个槽位规划器，排序为 场景 → 任务 → 轮次：
 
 1. 场景按解析出的场景顺序排列。
 2. 当 `task_order: spatial`（默认）时，任务先按首次提及的手（左、右、未知）排序，再按被操作物体在布局中的行优先位置排序。空间顺序由坐标决定；没有可用坐标的点排在有坐标的点之后，并保持编写顺序。
@@ -139,7 +139,7 @@ COLLECT、EVAL、DASHBOARD 和 RESULT 页会把任务的 `reference_image` 作�
 
 稳定键为 `<task_id>:<scene_id>:<round_index>`。每个 episode 会保存这个 `slot_id`、任务/场景 ID 以及 `scene_round`。修改 ID 或计数会改变规划与已有录制之间的对应关系，因此在编辑进行中的规划时，请保持已被引用的标识不变。
 
-槽位选择器可以按场景/任务筛选、选择已保存的某条录制进行回放/审核，或将某个槽位延后。游标和延后选择仅保存在本机。进度由已保存的记录和质检台账决定；TO COLLECT、UNREVIEWED、PASSED 和 FAILED 四种状态彼此独立。补采会替换该槽位已有的 episode 索引。质检与保存语义详见[录制](./recording.zh.md)。
+槽位选择器可以按场景/任务筛选、选择已保存的某条录制进行回放/审核，或将某个槽位延后。游标和延后选择仅保存在本机。进度由已保存的记录和质检台账决定；TO COLLECT、UNREVIEWED、PASSED 和 FAILED 四种状态彼此独立。补采会替换该槽位已有的 episode 索引。质检与保存语义详见[录制](./recording.md)。
 
 当前运行时直接根据各目录文件生成这份固定规划，不会生成带随机种子的 `run_plan.csv`，也不会随机分配位置。调整覆盖范围时，请显式编写所需的场景 ID 和计数。
 

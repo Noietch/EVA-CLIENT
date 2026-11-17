@@ -1,12 +1,12 @@
-[← 返回 README](../README_zh.md) ｜ [English](concepts.md)
+[← 返回 README](../../README_zh.md) ｜ [English](../en/concepts.md)
 
 # 核心概念
 
 ## 设备进程与通信层
 
 EVA-CLIENT 负责策略推理、操作员控制、录制和控制台。硬件 SDK 与相机采集运行在
-[`examples/hardware/`](../examples/hardware/) 和
-[`examples/input_sources/`](../examples/input_sources/) 下的独立进程中。各设备的
+[`examples/hardware/`](../../examples/hardware/) 和
+[`examples/input_sources/`](../../examples/input_sources/) 下的独立进程中。各设备的
 `config.yaml` 提供硬件默认值；Python 预设负责选择模型和工作流。控制台的 DEVICE
 页负责设备选择、参数设置、启动和健康状态管理。
 
@@ -44,7 +44,7 @@ EVA 观测包含 `state`（扁平的 float32 向量）、`images`（相机名到
 XPolicyLab 会发送指令、按名称组织的相机彩色图像数组以及按名称组织的状态字段。
 对于两条关节空间机械臂，传输中的状态/动作顺序为：左臂关节、左夹爪、右臂关节、右夹爪。
 末端空间机械臂每条使用七个值（`xyz + wxyz`），再加上所配置的夹爪开度。重置会创建新的
-trial 标识，并重新开始推理步计数。预设说明见[配置](configuration.zh.md)。
+trial 标识，并重新开始推理步计数。预设说明见[配置](configuration.md)。
 
 ## 推理策略
 
@@ -85,5 +85,5 @@ trial 标识，并重新开始推理步计数。预设说明见[配置](configur
 EVAL 页也可以从任务集目录加载场景规划。感知场景的尝试会把 `task_set`、`task_id` 和
 `scene_id` 绑定在一起，并随 trial 保存一份场景映射快照。这样即使源场景规划之后发生变化，
 RESULT 页和 DASHBOARD 视图仍然与当次尝试的布局对应。详见
-[配置](configuration.zh.md#evaluation-and-scene-plans)和
-[场景规划格式](collection_scene_plan.zh.md)。
+[配置](configuration.md#evaluation-and-scene-plans)和
+[场景规划格式](collection_scene_plan.md)。

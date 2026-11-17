@@ -11,7 +11,7 @@
 - Preserved all configured camera inputs in policy requests and improved camera readiness, safe homing/stop, collection feedback, replay, and QC responsiveness.
 - Reorganized tests into `unit`, `integration`, and `static` layers focused on the core deploy, evaluation, transport, recording, and device paths.
 - Scene maps in COLLECT, EVAL, DASHBOARD, and RESULT now show a task's reference photo or only its prompt; the position-grid view was removed.
-- Added an end-to-end data collection SOP (`docs/data_collection_sop.md`) covering planning, collection, monitoring, QC, repair, and delivery.
+- Added an end-to-end data collection SOP (`docs/en/data_collection_sop.md`) covering planning, collection, monitoring, QC, repair, and delivery.
 - Added an example dual YAM collection task set under `examples/task_sets/`.
 - Moved the coding-agent skills from `tools/skills` to `.agents/skills`.
 - Refreshed installation, quick start, console, configuration, recording, control-channel, policy, and hardware documentation.

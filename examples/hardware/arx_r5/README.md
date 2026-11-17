@@ -301,7 +301,7 @@ bash examples/hardware/arx_r5/run_hardware.sh
 
 R5 runtime logs use `work_dirs/collection/arx_r5`. Datasets default to
 `<data_root>/datasets/real_robot/arx_r5/<dataset>`; a task set's `collection_dir`
-can override that location. See [Recording](../../../docs/recording.md).
+can override that location. See [Recording](../../../docs/en/recording.md).
 For X5 hardware use the separate [`../arx_x5/README.md`](../arx_x5/README.md)
 adapter and config.
 

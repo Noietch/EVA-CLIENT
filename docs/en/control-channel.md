@@ -1,4 +1,4 @@
-[← Back to README](../README.md) ｜ [中文](control-channel.zh.md)
+[← Back to README](../../README.md) ｜ [中文](../zh/control-channel.md)
 
 # Control channel (ZMQ)
 
@@ -40,7 +40,7 @@ are applied later by the main loop; poll status and inspect `last_error`.
 | Invalid request or disallowed verb | `{"ok":false,"error":"..."}` |
 
 Only `web:*` verbs in
-[`command_catalog.py`](../src/core/app/command_catalog.py) are allowed.
+[`command_catalog.py`](../../src/core/app/command_catalog.py) are allowed.
 `tab_switch` updates the active console tab and queues its transition. Haptics are sent directly to
 the VR client. `web:start` with `clip_id` validates/binds an evaluation attempt
 before queueing it. Other supported commands enter the shared queue.
@@ -159,7 +159,7 @@ the feedback through OpenXR; the command does not change robot session state.
 | `config` | Robot/transport, tasks, modes, strategies, evaluation/RL configuration, and command metadata |
 | `frame` | Latest visualization frame, qpos, and camera keys |
 
-[`eva_ctl.py`](../examples/control_channel/eva_ctl.py) provides a REQ client:
+[`eva_ctl.py`](../../examples/control_channel/eva_ctl.py) provides a REQ client:
 
 ```bash
 .venv/bin/python examples/control_channel/eva_ctl.py query config
@@ -179,8 +179,8 @@ see [Console](./console.md#headless--low-power-mode).
 ## Extending the catalog
 
 Implement the state-machine branch in
-[`run.py`](../src/core/app/run.py) and add its entry to the shared command catalog.
+[`run.py`](../../src/core/app/run.py) and add its entry to the shared command catalog.
 The catalog supplies both the ZMQ allow-list and console shortcut metadata.
 Commands needing HTTP-style context mutation must also implement that binding in
-[`control_channel.py`](../src/core/app/control_channel.py); queueing a string
+[`control_channel.py`](../../src/core/app/control_channel.py); queueing a string
 alone does not reproduce an HTTP handler's metadata writes.

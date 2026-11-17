@@ -1,9 +1,9 @@
-[← 返回 README](../README_zh.md) ｜ [English](quick-start.md)
+[← 返回 README](../../README_zh.md) ｜ [English](../en/quick-start.md)
 
 # 快速开始
 
 请在仓库根目录下、使用已有的应用环境运行以下命令。
-`eva` 入口的实现位于 [`src/main.py`](../src/main.py)。
+`eva` 入口的实现位于 [`src/main.py`](../../src/main.py)。
 
 ## 从 DEVICE 页开始
 
@@ -72,8 +72,8 @@ Fake 模式使用共享的 ZMQ fake 节点，不需要实体机器人的 SDK 环
 
 使用前请检查预设中的路径、服务端点、任务集挂载以及模型/checkpoint 设置。
 预设不会自动启动策略服务器或仿真器。
-SIM 录制（EVA-SIM，即将发布）和场景规划分别见[录制](recording.zh.md)和
-[采集场景规划](collection_scene_plan.zh.md)。
+SIM 录制（EVA-SIM，即将发布）和场景规划分别见[录制](recording.md)和
+[采集场景规划](collection_scene_plan.md)。
 
 ## 手动启动硬件
 
@@ -82,14 +82,14 @@ SIM 录制（EVA-SIM，即将发布）和场景规划分别见[录制](recording
 
 | 机器人 | 默认通信层 | 启动脚本 / 说明 |
 |-------|-------------------|-------------------------|
-| AgileX Piper | `ros1` | [`run_agilex_ros.sh`](../examples/hardware/agilex_piper/run_agilex_ros.sh)，[说明](../examples/hardware/agilex_piper/README.md) |
-| Galaxea R1 Lite | `ros2` | [`run_hardware.sh`](../examples/hardware/r1_lite/run_hardware.sh)，[说明](../examples/hardware/r1_lite/README.md) |
-| ARX R5 | `zmq` | [`run_hardware.sh`](../examples/hardware/arx_r5/run_hardware.sh)，[说明](../examples/hardware/arx_r5/README.md) |
-| ARX X5 | `zmq` | [`run_hardware.sh`](../examples/hardware/arx_x5/run_hardware.sh)，[说明](../examples/hardware/arx_x5/README.md) |
-| Dual Franka | `zmq` | [`run_hardware.sh`](../examples/hardware/franka/run_hardware.sh)，[说明](../examples/hardware/franka/README.md) |
-| UR5e | `zmq` | [`run_hardware.sh`](../examples/hardware/ur5e/run_hardware.sh)，[说明](../examples/hardware/ur5e/README.md) |
-| AgiBot G2 | `zmq` | [`node.py`](../examples/hardware/agibot_g2/node.py)，[说明](../examples/hardware/agibot_g2/README.md) |
-| Dual YAM | `zmq` | [`run_hardware.sh`](../examples/hardware/yam/run_hardware.sh)，[说明](../examples/hardware/yam/README.md) |
+| AgileX Piper | `ros1` | [`run_agilex_ros.sh`](../../examples/hardware/agilex_piper/run_agilex_ros.sh)，[说明](../../examples/hardware/agilex_piper/README.md) |
+| Galaxea R1 Lite | `ros2` | [`run_hardware.sh`](../../examples/hardware/r1_lite/run_hardware.sh)，[说明](../../examples/hardware/r1_lite/README.md) |
+| ARX R5 | `zmq` | [`run_hardware.sh`](../../examples/hardware/arx_r5/run_hardware.sh)，[说明](../../examples/hardware/arx_r5/README.md) |
+| ARX X5 | `zmq` | [`run_hardware.sh`](../../examples/hardware/arx_x5/run_hardware.sh)，[说明](../../examples/hardware/arx_x5/README.md) |
+| Dual Franka | `zmq` | [`run_hardware.sh`](../../examples/hardware/franka/run_hardware.sh)，[说明](../../examples/hardware/franka/README.md) |
+| UR5e | `zmq` | [`run_hardware.sh`](../../examples/hardware/ur5e/run_hardware.sh)，[说明](../../examples/hardware/ur5e/README.md) |
+| AgiBot G2 | `zmq` | [`node.py`](../../examples/hardware/agibot_g2/node.py)，[说明](../../examples/hardware/agibot_g2/README.md) |
+| Dual YAM | `zmq` | [`run_hardware.sh`](../../examples/hardware/yam/run_hardware.sh)，[说明](../../examples/hardware/yam/README.md) |
 
 Fake 模式下所有已注册机器人都使用 `zmq`。其相机和动力学都是合成的，不能说明实体硬件已经就绪。
 
@@ -120,7 +120,7 @@ ssh -N -L 9000:127.0.0.1:9000 '<user>@<policy-host>'
 
 无界面模式会关闭 HTTP 控制台和浏览器可视化。在 TTY 终端中，推理 CLI 提供
 `task`、`setup`、`run`、`stop`、`reset` 和 `status` 命令。
-无界面模式会自动启用 [ZMQ 控制通道](control-channel.zh.md)；其配置的主机和端口也可供外部自动化程序使用。
+无界面模式会自动启用 [ZMQ 控制通道](control-channel.md)；其配置的主机和端口也可供外部自动化程序使用。
 启用浏览器时，如需开放该通道，请设置 `control_channel.enabled=True`。
 
 独立的数据集浏览器不需要运行中的机器人或 EVA 控制台：
@@ -134,7 +134,7 @@ bash tools/datasets/start.sh --read-only \
 `--config` 指定的 Python 文件中写一个
 `dataset_browser = dict(plans_root=..., assets_root=..., collection_root=...)` 配置段。
 只读模式会禁用编辑和传输操作，但服务仍可能创建目录索引和预览缓存。数据布局和质检（QC）/导出流程见
-[录制](recording.zh.md)。
+[录制](recording.md)。
 
 | 参数 | 说明 | 默认值 |
 |----------|-------------|---------|

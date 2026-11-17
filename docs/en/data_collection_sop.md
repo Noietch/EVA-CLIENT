@@ -1,4 +1,4 @@
-[← Back to README](../README.md) ｜ [中文](data_collection_sop.zh.md)
+[← Back to README](../../README.md) ｜ [中文](../zh/data_collection_sop.md)
 
 # Data collection SOP
 
@@ -42,7 +42,7 @@ Each task is shown to the operator in one of two ways:
   only.
 
 Start from
-[`examples/task_sets/dual_yam_pickplace_example`](../examples/task_sets/dual_yam_pickplace_example):
+[`examples/task_sets/dual_yam_pickplace_example`](../../examples/task_sets/dual_yam_pickplace_example):
 four tasks, two scenes, ten slots, three tasks with a photo and one without.
 
 Before the campaign:

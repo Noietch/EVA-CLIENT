@@ -66,5 +66,5 @@ That example expects a sibling checkout of the official
 [XPolicyLab](https://github.com/XPolicyLab/XPolicyLab) with the policy installed
 and its `deploy.yml` pointing at your checkpoint. The tool writes `trajectory.jsonl`, `summary.json`, and `open_loop.png`
 into a new output directory and stops its configured server when finished.
-See [configuration](../../docs/configuration.md) for image, space, and timeout
+See [configuration](../../docs/en/configuration.md) for image, space, and timeout
 settings.

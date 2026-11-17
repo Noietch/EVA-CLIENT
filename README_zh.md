@@ -49,10 +49,10 @@ uv venv --python 3.11 .venv && uv pip install --python .venv/bin/python -e ".[de
 - **🧠 多种策略后端**：支持 [OpenPI](https://github.com/Physical-Intelligence/openpi)、[OpenPI-RTC](https://www.pi.website/research/real_time_chunking)、[StarVLA](https://github.com/starVLA/starVLA)、[GR00T](https://github.com/Nvidia/Isaac-GR00T)、[XPolicyLab](https://github.com/XPolicyLab/XPolicyLab)，另有 mock 与 replay 后端用于调试。
 - **📊 真机评测**：基于任务集的多 checkpoint 评测，支持里程碑打分和逐次尝试记录。每次 rollout 都会保存相机视频、3D URDF 场景、逐维度状态曲线和里程碑得分，并可在 RESULT 页同步回放。
 - **🎥 数据采集**：遥操作（含 WebXR VR 手柄）直接录制为 [LeRobot](https://github.com/huggingface/lerobot) episode，支持后台保存、相机健康检查、页内 QC 回放，可导出为 LeRobot v3.0、MCAP 和 HDF5。
-- **🗂️ 采集任务管理**：规划任务与场景，按槽位逐条采集，在 DASHBOARD 上监控产出和质检，然后审核、补采、交付。详见[数据采集 SOP](./docs/data_collection_sop.zh.md)。
+- **🗂️ 采集任务管理**：规划任务与场景，按槽位逐条采集，在 DASHBOARD 上监控产出和质检，然后审核、补采、交付。详见[数据采集 SOP](./docs/zh/data_collection_sop.md)。
 - **🔁 强化学习与人在环**：在 RL 工作区中可随时接管策略 rollout，并实时查看价值曲线。
 - **🖥️ 无界面控制**：控制台上的每个按钮（包括 HIL 接管）都映射到 ZMQ 控制通道，部署 / 评测 / RL / 采集全流程都可以脱离浏览器运行。
-- **🧩 对 Agent 友好**：[`.agents/skills`](./.agents/skills) 中内置了多个 coding-agent 技能，用于添加机器人、标定相机和调试机器人 SDK。
+- **🧩 对 Agent 友好**：[`.agents/skills`](.agents/skills) 中内置了多个 coding-agent 技能，用于添加机器人、标定相机和调试机器人 SDK。
 
 ## 📊 控制台预览
 
@@ -81,18 +81,18 @@ EVA-Client 自带 Web 控制台，覆盖从设备启动到结果复盘的完整�
   </tr>
 </table>
 
-八个页面的完整介绍见 [🧭 Web 控制台](./docs/console.zh.md)。
+八个页面的完整介绍见 [🧭 Web 控制台](./docs/zh/console.md)。
 
 ## 🎉 最新动态
 
-- 🔥 **[2026-11-17] EVA-Client 0.3.0：为完整数据闭环重新设计的控制台。** 在一个控制台里完成整场采集：规划任务（可带或不带参考照片），在新的 DEVICE 页启动机器人，带相机健康检查逐槽位采集，在新的 DASHBOARD 上监控产出与质检，然后审核、补采、交付。可参考端到端的[数据采集 SOP](./docs/data_collection_sop.zh.md)。评测现在基于任务集运行，支持里程碑和逐次尝试记录；原生接入 [XPolicyLab](https://github.com/XPolicyLab/XPolicyLab) 策略；coding-agent 技能迁移到 [`.agents/skills`](./.agents/skills)。客户端侧的 EVA-SIM 支持已就绪，仿真器即将发布。详见 [CHANGELOG](./CHANGELOG.md)。
+- 🔥 **[2026-11-17] EVA-Client 0.3.0：为完整数据闭环重新设计的控制台。** 在一个控制台里完成整场采集：规划任务（可带或不带参考照片），在新的 DEVICE 页启动机器人，带相机健康检查逐槽位采集，在新的 DASHBOARD 上监控产出与质检，然后审核、补采、交付。可参考端到端的[数据采集 SOP](./docs/zh/data_collection_sop.md)。评测现在基于任务集运行，支持里程碑和逐次尝试记录；原生接入 [XPolicyLab](https://github.com/XPolicyLab/XPolicyLab) 策略；coding-agent 技能迁移到 [`.agents/skills`](.agents/skills)。客户端侧的 EVA-SIM 支持已就绪，仿真器即将发布。详见 [CHANGELOG](./CHANGELOG.md)。
 - 🔥 **[2026-08-28] EVA-Client 0.2.0。** 新增基于 WebXR 的 VR 手柄遥操作、ARX X5 硬件、双 YAM 主从臂数据采集，支持导出 LeRobot v3.0、MCAP 和 HDF5，并提供添加机器人、标定相机、调试机器人 SDK 的 coding-agent 技能。
 - 🔥 **[2026-08-28] EVA-MHS 预览版。** 受 Anthropic [Model Hardware Standard (MHS) 研究预览](https://www.anthropic.com/news/model-hardware-standard-research-preview)启发，EVA-MHS 探索面向机器人的 MHS 风格 agent-硬件接口。其 MCP 服务允许 coding agent 查看运行时状态、调用策略模型并直接控制机器人。EVA-MHS 目前位于 `dev/mcp_preview` 分支，将在后续版本正式发布。
-- 🔥 **[2026-07-22] 全新 RL 工作区。** 支持在策略 rollout 过程中进行人在环（HIL）干预，并实时可视化价值曲线。详见 [RL 工作区与 HIL 干预演示](./docs/console.zh.md#rl-and-human-intervention)。
+- 🔥 **[2026-07-22] 全新 RL 工作区。** 支持在策略 rollout 过程中进行人在环（HIL）干预，并实时可视化价值曲线。详见 [RL 工作区与 HIL 干预演示](./docs/zh/console.md#rl-and-human-intervention)。
 
 <details><summary>更多历史更新</summary>
 
-- 🔥 **[2026-07-18] 无界面 CLI + ZMQ 控制通道。** 只用一个 `.py` 配置、无需浏览器即可驱动部署 / 评测 / RL / 采集全流程，控制台上的每个按钮（包括 HIL 接管）都映射到 ZMQ socket。详见 [`docs/console.md`](./docs/console.zh.md) 和 [`docs/control-channel.md`](./docs/control-channel.zh.md)。
+- 🔥 **[2026-07-18] 无界面 CLI + ZMQ 控制通道。** 只用一个 `.py` 配置、无需浏览器即可驱动部署 / 评测 / RL / 采集全流程，控制台上的每个按钮（包括 HIL 接管）都映射到 ZMQ socket。详见 [`docs/zh/console.md`](./docs/zh/console.md) 和 [`docs/zh/control-channel.md`](./docs/zh/control-channel.md)。
 - 🔥 **[2026-07-03] EVA-Client 正式开源！**
 - 🔥 **[2026-07-03] 论文、文档和项目主页上线！** 阅读[技术报告](https://colalab.net/projects/eva-client/paper/EVA_Client_Report.pdf)，浏览[中文文档](https://colalab.net/projects/eva-client/docs/introduction.zh.html)（[English](https://colalab.net/projects/eva-client/docs/introduction.html)），访问[项目主页](https://colalab.net/projects/eva-client/)。
 
@@ -111,7 +111,7 @@ uv venv --python 3.11 .venv
 uv pip install --python .venv/bin/python -e ".[dev]"
 ```
 
-> 通信层依赖（ROS 1 / ROS 2）、硬件 SDK 和可选依赖请参考[📦 安装指南](./docs/installation.zh.md)。
+> 通信层依赖（ROS 1 / ROS 2）、硬件 SDK 和可选依赖请参考[📦 安装指南](./docs/zh/installation.md)。
 
 ### 方式一：打开控制台（推荐）
 
@@ -165,7 +165,7 @@ ssh -N -L 9000:127.0.0.1:9000 '<user>@<policy-host>'
 
 </details>
 
-> 预设不会自动启动策略服务器或仿真器，使用前请检查路径、端点和 checkpoint 配置。各机器人的硬件启动方式见[🚀 快速开始指南](./docs/quick-start.zh.md)。
+> 预设不会自动启动策略服务器或仿真器，使用前请检查路径、端点和 checkpoint 配置。各机器人的硬件启动方式见[🚀 快速开始指南](./docs/zh/quick-start.md)。
 
 ## 🤖 支持的机器人
 
@@ -212,16 +212,16 @@ ssh -N -L 9000:127.0.0.1:9000 '<user>@<policy-host>'
 
 | 指南 | 内容 |
 |------|------|
-| [📦 安装](./docs/installation.zh.md) | 环境要求、`uv` 安装、硬件依赖、验证 |
-| [🚀 快速开始](./docs/quick-start.zh.md) | 设备启动、工作流预设、远程访问 |
-| [🧭 Web 控制台](./docs/console.zh.md) | 八个页面：DASHBOARD、DEBUG、DEVICE、COLLECT、REPLAY、RL、EVAL、RESULT |
-| [📚 核心概念](./docs/concepts.zh.md) | 通信层、策略后端、推理策略、机器人、动作空间 |
-| [⚙️ 配置系统](./docs/configuration.zh.md) | `_base_` 继承、深度合并、启动流程 |
-| [🎞️ 数据录制](./docs/recording.zh.md) | 磁盘目录结构、采集检查、质检、导出与交付 |
-| [🧾 数据采集 SOP](./docs/data_collection_sop.zh.md) | 端到端流程：规划、采集、监控、质检、修复、交付 |
-| [🗂️ 采集场景规划](./docs/collection_scene_plan.zh.md) | 任务集、场景、物体与采集槽位规划 |
-| [🔌 控制通道](./docs/control-channel.zh.md) | 用于部署、评测、RL 和采集的无界面 ZMQ 命令 |
-| [🔬 开发指南](./docs/development.zh.md) | 测试、lint、类型检查，以及如何模拟机器人端 |
+| [📦 安装](./docs/zh/installation.md) | 环境要求、`uv` 安装、硬件依赖、验证 |
+| [🚀 快速开始](./docs/zh/quick-start.md) | 设备启动、工作流预设、远程访问 |
+| [🧭 Web 控制台](./docs/zh/console.md) | 八个页面：DASHBOARD、DEBUG、DEVICE、COLLECT、REPLAY、RL、EVAL、RESULT |
+| [📚 核心概念](./docs/zh/concepts.md) | 通信层、策略后端、推理策略、机器人、动作空间 |
+| [⚙️ 配置系统](./docs/zh/configuration.md) | `_base_` 继承、深度合并、启动流程 |
+| [🎞️ 数据录制](./docs/zh/recording.md) | 磁盘目录结构、采集检查、质检、导出与交付 |
+| [🧾 数据采集 SOP](./docs/zh/data_collection_sop.md) | 端到端流程：规划、采集、监控、质检、修复、交付 |
+| [🗂️ 采集场景规划](./docs/zh/collection_scene_plan.md) | 任务集、场景、物体与采集槽位规划 |
+| [🔌 控制通道](./docs/zh/control-channel.md) | 用于部署、评测、RL 和采集的无界面 ZMQ 命令 |
+| [🔬 开发指南](./docs/zh/development.md) | 测试、lint、类型检查，以及如何模拟机器人端 |
 
 ## 🗺️ 路线图
 
@@ -240,7 +240,7 @@ ssh -N -L 9000:127.0.0.1:9000 '<user>@<policy-host>'
 
 ## 👷‍♂️ 参与贡献
 
-欢迎任何形式的贡献！如果想添加机器人、策略后端或新功能，可以先阅读[🔬 开发指南](./docs/development.zh.md)和 [`.agents/skills`](./.agents/skills) 中的 coding-agent 技能，然后提交 Pull Request。
+欢迎任何形式的贡献！如果想添加机器人、策略后端或新功能，可以先阅读[🔬 开发指南](./docs/zh/development.md)和 [`.agents/skills`](.agents/skills) 中的 coding-agent 技能，然后提交 Pull Request。
 
 感谢所有为 EVA-Client 做出贡献的开发者！
 

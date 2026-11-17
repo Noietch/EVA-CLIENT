@@ -1,8 +1,8 @@
-[← 返回 README](../README_zh.md) ｜ [English](development.md)
+[← 返回 README](../../README_zh.md) ｜ [English](../en/development.md)
 
 # 开发
 
-请使用 Python 3.11 和仓库中已有的 `.venv`。开发工具列在根项目的 `dev` extra 中。如果是全新检出的仓库，请按照[安装指南](installation.zh.md)操作。对于已有环境，只有在确认安装计划会保留所有已安装的版本和文件之后，才添加缺失的依赖。不要运行 `uv run`，不要重建环境，也不要使用同步 / 重新安装类命令。
+请使用 Python 3.11 和仓库中已有的 `.venv`。开发工具列在根项目的 `dev` extra 中。如果是全新检出的仓库，请按照[安装指南](installation.md)操作。对于已有环境，只有在确认安装计划会保留所有已安装的版本和文件之后，才添加缺失的依赖。不要运行 `uv run`，不要重建环境，也不要使用同步 / 重新安装类命令。
 
 ## 检查
 
