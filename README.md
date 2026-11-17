@@ -79,7 +79,7 @@
 
 ## 🤖 Robot zoo & compatibility
 
-✅ Supported &nbsp;·&nbsp; 🚧 In development &nbsp;·&nbsp; 📦 To be added
+✅ Supported &nbsp;·&nbsp; 🚧 In development
 
 | Robot | Form factor | Supported |
 |-------|-------------|:---------:|
@@ -93,10 +93,6 @@
 | YAM | Dual-arm follower + leader | ✅ |
 | AgiBot G2 (mobile base) | Humanoid on mobile chassis | 🚧 |
 | Tianji | Dual-arm manipulator | 🚧 |
-| Unitree H1 / G1 | Humanoid | 🚧 |
-| Fourier GR-1 | Humanoid | 📦 |
-| Booster T1 | Humanoid | 📦 |
-| Mobile ALOHA | Mobile dual-arm | 📦 |
 
 ---
 
