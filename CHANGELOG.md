@@ -10,6 +10,7 @@
 - Added the in-tree XPolicyLab policy client for the official [XPolicyLab](https://github.com/XPolicyLab/XPolicyLab) websocket protocol, with joint/EEF actions, episode reset, and replaced-session recovery; added an ARX X5 XPolicyLab evaluation example.
 - Preserved all configured camera inputs in policy requests and improved camera readiness, safe homing/stop, collection feedback, replay, and QC responsiveness.
 - Reorganized tests into `unit`, `integration`, and `static` layers focused on the core deploy, evaluation, transport, recording, and device paths.
+- Added an end-to-end data collection SOP (`docs/data_collection_sop.md`) covering planning, collection, monitoring, QC, repair, and delivery.
 - Added an example dual YAM collection task set under `examples/task_sets/`.
 - Moved the coding-agent skills from `tools/skills` to `.agents/skills`.
 - Refreshed installation, quick start, console, configuration, recording, control-channel, policy, and hardware documentation.

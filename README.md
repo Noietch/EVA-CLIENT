@@ -45,7 +45,7 @@
   </tr>
 </table>
 
-* **[2026-11-17] EVA-Client 0.3.0: a redesigned console for the whole data loop.** Choose and bring up a robot from the new DEVICE tab, collect against scene plans with camera health checks, and browse, QC, and deliver every dataset from the new DASHBOARD (screenshots above). Evaluation now runs on task sets with milestones and per-attempt tracking, [XPolicyLab](https://github.com/XPolicyLab/XPolicyLab) policies connect natively, and coding-agent skills now live in [`.agents/skills`](./.agents/skills). Client-side EVA-SIM support is in place, with the simulator coming soon. See the [changelog](./CHANGELOG.md) for details.
+* **[2026-11-17] EVA-Client 0.3.0: a redesigned console for the whole data loop.** Run a full collection campaign from one console: plan tasks with or without reference photos, bring up a robot from the new DEVICE tab, collect slot by slot with camera health checks, monitor throughput and QC from the new DASHBOARD, then review, retake, and deliver. Follow the end-to-end [data collection SOP](./docs/data_collection_sop.md) (screenshots above). Evaluation now runs on task sets with milestones and per-attempt tracking, [XPolicyLab](https://github.com/XPolicyLab/XPolicyLab) policies connect natively, and coding-agent skills now live in [`.agents/skills`](./.agents/skills). Client-side EVA-SIM support is in place, with the simulator coming soon. See the [changelog](./CHANGELOG.md) for details.
 
 * **[2026-08-28] EVA-Client 0.2.0** EVA-Client now supports WebXR-based VR controller teleoperation, ARX X5 hardware, dual-YAM leader-follower data collection, export to LeRobot v3.0, MCAP, and HDF5, and multiple coding-agent skills for adding robots, calibrating cameras, and debugging robot SDKs.
 
@@ -76,7 +76,8 @@
   from the COLLECT tab — background saver, in-tab QC PASS/FAIL replay, camera
   streams encoded to mp4, per-frame green/red quality flags. Teleop demos and
   model rollouts share one on-disk layout, browsable and QC-able from the
-  DASHBOARD.
+  DASHBOARD. The [data collection SOP](./docs/data_collection_sop.md) covers
+  the full plan → collect → monitor → QC → repair → deliver loop.
 
 ---
 
@@ -141,6 +142,7 @@ Full guides live in [`docs/`](./docs). Start here:
 | [📚 Core concepts](./docs/concepts.md) | Transports, policy backends, inference strategies, robots, action spaces |
 | [⚙️ Configuration](./docs/configuration.md) | `_base_` inheritance, deep merge, startup pipeline |
 | [🎞️ Recording](./docs/recording.md) | On-disk layout, capture checks, QC, export and delivery |
+| [🧾 Data collection SOP](./docs/data_collection_sop.md) | End-to-end campaign: plan, collect, monitor, QC, repair, deliver |
 | [🗂️ Collection scene plans](./docs/collection_scene_plan.md) | Task sets, scenes, objects, and planned collection slots |
 | [🔌 Control channel](./docs/control-channel.md) | Headless ZMQ commands for deploy, eval, RL, and collection |
 | [🔬 Development](./docs/development.md) | Tests, lint, type-check, and how the robot side is faked |
