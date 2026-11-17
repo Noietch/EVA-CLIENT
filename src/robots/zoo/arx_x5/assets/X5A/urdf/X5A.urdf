@@ -510,4 +510,10 @@
       effort="100"
       velocity="1000" />
   </joint>
+  <link name="tcp" />
+  <joint name="eef_to_tcp" type="fixed">
+    <origin xyz="0.1566575 0 -0.00014" rpy="0 1.570796327 0" />
+    <parent link="link6" />
+    <child link="tcp" />
+  </joint>
 </robot>

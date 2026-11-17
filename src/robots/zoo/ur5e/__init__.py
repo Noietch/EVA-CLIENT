@@ -61,7 +61,7 @@ class UR5e(Robot):
             initial_qpos=np.asarray(self.INITIAL_QPOS, dtype=np.float32),
             observation_schema=ObservationSchema(
                 cameras=(
-                    CameraSpec("wrist_image", "cam_wrist"),
+                    CameraSpec("wrist_image", "cam_wrist", attached_to="arm"),
                     CameraSpec("exterior_image", "cam_high"),
                 ),
                 state_composition=("arm",),

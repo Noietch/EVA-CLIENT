@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Start the EVA collection dataset browser in the foreground.
+#
+# Usage: tools/datasets/start.sh --config <dataset_browser_config.py> [additional arguments]
+# Inputs: EVA_DATASET_HOST,
+# EVA_DATASET_PORT, EVA_DATASET_READ_ONLY (0 or 1), EVA_DATASET_LOCALE (en or zh),
+# and EVA_DATASET_PYTHON
+# (default: the repository .venv).
+# Output: a Flask service listening on the configured host and port.
+# Side effects: the application may create missing catalog directories and
+# generated image previews below the selected data root.
+# Stages: resolve repository paths, validate Python, then replace this process
+# with the dataset application.
+
+set -euo pipefail
+
+repository_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)"
+python_bin="${EVA_DATASET_PYTHON:-${repository_root}/.venv/bin/python}"
+host="${EVA_DATASET_HOST:-0.0.0.0}"
+port="${EVA_DATASET_PORT:-8412}"
+read_only="${EVA_DATASET_READ_ONLY:-0}"
+locale="${EVA_DATASET_LOCALE:-en}"
+
+if [[ ! -x "${python_bin}" ]]; then
+  echo "Dataset Python is not executable: ${python_bin}" >&2
+  exit 1
+fi
+
+command=(
+  "${python_bin}" -m tools.datasets.app
+  --host "${host}"
+  --port "${port}"
+  --locale "${locale}"
+)
+
+case "${read_only}" in
+  0) ;;
+  1) command+=(--read-only) ;;
+  *)
+    echo "EVA_DATASET_READ_ONLY must be 0 or 1, got: ${read_only}" >&2
+    exit 1
+    ;;
+esac
+
+exec "${command[@]}" "$@"

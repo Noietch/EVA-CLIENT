@@ -151,6 +151,14 @@ class TeleopClient(Protocol):
         message: str,
     ) -> None: ...
 
+    def send_haptic(
+        self,
+        *,
+        hand: str,
+        intensity: float,
+        duration_ms: float,
+    ) -> bool: ...
+
     def status(self, now: float | None = None) -> TeleopStatus: ...
 
     def close(self) -> None: ...

@@ -47,7 +47,7 @@ fi
 exec "$UR5E_PYTHON_BIN" -X faulthandler examples/hardware/ur5e/node.py \
   --obs-endpoint "${OBS_ENDPOINT:-tcp://127.0.0.1:5555}" \
   --action-endpoint "${ACTION_ENDPOINT:-tcp://127.0.0.1:5556}" \
-  --robot-ip "${UR5E_ROBOT_IP:-192.168.31.123}" \
+  --robot-ip "${UR5E_ROBOT_IP:-127.0.0.1}" \
   --gripper-port "${AG95_PORT:-/dev/ttyUSB1}" \
   --rate "${PUBLISH_RATE:-25}" \
   "${teleop_args[@]}" \

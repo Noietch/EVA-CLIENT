@@ -143,7 +143,7 @@ class DualArmChunkSolver:
             eef = solver.fk_arm(np.concatenate([arm, [0.0]]))
             pos_err = float(np.linalg.norm(eef[:3] - eef_targets[t, :3]))
             if pos_err >= self._position_tolerance:
-                _logger.warning(
+                _logger.debug(
                     "%s frame %d tracking pos err %.4f >= tol %.4f",
                     label,
                     t,
@@ -318,7 +318,7 @@ class SingleArmChunkSolver:
                 eef = self._solver.fk_arm(np.concatenate([arm, [0.0]]))
                 pos_err = float(np.linalg.norm(eef[:3] - eef_primary[t, :3]))
                 if pos_err >= self._position_tolerance:
-                    _logger.warning(
+                    _logger.debug(
                         "frame %d tracking pos err %.4f >= tol %.4f",
                         t,
                         pos_err,

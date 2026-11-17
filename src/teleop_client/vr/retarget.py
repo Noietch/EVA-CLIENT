@@ -224,6 +224,8 @@ class ArmRetargeter:
         assert controller.pose is not None
         position_xr = np.asarray(controller.pose.position, dtype=np.float64)
         rotation_xr = Rotation.from_quat(controller.pose.orientation_xyzw).as_matrix()
+        # The grip long-press unlock is the calibration boundary. The first
+        # authorized frame anchors controller motion to the robot's live pose.
         latched = self._home_eef is None
         if latched:
             self._home_eef = measured.copy()

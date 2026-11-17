@@ -71,7 +71,7 @@ usage: node.py [-h] [--obs-endpoint OBS_ENDPOINT]
                [--realsense-resolution REALSENSE_RESOLUTION]
                [--realsense-fps REALSENSE_FPS]
                [--realsense-timeout-ms REALSENSE_TIMEOUT_MS]
-               [--realsense-profile {day,night}]
+               [--realsense-color-profiles JSON]
                [--status-log-interval STATUS_LOG_INTERVAL]
                [--log-level LOG_LEVEL]
 EOF
@@ -652,10 +652,9 @@ run_python "${ARX_X5_NODE_PATH}" \
   --gripper-open-pos "-3.4" \
   --gripper-close-pos "0.1" \
   --initial-gripper-scalar "1.0" \
-  --eva-config "configs/02_collection/arx_x5_vr.py" \
+  --eva-config "configs/02_collection/arx_x5.py" \
   --rate "100" \
   --realsense-resolution "640x480" \
   --realsense-fps "30" \
-  --realsense-profile "day" \
   --status-log-interval "${ARX_X5_STATUS_LOG_INTERVAL_S:-1}" \
   "$@"

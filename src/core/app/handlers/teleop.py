@@ -11,7 +11,7 @@ from collections.abc import Callable
 import numpy as np
 
 from core.app.collection_capture import stop_collection_capture
-from core.app.state import OutputTarget, RuntimeState, SessionMode, SessionState, SessionStatus
+from core.app.state import RuntimeState, SessionMode, SessionState, SessionStatus
 from core.config import ConfigDict
 from teleop_client import build_client
 from teleop_client.base import (
@@ -52,6 +52,7 @@ class TeleopExecutionState:
     published_actions: int = 0
     ik_prewarmed: bool = False
     last_safe_qpos: np.ndarray | None = None
+    world_instance_id: str | None = None
     last_fault: str = ""
     max_qpos_step: float = 0.08
     max_position_error_m: float = 0.08
@@ -146,8 +147,8 @@ def start_teleop_input(config: ConfigDict, runtime: RuntimeState) -> None:
         client.start()
 
 
-def _current_qpos(runtime: RuntimeState) -> np.ndarray:
-    qpos = runtime.transport.get_latest_qpos()
+def _current_feedback(runtime: RuntimeState) -> tuple[np.ndarray, str | None]:
+    qpos, world_instance_id = runtime.transport.get_control_feedback()
     if qpos is None:
         raise TeleopExecutionError("teleop requires current robot qpos feedback")
     value = np.asarray(qpos, dtype=np.float32).reshape(-1)
@@ -156,7 +157,7 @@ def _current_qpos(runtime: RuntimeState) -> np.ndarray:
         raise TeleopExecutionError(
             f"teleop qpos must be finite shape ({expected},), got {value.shape}"
         )
-    return value
+    return value, world_instance_id
 
 
 def _set_hil_relay_enabled(runtime: RuntimeState, enabled: bool) -> None:
@@ -261,7 +262,8 @@ def activate_teleop(config: ConfigDict, runtime: RuntimeState, session: SessionS
             client.start()
             # Collection ARM is an explicit operator gate. Do not make the gate
             # depend on the transient neutral snapshot; the per-arm grip latch
-            # remains the source of which arm is allowed to follow.
+            # remains the source of which arm is allowed to follow and calibrates
+            # that arm against live feedback on its first unlock.
             client.reset(require_neutral=False)
         runtime.transport.reset_hil_control()
         _set_hil_relay_enabled(
@@ -555,7 +557,12 @@ def _step_active_teleop(
     *,
     still_active: Callable[[], bool] | None = None,
 ) -> PublishedTeleopAction | None:
-    current_qpos = _current_qpos(runtime)
+    current_qpos, world_instance_id = _current_feedback(runtime)
+    if world_instance_id != state.world_instance_id:
+        # Re-latch only from feedback belonging to the initialized world. A held
+        # grip must release before it can drive a different episode.
+        reset_teleop(runtime, require_neutral=state.world_instance_id is not None)
+        state.world_instance_id = world_instance_id
     try:
         measured_eef = np.asarray(
             forward_canonical_eef(config, runtime, current_qpos), dtype=np.float32
@@ -607,7 +614,7 @@ def _step_active_teleop(
         if not result_is_current:
             raise TeleopExecutionError("teleop input changed before publish")
     try:
-        runtime.transport.publish_action(action, target=OutputTarget.REAL.value)
+        runtime.transport.publish_teleop_action(action, world_instance_id)
     except Exception as error:
         raise TeleopExecutionError(f"teleop action publish failed: {error}") from error
     state.last_safe_qpos = action.copy()
@@ -758,8 +765,28 @@ def acknowledge_teleop_event(
     message: str,
 ) -> None:
     client = getattr(runtime, "teleop_client", None)
-    if client is not None:
-        client.acknowledge_event(event, accepted=accepted, message=message)
+    if client is None:
+        return
+    client.acknowledge_event(event, accepted=accepted, message=message)
+
+
+def send_teleop_haptic(
+    runtime: RuntimeState,
+    *,
+    hand: str,
+    intensity: float,
+    duration_ms: float,
+) -> bool:
+    """Send one explicit host-side haptic request to the active VR client."""
+    client = getattr(runtime, "teleop_client", None)
+    send_haptic = None if client is None else getattr(client, "send_haptic", None)
+    if send_haptic is None:
+        return False
+    result = send_haptic(hand=hand, intensity=intensity, duration_ms=duration_ms)
+    # Older/custom teleop clients may implement the original None-returning method;
+    # treat a non-False return as accepted while allowing VrTeleopClient to report
+    # that the headset is currently disconnected.
+    return result is not False
 
 
 def teleop_status(runtime: RuntimeState) -> dict[str, object] | None:
@@ -797,6 +824,7 @@ __all__ = [
     "TeleopExecutionState",
     "PublishedTeleopAction",
     "acknowledge_teleop_event",
+    "send_teleop_haptic",
     "activate_teleop",
     "activate_rollout_teleop",
     "close_teleop",

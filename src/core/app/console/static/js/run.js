@@ -2,11 +2,319 @@
 // config & tuning panel (config); manual sim/connection control (manual).
 import { $, LIVE, RUN_CONTROLS, S, apiPost, setCommandMetadata } from "./core.js";
 import { updateScrub } from "./charts.js";
-import { collectEnabled, dotClass, renderCollect, renderRolloutSave, loadAnnotation } from "./collect.js";
+import { renderDeviceSettings } from "./device.js";
+import { t } from "./i18n.js";
+import { applyLocalHistoryStatus, initLocalHistory } from "./local_history.js";
+import {
+  collectEnabled, dotClass, loadAnnotation, renderCollect, renderRolloutSave,
+  selectCollectionDataset,
+} from "./collect.js";
 import { applyEvalStatus, evalCfg, evalEnabled } from "./eval.js";
 import { maybeSyncReplayPlayer, loadMountedReplaySeries, replayStop } from "./replay.js";
 
 // ===== run =====
+
+// A send is an explicit intent; polling may finish setup, but can dispatch it only once.
+let debugIntent = null;
+let debugDispatch = null;
+let debugRequestBusy = false;
+let debugModelPending = null;
+let debugDefaultModePending = false;
+let debugPausedIntent = null;
+let debugPausedReset = false;
+let debugNewRunPending = null;
+let debugModePending = null;
+
+async function changeDebugMode(mode) {
+  if (debugModePending || debugNewRunPending || mode === uiMode(S.STATUS.cli_mode)) return;
+  cancelDebugIntent();
+  debugDispatch = null;
+  debugModePending = { mode, started: Date.now() };
+  S._setupPaused = false;
+  mark("mode-list", "mode", mode);
+  syncDebugComposer(S.STATUS);
+  try {
+    const result = await apiPost("/api/select_mode", { mode });
+    if (result?.ok === false) throw new Error(result.error || "Permission switch failed");
+  } catch (error) {
+    debugModePending = null;
+    mark("mode-list", "mode", uiMode(S.STATUS.cli_mode));
+    debugPromptError(error.message);
+    syncDebugComposer(S.STATUS);
+  }
+}
+
+async function newDebugRun() {
+  const status = S.STATUS || {};
+  if (debugModePending || debugNewRunPending || debugRequestBusy || debugIntent || debugDispatch || status.setup_stage ||
+      status.step_operation || status.session_status === "running" || status.local_history?.rollout_id) return;
+  cancelDebugIntent();
+  const input = $("debug-prompt-input");
+  debugNewRunPending = { generation: Number(status.local_history?.generation || 0), started: Date.now(), prompt: input.value };
+  S.debugNewRunPending = true;
+  S._setupPaused = false;
+  syncDebugComposer(status);
+  try {
+    const result = await apiPost("/api/new_debug_run", {});
+    if (!result.ok) throw new Error(result.error || "Unable to create a new run");
+    input.value = "";
+    input.dataset.dirty = "1";
+    input.focus();
+    debugPromptError("");
+  } catch (error) {
+    debugNewRunPending = null;
+    S.debugNewRunPending = false;
+    debugPromptError(error.message);
+    syncDebugComposer(S.STATUS);
+  }
+}
+
+function cancelDebugIntent() {
+  debugIntent = null;
+  debugPausedIntent = null;
+  if (debugDispatch) debugDispatch.autoContinue = false;
+}
+
+function syncDebugDefaultMode(status) {
+  if (!S.CFG || !status?.cli_mode || S.ACTIVE_TAB !== "debug" || evalEnabled()) return;
+  if (["real", "step"].includes(uiMode(status.cli_mode))) { debugDefaultModePending = false; return; }
+  if (debugDefaultModePending) return;
+  debugDefaultModePending = true;
+  const mode = (S.CFG.modes || []).includes("step") ? "step" : "real";
+  apiPost("/api/select_mode", { mode }).catch(() => { debugDefaultModePending = false; });
+}
+
+function syncDebugModelSelection(status) {
+  const select = $("debug-model-list");
+  if (!select) return;
+  const index = Number(status.model_index ?? 0);
+  if (debugModelPending) {
+    if (index === debugModelPending.index) debugModelPending = null;
+    else if (Date.now() - debugModelPending.started > 10000) {
+      debugModelPending = null;
+      debugPromptError("模型切换超时，请重试");
+    }
+  }
+  if (!debugModelPending) select.value = String(index);
+  const name = select.selectedOptions?.[0]?.textContent || "Model";
+  select.title = name;
+  select.style.width = Math.min(160, Math.max(80, name.length * 7 + 32)) + "px";
+  select.disabled = !!debugModePending || !!debugModelPending || debugRequestBusy || !!debugDispatch ||
+    status.session_status === "running" || ["starting", "running", "stopping", "resetting"].includes(status.web_phase);
+}
+
+function renderDebugModels() {
+  const select = $("debug-model-list");
+  if (!select) return;
+  select.parentElement.hidden = evalEnabled();
+  const models = S.CFG.models || [{ index: 0, name: S.CFG.policy?.type || "Model" }];
+  select.replaceChildren();
+  models.forEach((model) => {
+    const option = document.createElement("option");
+    option.value = String(model.index);
+    option.textContent = model.name;
+    select.appendChild(option);
+  });
+  setCommandMetadata(select, "web:select_model:{index}", true);
+  select.onchange = async () => {
+    const index = Number(select.value);
+    if (index === Number(S.STATUS.model_index ?? 0)) return;
+    if (debugModelPending || debugRequestBusy || debugDispatch ||
+        S.STATUS.session_status === "running" || ["starting", "running", "stopping", "resetting"].includes(S.STATUS.web_phase)) {
+      syncDebugModelSelection(S.STATUS); return;
+    }
+    cancelDebugIntent();
+    debugPromptError("");
+    debugModelPending = { index, started: Date.now() };
+    syncDebugModelSelection(S.STATUS);
+    syncDebugComposer(S.STATUS);
+    try {
+      const result = await apiPost("/api/select_model", { index });
+      if (result && result.ok === false) throw new Error(result.error || "Model switch failed");
+    } catch (error) {
+      debugModelPending = null;
+      debugPromptError(error.message);
+      syncDebugModelSelection(S.STATUS);
+      syncDebugComposer(S.STATUS);
+    }
+  };
+  syncDebugModelSelection(S.STATUS || {});
+}
+
+function debugPromptError(message) {
+  const status = $("debug-prompt-status");
+  status.hidden = !message;
+  status.textContent = message || "";
+}
+
+async function dispatchDebugAction(kind) {
+  debugIntent = null;
+  debugRequestBusy = true;
+  debugDispatch = { kind, started: Date.now(), previewVersion: Number(S.STATUS.step_preview_version || 0),
+    autoContinue: kind === "approve", endStep: Number(S.STATUS.step_index || 0) + Number(S.STATUS.pending_chunk || 0) };
+  syncDebugComposer(S.STATUS);
+  try {
+    const paths = { run: "/api/run", preview: "/api/step_infer", approve: "/api/step_commit", stop: "/api/halt" };
+    const result = await apiPost(paths[kind]);
+    if (result && result.ok === false) throw new Error(result.error || "Command failed");
+  } catch (error) {
+    debugDispatch = null;
+    debugPromptError(error.message);
+  } finally {
+    debugRequestBusy = false;
+    syncDebugComposer(S.STATUS);
+  }
+}
+
+function syncDebugComposer(status) {
+  const button = $("debug-prompt-apply");
+  if (!button || !status) return;
+  if (S.ACTIVE_TAB !== "debug") { debugIntent = null; return; }
+  if (debugModePending && uiMode(status.cli_mode) === debugModePending.mode &&
+      !status.step_operation && status.session_status !== "running") debugModePending = null;
+  if (debugNewRunPending) {
+    if (Number(status.local_history?.generation || 0) > debugNewRunPending.generation) {
+      debugNewRunPending = null;
+      S.debugNewRunPending = false;
+    } else if (Date.now() - debugNewRunPending.started > 10000) {
+      $("debug-prompt-input").value = debugNewRunPending.prompt;
+      debugNewRunPending = null;
+      S.debugNewRunPending = false;
+      debugPromptError("New run could not be created. Please try again.");
+    }
+  }
+  const saving = !!status.local_history?.saving;
+  const running = status.session_status === "running";
+  const armed = uiMode(status.cli_mode) === "step" && status.pending_chunk != null;
+  const stepOperation = status.step_operation || "";
+  const displayOperation = stepOperation || (debugDispatch?.kind === "approve" ? "executing" :
+    debugDispatch?.kind === "preview" ? "previewing" : "");
+  const progress = $("debug-execution-status");
+  if (progress) {
+    progress.hidden = !debugModePending && !running && !armed && !displayOperation && !saving;
+    progress.textContent = debugModePending ? "Switching permissions…" : displayOperation === "executing" ? "Executing approved actions…" :
+      displayOperation === "previewing" ? "Requesting next preview…" :
+      saving ? "Saving recording…" : running ? "Running…" : armed ? "Preview ready · waiting for approval" : "";
+  }
+  if (debugDispatch && !debugRequestBusy) {
+    const kind = debugDispatch.kind;
+    if (kind === "approve" && debugDispatch.autoContinue && status.step_preview_version == null &&
+        !armed && !stepOperation && !status.last_error && status.is_setup_done &&
+        Number(status.step_index || 0) >= debugDispatch.endStep) {
+      void dispatchDebugAction("preview");
+      return;
+    }
+    const nextPreview = armed && !stepOperation && Number(status.step_preview_version || 0) > debugDispatch.previewVersion;
+    const approvalDone = status.step_preview_version == null ? !armed :
+      nextPreview || (!armed && !stepOperation && !status.local_history?.rollout_id);
+    const stopped = !running && !stepOperation && !armed && !status.local_history?.rollout_id;
+    if ((kind === "run" && running) || (kind === "preview" && armed && !stepOperation) ||
+        (kind === "approve" && approvalDone) || (kind === "stop" && stopped) ||
+        status.last_error || Date.now() - debugDispatch.started > 10000) debugDispatch = null;
+  }
+  if (debugIntent && !debugRequestBusy && !S._setupPaused) {
+    const matches = Number(status.model_index ?? 0) === debugIntent.model && status.selected_task === debugIntent.task &&
+      uiMode(status.cli_mode) === debugIntent.mode && status.selected_strategy === debugIntent.strategy;
+    if (Number(status.model_index ?? 0) !== debugIntent.model) {
+      debugPromptError("模型已切换，请重新发送");
+      debugIntent = null;
+    } else if (status.last_error || Date.now() - debugIntent.started > 120000) {
+      debugPromptError(status.last_error || "准备超时，请重试");
+      debugIntent = null;
+    } else if (matches && debugIntent.selected) {
+      $("debug-prompt-input").dataset.dirty = "";
+      if (status.is_setup_done && ["ready", "idle"].includes(status.web_phase)) {
+        void dispatchDebugAction(debugIntent.mode === "step" ? "preview" : "run");
+      }
+    }
+  }
+  const busy = !!debugModePending || debugRequestBusy || !!debugIntent || !!debugDispatch || !!debugModelPending || !!stepOperation || saving || !!debugNewRunPending;
+  const newRun = $("debug-new-run");
+  if (newRun) newRun.disabled = !!debugModePending || !!debugNewRunPending || debugRequestBusy || !!debugIntent || !!debugDispatch ||
+    !!status.setup_stage || !!stepOperation || running || !!status.local_history?.rollout_id;
+  const approvalStop = $("debug-approval-stop");
+  if (approvalStop) approvalStop.hidden = uiMode(status.cli_mode) !== "step" ||
+    !armed || !!displayOperation;
+  const preparing = !!status.setup_stage || status.web_phase === "resetting";
+  const paused = !!S._setupPaused;
+  const stopping = debugDispatch?.kind === "stop";
+  const operation = !!stepOperation || ["preview", "approve"].includes(debugDispatch?.kind);
+  const action = paused ? "resume" : preparing || operation || running ? "stop" : armed ? "approve" : "send";
+  const canStop = !paused && !stopping && (preparing || running || operation && !debugRequestBusy);
+  const showBusy = busy && !canStop && !paused;
+  button.dataset.action = action;
+  const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  icon.setAttribute("viewBox", "0 0 24 24");
+  icon.setAttribute("width", "18");
+  icon.setAttribute("height", "18");
+  icon.setAttribute("aria-hidden", "true");
+  const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+  path.setAttribute("d", showBusy ? "M6 12h12" : action === "pause" ? "M8 5v14M16 5v14" :
+    action === "resume" ? "m9 5 10 7-10 7Z" : action === "stop" ? "M6 6h12v12H6z" : action === "approve" ? "m5 12 4 4L19 6" : "M12 19V5m-6 6 6-6 6 6");
+  path.setAttribute("fill", action === "stop" && !showBusy ? "currentColor" : "none");
+  path.setAttribute("stroke", "currentColor");
+  path.setAttribute("stroke-width", "2");
+  path.setAttribute("stroke-linecap", "round");
+  path.setAttribute("stroke-linejoin", "round");
+  icon.appendChild(path);
+  button.replaceChildren(icon);
+  button.title = paused && preparing || stopping ? "Stopping…" : saving ? "Saving recording…" : action === "resume" ? "Resume" : canStop ? "Stop" : debugModePending ? "Switching permissions…" : showBusy ? "Preparing…" : action === "stop" ? "Stop" : action === "approve" ? "Approve" : status.local_history?.current_rollout_id ? "Continue run" : uiMode(status.cli_mode) === "step" ? "Preview" : "Run";
+  button.setAttribute("aria-label", button.title);
+  button.disabled = paused ? preparing : stopping || busy && !canStop;
+  $("debug-prompt-input").readOnly = busy || armed || preparing || paused;
+}
+
+async function submitDebugPrompt(event) {
+  event.preventDefault();
+  const status = S.STATUS || {};
+  const preparing = !!status.setup_stage || status.web_phase === "resetting";
+  if (S._setupPaused) {
+    if (!preparing) { resumeSetup(); syncDebugComposer(status); }
+    return;
+  }
+  if (preparing) { pauseSetup(); syncDebugComposer(status); return; }
+  if (!debugRequestBusy && (status.step_operation || ["preview", "approve"].includes(debugDispatch?.kind))) {
+    cancelDebugIntent(); await dispatchDebugAction("stop"); return;
+  }
+  if (debugModePending) {
+    if (status.session_status === "running") await dispatchDebugAction("stop");
+    return;
+  }
+  if (debugRequestBusy || debugIntent || debugDispatch || debugModelPending || debugNewRunPending || status.local_history?.saving) return;
+  debugPromptError("");
+  if (status.session_status === "running") { await dispatchDebugAction("stop"); return; }
+  if (uiMode(status.cli_mode) === "step" && status.pending_chunk != null) {
+    await dispatchDebugAction("approve"); return;
+  }
+  const input = $("debug-prompt-input");
+  const task = input.value.trim();
+  if (!task) { debugPromptError("请输入任务指令"); input.focus(); return; }
+  if (!status.selected_strategy) { debugPromptError("请选择策略"); $("strategy-list").focus(); return; }
+  if (!status.cli_mode || status.cli_mode === "select") { debugPromptError("请选择模式"); return; }
+  if (["starting", "stopping", "resetting"].includes(status.web_phase)) return;
+  input.value = task;
+  input.dataset.dirty = "1";
+  debugIntent = { task, model: Number(status.model_index ?? 0), mode: uiMode(status.cli_mode), strategy: status.selected_strategy, started: Date.now(), selected: false };
+  debugRequestBusy = true;
+  syncDebugComposer(status);
+  try {
+    if (status.selected_task !== task) {
+      const result = await apiPost("/api/select_task", { task });
+      if (result && result.ok === false) throw new Error(result.error || "Command failed");
+    }
+    if (debugIntent) debugIntent.selected = true;
+    if (!status.is_setup_done || status.selected_task !== task) S._setupFired = false;
+  } catch (error) {
+    debugIntent = null;
+    debugPromptError(error.message);
+  } finally {
+    debugRequestBusy = false;
+    syncDebugComposer(S.STATUS);
+    updateGuide();
+  }
+}
+
+
 
 function formatImageHz(hz) {
     const value = Number(hz);
@@ -35,7 +343,7 @@ function applyRunControlStatus(ids, s) {
       $(ids.runGroup).style.display = "grid";
       if (stepGroup) stepGroup.style.display = "none";
       if (replayIsLocalMode()) {
-        run.textContent = LIVE.playing ? "STOP ■" : (resumable ? "CONTINUE ▶▶" : "REPLAY ▶");
+        run.textContent = LIVE.playing ? t("debug.stop") : (resumable ? t("run.continue") : t("run.replay"));
         run.classList.toggle("primary", !LIVE.playing);
         run.classList.toggle("danger", LIVE.playing);
         run.disabled = !loaded || !ready;
@@ -44,7 +352,7 @@ function applyRunControlStatus(ids, s) {
       }
       const running = s.session_status === "running";
       const continueRun = !running && (s.step_index || 0) > 0;
-      run.textContent = running ? "STOP ■" : (continueRun ? "CONTINUE ▶▶" : "REPLAY ▶");
+      run.textContent = running ? t("debug.stop") : (continueRun ? t("run.continue") : t("run.replay"));
       run.classList.toggle("primary", !running);
       run.classList.toggle("danger", running);
       run.disabled = !loaded || (!running && !ready);
@@ -52,6 +360,7 @@ function applyRunControlStatus(ids, s) {
       return;
     }
     const m = uiMode(s.cli_mode);
+    if (S.ACTIVE_TAB === "manual") renderControl();
     const isStep = m === "step";
     $(ids.runGroup).style.display = isStep ? "none" : "grid";
     $(ids.stepGroup).style.display = isStep ? "block" : "none";
@@ -60,13 +369,13 @@ function applyRunControlStatus(ids, s) {
     const ss = $(ids.stepState);
     ss.classList.remove("armed", "ok");
     if (armed) {
-      ss.textContent = "SIM preview done · " + (s.pending_chunk || "?") + " actions · press REAL ▶ to dispatch";
+      ss.textContent = t("run.simPreviewDone", {count: s.pending_chunk || "?"});
       ss.classList.add("armed");
     } else if (s.is_setup_done) {
-      ss.textContent = "READY · press SIM ↻ to infer one chunk";
+      ss.textContent = t("run.stepReady");
       ss.classList.add("ok");
     } else {
-      ss.textContent = "IDLE · SETUP FIRST";
+      ss.textContent = t("run.stepIdle");
     }
 
     const ready = s.is_setup_done;
@@ -81,8 +390,8 @@ function applyRunControlStatus(ids, s) {
       const busy = S.runToggleBusy !== null;
       const run = $(ids.run);
       run.querySelector(".rec-label").textContent = running
-        ? "STOP ■"
-        : (intervention ? "RESUME ▶" : (continueRun ? "CONTINUE ▶▶" : "RUN ▶"));
+        ? t("debug.stop")
+        : (intervention ? t("run.resume") : (continueRun ? t("run.continue") : t("debug.run")));
       run.classList.toggle("recording", running);
       run.classList.toggle("primary", !running);
       run.disabled = busy || (!running && !ready);
@@ -97,7 +406,7 @@ function applyRunControlStatus(ids, s) {
       $(ids.stepReset).disabled = false;
       return;
     }
-    $(ids.run).textContent = continueRun ? "CONTINUE ▶▶" : "RUN ▶";
+    $(ids.run).textContent = continueRun ? t("run.continue") : t("debug.run");
     $(ids.run).disabled = !ready || running;
     $(ids.run).classList.toggle("live", running);
     $(ids.halt).disabled = !running;
@@ -115,8 +424,8 @@ function syncHilInterventionEnabled(status) {
     const supported = !!status.hil_supported;
     toggle.checked = enabled;
     toggle.disabled = !supported || !!status.rollout_intervention_active;
-    label.textContent = supported ? (enabled ? "HIL ON" : "HIL OFF") : "HIL N/A";
-    toggle.title = status.hil_error || "Enable rollout HIL intervention";
+    label.textContent = supported ? (enabled ? t("run.hilOn") : t("run.hilOff")) : t("run.hilUnavailable");
+    toggle.title = status.hil_error || t("run.hilTitle");
     const gate = toggle.closest(".collect-arm-gate");
     if (gate) {
       gate.classList.toggle("on", enabled);
@@ -126,6 +435,7 @@ function syncHilInterventionEnabled(status) {
 
 function applyStatus(s) {
     S.STATUS = s;
+    syncDebugDefaultMode(s);
     if (!s.setup_stage) S.collectHomeBusy = false;
     S.collectArmEnabled = !!s.collection_teleop_armed;
     // RUN follows the live tail; any other state unlocks the scrub bar for history
@@ -167,6 +477,14 @@ function applyStatus(s) {
         ? s.selected_collect_task_index
         : null;
     }
+    if (collectTask == null) {
+      const defaultSet = collectTaskSets()[0];
+      if (defaultSet && defaultSet.tasks.length) {
+        collectSet = defaultSet.name;
+        collectTask = defaultSet.tasks[0].prompt;
+        collectTaskIndex = 0;
+      }
+    }
     syncCollectTaskNavigation();
     if (S.ACTIVE_TAB === "replay" || S.ACTIVE_TAB === "eval" || s.replay_loaded || S.CFG.is_replay) {
       const input = $("replay-episode-input");
@@ -188,7 +506,7 @@ function applyStatus(s) {
       maybeSyncReplayPlayer(s);
     }
     // default the mode highlight to SIM until the operator picks another
-    const modeMark = (!s.cli_mode || s.cli_mode === "select") ? "sim" : uiMode(s.cli_mode);
+    const modeMark = debugModePending?.mode || ((!s.cli_mode || s.cli_mode === "select") ? "sim" : uiMode(s.cli_mode));
     mark("mode-list", "mode", modeMark);
     mark("replay-mode-list", "mode", modeMark);
     mark("strategy-list", "strategy", s.selected_strategy);
@@ -230,6 +548,9 @@ function applyStatus(s) {
     renderCollect();
     renderRolloutSave();
     applyEvalStatus(s);
+    syncDebugModelSelection(s);
+    syncDebugComposer(s);
+    applyLocalHistoryStatus(s);
   }
 
 function uiMode(m) { return m === "debug_sim_real" ? "step" : m; }
@@ -237,7 +558,6 @@ function uiMode(m) { return m === "debug_sim_real" ? "step" : m; }
 // Map each selector list to the header chip that mirrors its current value.
 const SEL_CHIP = {
     "prompt-list": "prompt-chip",
-    "collect-prompt-list": "collect-prompt-chip",
     "mode-list": "mode-chip",
     "replay-mode-list": "replay-mode-chip",
     "strategy-list": "strategy-chip",
@@ -263,6 +583,16 @@ function syncChip(listId) {
       const seg = document.querySelector(`#${listId} .seg.active`);
       label = seg ? segLabel(seg) : "";
     }
+    if (listId === "strategy-list" && host) {
+      host.title = label ? "Strategy: " + label : "Choose a strategy";
+    }
+    if (listId === "mode-list" && $("debug-mode-label")) {
+      const summary = $("debug-mode-label");
+      const modeLabel = label || "Ask for approval";
+      summary.setAttribute("aria-label", modeLabel);
+      summary.setAttribute("title", modeLabel);
+      summary.innerHTML = `<svg class="debug-permission-shield" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 4.5 6v5.5c0 4.4 3 7.6 7.5 9.5 4.5-1.9 7.5-5.1 7.5-9.5V6L12 3Z"/><path d="${host.querySelector('.seg.active')?.dataset.mode === "real" ? 'm13 7-4 6h4l-2 4' : 'm8.5 12 2.3 2.3 4.7-4.6'}"/></svg><svg class="debug-menu-chevron" width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg>`;
+    }
     const chip = $(SEL_CHIP[listId]);
     if (!chip) return;
     let v = chip.querySelector(".v");
@@ -275,6 +605,24 @@ function syncChip(listId) {
 function mark(listId, attr, val) {
     const host = $(listId);
     if (host && host.tagName === "SELECT") {
+      if (listId === "prompt-list") {
+        host.querySelectorAll("option[data-custom]").forEach((option) => option.remove());
+        if (val && !Array.from(host.options).some((option) => option.value === val)) {
+          const option = document.createElement("option");
+          option.value = val;
+          option.textContent = "CUSTOM · " + val;
+          option.dataset.custom = "1";
+          host.appendChild(option);
+        }
+        document.querySelectorAll("#debug-prompt-presets button").forEach((button) => {
+          const input = $("debug-prompt-input");
+          const selected = button.dataset.prompt === (input && input.dataset.dirty === "1" ? input.value : val);
+          button.classList.toggle("active", selected);
+          button.setAttribute("aria-pressed", String(selected));
+        });
+        const input = $("debug-prompt-input");
+        if (input && document.activeElement !== input && input.dataset.dirty !== "1") input.value = val || "";
+      }
       host.value = val || "";
       syncChip(listId);
       return;
@@ -313,6 +661,12 @@ let _prevSetupDone = false;
 function retrySetup() { S._setupFired = true; apiPost("/api/setup"); }
 
 function pauseSetup() {
+    if (S.ACTIVE_TAB === "debug") {
+      debugPausedIntent = debugIntent;
+      debugIntent = null;
+      debugPausedReset = !debugPausedIntent &&
+        (/reset/i.test(S.STATUS.setup_stage || "") || S.STATUS.web_phase === "resetting");
+    }
     S._setupPaused = true;
     S._setupFired = true;  // block auto-restart until RESUME
     apiPost("/api/halt");
@@ -322,6 +676,12 @@ function pauseSetup() {
 function resumeSetup() {
     S._setupPaused = false;
     S._setupFired = false;  // re-arm so auto-setup fires again
+    if (S.ACTIVE_TAB === "debug") {
+      if (debugPausedIntent) debugIntent = { ...debugPausedIntent, started: Date.now() };
+      debugPausedIntent = null;
+      if (debugPausedReset) { debugPausedReset = false; apiPost("/api/reset"); }
+      updateGuide();
+    }
     renderSetupCtl();
   }
 
@@ -334,43 +694,97 @@ function renderSetupCtl() {
     const pauseBtn = $(ids.pause);
     const resumeBtn = $(ids.resume);
     const retryBtn = $(ids.retry);
-    if (pauseBtn) pauseBtn.style.display = (inFlight && !done && !S._setupPaused && !errored) ? "" : "none";
-    if (resumeBtn) resumeBtn.style.display = (S._setupPaused && !done) ? "" : "none";
+    if (pauseBtn) pauseBtn.style.display = (S.ACTIVE_TAB !== "debug" && inFlight && !done && !S._setupPaused && !errored) ? "" : "none";
+    if (resumeBtn) resumeBtn.style.display = (S.ACTIVE_TAB !== "debug" && S._setupPaused && !done) ? "" : "none";
     if (retryBtn) retryBtn.style.display = (errored && !S._setupPaused) ? "" : "none";
   }
 
 const TELEOP_CLIENT_LABELS = { vr_webxr: "VR" };
 
+const SETUP_STAGE_KEYS = {
+  "waiting for joint feedback": "setup.waitingFeedback",
+  "publishing reset trajectory": "setup.publishingReset",
+  "moving to trajectory start": "setup.movingTrajectory",
+  "rewinding episode": "setup.rewindingEpisode",
+  "resetting to home position": "setup.resettingHome",
+  "validating policy (inference)": "setup.validatingPolicy",
+  "moving to init pose": "setup.movingInit",
+};
+
+function localizeSetupStage(stage) {
+  const value = String(stage || "");
+  const warmup = value.match(/^warming up (.+)$/i);
+  if (warmup) return t("setup.warmingUp", {progress: warmup[1]});
+  const key = SETUP_STAGE_KEYS[value.toLowerCase()];
+  return key ? t(key) : value.toUpperCase();
+}
+
 function collectInputSourceSuffix(status) {
     const teleopCfg = S.CFG && S.CFG.collection && S.CFG.collection.teleop;
     if (!teleopCfg || teleopCfg.control_source !== "client" || !teleopCfg.client_type) return "";
-    const label = TELEOP_CLIENT_LABELS[teleopCfg.client_type] || "INPUT";
+    const label = TELEOP_CLIENT_LABELS[teleopCfg.client_type] || t("teleop.input");
     const teleop = status && status.teleop;
-    const faulted = !!(teleop && (teleop.last_fault || teleop.source_error));
-    const state = faulted ? "ERROR" : (teleop && teleop.connected ? "LINKED" : "DOWN");
+    // Keep transport health separate from execution faults. An IK rejection can
+    // stop one robot tick while the VR socket and input stream remain healthy.
+    const sourceFaulted = !!(teleop && teleop.source_error);
+    const state = sourceFaulted ? "ERROR" : (teleop && teleop.connected ? "LINKED" : "DOWN");
     const stateClass = state === "LINKED" ? "linked" : (state === "DOWN" ? "down" : "error");
-    return ` | <span class="vr-input-status ${stateClass}">${label} ${state}</span>`;
+    const stateKey = state === "LINKED" ? "teleop.vr.linked" :
+      (state === "DOWN" ? "teleop.vr.down" : "teleop.vr.error");
+    let suffix = ` | <span class="vr-input-status ${stateClass}">${teleopCfg.client_type === "vr_webxr" ? t(stateKey) : `${label} ${state}`}</span>`;
+    if (teleopCfg.client_type === "vr_webxr") {
+      const groups = (S.CFG.collection.controls || {}).groups || [];
+      const authorized = new Set((teleop && teleop.authorized_groups) || []);
+      const engaged = new Set((teleop && teleop.engaged_groups) || []);
+      ["left", "right"].forEach((hand) => {
+        const group = groups.find((item) => item.control === `${hand}.grip`);
+        const available = state === "LINKED" && !!group;
+        // A closed MOTION gate and an open-but-not-yet-gripped one are different
+        // states: only the second one is waiting on the operator, not on hardware.
+        const gripping = !!group && (authorized.has(group.id) || engaged.has(group.id));
+        const enabled = available && S.collectArmEnabled && gripping;
+        const armState = !available ? "UNAVAILABLE"
+          : !S.collectArmEnabled ? "OFF"
+            : gripping ? "ENABLED" : "AWAITING";
+        const armKey = `teleop.arm.${hand}.${armState.toLowerCase()}`;
+        suffix += ` | <span class="vr-input-status ${enabled ? "linked" : "down"}">${t(armKey)}</span>`;
+      });
+    }
+    return suffix;
   }
 
 function autoSetup(ready, done, errored) {
     const msg = $(activeWorkflowPanels().setupMsg);
     const stage = (S.STATUS && S.STATUS.setup_stage) ? String(S.STATUS.setup_stage) : "";
+    const panel = $(activeWorkflowPanels().setup);
+    if (S.ACTIVE_TAB === "debug") {
+      panel.hidden = !stage && !S._setupPaused && !errored && !S.STATUS.last_error;
+      panel.dataset.paused = S._setupPaused ? "1" : "0";
+    }
     if (_prevSetupDone && !done) S._setupFired = false;
     _prevSetupDone = done;
-    if (done) { S._setupFired = true; S._setupPaused = false; renderSetupCtl(); if (msg) msg.textContent = "ROBOT READY"; return; }
     renderSetupCtl();
-    if (S._setupPaused) { if (msg) msg.textContent = "PAUSED — CLICK RESUME"; return; }
+    if (S._setupPaused) { if (msg) msg.textContent = t("guide.paused"); return; }
+    if (done) { S._setupFired = true; if (msg) msg.textContent = t("guide.robotReady"); return; }
     if (errored) {
       // Failed: stop spinning, surface the error (full text shows in #err); RETRY button offers a re-run.
-      if (msg) msg.textContent = "SETUP FAILED";
+      if (msg) msg.textContent = t("guide.setupFailed");
       return;
     }
-    if (!ready) { S._setupFired = false; if (msg) msg.textContent = "AWAITING CONFIG…"; return; }
-    if (stage) { if (msg) msg.textContent = "AUTO · " + stage.toUpperCase(); return; }
+    if (stage) { if (msg) msg.textContent = t("guide.autoStage", {stage: localizeSetupStage(stage)}); return; }
+    if (!ready) {
+      S._setupFired = false;
+      if (msg) msg.textContent = S.ACTIVE_TAB !== "debug" ? t("guide.awaitingConfig") :
+        !S.STATUS.cli_mode || S.STATUS.cli_mode === "select" ? t("guide.selectMode") :
+        !S.STATUS.selected_strategy ? t("guide.selectStrategy") : "";
+      return;
+    }
     if (!S._setupFired) { S._setupFired = true; apiPost("/api/setup"); }
     // Show the live setup sub-stage (connecting / resetting / warming up…) so the
     // user can see what setup is doing instead of an opaque spinner.
-    if (msg) msg.textContent = stage ? ("AUTO · " + stage.toUpperCase()) : "AUTO · PREPARING ROBOT…";
+    if (msg) msg.textContent = stage
+      ? t("guide.autoStage", {stage: localizeSetupStage(stage)})
+      : t("guide.preparing");
   }
 
 function updateGuide() {
@@ -408,24 +822,24 @@ function updateGuide() {
       const bar = $("guidebar");
       if (bar) bar.classList.toggle("done", saved && !running && !intervention);
       const guideStep = !hasTask || !hasPolicy ? 1 : (!setup ? 2 : (running || intervention ? 4 : 3));
-      $("gb-step").textContent = `STEP ${guideStep}/4`;
+      $("gb-step").textContent = t("guide.step", {step: guideStep});
       if (!hasTask || !hasPolicy) {
-        $("gb-msg").innerHTML = "Select <b>task and Policy</b>";
-        $("gb-hint").textContent = "Critic is optional and adds value telemetry when available";
+        $("gb-msg").innerHTML = t("guide.rlSelect");
+        $("gb-hint").textContent = t("guide.rlCriticHint");
       } else if (!setup) {
         $("gb-msg").innerHTML = s.setup_stage
-          ? `SETUP · <b>${String(s.setup_stage).toUpperCase()}</b>`
-          : "SETUP starts <b>automatically</b>";
-        $("gb-hint").textContent = s.last_error || "Critic is optional";
+          ? t("guide.rlSetup", {stage: String(s.setup_stage).toUpperCase()})
+          : t("guide.rlAutoSetup");
+        $("gb-hint").textContent = s.last_error || t("guide.rlCriticOptional");
       } else if (intervention) {
-        $("gb-msg").innerHTML = "HIL intervention is <b>recording</b>";
-        $("gb-hint").textContent = "ACCEPT resumes rollout; ABANDON rolls the segment back";
+        $("gb-msg").innerHTML = t("guide.rlHilRecording");
+        $("gb-hint").textContent = t("guide.rlHilHint");
       } else if (running) {
-        $("gb-msg").innerHTML = "Rollout is <b>running</b>";
-        $("gb-hint").textContent = "The Critic curve and rollout/intervention track update live";
+        $("gb-msg").innerHTML = t("guide.rlRunning");
+        $("gb-hint").textContent = t("guide.rlLiveHint");
       } else {
-        $("gb-msg").innerHTML = saved ? "Saved episode is ready for <b>REPLAY</b>" : "Ready to <b>RUN</b>";
-        $("gb-hint").textContent = "Stop, save, then select an episode to replay";
+        $("gb-msg").innerHTML = saved ? t("guide.rlSavedReady") : t("guide.rlReadyRun");
+        $("gb-hint").textContent = t("guide.rlReplayHint");
       }
       return;
     }
@@ -434,38 +848,41 @@ function updateGuide() {
       const enabled = collectEnabled();
       const collecting = !!collect.collecting;
       const hasPrompt = !!collectTaskValue();
-      const queue = collect.queue || [];
+      const activeQueue = (collect.queue || []).filter(
+        (item) => item.status === "queued" || item.status === "saving"
+      );
       let message = "";
       let hint = "";
-      const done = enabled && hasPrompt && S.collectArmEnabled && !collecting && queue.length === 0;
+      const done = enabled && hasPrompt && S.collectArmEnabled &&
+        !collecting && activeQueue.length === 0;
       const bar = $("guidebar");
       if (bar) bar.classList.toggle("done", done);
-      if ($("gb-step")) $("gb-step").textContent = collectReplayActive ? "QUALITY CHECK" : "COLLECT";
+      if ($("gb-step")) $("gb-step").textContent = collectReplayActive ? t("collect.qc") : t("tabs.collect");
       if (!enabled) {
-        message = "Collection disabled in <b>config</b>";
-        hint = "Enable collection + logging before recording";
+        message = t("collect.guide.disabled");
+        hint = t("collect.guide.enable");
       } else if (!hasPrompt) {
-        message = "Select a <b>TASK</b> before recording";
-        hint = "Choose a task before recording";
+        message = t("collect.guide.selectTask");
+        hint = t("collect.guide.chooseTask");
       } else if (!S.collectArmEnabled) {
-        message = "Collection motion is <b>locked</b>";
-        hint = "Switch ARM on before START RECORD";
+        message = t("collect.guide.motionLocked");
+        hint = t("collect.guide.switchArm");
       } else if (collecting) {
-        message = `Recording — <b>${collect.current_episode_frames || 0}</b> frames`;
-        hint = "END/SAVE queues the episode · CANCEL discards it";
-      } else if (queue.length) {
-        message = `Converting — <b>${queue.length}</b> item(s) in queue`;
-        hint = "Select a green item, then press REPLAY";
+        message = t("collect.guide.recording", {frames: collect.current_episode_frames || 0});
+        hint = t("collect.guide.recordingHint");
+      } else if (activeQueue.length) {
+        message = t("collect.guide.converting", {count: activeQueue.length});
+        hint = t("collect.guide.convertingHint");
       } else {
-        message = "Ready — click <b>START RECORD</b>";
-        hint = "Queue is collapsed by default; expand for details";
+        message = t("collect.guide.ready");
+        hint = t("collect.guide.readyHint");
       }
       if ($("gb-msg")) $("gb-msg").innerHTML = message + collectInputSourceSuffix(s);
       if ($("gb-hint")) $("gb-hint").textContent = hint;
       return;
     }
     const isReplay = S.ACTIVE_TAB === "replay";
-    const isManual = uiMode(s.cli_mode) === "manual";
+    const isManual = S.ACTIVE_TAB === "manual" || uiMode(s.cli_mode) === "manual";
     const hasPrompt = isReplay
       ? !!(s.replay_loaded || (S.CFG.is_replay && s.current_episode != null))
       : !!s.selected_task;
@@ -493,17 +910,19 @@ function updateGuide() {
       setPanel(ids.setup, "done");
       setPanel(ids.control, "active");
       const bar = $("guidebar");
-      if (bar) bar.classList.add("done");
-      if ($("gb-step")) $("gb-step").textContent = "MANUAL";
-      if ($("gb-msg")) $("gb-msg").innerHTML = "Manual — drag the <b>qpos sliders</b>";
-      if ($("gb-hint")) $("gb-hint").textContent = "STAGE: adjust target, then SEND to publish";
+      if (bar) bar.classList.toggle("done", !!s.transport_connected);
+      if ($("gb-step")) $("gb-step").textContent = t("guide.device");
+      if ($("gb-msg")) $("gb-msg").textContent = s.transport_connected ? t("guide.robotConnected") : t("guide.robotDisconnected");
+      if ($("gb-hint")) $("gb-hint").textContent = s.collection_teleop_armed || s.manual_publish_active ? t("guide.controlEnabled") : t("guide.controlLocked");
       return;
     }
 
     // per-panel state: done / active (current step) / pending (locked)
     const ids = activeWorkflowPanels();
     setPanel(ids.prompt, hasPrompt ? "done" : "active");
-    setPanel(ids.config, hasConfig ? "done" : (hasPrompt ? "active" : "pending"));
+    // The composer sends the prompt only after mode and strategy are chosen.
+    const canChooseConfig = S.ACTIVE_TAB === "debug" || hasPrompt;
+    setPanel(ids.config, hasConfig ? "done" : (canChooseConfig ? "active" : "pending"));
     // A setup error (server unreachable) shows as a distinct failed state so the
     // spinner stops and RETRY is offered, instead of spinning forever.
     const setupErrored = !setupDone && hasPrompt && hasConfig && !!s.last_error;
@@ -520,32 +939,40 @@ function updateGuide() {
       apiPost("/api/select_mode", { mode: "sim" });
     }
     if (hasRealMode) S._replayModePushed = false;
-    autoSetup(hasPrompt && hasRealMode && hasStrategy, setupDone, setupErrored);
+    const debugSendReady = S.ACTIVE_TAB !== "debug" || (debugIntent && debugIntent.selected &&
+      Number(s.model_index ?? 0) === debugIntent.model && s.selected_task === debugIntent.task && uiMode(s.cli_mode) === debugIntent.mode && s.selected_strategy === debugIntent.strategy);
+    autoSetup(hasPrompt && hasRealMode && hasStrategy && !!debugSendReady, setupDone, setupErrored);
 
     // top guide bar message for the current step
-    const pick = isReplay ? "an <b>EPISODE</b>" : "a <b>TASK</b>";
     const setupStage = s.setup_stage ? String(s.setup_stage) : "";
-    let step = 1, msg = `Step 1 — select ${pick}`, hint = "Follow steps 1 → 4 on the left to run";
+    let step = 1, msg = isReplay ? t("guide.selectEpisodeStep") : t("guide.selectTaskStep"), hint = t("guide.follow");
     let done = false;
-    if (!hasPrompt) { step = 1; msg = `Step 1 — select ${pick} on the left`; }
-    else if (!hasMode) { step = 2; msg = "Step 2 — pick a <b>MODE</b> under CONFIG"; }
-    else if (!hasStrategy) { step = 2; msg = "Step 2 — pick a <b>STRATEGY</b> under CONFIG"; }
-    else if (setupErrored) { step = 3; msg = "Step 3 — <b>setup failed</b>"; hint = "Check the error, then click RETRY under SETUP"; }
+    if (!hasPrompt) { step = 1; msg = isReplay ? t("guide.selectEpisodeStep") : t("guide.selectTaskStep"); }
+    else if (!hasMode) { step = 2; msg = t("guide.selectMode"); }
+    else if (!hasStrategy) { step = 2; msg = t("guide.selectStrategy"); }
+    else if (setupErrored) { step = 3; msg = t("guide.setupFailedStep"); hint = t("guide.setupFailedHint"); }
     else if (!setupDone) {
       // Surface the live setup sub-stage (resetting / validating policy / warming up…)
       // straight in the banner so the operator sees what setup is doing, not an opaque spinner.
       step = 3;
       msg = setupStage
-        ? `Step 3 — <b>${setupStage}</b>…`
-        : "Step 3 — <b>preparing the robot</b>…";
-      hint = "Setting up automatically — this can take a few seconds";
+        ? t("guide.setupStage", {stage: localizeSetupStage(setupStage)})
+        : t("guide.preparingStep");
+      hint = t("guide.autoSetupHint");
     }
-    else if (!running) { step = 4; msg = "Ready — click <b>RUN ▶</b> to start"; hint = "STOP to halt · RESET to home"; done = true; }
-    else { step = 4; msg = "Running — click <b>STOP ■</b> to halt"; hint = "Live observation on the right"; done = true; }
+    else if (!running) { step = 4; msg = t("guide.readyRun"); hint = t("guide.readyRunHint"); done = true; }
+    else { step = 4; msg = t("guide.running"); hint = t("guide.runningHint"); done = true; }
 
+    if (S.ACTIVE_TAB === "debug") {
+      hint = "";
+      if (!hasPrompt) msg = "Enter a prompt";
+      else if (!hasStrategy) msg = "Choose a strategy";
+      else if (s.pending_chunk != null) msg = "Preview ready · approve to execute";
+      else if (!debugIntent && !setupDone && !setupErrored) msg = "Ready to send";
+    }
     const bar = $("guidebar");
     if (bar) bar.classList.toggle("done", done);
-    if ($("gb-step")) $("gb-step").textContent = `STEP ${step}/4`;
+    if ($("gb-step")) $("gb-step").textContent = t("guide.step", {step});
     if ($("gb-msg")) $("gb-msg").innerHTML = msg;
     if ($("gb-hint")) $("gb-hint").textContent = hint;
   }
@@ -582,8 +1009,38 @@ function renderPromptButtons(listId) {
         opt.textContent = `${String(i + 1).padStart(2, "0")} ${p || "∅ empty"}`;
         host.appendChild(opt);
       });
+      if (listId === "prompt-list" && $("debug-prompt-presets")) {
+        const presets = $("debug-prompt-presets");
+        presets.replaceChildren();
+        S.CFG.tasks.forEach((task) => {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = "debug-preset";
+          button.textContent = task || "∅ empty";
+          button.dataset.prompt = task;
+          button.onclick = () => {
+            if (debugIntent || debugDispatch || debugRequestBusy || S.STATUS.pending_chunk != null) return;
+            const input = $("debug-prompt-input");
+            input.value = task;
+            input.dataset.dirty = "1";
+            presets.closest("details").open = false;
+            input.focus();
+            presets.querySelectorAll("button").forEach((preset) => {
+              const selected = preset === button;
+              preset.classList.toggle("active", selected);
+              preset.setAttribute("aria-pressed", String(selected));
+            });
+            debugPromptError("");
+          };
+          presets.appendChild(button);
+        });
+      }
       host.onchange = () => {
         const task = host.value;
+        if (listId === "prompt-list" && $("debug-prompt-input")) {
+          $("debug-prompt-input").value = task;
+          $("debug-prompt-input").dataset.dirty = "";
+        }
         mark(listId, "prompt", task);
         S.STATUS.selected_task = task;
         apiPost("/api/select_task", { task });
@@ -616,186 +1073,164 @@ function collectSetValue() {
     return collectSet || "";
   }
 
+function selectCollectSet(setName) {
+    const set = collectTaskSets().find((item) => item.name === setName);
+    if (!set) return false;
+    collectSet = set.name;
+    collectTask = set.tasks[0].prompt;
+    collectTaskIndex = 0;
+    syncCollectTaskNavigation();
+    return true;
+  }
+
 function collectTaskIndexValue() {
     return Number.isInteger(collectTaskIndex) ? collectTaskIndex : null;
   }
 
 function collectTaskSets() {
-    return Object.entries((S.CFG && S.CFG.collect_tasks) || {}).map(
-      ([name, entries]) => {
+    const sets = Object.entries((S.CFG && S.CFG.collect_tasks) || {}).map(
+      ([name, entries], sourceIndex) => {
         const tasks = (Array.isArray(entries) ? entries : [])
           .filter((entry) => Array.isArray(entry) && entry.length === 2)
           .map(([prompt, target]) => ({ prompt: String(prompt), target: Number(target) }));
-        return { name, tasks, prompts: tasks.map((task) => task.prompt) };
+        return {
+          name, tasks, prompts: tasks.map((task) => task.prompt), sourceIndex,
+        };
       }
     ).filter((entry) => entry.prompts.length);
+    return orderCollectTaskSets(sets);
   }
 
-function collectTaskTarget(prompt = collectTaskValue()) {
-    const { sets, setIndex, taskIndex } = collectTaskLocation(prompt);
-    if (setIndex < 0 || taskIndex < 0) return null;
-    return sets[setIndex].tasks[taskIndex].target;
+function collectTaskPlan(prompt) {
+    return ((S.SCENE_PLAN && S.SCENE_PLAN.tasks) || []).find(
+      (task) => (task.runtime_prompt || task.prompt_en) === prompt
+    ) || null;
   }
 
-function collectTaskLocation(
-    prompt = collectTaskValue(),
-    setName = collectSet,
-    preferredTaskIndex = collectTaskIndex,
-  ) {
-    const sets = collectTaskSets();
-    const selectedSetIndex = sets.findIndex((set) => set.name === setName);
-    if (selectedSetIndex >= 0) {
-      const tasks = sets[selectedSetIndex].tasks;
-      if (Number.isInteger(preferredTaskIndex) &&
-          tasks[preferredTaskIndex] && tasks[preferredTaskIndex].prompt === prompt) {
-        return { sets, setIndex: selectedSetIndex, taskIndex: preferredTaskIndex };
-      }
-      const taskIndex = tasks.findIndex((task) => task.prompt === prompt);
-      if (taskIndex >= 0) return { sets, setIndex: selectedSetIndex, taskIndex };
-    }
-    for (let setIndex = 0; setIndex < sets.length; setIndex += 1) {
-      const taskIndex = sets[setIndex].prompts.indexOf(prompt);
-      if (taskIndex >= 0) return { sets, setIndex, taskIndex };
-    }
-    return { sets, setIndex: -1, taskIndex: -1 };
-  }
-
-function collectTaskSelectionKey() {
-    const { sets, setIndex, taskIndex } = collectTaskLocation();
-    return setIndex < 0 ? "" : `${sets[setIndex].name}:${taskIndex}`;
-  }
-
-function selectCollectTask(prompt, setName = collectSet, taskIndex = null) {
-    if (!prompt || (S.STATUS.collect && S.STATUS.collect.collecting)) return;
-    const location = collectTaskLocation(prompt, setName, taskIndex);
-    if (location.setIndex < 0 || location.taskIndex < 0) return;
-    const selectedSet = location.sets[location.setIndex];
-    collectTask = selectedSet.tasks[location.taskIndex].prompt;
-    collectSet = selectedSet.name;
-    collectTaskIndex = location.taskIndex;
-    S.STATUS.selected_collect_task = prompt;
-    S.STATUS.selected_collect_set = collectSet;
-    S.STATUS.selected_collect_task_index = collectTaskIndex;
-    apiPost("/api/select_collect_task", {
-      task: prompt,
-      dataset: collectSet,
-      task_index: collectTaskIndex,
+function collectSetSceneIds(set) {
+    const sceneIds = [];
+    (set.tasks || []).forEach((task) => {
+      const plan = collectTaskPlan(task.prompt);
+      (plan ? plan.scene_ids : []).forEach((sceneId) => {
+        if (!sceneIds.includes(sceneId)) sceneIds.push(sceneId);
+      });
     });
-    syncCollectTaskNavigation();
-    renderCollect();
-    updateGuide();
+    const encoded = String(set.name || "").match(/(?:^|_)scene[_-]?([0-9]+)/i);
+    if (!sceneIds.length && encoded) sceneIds.push(`SC-${encoded[1].padStart(3, "0")}`);
+    return sceneIds;
+  }
+
+function collectSceneSortKey(sceneId) {
+    const value = String(sceneId || "");
+    const number = value.match(/(\d+)(?!.*\d)/);
+    return [value.replace(/\d+/g, "").toUpperCase(), number ? Number(number[1]) : Number.MAX_SAFE_INTEGER, value];
+  }
+
+function compareCollectSceneIds(left, right) {
+    const leftKey = collectSceneSortKey(left);
+    const rightKey = collectSceneSortKey(right);
+    return leftKey[0].localeCompare(rightKey[0]) || leftKey[1] - rightKey[1] ||
+      leftKey[2].localeCompare(rightKey[2]);
+  }
+
+function collectSceneDistance(left, right) {
+    if (!left || !right) return 0;
+    const leftKey = collectSceneSortKey(left);
+    const rightKey = collectSceneSortKey(right);
+    if (leftKey[0] !== rightKey[0]) return 1000000;
+    return Math.abs(leftKey[1] - rightKey[1]);
+  }
+
+function orderCollectTaskSets(sets) {
+    const remaining = sets.map((set) => ({ ...set, sceneIds: collectSetSceneIds(set) }));
+    const ordered = [];
+    let previousScene = "";
+    while (remaining.length) {
+      remaining.sort((left, right) => {
+        const leftScene = left.sceneIds[0] || "";
+        const rightScene = right.sceneIds[0] || "";
+        return (previousScene ? collectSceneDistance(previousScene, leftScene) : 0) -
+          (previousScene ? collectSceneDistance(previousScene, rightScene) : 0) ||
+          compareCollectSceneIds(leftScene, rightScene) || left.sourceIndex - right.sourceIndex;
+      });
+      const next = remaining.shift();
+      ordered.push(next);
+      previousScene = next.sceneIds[next.sceneIds.length - 1] || previousScene;
+    }
+    return ordered;
+  }
+
+function applyCollectTaskSelection(prompt, setName, taskIndex, preferredSceneId = "") {
+    const sets = collectTaskSets();
+    const selectedSet = sets.find((set) => set.name === setName);
+    const selectedTask = selectedSet && selectedSet.tasks[taskIndex];
+    if (!selectedTask || selectedTask.prompt !== prompt) return false;
+    collectTask = prompt;
+    collectSet = setName;
+    collectTaskIndex = taskIndex;
+    S.STATUS.selected_collect_task = prompt;
+    S.STATUS.selected_collect_set = setName;
+    S.STATUS.selected_collect_task_index = taskIndex;
+    const linked = collectTaskPlan(prompt);
+    if (linked) {
+      const sceneIndex = preferredSceneId ? linked.scene_ids.indexOf(preferredSceneId) : -1;
+      S.scenePlanTaskId = linked.task_id;
+      S.scenePlanSceneIndex = sceneIndex >= 0 ? sceneIndex : 0;
+      S.scenePlanSceneId = linked.scene_ids[S.scenePlanSceneIndex] || "";
+      S.scenePlanRoundIndex = 0;
+      S.scenePlanTaskPromptKey = prompt;
+    }
+    return true;
   }
 
 function stepCollectSet(delta) {
-    const { sets, setIndex } = collectTaskLocation();
-    const nextIndex = setIndex + delta;
+    const sets = collectTaskSets();
+    const setIndex = sets.findIndex((set) => set.name === collectSet);
+    const nextIndex = (setIndex < 0 ? 0 : setIndex) + delta;
     if (nextIndex < 0 || nextIndex >= sets.length) return;
-    selectCollectTask(sets[nextIndex].tasks[0].prompt, sets[nextIndex].name, 0);
-  }
-
-function stepCollectTask(delta) {
-    const { sets, setIndex, taskIndex } = collectTaskLocation();
-    if (setIndex < 0) return;
-    const nextIndex = taskIndex + delta;
-    if (nextIndex < 0 || nextIndex >= sets[setIndex].tasks.length) return;
-    selectCollectTask(
-      sets[setIndex].tasks[nextIndex].prompt,
-      sets[setIndex].name,
-      nextIndex,
-    );
-  }
-
-function advanceCollectTask() {
-    const { sets, setIndex, taskIndex } = collectTaskLocation();
-    if (setIndex < 0 || taskIndex < 0) return false;
-    if (taskIndex + 1 < sets[setIndex].tasks.length) {
-      const nextIndex = taskIndex + 1;
-      selectCollectTask(sets[setIndex].tasks[nextIndex].prompt, sets[setIndex].name, nextIndex);
-      return true;
-    }
-    if (setIndex + 1 < sets.length) {
-      selectCollectTask(sets[setIndex + 1].tasks[0].prompt, sets[setIndex + 1].name, 0);
-      return true;
-    }
-    return false;
-  }
+    selectCollectionDataset(sets[nextIndex].name);
+}
 
 function syncCollectTaskNavigation() {
-    const { sets, setIndex, taskIndex } = collectTaskLocation();
+    const sets = collectTaskSets();
+    const setIndex = sets.findIndex((set) => set.name === collectSet);
     const currentSet = setIndex >= 0 ? sets[setIndex] : null;
     const collecting = !!(S.STATUS.collect && S.STATUS.collect.collecting);
+    const locked = collecting || S.collectTaskSelectionPending;
     const setSelect = $("collect-set-list");
-    const taskSelect = $("collect-prompt-list");
     if (setSelect) setSelect.value = currentSet ? currentSet.name : "";
-    const currentSetName = currentSet ? currentSet.name : "";
-    if (taskSelect && taskSelect.dataset.set !== currentSetName) {
-      taskSelect.innerHTML = "";
-      const placeholder = document.createElement("option");
-      placeholder.value = "";
-      placeholder.disabled = true;
-      placeholder.textContent = "SELECT TASK";
-      taskSelect.appendChild(placeholder);
-      if (currentSet) {
-        currentSet.prompts.forEach((prompt, index) => {
-          const option = document.createElement("option");
-          option.value = String(index);
-          option.dataset.prompt = prompt;
-          option.dataset.label = prompt;
-          option.textContent = `${String(index + 1).padStart(2, "0")} ${prompt}`;
-          taskSelect.appendChild(option);
-        });
-      }
-      taskSelect.dataset.set = currentSetName;
-    }
-    if (taskSelect) taskSelect.value = currentSet ? String(taskIndex) : "";
-    syncChip("collect-prompt-list");
     const controls = {
       "b-collect-prev-set": setIndex <= 0,
       "b-collect-next-set": setIndex < 0 || setIndex >= sets.length - 1,
-      "b-collect-prev-task": taskIndex <= 0,
-      "b-collect-next-task": !currentSet || taskIndex >= currentSet.prompts.length - 1,
     };
     Object.entries(controls).forEach(([id, atBoundary]) => {
       const button = $(id);
-      if (button) button.disabled = collecting || atBoundary;
+      if (button) button.disabled = locked || atBoundary;
     });
-    if (setSelect) setSelect.disabled = collecting || !sets.length;
-    if (taskSelect) taskSelect.disabled = collecting || !currentSet;
+    if (setSelect) setSelect.disabled = locked || !sets.length;
   }
 
 function renderCollectTaskButtons() {
-    const host = $("collect-prompt-list");
     const setHost = $("collect-set-list");
-    if (!host || !setHost) return;
-    host.innerHTML = "";
-    host.dataset.set = "__uninitialized__";
+    if (!setHost) return;
     setHost.innerHTML = "";
     const placeholder = document.createElement("option");
     placeholder.value = "";
     placeholder.disabled = true;
-    placeholder.textContent = "SELECT SET";
+    placeholder.textContent = t("collect.selectSet");
     setHost.appendChild(placeholder);
-    collectTaskSets().forEach((set, index) => {
+    collectTaskSets().forEach((set) => {
       const option = document.createElement("option");
       option.value = set.name;
-      option.textContent = `${String(index + 1).padStart(2, "0")} ${set.name}`;
+      option.textContent = set.name;
       setHost.appendChild(option);
     });
     setHost.onchange = () => {
       const selected = collectTaskSets().find((set) => set.name === setHost.value);
-      if (selected) selectCollectTask(selected.tasks[0].prompt, selected.name, 0);
-    };
-    host.onchange = () => {
-      const index = Number(host.value);
-      const selected = collectTaskSets().find((set) => set.name === setHost.value);
-      if (selected && selected.tasks[index]) {
-        selectCollectTask(selected.tasks[index].prompt, selected.name, index);
-      }
+      if (selected) selectCollectionDataset(selected.name);
     };
     $("b-collect-prev-set").onclick = () => stepCollectSet(-1);
     $("b-collect-next-set").onclick = () => stepCollectSet(1);
-    $("b-collect-prev-task").onclick = () => stepCollectTask(-1);
-    $("b-collect-next-task").onclick = () => stepCollectTask(1);
     syncCollectTaskNavigation();
   }
 
@@ -803,18 +1238,25 @@ function renderModeButtons(listId) {
     const host = $(listId);
     if (!host) return;
     host.innerHTML = "";
-    const MODE_LABEL = { real: "REAL", sim: "SIM", step: "STEP", manual: "MANUAL" };
-    // MANUAL is its own top-level tab now; keep it out of run-mode pickers.
-    const modes = S.CFG.modes.filter((m) => m !== "manual");
+    const MODE_LABEL = { real: "REAL", sim: "SIM", step: "Approve", manual: "MANUAL" };
+    const debugModes = listId === "mode-list";
+    const labels = debugModes ? { real: "Full access", step: "Ask for approval" } : MODE_LABEL;
+    const modes = S.CFG.modes.filter((m) => debugModes ? ["real", "step"].includes(m) : m !== "manual");
     setCommandMetadata(host, "web:select_mode:{mode}", true);
     host.style.setProperty("--mode-n", modes.length);
     modes.forEach((m) => {
       const b = document.createElement("button");
       b.className = "seg";
+      b.type = "button";
       b.dataset.mode = m;
+      b.setAttribute("aria-label", labels[m] || m);
       setCommandMetadata(b, "web:select_mode:{mode}", true);
-      b.innerHTML = `<span>${MODE_LABEL[m] || m}</span>`;
+      b.innerHTML = `<span>${labels[m] || m}</span>`;
       b.onclick = () => {
+        const menu = host.closest("details");
+        if (menu) menu.open = false;
+        if (debugModes) { void changeDebugMode(m); return; }
+        cancelDebugIntent();
         mark(listId, "mode", m);
         S.STATUS.cli_mode = m;
         apiPost("/api/select_mode", { mode: m });
@@ -822,13 +1264,36 @@ function renderModeButtons(listId) {
       };
       host.appendChild(b);
     });
-    // default selection: SIM (fall back to the first available mode)
-    mark(listId, "mode", modes.includes("sim") ? "sim" : modes[0]);
+    const current = uiMode((S.STATUS || {}).cli_mode);
+    const fallback = debugModes ? (modes.includes("step") ? "step" : modes[0]) : (modes.includes("sim") ? "sim" : modes[0]);
+    mark(listId, "mode", modes.includes(current) ? current : fallback);
   }
 
 const GRIP_STATE = {};
 
-let GRIP_FORCE = true;
+let GRIP_FORCE = false;
+
+function gripperStateFromValue(control, value) {
+    const current = Number(value);
+    const openValue = Number(control.open_value);
+    const closeValue = Number(control.close_value);
+    if (![current, openValue, closeValue].every(Number.isFinite)) return null;
+    return Math.abs(current - openValue) <= Math.abs(current - closeValue) ? "open" : "close";
+  }
+
+function syncGripperState(qpos) {
+    if (!Array.isArray(qpos)) return;
+    const controls = (S.CFG && S.CFG.gripper_controls) || [];
+    let changed = false;
+    controls.forEach((control) => {
+      const state = gripperStateFromValue(control, qpos[control.qpos_index]);
+      if (state && GRIP_STATE[control.side] !== state) {
+        GRIP_STATE[control.side] = state;
+        changed = true;
+      }
+    });
+    if (changed) syncGripperCaps();
+  }
 
 function buildGripperCaps(host) {
     if (!host) return;
@@ -839,6 +1304,12 @@ function buildGripperCaps(host) {
     caps.className = "grip-caps";
     if (controls.length === 1) caps.style.gridTemplateColumns = "1fr";
     controls.forEach((control) => {
+      if (!GRIP_STATE[control.side]) {
+        GRIP_STATE[control.side] = gripperStateFromValue(
+          control,
+          control.initial_value,
+        ) || "close";
+      }
       const cap = document.createElement("div");
       cap.className = "grip-cap";
       const lbl = document.createElement("div");
@@ -870,17 +1341,27 @@ function buildGripperCaps(host) {
     txt.className = "grip-force-txt";
     const title = document.createElement("span");
     title.className = "grip-force-title";
-    title.textContent = "force lock";
-    const sub = document.createElement("span");
-    sub.className = "grip-force-sub";
-    sub.textContent = "override policy during run";
+    title.textContent = t("debug.forceLock");
+    force.title = t("debug.overridePolicy");
     txt.appendChild(title);
-    txt.appendChild(sub);
     const fsw = document.createElement("span");
     fsw.className = "ios-sw" + (GRIP_FORCE ? " on" : "");
+    force.setAttribute("role", "switch");
+    force.setAttribute("aria-checked", String(GRIP_FORCE));
+    force.tabIndex = 0;
     force.appendChild(txt);
     force.appendChild(fsw);
-    force.onclick = () => { GRIP_FORCE = !GRIP_FORCE; fsw.classList.toggle("on", GRIP_FORCE); };
+    force.onclick = () => {
+      GRIP_FORCE = !GRIP_FORCE;
+      document.querySelectorAll(".grip-force").forEach((control) => {
+        control.setAttribute("aria-checked", String(GRIP_FORCE));
+        control.querySelector(".ios-sw")?.classList.toggle("on", GRIP_FORCE);
+      });
+      if (!GRIP_FORCE) apiPost("/api/gripper_unlock", {});
+    };
+    force.onkeydown = (event) => {
+      if (event.key === " " || event.key === "Enter") { event.preventDefault(); force.onclick(); }
+    };
     host.appendChild(force);
   }
 
@@ -895,10 +1376,6 @@ function syncGripperCaps() {
 
 function renderGripperButtons() {
     buildGripperCaps($("gripper-buttons"));
-  }
-
-function renderEvalGripper() {
-    buildGripperCaps($("eval-gripper-buttons"));
   }
 
 function renderRlGripper(enabled) {
@@ -924,6 +1401,34 @@ function renderConfig() {
     $("prompt-title").textContent = "TASK";
     $("prompt-n").textContent = S.CFG.tasks.length;
     renderPromptButtons("prompt-list");
+    renderDebugModels();
+    initLocalHistory();
+    if ($("debug-new-run")) {
+      $("debug-new-run").onclick = newDebugRun;
+      setCommandMetadata($("debug-new-run"), "web:new_debug_run");
+    }
+    const approvalStop = $("debug-approval-stop");
+    if (approvalStop) approvalStop.onclick = () => { cancelDebugIntent(); return dispatchDebugAction("stop"); };
+    const promptForm = $("debug-prompt-form");
+    const promptInput = $("debug-prompt-input");
+    if (promptForm && promptInput) {
+      promptInput.oninput = () => { promptInput.dataset.dirty = "1"; };
+      promptInput.onkeydown = (event) => {
+        if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+          event.preventDefault();
+          promptForm.requestSubmit();
+        }
+      };
+      promptForm.onsubmit = submitDebugPrompt;
+      document.querySelectorAll(".debug-composer details").forEach((menu) => {
+        menu.ontoggle = () => {
+          if (!menu.open) return;
+          document.querySelectorAll(".debug-composer details").forEach((other) => {
+            if (other !== menu) other.open = false;
+          });
+        };
+      });
+    }
     renderCollectTaskButtons();
     renderModeButtons("mode-list");
     renderModeButtons("replay-mode-list");
@@ -932,7 +1437,9 @@ function renderConfig() {
     // a directly-entered eval runs on the real arm, instead of the SIM fallback below
     // which (when STATUS is still empty at boot) would silently run trials in SIM — no
     // real-arm motion, instant reset — until a model A->B switch re-selected REAL.
-    if (evalEnabled()) {
+    if (S.ACTIVE_TAB === "debug" && !evalEnabled()) {
+      syncDebugDefaultMode(S.STATUS);
+    } else if (evalEnabled()) {
       const wantMode = evalCfg().cli_mode || "real";
       if ((!S.STATUS || !S.STATUS.cli_mode || S.STATUS.cli_mode === "select") && S.CFG.modes.includes(wantMode)) {
         if (S.STATUS) S.STATUS.cli_mode = wantMode;
@@ -964,6 +1471,7 @@ function renderConfig() {
       const key = sl.value;
       if (!key) return;
       mark("strategy-list", "strategy", key);
+      cancelDebugIntent();
       S.STATUS.selected_strategy = key;
       apiPost("/api/select_strategy", { strategy: key });
       renderTune(key);
@@ -1020,7 +1528,11 @@ function renderReplayConfig() {
 
     const inspectDataset = async (dir) => {
       $("replay-episode-task").textContent = `inspecting ${dir}…`;
-      const r = await apiPost("/api/inspect_dataset", { dataset_dir: dir });
+      const r = await apiPost(
+        "/api/inspect_dataset",
+        { dataset_dir: dir },
+        { timeoutMs: 0 },
+      );
       if (!r.ok) {
         if (S.pendingQcLoad && S.pendingQcLoad.dir === dir) S.pendingQcLoad = null;
         $("replay-episode-task").textContent = `✗ ${r.error || "cannot read dataset"}`;
@@ -1075,13 +1587,16 @@ function renderReplayConfig() {
       S.replayLoadPending = true;
       replayStop();
       try {
-        const load = await apiPost("/api/load_replay_dataset", {
-          dataset_dir: dir,
-          episode: id,
-          keys: loadKeys,
-          video_keys: loadVideoKeys,
-          action_mode: actionMode,
-        });
+        const load = await apiPost("/api/load_replay_dataset",
+          {
+            dataset_dir: dir,
+            episode: id,
+            keys: loadKeys,
+            video_keys: loadVideoKeys,
+            action_mode: actionMode,
+          },
+          { timeoutMs: 0 },
+        );
         if (!load.ok) {
           $("replay-episode-task").textContent = `✗ ${load.error || "cannot load episode"}`;
           return;
@@ -1142,9 +1657,7 @@ function renderTune(strategyKey) {
     $("tune-publish-rate").value = S.CFG.publish_rate != null ? S.CFG.publish_rate : "";
     const strat = (S.CFG.strategies || []).find((s) => s.key === strategyKey);
     const box = $("tune-strategy-args"); box.innerHTML = "";
-    $("tune-strategy-key").textContent = strat ? strat.key : "—";
-    if (!strat) { $("tune-strategy-h").style.display = "none"; return; }
-    $("tune-strategy-h").style.display = "block";
+    if (!strat) return;
     const fields = strat.fields || [];
     const args = strat.args || {};
     fields.forEach(({ key, label, min, step }) => {
@@ -1214,15 +1727,51 @@ async function applyManualTune() {
 // ===== manual =====
 
 function enterManualSim() {
-    S.manualActive = true;
-    apiPost("/api/select_mode", { mode: "manual" });
+    S.manualActive = !S.STATUS.collection_teleop_armed;
+    if (S.manualActive) {
+      // MANUAL is the real-device control surface; selecting it requests the
+      // transport immediately so START never depends on a separate connect click.
+      S.realRequested = true;
+      apiPost("/api/select_mode", { mode: "manual" });
+    }
     renderManualConn();
+    renderControl();
+  }
+
+function renderControl() {
+    const config = S.CFG;
+    if (!config) return false;
+    renderDeviceSettings();
+    const source = config.collection.teleop;
+    const teleop = config.device_selection.teleop !== "joint";
+    const name = source.client_type === "vr_webxr" ? "VR" : source.client_type || "LEADER";
+    document.querySelectorAll(".control-joints").forEach(panel => { panel.hidden = false; });
+    const motionOwnedByTeleop = !!S.STATUS.collection_teleop_armed;
+    S.manualActive = !motionOwnedByTeleop;
+    renderManualConn();
+    if (motionOwnedByTeleop) {
+      $("bm-connect").disabled = true;
+      $("bm-send").disabled = true;
+      $("bm-home").disabled = true;
+    }
+    buildManualSliders(S.STATUS.manual_qpos);
+    document.querySelectorAll("#manual-sliders-m input").forEach(input => {
+      input.disabled = motionOwnedByTeleop;
+    });
+    if (!teleop) return false;
+    const status = S.STATUS;
+    const armed = !!status.collection_teleop_armed;
+    $("control-arm-enable").checked = armed;
+    $("control-arm-enable").disabled = !armed && !status.transport_connected;
+    $("manual-conn").textContent = `${name} · ${armed ? t("state.enabled") : t("state.locked")}`;
+    return true;
   }
 
 function renderManualConn() {
     const btn = $("bm-connect");
     const conn = $("manual-conn");
     const send = $("bm-send");
+    btn.hidden = true;
     setCommandMetadata(btn, S.realRequested ? "web:disconnect" : "web:connect");
     setCommandMetadata(send, S.manualDispatching ? "web:halt" : "web:manual_send");
     const capable = !!(S.CFG && S.CFG.manual_capable);
@@ -1231,33 +1780,33 @@ function renderManualConn() {
     if (!capable) {
       S.manualDispatching = false;
       // No real-robot transport at all: SIM debug still works, REAL is unavailable.
-      conn.textContent = "SIM DEBUG · no real robot (transport not zmq/ros)";
-      btn.textContent = "CONNECT REAL";
+      conn.textContent = t("manual.simNoRobot");
+      btn.textContent = t("manual.connectReal");
       btn.disabled = true;
       btn.classList.add("primary");
     } else if (S.realRequested && S.realConnected) {
-      conn.textContent = "REAL ROBOT · LIVE";
+      conn.textContent = t("manual.realLive");
       conn.classList.add("ok");
-      btn.textContent = "DISCONNECT";
+      btn.textContent = t("manual.disconnect");
       btn.disabled = false;
       btn.classList.remove("primary");
     } else if (S.realRequested && !S.realConnected) {
-      conn.textContent = "WAITING FOR ROBOT… (no live data)";
+      conn.textContent = t("manual.waitingRobot");
       conn.classList.add("armed");
-      btn.textContent = "CANCEL";
+      btn.textContent = t("manual.cancel");
       btn.disabled = false;
       btn.classList.remove("primary");
     } else {
       S.manualDispatching = false;
-      conn.textContent = "SIM DEBUG · press CONNECT REAL to drive hardware";
-      btn.textContent = "CONNECT REAL";
+      conn.textContent = t("manual.simConnectHint");
+      btn.textContent = t("manual.connectReal");
       btn.disabled = false;
       btn.classList.add("primary");
     }
     // HOME drives the sim preview — available in SIM debug. SEND TO REAL
     // needs a live hardware link.
     $("bm-home").disabled = !S.manualActive;
-    send.textContent = S.manualDispatching ? "STOP ■" : "SEND TO REAL ▶";
+    send.textContent = S.manualDispatching ? t("manual.stop") : t("manual.sendReal");
     send.classList.toggle("primary", !S.manualDispatching);
     send.classList.toggle("danger", S.manualDispatching);
     send.disabled = S.manualDispatching ? !S.realRequested : !(S.realRequested && S.realConnected);
@@ -1339,15 +1888,26 @@ function buildManualSliders(qpos) {
     }
     const host = $("manual-sliders-m");
     host.innerHTML = "";
+    const joints = S.CFG.manual_joint_groups.flatMap(group =>
+      group.joints.map((name, index) => ({name, group: group.name, first: index === 0})));
     qpos.forEach((v, i) => {
       const limit = limits[i];
+      const joint = joints[i];
+      if (joint.first) {
+        const heading = document.createElement("div");
+        heading.className = "ms-group";
+        heading.textContent = joint.group;
+        host.appendChild(heading);
+      }
       const row = document.createElement("div"); row.className = "ms-row";
       row.innerHTML =
-        `<span class="ms-j">j${String(i).padStart(2, "0")}</span>` +
-        `<input type="range" min="${limit.min}" max="${limit.max}" step="${limit.step}" value="${v}" data-j="${i}">` +
+        `<label class="ms-j" for="ms-joint-${i}"></label>` +
+        `<input id="ms-joint-${i}" type="range" min="${limit.min}" max="${limit.max}" step="${limit.step}" value="${v}" data-j="${i}">` +
         `<span class="ms-x"><span id="ms-target-${i}">${v.toFixed(3)}</span>` +
         `<span class="ms-sep">/</span><span class="ms-current" id="ms-current-${i}">—</span></span>`;
       const range = row.querySelector("input");
+      row.querySelector("label").textContent = joint.name;
+      range.setAttribute("aria-label", `${joint.group}: ${joint.name}`);
       range.oninput = (e) => {
         const idx = i, val = parseFloat(e.target.value);
         _manualQpos[idx] = val;
@@ -1375,7 +1935,7 @@ function syncManualSliders(qpos) {
   }
 
 function renderManualCurrent(qpos) {
-    if (!S.manualActive || uiMode(S.STATUS.cli_mode) !== "manual" || !qpos) return;
+    if (!S.manualActive || S.ACTIVE_TAB !== "manual" || !qpos) return;
     _manualCurrentQpos = qpos.slice();
     _manualCurrentQpos.forEach((v, i) => {
       const current = $(`ms-current-${i}`);
@@ -1384,18 +1944,18 @@ function renderManualCurrent(qpos) {
   }
 
 function renderManualTarget(qpos) {
-    if (!S.manualActive || uiMode(S.STATUS.cli_mode) !== "manual") return;
+    if (!S.manualActive || S.ACTIVE_TAB !== "manual") return;
     buildManualSliders(qpos);
     syncManualSliders(qpos);
   }
 
 export {
-  applyRunControlStatus, applyStatus, mark, pauseSetup, replayIsLocalMode, resumeSetup,
+  cancelDebugIntent, applyRunControlStatus, applyStatus, mark, pauseSetup, replayIsLocalMode, resumeSetup,
   retrySetup, setPanel, startRunFromDebug, syncChip, uiMode, updateGuide,
-  advanceCollectTask, applyTune, applyManualTune, collectSetValue, collectTaskIndexValue,
-  collectTaskSelectionKey, collectTaskTarget, collectTaskValue, renderConfig,
-  renderEvalGripper,
+  applyTune, applyManualTune, collectSetValue, selectCollectSet, collectTaskIndexValue,
+  collectTaskValue, renderConfig, applyCollectTaskSelection, syncCollectTaskNavigation,
   renderRlGripper,
   enterManualSim, manualConnect, manualDisconnect, manualDispatchToggle,
   renderManualConn, renderManualCurrent, renderManualTarget,
+  syncGripperState,
 };

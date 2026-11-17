@@ -26,7 +26,4 @@ unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY
   --obs-endpoint "${OBS_ENDPOINT:-tcp://127.0.0.1:5555}" \
   --action-endpoint "${ACTION_ENDPOINT:-tcp://127.0.0.1:5556}" \
   --rate "${PUBLISH_RATE:-30}" \
-  --dynamics-rate "${DYNAMICS_RATE:-200}" \
-  --natural-frequency-hz "${NATURAL_FREQUENCY_HZ:-2}" \
-  --damping-ratio "${DAMPING_RATIO:-1}" \
   "$@"

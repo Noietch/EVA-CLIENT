@@ -11,9 +11,6 @@ from __future__ import annotations
 from typing import Any
 
 _CODEBASE_VERSION = "v2.1"
-_CHUNKS_SIZE = 1000
-_DATA_PATH_TPL = "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet"
-_VIDEO_PATH_TPL = "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4"
 
 
 def summarize_quality_issues(
@@ -50,18 +47,20 @@ def summarize_quality_issues(
 def build_info(
     *,
     robot_type: str,
-    total_episodes: int,
+    episode_indices: list[int],
     total_frames: int,
     total_tasks: int,
     total_videos: int,
     fps: float,
     features: dict[str, Any],
+    layout: dict[str, Any],
 ) -> dict[str, Any]:
     """Assemble the common ``meta/info.json`` envelope shared by all writers.
 
     Callers pass already-resolved scalars (robot_type, totals, features) and add
     any per-caller section (e.g. the eval block) to the returned dict themselves.
     """
+    total_episodes = len(episode_indices)
     return {
         "codebase_version": _CODEBASE_VERSION,
         "robot_type": robot_type,
@@ -69,12 +68,10 @@ def build_info(
         "total_frames": total_frames,
         "total_tasks": total_tasks,
         "total_videos": total_videos,
-        "total_chunks": 1,
-        "chunks_size": _CHUNKS_SIZE,
+        "total_chunks": max(episode_indices, default=0) // layout["chunks_size"] + 1,
         "fps": fps,
         "splits": {"train": f"0:{total_episodes}"},
-        "data_path": _DATA_PATH_TPL,
-        "video_path": _VIDEO_PATH_TPL,
+        **layout,
         "features": features,
     }
 
@@ -91,7 +88,7 @@ def history_row(row: dict[str, Any], fallback_index: int) -> dict[str, Any]:
     """
     quality_issues, quality_issue_count = summarize_quality_issues(row.get("quality_issues"))
     tasks = row.get("tasks") or []
-    return {
+    history = {
         "episode_index": int(row.get("episode_index", fallback_index)),
         "task": str(row.get("prompt") or (tasks[0] if tasks else "")),
         "length": int(row.get("length", 0)),
@@ -99,7 +96,21 @@ def history_row(row: dict[str, Any], fallback_index: int) -> dict[str, Any]:
         "quality": row.get("quality", "green"),
         "qc_verdict": row.get("qc_verdict", ""),
         "qc_note": row.get("qc_note", ""),
+        "qc_reason": row.get("qc_reason", ""),
+        "qc_auto": row.get("qc_auto", False),
+        "qc_auto_verdict": row.get("qc_auto_verdict", ""),
+        "qc_auto_note": row.get("qc_auto_note", ""),
+        "qc_auto_reason": row.get("qc_auto_reason", ""),
         "quality_issues": quality_issues,
         "quality_issue_count": quality_issue_count,
         "error": "",
     }
+    for key in (
+        "scene_id",
+        "scene_round",
+        "slot_id",
+        "task_id",
+    ):
+        if key in row:
+            history[key] = row[key]
+    return history

@@ -46,6 +46,8 @@ class CameraSpec:
 
     name: str
     observation_key: str
+    # Actuator group carrying this camera; None denotes an external camera.
+    attached_to: str | None = None
 
 
 @dataclasses.dataclass(frozen=True)

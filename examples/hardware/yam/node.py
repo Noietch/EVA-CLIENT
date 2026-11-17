@@ -22,6 +22,7 @@ from examples.hardware.yam.camera import (
     load_camera_profiles,
     parse_camera_specs,
 )
+from core.devices.camera import CameraPublisher, CameraSource
 from examples.hardware.yam.orbbec_camera import (
     OrbbecCameraCache,
     OrbbecCameraSpec,
@@ -125,6 +126,11 @@ class YamZmqConfig:
     gravity_comp_factor: tuple[float, ...] | None
     gripper_limits_override: tuple[float, float] | None
     allow_gripper_calibration: bool
+    gripper_kp: float
+    gripper_damping: float
+    gripper_close_torque_limit: float
+    gripper_open_torque_limit: float
+    gripper_max_speed: float
     tracking_ki: float
     tracking_trim_limit: float
     tracking_deadband: float
@@ -187,7 +193,7 @@ def _parse_leader_gripper_endpoints(
 class YamZmqNode:
     """Bridge EVA wire messages to YAM follower and leader YAM arms."""
 
-    def __init__(self, config: YamZmqConfig) -> None:
+    def __init__(self, config: YamZmqConfig, camera_endpoint: str = "") -> None:
         self._config = config
         self._stop = threading.Event()
         self._ctx = zmq.Context.instance()
@@ -204,11 +210,17 @@ class YamZmqNode:
         self._leaders = YamLeaders(config)
         robot = ROBOT_REGISTRY.build(config.robot_name)
         self._fk_solver = robot.build_kinematics(initial_qpos_groups=robot.initial_qpos_by_group())
-        self._camera_caches = (RealSenseCameraCache(config.cameras),)
+        self._camera_endpoint = camera_endpoint
+        self._camera_caches = (
+            CameraSource(camera_endpoint)
+            if camera_endpoint
+            else RealSenseCameraCache(config.cameras),
+        )
         self._orbbec_camera_cache: OrbbecCameraCache | None = None
         self._collection_active = False
         self._hil_active = False
         self._direct_leader_control = config.direct_leader_control
+        self._collection_control_source = "transport"
         self._hil_mode = "relative"
         self._hil_error = ""
         self._leader_anchor: np.ndarray | None = None
@@ -268,12 +280,20 @@ class YamZmqNode:
         logger.info("YAM direct dual-leader control started with relative anchors")
         return True
 
-    def _start_collection(self) -> None:
+    def _start_collection(self, control_source: str = "transport") -> None:
+        if control_source not in {"transport", "client"}:
+            raise ValueError(f"Unsupported YAM control source: {control_source}")
+        if control_source == "client" and self._direct_leader_control:
+            raise ValueError("Disable direct leader control before using VR")
         if self._collection_active:
+            if self._collection_control_source != control_source:
+                raise ValueError("Stop collection before switching control source")
             return
-        self._capture_leader_anchors()
+        if control_source == "transport":
+            self._capture_leader_anchors()
+        self._collection_control_source = control_source
         self._collection_active = True
-        logger.info("YAM dual-leader collection started")
+        logger.info("YAM collection started: %s", control_source)
 
     def _stop_collection(self) -> None:
         self._collection_active = False
@@ -325,7 +345,7 @@ class YamZmqNode:
                 continue
             if action.target == COLLECTION_START_TARGET:
                 try:
-                    self._start_collection()
+                    self._start_collection(action.mode or "transport")
                 except Exception as exc:
                     logger.exception("Could not start YAM collection")
                     self._hil_error = str(exc)
@@ -339,11 +359,13 @@ class YamZmqNode:
             if action.target == HIL_STOP_TARGET:
                 self._stop_hil()
                 continue
+            # Sim previews and on-demand image requests share this channel but carry
+            # no robot command (an image request is a zero placeholder).
             if (
-                action.target == "sim"
+                action.target != "real"
                 or self._direct_leader_control
                 or self._hil_active
-                or self._collection_active
+                or (self._collection_active and self._collection_control_source == "transport")
             ):
                 continue
             try:
@@ -353,6 +375,8 @@ class YamZmqNode:
                 logger.warning("Dropped invalid YAM action: %s", exc)
 
     def _leader_action(self) -> np.ndarray | None:
+        if self._collection_active and self._collection_control_source == "client":
+            return None
         if not self._direct_leader_control and not self._collection_active and not self._hil_active:
             return None
         if not self._ensure_direct_leader_control() and (
@@ -450,6 +474,10 @@ class YamZmqNode:
             self._config.group_names,
         )
         action_eef = None if action is None else self._fk(action)
+        online = self._followers.hardware_status()
+        # Cached poses are useful for local bookkeeping, never as hardware feedback.
+        state = {name: qpos for name, qpos in state.items() if online.get(name) == "online"}
+        eef = {name: pose for name, pose in eef.items() if name in state}
         observation = WireObservation(
             t=time.monotonic(),
             images=self._camera_snapshot(),
@@ -532,7 +560,7 @@ class YamZmqNode:
                 publisher.close(linger=0)
 
     def serve_forever(self) -> None:
-        if self._config.orbbec_cameras:
+        if self._config.orbbec_cameras and not self._camera_endpoint:
             self._orbbec_camera_cache = OrbbecCameraCache(self._config.orbbec_cameras)
             self._camera_caches += (self._orbbec_camera_cache,)
             if not self._orbbec_camera_cache.wait_until_online(timeout_s=30.0):
@@ -603,6 +631,9 @@ class YamZmqNode:
     def _camera_snapshot(self) -> dict[str, np.ndarray]:
         images: dict[str, np.ndarray] = {}
         for camera_cache in self._camera_caches:
+            # Observations sample the latest image on the robot's publish clock.
+            # Independent camera clocks can repeat a capture across two ticks;
+            # omitting it creates artificial holes in the observation stream.
             images.update(camera_cache.snapshot())
         return images
 
@@ -615,6 +646,8 @@ class YamZmqNode:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
+    parser.add_argument("--camera-only", action="store_true")
+    parser.add_argument("--camera-endpoint", default="")
     parser.add_argument("--obs-endpoint", default="tcp://127.0.0.1:5555")
     parser.add_argument("--action-endpoint", default="tcp://127.0.0.1:5556")
     parser.add_argument(
@@ -675,9 +708,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--startup-position",
-        choices=("current", "zero"),
-        default="current",
-        help="Initial follower target after connection.",
+        choices=("zero",),
+        default="zero",
+        help="Move followers to the configured initial position after connection.",
     )
     parser.add_argument(
         "--startup-duration",
@@ -722,6 +755,39 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help=(
             "Explicitly allow the SDK to drive a motorized gripper to both hard stops "
             "when no calibrated limit override is supplied."
+        ),
+    )
+    parser.add_argument(
+        "--gripper-close-torque-limit",
+        type=float,
+        default=0.29,
+        help="Maximum complete gripper closing torque command in Nm; in (0, 1].",
+    )
+    parser.add_argument(
+        "--gripper-open-torque-limit",
+        type=float,
+        default=0.29,
+        help="Maximum complete gripper opening torque command in Nm; in (0, 1].",
+    )
+    parser.add_argument(
+        "--gripper-kp",
+        type=float,
+        default=5.0,
+        help="Gripper software spring stiffness in Nm/rad; must be in (0, 20].",
+    )
+    parser.add_argument(
+        "--gripper-damping",
+        type=float,
+        default=0.5,
+        help="Gripper software damping in Nm/(rad/s); must be in (0, 5].",
+    )
+    parser.add_argument(
+        "--gripper-max-speed",
+        type=float,
+        default=2.0,
+        help=(
+            "Maximum normalized gripper travel per second; 2.0 gives a 0.5 s full stroke, "
+            "and 0 disables limiting."
         ),
     )
     parser.add_argument(
@@ -796,8 +862,43 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--orbbec-fps", type=int, default=30)
     parser.add_argument("--orbbec-color-format", default="MJPG")
     parser.add_argument("--orbbec-timeout-ms", type=int, default=1000)
+    parser.add_argument(
+        "--orbbec-startup-timeout",
+        action="append",
+        default=[],
+        metavar="IMAGE_KEY=SECONDS",
+        help="Per-camera deadline for receiving the first Orbbec color frame.",
+    )
     parser.add_argument("--orbbec-warmup-frames", type=int, default=30)
-    parser.add_argument("--orbbec-brightness", type=int, default=5)
+    parser.add_argument(
+        "--orbbec-brightness",
+        type=int,
+        default=25,
+        help="Orbbec color brightness compensation while auto exposure is enabled (-64..64).",
+    )
+    parser.add_argument(
+        "--orbbec-camera-brightness",
+        action="append",
+        default=[],
+        metavar="IMAGE_KEY=VALUE",
+        help="Per-camera brightness override (-64..64); repeatable.",
+    )
+    parser.add_argument("--orbbec-reset-on-start", action="store_true")
+    for control in ("exposure", "gain"):
+        parser.add_argument(
+            f"--orbbec-camera-{control}",
+            action="append",
+            default=[],
+            metavar="IMAGE_KEY=VALUE",
+            help=f"Per-camera manual {control} in SDK units; exposure disables auto exposure.",
+        )
+    parser.add_argument(
+        "--orbbec-power-line-frequency",
+        type=int,
+        choices=(0, 50, 60),
+        default=50,
+        help="Orbbec color anti-flicker frequency in Hz; 0 disables compensation.",
+    )
     parser.add_argument(
         "--list-cameras",
         action="store_true",
@@ -881,6 +982,14 @@ def build_config(args: argparse.Namespace) -> YamZmqConfig:
             dataclasses.replace(camera, warmup_frames=args.camera_warmup_frames)
             for camera in cameras
         )
+    orbbec_startup_timeouts: dict[str, float] = {}
+    for value in args.orbbec_startup_timeout:
+        if "=" not in value:
+            raise ValueError(f"Expected Orbbec startup timeout IMAGE_KEY=SECONDS, got {value!r}")
+        image_key, seconds = (part.strip() for part in value.split("=", 1))
+        if not image_key or image_key in orbbec_startup_timeouts:
+            raise ValueError(f"Invalid Orbbec startup timeout mapping {value!r}")
+        orbbec_startup_timeouts[image_key] = float(seconds)
     orbbec_cameras = parse_orbbec_camera_specs(
         args.orbbec_camera,
         width=args.orbbec_width,
@@ -888,9 +997,48 @@ def build_config(args: argparse.Namespace) -> YamZmqConfig:
         fps=args.orbbec_fps,
         color_format=args.orbbec_color_format,
         timeout_ms=args.orbbec_timeout_ms,
+        startup_timeouts=orbbec_startup_timeouts,
         warmup_frames=args.orbbec_warmup_frames,
         brightness=args.orbbec_brightness,
+        reset_on_start=args.orbbec_reset_on_start,
+        power_line_frequency_hz=args.orbbec_power_line_frequency,
     )
+    brightness_overrides: dict[str, int] = {}
+    orbbec_keys = {camera.image_key for camera in orbbec_cameras}
+    for value in args.orbbec_camera_brightness:
+        image_key, separator, raw_brightness = value.partition("=")
+        image_key = image_key.strip()
+        if not separator or image_key not in orbbec_keys or image_key in brightness_overrides:
+            raise ValueError(f"Invalid Orbbec camera brightness mapping {value!r}")
+        brightness = int(raw_brightness)
+        if not -64 <= brightness <= 64:
+            raise ValueError("Orbbec brightness must be in [-64, 64]")
+        brightness_overrides[image_key] = brightness
+    orbbec_cameras = tuple(
+        dataclasses.replace(camera, brightness=brightness_overrides[camera.image_key])
+        if camera.image_key in brightness_overrides
+        else camera
+        for camera in orbbec_cameras
+    )
+    for control in ("exposure", "gain"):
+        overrides: dict[str, int] = {}
+        for value in getattr(args, f"orbbec_camera_{control}"):
+            key, separator, raw_value = value.partition("=")
+            key = key.strip()
+            if not separator or key not in orbbec_keys or key in overrides:
+                raise ValueError(f"Invalid Orbbec {control} mapping {value!r}")
+            parsed = int(raw_value)
+            if parsed <= 0:
+                raise ValueError(f"Orbbec {control} must be positive")
+            overrides[key] = parsed
+        orbbec_cameras = tuple(
+            dataclasses.replace(camera, **{control: overrides[camera.image_key]})
+            if camera.image_key in overrides
+            else camera
+            for camera in orbbec_cameras
+        )
+    if any(camera.gain is not None and camera.exposure is None for camera in orbbec_cameras):
+        raise ValueError("Orbbec manual gain requires per-camera manual exposure")
     invalid_cameras = {
         camera.image_key
         for camera in cameras + orbbec_cameras
@@ -930,13 +1078,27 @@ def build_config(args: argparse.Namespace) -> YamZmqConfig:
                 "--gripper-limits-override values must be distinct and within [-20, 20]"
             )
         gripper_limits_override = (float(closed), float(opened))
-    if args.gripper_limits_override is None and not args.allow_gripper_calibration:
+    if (
+        args.gripper_limits_override is None
+        and not args.allow_gripper_calibration
+        and not args.camera_only
+    ):
         raise ValueError(
             "motorized gripper startup requires calibrated --gripper-limits-override "
             "or explicit --allow-gripper-calibration"
         )
     if args.tracking_ki < 0 or args.tracking_ki > 10:
         raise ValueError("--tracking-ki must be in [0, 10]")
+    for name in ("gripper_close_torque_limit", "gripper_open_torque_limit"):
+        value = getattr(args, name)
+        if not np.isfinite(value) or not 0 < value <= 1:
+            raise ValueError(f"--{name.replace('_', '-')} must be finite and in (0, 1]")
+    if not np.isfinite(args.gripper_damping) or not 0 < args.gripper_damping <= 5:
+        raise ValueError("--gripper-damping must be finite and in (0, 5]")
+    if not np.isfinite(args.gripper_kp) or not 0 < args.gripper_kp <= 20:
+        raise ValueError("--gripper-kp must be finite and in (0, 20]")
+    if not np.isfinite(args.gripper_max_speed) or args.gripper_max_speed < 0:
+        raise ValueError("--gripper-max-speed must be finite and non-negative")
     if args.tracking_trim_limit < 0 or args.tracking_trim_limit > 0.3:
         raise ValueError("--tracking-trim-limit must be in [0, 0.3]")
     if args.tracking_deadband < 0 or args.tracking_deadband > 0.05:
@@ -976,6 +1138,11 @@ def build_config(args: argparse.Namespace) -> YamZmqConfig:
         ),
         gripper_limits_override=gripper_limits_override,
         allow_gripper_calibration=bool(args.allow_gripper_calibration),
+        gripper_kp=float(args.gripper_kp),
+        gripper_damping=float(args.gripper_damping),
+        gripper_close_torque_limit=float(args.gripper_close_torque_limit),
+        gripper_open_torque_limit=float(args.gripper_open_torque_limit),
+        gripper_max_speed=float(args.gripper_max_speed),
         tracking_ki=float(args.tracking_ki),
         tracking_trim_limit=float(args.tracking_trim_limit),
         tracking_deadband=float(args.tracking_deadband),
@@ -1011,7 +1178,17 @@ def main() -> None:
         config = build_config(args)
     except ValueError as exc:
         parser.error(str(exc))
-    node = YamZmqNode(config)
+    if args.camera_only:
+        caches = (RealSenseCameraCache(config.cameras),)
+        if config.orbbec_cameras:
+            caches += (OrbbecCameraCache(config.orbbec_cameras),)
+        camera_rate = max(
+            (spec.fps or 30 for spec in config.cameras + config.orbbec_cameras),
+            default=30,
+        )
+        CameraPublisher(caches, args.camera_endpoint, rate=camera_rate).run()
+        return
+    node = YamZmqNode(config, args.camera_endpoint)
 
     def stop(*_args: object) -> None:
         node.stop()

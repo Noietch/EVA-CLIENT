@@ -1,0 +1,345 @@
+"""Fixed collection-slot planning and persisted skip state."""
+
+from __future__ import annotations
+
+import json
+import threading
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from core.config import ConfigDict
+from core.utils.qc import qc_state
+from core.utils.scene_plan import plan_slots
+
+_STATE_LOCK = threading.RLock()
+
+
+@dataclass(frozen=True)
+class CollectionSlot:
+    """One immutable capture target in Scene -> Task -> Round order."""
+
+    slot_id: str
+    ordinal: int
+    dataset: str
+    task_index: int
+    task_id: str
+    task: str
+    task_zh: str
+    scene_id: str
+    scene_label: str
+    round_index: int
+    round_total: int
+    unbounded: bool = False
+
+
+@dataclass(frozen=True)
+class CollectionSlotState:
+    """Small persisted operator override layered on top of the fixed plan."""
+
+    deferred: list[str]
+    selected_slot_id: str = ""
+    selected_episode_index: int | None = None
+    selected_manually: bool = False
+
+
+def build_collection_slots(
+    config: ConfigDict,
+    scene_plan: dict[str, Any],
+    dataset: str,
+) -> list[CollectionSlot]:
+    """Expand a dataset plan into stable slots in operator workflow order."""
+    entries = list(config.collection.tasks.get(dataset) or [])
+    bindings = (config.collection.get("task_prompt_bindings") or {}).get(dataset) or {}
+    slots = [
+        CollectionSlot(
+            slot_id=slot.slot_id,
+            ordinal=slot.ordinal,
+            dataset=dataset,
+            task_index=slot.task_index,
+            task_id=slot.task_id,
+            task=slot.task,
+            task_zh=slot.task_zh,
+            scene_id=slot.scene_id,
+            scene_label=slot.scene_label,
+            round_index=slot.round_index,
+            round_total=slot.round_total,
+        )
+        for slot in plan_slots(scene_plan, entries, bindings)
+    ]
+    if slots or scene_plan.get("tasks"):
+        return slots
+
+    # Inline collection configs do not have scene.csv/tasks.csv, but they still
+    # use the same slot picker. A -1 target means the task remains available for
+    # repeated captures; finite targets expand into one slot per episode.
+    for task_index, entry in enumerate(entries):
+        if not isinstance(entry, (list, tuple)) or len(entry) != 2:
+            continue
+        prompt = str(entry[0]).strip()
+        if not prompt:
+            continue
+        target = int(entry[1])
+        unbounded = target == -1
+        round_total = target if target > 0 else 1
+        task_id = f"INLINE-{task_index}"
+        for round_index in range(round_total):
+            slots.append(
+                CollectionSlot(
+                    slot_id=f"{task_id}:DEFAULT:{round_index}",
+                    ordinal=len(slots),
+                    dataset=dataset,
+                    task_index=task_index,
+                    task_id=task_id,
+                    task=prompt,
+                    task_zh="",
+                    scene_id="DEFAULT",
+                    scene_label="DEFAULT",
+                    round_index=round_index,
+                    round_total=round_total,
+                    unbounded=unbounded,
+                )
+            )
+    return slots
+
+
+def load_slot_state(state_path: Path | None) -> CollectionSlotState:
+    """Read the console's slot selection; it stays machine-local."""
+    if state_path is None:
+        return CollectionSlotState([])
+    path = Path(state_path)
+    with _STATE_LOCK:
+        try:
+            payload = json.loads(path.read_text())
+        except (OSError, ValueError):
+            return CollectionSlotState([])
+    deferred = payload.get("deferred") if isinstance(payload, dict) else None
+    selected_slot_id = payload.get("selected_slot_id") if isinstance(payload, dict) else ""
+    selected_episode_index = (
+        payload.get("selected_episode_index") if isinstance(payload, dict) else None
+    )
+    return CollectionSlotState(
+        [str(slot_id) for slot_id in deferred] if isinstance(deferred, list) else [],
+        str(selected_slot_id or ""),
+        selected_episode_index if type(selected_episode_index) is int else None,
+        bool(payload.get("selected_manually", selected_episode_index is not None))
+        if isinstance(payload, dict)
+        else False,
+    )
+
+
+def save_slot_state(state_path: Path, state: CollectionSlotState) -> None:
+    path = Path(state_path)
+    with _STATE_LOCK:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_suffix(f"{path.suffix}.tmp")
+        temporary.write_text(
+            json.dumps(
+                {
+                    "deferred": state.deferred,
+                    "selected_slot_id": state.selected_slot_id,
+                    "selected_episode_index": state.selected_episode_index,
+                    "selected_manually": state.selected_manually,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+            + "\n"
+        )
+        temporary.replace(path)
+
+
+def episode_qc_state(episode: dict[str, Any] | None) -> str:
+    """Match datasets tools' four QC states, independently of capture selection."""
+    if not episode or episode.get("status") != "saved":
+        return "pending"
+    return qc_state(
+        episode.get("qc_verdict"),
+        episode.get("quality"),
+        episode.get("replay_verified"),
+        bool(episode.get("replay_required")),
+        episode.get("qc_auto_verdict"),
+    )
+
+
+def _episode_outcome(episode: dict[str, Any]) -> str:
+    state = episode_qc_state(episode)
+    return "rejected" if state == "failed" else "pending" if state == "pending" else "usable"
+
+
+def _episode_indices(
+    episodes: list[dict[str, Any]],
+) -> tuple[dict[str, dict[str, Any]], dict[tuple[str, str, int], dict[str, Any]]]:
+    by_slot: dict[str, dict[str, Any]] = {}
+    by_legacy_target: dict[tuple[str, str, int], dict[str, Any]] = {}
+    for episode in episodes:
+        slot_id = str(episode.get("slot_id") or "")
+        if not slot_id and episode.get("task_id") and episode.get("scene_id"):
+            try:
+                scene_round = int(episode["scene_round"])
+                slot_id = f"{episode['task_id']}:{episode['scene_id']}:{scene_round}"
+            except (KeyError, TypeError, ValueError):
+                pass
+        if slot_id:
+            current = by_slot.get(slot_id)
+            if current is None or int(episode.get("episode_index", -1)) > int(
+                current.get("episode_index", -1)
+            ):
+                by_slot[slot_id] = episode
+            continue
+        try:
+            key = (
+                str(episode.get("task") or episode.get("prompt") or ""),
+                str(episode.get("scene_id") or ""),
+                int(episode["scene_round"]),
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+        current = by_legacy_target.get(key)
+        if current is None or int(episode.get("episode_index", -1)) > int(
+            current.get("episode_index", -1)
+        ):
+            by_legacy_target[key] = episode
+    return by_slot, by_legacy_target
+
+
+def collection_slot_status(
+    slots: list[CollectionSlot],
+    episodes: list[dict[str, Any]],
+    queue: list[dict[str, Any]],
+    slot_state: CollectionSlotState,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None, dict[str, int]]:
+    """Resolve completion, repair, deferred, and current states for the plan."""
+    valid_ids = {slot.slot_id for slot in slots}
+    deferred = [slot_id for slot_id in slot_state.deferred if slot_id in valid_ids]
+    deferred_set = set(deferred)
+    episode_by_slot, legacy_episode_by_target = _episode_indices(
+        episodes + [item for item in queue if item.get("status") == "saved"]
+    )
+    saving_ids = {
+        str(item.get("slot_id") or "")
+        for item in queue
+        if item.get("status") in {"queued", "saving"}
+    }
+    failed_ids = {
+        str(item.get("slot_id") or "") for item in queue if item.get("status") == "failed"
+    }
+    rows: list[dict[str, Any]] = []
+    unresolved_regular: list[dict[str, Any]] = []
+    unresolved_deferred: dict[str, dict[str, Any]] = {}
+    counts = {
+        "complete": 0,
+        "rejected": 0,
+        "deferred": 0,
+        "pending": 0,
+        "passed": 0,
+        "unreviewed": 0,
+        "failed": 0,
+        "qc_pending": 0,
+    }
+
+    for slot in slots:
+        episode = episode_by_slot.get(slot.slot_id) or legacy_episode_by_target.get(
+            (slot.task, slot.scene_id, slot.round_index)
+        )
+        outcome = (
+            "pending" if slot.unbounded else (_episode_outcome(episode) if episode else "pending")
+        )
+        if slot.slot_id in saving_ids:
+            state = "saving"
+            counts["pending"] += 1
+        elif outcome == "usable":
+            state = "complete"
+            counts["complete"] += 1
+        elif slot.slot_id in deferred_set:
+            state = "deferred"
+            counts["deferred"] += 1
+        elif slot.slot_id in failed_ids or outcome == "rejected":
+            state = "rejected"
+            counts["rejected"] += 1
+        else:
+            state = "pending"
+            counts["pending"] += 1
+        qc_state = episode_qc_state(episode)
+        counts["qc_pending" if qc_state == "pending" else qc_state] += 1
+        row = {**vars(slot), "state": state, "qc_state": qc_state, "episode": episode}
+        rows.append(row)
+        if state not in {"complete", "saving"}:
+            if state == "deferred":
+                unresolved_deferred[slot.slot_id] = row
+            else:
+                unresolved_regular.append(row)
+
+    unresolved = {
+        row["slot_id"]: row for row in [*unresolved_regular, *unresolved_deferred.values()]
+    }
+    active = unresolved.get(slot_state.selected_slot_id)
+    if active is not None and active["state"] in {"rejected", "deferred"}:
+        if not (
+            slot_state.selected_manually
+            and (active["episode"] or {}).get("episode_index") == slot_state.selected_episode_index
+        ):
+            active = None
+    # A manual retake stays selected only until a newer attempt exists.
+    if (
+        active is None
+        and slot_state.selected_manually
+        and slot_state.selected_episode_index is not None
+    ):
+        active = next(
+            (
+                row
+                for row in rows
+                if row["slot_id"] == slot_state.selected_slot_id
+                and row["state"] == "complete"
+                and (row["episode"] or {}).get("episode_index") == slot_state.selected_episode_index
+            ),
+            None,
+        )
+    if active is None:
+        # Pending and rejected captures share the same forward plan order.
+        selected = next(
+            (row for row in rows if row["slot_id"] == slot_state.selected_slot_id),
+            None,
+        )
+        active = next(
+            (
+                row
+                for row in unresolved_regular
+                if row["state"] in {"pending", "rejected"}
+                and (selected is None or row["ordinal"] > selected["ordinal"])
+            ),
+            None,
+        )
+    if active is not None:
+        active["repair"] = active["state"] in {"complete", "deferred", "rejected"}
+        active["state"] = "active"
+    counts["total"] = len(slots)
+    return rows, active, counts
+
+
+def defer_active_slot(
+    state_path: Path,
+    active_slot_id: str,
+    state: CollectionSlotState,
+) -> CollectionSlotState:
+    """Move the current slot to the tail of the deferred repair queue."""
+    ordered = [slot_id for slot_id in state.deferred if slot_id != active_slot_id]
+    ordered.append(active_slot_id)
+    updated = CollectionSlotState(ordered, active_slot_id)
+    save_slot_state(state_path, updated)
+    return updated
+
+
+def select_collection_slot(
+    state_path: Path,
+    slot_id: str,
+    state: CollectionSlotState,
+    *,
+    episode_index: int | None = None,
+    manual: bool = False,
+) -> CollectionSlotState:
+    """Select a capture target, optionally retaining a completed episode for retake."""
+    updated = CollectionSlotState(state.deferred, slot_id, episode_index, manual)
+    save_slot_state(state_path, updated)
+    return updated

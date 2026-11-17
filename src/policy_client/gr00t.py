@@ -17,7 +17,8 @@ through ``policy.backend_options``::
       backend_options:
         video_keys:                       # EVA camera -> GR00T video modality key
           cam_high: video.exterior_image_1
-          cam_left_wrist: video.wrist_image
+          cam_left_wrist: video.left_wrist_image
+          cam_right_wrist: video.right_wrist_image
         state_key: state.qpos             # GR00T state modality key for EVA's qpos
         language_key: annotation.human.task_description
         action_keys: [action.qpos]        # response keys to concatenate into the chunk
@@ -145,9 +146,8 @@ class Gr00tPolicyClient(PolicyClient):
         state = np.asarray(observation["state"], dtype=np.float32)[None, None, ...]
         request: dict = {self._state_key: state, self._language_key: [[observation["prompt"]]]}
         for cam_key, image in observation["images"].items():
-            gr00t_key = self._video_keys.get(cam_key)
-            if gr00t_key is not None:
-                request[gr00t_key] = np.asarray(image)[None, None, ...]
+            gr00t_key = self._video_keys[cam_key]
+            request[gr00t_key] = np.asarray(image)[None, None, ...]
         return request
 
     def infer(

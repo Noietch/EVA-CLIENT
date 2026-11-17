@@ -35,8 +35,16 @@ class OrbbecCameraSpec:
     color_format: str = "MJPG"
     timeout_ms: int = 1000
     retry_interval_s: float = 3.0
+    startup_timeout_s: float = 8.0
+    startup_retry_interval_s: float = 0.25
     warmup_frames: int = 30
-    brightness: int = 5
+    # Keep auto exposure enabled while applying a moderate compensation for
+    # the relatively dark workcell image.
+    brightness: int = 25
+    exposure: int | None = None
+    gain: int | None = None
+    reset_on_start: bool = False
+    power_line_frequency_hz: int = 50
 
 
 def parse_orbbec_camera_specs(
@@ -47,16 +55,24 @@ def parse_orbbec_camera_specs(
     fps: int = 30,
     color_format: str = "MJPG",
     timeout_ms: int = 1000,
+    startup_timeouts: dict[str, float] | None = None,
     warmup_frames: int = 30,
-    brightness: int = 5,
+    brightness: int = 25,
+    reset_on_start: bool = False,
+    power_line_frequency_hz: int = 50,
 ) -> tuple[OrbbecCameraSpec, ...]:
     """Parse repeated ``IMAGE_KEY=SERIAL`` or ``IMAGE_KEY=index:N`` mappings."""
     if width <= 0 or height <= 0 or fps <= 0 or timeout_ms <= 0:
         raise ValueError("Orbbec width, height, fps, and timeout must be positive")
     if warmup_frames < 0:
         raise ValueError("Orbbec warmup frame count must be non-negative")
+    startup_timeouts = startup_timeouts or {}
+    if any(not np.isfinite(value) or value <= 0 for value in startup_timeouts.values()):
+        raise ValueError("Orbbec startup timeouts must be finite and positive")
     if not -64 <= brightness <= 64:
         raise ValueError("Orbbec brightness must be in [-64, 64]")
+    if power_line_frequency_hz not in (0, 50, 60):
+        raise ValueError("Orbbec power-line frequency must be 0, 50, or 60 Hz")
 
     cameras: list[OrbbecCameraSpec] = []
     seen: set[str] = set()
@@ -87,9 +103,17 @@ def parse_orbbec_camera_specs(
                 fps=fps,
                 color_format=color_format,
                 timeout_ms=timeout_ms,
+                startup_timeout_s=startup_timeouts.get(image_key, 8.0),
                 warmup_frames=warmup_frames,
                 brightness=brightness,
+                reset_on_start=reset_on_start,
+                power_line_frequency_hz=power_line_frequency_hz,
             )
+        )
+    unknown_timeout_keys = set(startup_timeouts) - seen
+    if unknown_timeout_keys:
+        raise ValueError(
+            f"Orbbec startup timeout has no matching camera: {sorted(unknown_timeout_keys)}"
         )
     return tuple(cameras)
 
@@ -191,6 +215,36 @@ def enable_auto_exposure(device: Any, sdk: ModuleType) -> bool:
     return True
 
 
+def set_color_power_line_frequency(
+    device: Any,
+    sdk: ModuleType,
+    frequency_hz: int,
+) -> int | None:
+    """Set color anti-flicker frequency to off, 50 Hz, or 60 Hz."""
+    if frequency_hz not in (0, 50, 60):
+        raise ValueError("Orbbec power-line frequency must be 0, 50, or 60 Hz")
+    prop = getattr(sdk.OBPropertyID, "OB_PROP_COLOR_POWER_LINE_FREQUENCY_INT", None)
+    modes = getattr(sdk, "OBPowerLineFreqMode", None)
+    if prop is None or modes is None:
+        return None
+    permissions = (
+        sdk.OBPermissionType.PERMISSION_READ_WRITE,
+        sdk.OBPermissionType.PERMISSION_WRITE,
+    )
+    if not any(device.is_property_supported(prop, item) for item in permissions):
+        return None
+    mode_name = {
+        0: "FREQUENCY_CLOSE",
+        50: "FREQUENCY_50HZ",
+        60: "FREQUENCY_60HZ",
+    }[frequency_hz]
+    mode = getattr(modes, mode_name, None)
+    if mode is None:
+        return None
+    device.set_int_property(prop, int(mode))
+    return frequency_hz
+
+
 def set_color_brightness(device: Any, sdk: ModuleType, value: int) -> int | None:
     """Apply a small brightness compensation while retaining auto exposure."""
     prop = getattr(sdk.OBPropertyID, "OB_PROP_COLOR_BRIGHTNESS_INT", None)
@@ -238,7 +292,7 @@ def frame_to_bgr_image(frame: Any, sdk: ModuleType) -> np.ndarray:
 
 
 _STATE_NAMES = ("starting", "connecting", "warming", "online", "retrying", "stopped")
-_CAMERA_START_TIMEOUT_S = 8.0
+_CAMERA_START_GATE_TIMEOUT_S = 8.0
 _STALE_FRAME_TIMEOUT_S = 3.0
 
 
@@ -272,18 +326,45 @@ def _capture_orbbec_camera(
             )
         except Exception as exc:
             _set_process_state(state, "retrying")
+            retry_interval_s = (
+                spec.startup_retry_interval_s if frame_count.value == 0 else spec.retry_interval_s
+            )
             logger.warning(
                 "Orbbec camera %s stopped; retrying in %.1f s: %s",
                 spec.image_key,
-                spec.retry_interval_s,
+                retry_interval_s,
                 exc,
             )
-            stop.wait(spec.retry_interval_s)
+            stop.wait(retry_interval_s)
     _set_process_state(state, "stopped")
+
+
+def _reset_startup_devices(sdk: ModuleType, specs: tuple[OrbbecCameraSpec, ...]) -> bool:
+    """Clear stale device streams once before this process starts capture."""
+    requested = tuple(spec for spec in specs if spec.reset_on_start)
+    if not requested:
+        return False
+    context = sdk.Context()
+    devices = context.query_devices()
+    selected = [select_orbbec_device(devices, spec) for spec in requested]
+    for spec, device in zip(requested, selected, strict=True):
+        logger.info("Resetting Orbbec camera %s before capture", spec.image_key)
+        device.reboot()
+    return True
+
+
+def _reset_orbbec_camera_process(specs: tuple[OrbbecCameraSpec, ...]) -> None:
+    # SDK contexts retain disconnected device handles after reboot. Exit this
+    # process before the capture process creates its own fresh SDK context.
+    _reset_startup_devices(get_orbbec_sdk(), specs)
 
 
 def _capture_orbbec_cameras(capture_args: tuple[tuple[Any, ...], ...], stop: Any) -> None:
     """Capture all cameras from device handles owned by one isolated SDK context."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     cv2.setNumThreads(1)
     try:
@@ -292,8 +373,20 @@ def _capture_orbbec_cameras(capture_args: tuple[tuple[Any, ...], ...], stop: Any
         logger.debug("Could not lower Orbbec camera process priority", exc_info=True)
 
     sdk = get_orbbec_sdk()
+    specs = tuple(args[0] for args in capture_args)
     context = sdk.Context()
-    devices = context.query_devices()
+    deadline = time.monotonic() + 10.0
+    while True:
+        devices = context.query_devices()
+        try:
+            for spec in specs:
+                select_orbbec_device(devices, spec)
+            break
+        except RuntimeError:
+            if time.monotonic() >= deadline:
+                raise
+            if stop.wait(0.25):
+                return
     selected: list[tuple[tuple[Any, ...], Any]] = []
     for args in capture_args:
         spec = args[0]
@@ -308,6 +401,8 @@ def _capture_orbbec_cameras(capture_args: tuple[tuple[Any, ...], ...], stop: Any
 
     threads: list[threading.Thread] = []
     for index, (args, device) in enumerate(selected):
+        if stop.is_set():
+            break
         thread = threading.Thread(
             target=_capture_orbbec_camera,
             args=(*args, stop, sdk, device),
@@ -318,8 +413,12 @@ def _capture_orbbec_cameras(capture_args: tuple[tuple[Any, ...], ...], stop: Any
         threads.append(thread)
         if index + 1 < len(selected):
             state = args[5]
-            deadline = time.monotonic() + _CAMERA_START_TIMEOUT_S
-            while state.value != _STATE_NAMES.index("online") and time.monotonic() < deadline:
+            deadline = time.monotonic() + _CAMERA_START_GATE_TIMEOUT_S
+            # Wait for a real frame before opening the next SDK pipeline. Starting
+            # multiple Gemini devices during warmup can leave one pipeline alive
+            # but permanently starved of color frames.
+            online_state = _STATE_NAMES.index("online")
+            while state.value != online_state and time.monotonic() < deadline:
                 if stop.wait(0.05):
                     break
 
@@ -341,6 +440,7 @@ def _run_orbbec_capture_loop(
     sdk: ModuleType | None = None,
     device: Any = None,
 ) -> None:
+    started_at = time.monotonic()
     _set_process_state(state, "connecting")
     if sdk is None or device is None:
         sdk = get_orbbec_sdk()
@@ -350,7 +450,24 @@ def _run_orbbec_capture_loop(
             raise RuntimeError("No Orbbec camera is connected")
         device = select_orbbec_device(devices, spec)
     serial = device.get_device_info().get_serial_number()
-    auto_exposure = enable_auto_exposure(device, sdk)
+    power_line_frequency_hz = set_color_power_line_frequency(
+        device,
+        sdk,
+        spec.power_line_frequency_hz,
+    )
+    if spec.exposure is None:
+        auto_exposure = enable_auto_exposure(device, sdk)
+    else:
+        device.set_bool_property(sdk.OBPropertyID.OB_PROP_COLOR_AUTO_EXPOSURE_BOOL, False)
+        for name, value in (("EXPOSURE", spec.exposure), ("GAIN", spec.gain)):
+            if value is None:
+                continue
+            prop = getattr(sdk.OBPropertyID, f"OB_PROP_COLOR_{name}_INT")
+            limits = device.get_int_property_range(prop)
+            if not limits.min <= value <= limits.max or (value - limits.min) % limits.step:
+                raise ValueError(f"Orbbec {spec.image_key} {name} outside supported range/step")
+            device.set_int_property(prop, value)
+        auto_exposure = False
     brightness = set_color_brightness(device, sdk, spec.brightness)
     pipeline = sdk.Pipeline(device)
     stream_config = sdk.Config()
@@ -373,22 +490,36 @@ def _run_orbbec_capture_loop(
     pipeline.start(stream_config)
     _set_process_state(state, "warming")
     logger.info(
-        "Started Orbbec camera %s serial=%s auto_exposure=%s brightness=%s warmup_frames=%d",
+        "Started Orbbec camera %s serial=%s auto_exposure=%s brightness=%s "
+        "power_line_frequency_hz=%s warmup_frames=%d exposure=%s gain=%s",
         spec.image_key,
         serial,
         auto_exposure,
         brightness,
+        power_line_frequency_hz,
         spec.warmup_frames,
+        spec.exposure,
+        spec.gain,
     )
     remaining_warmup = spec.warmup_frames
+    first_frame = True
+    first_frame_deadline = time.monotonic() + spec.startup_timeout_s
     shared_image = np.frombuffer(frame_buffer, dtype=np.uint8).reshape((spec.height, spec.width, 3))
     try:
         while not stop.is_set():
             frameset = pipeline.wait_for_frames(spec.timeout_ms)
             if frameset is None:
+                if first_frame and time.monotonic() >= first_frame_deadline:
+                    raise TimeoutError(
+                        f"no color frame received within {spec.startup_timeout_s:g} s"
+                    )
                 continue
             color_frame = frameset.get_color_frame()
             if color_frame is None:
+                if first_frame and time.monotonic() >= first_frame_deadline:
+                    raise TimeoutError(
+                        f"no color frame received within {spec.startup_timeout_s:g} s"
+                    )
                 continue
             if remaining_warmup > 0:
                 remaining_warmup -= 1
@@ -401,6 +532,13 @@ def _run_orbbec_capture_loop(
                 frame_count.value += 1
                 last_frame_time.value = time.monotonic()
                 _set_process_state(state, "online")
+            if first_frame:
+                logger.info(
+                    "Orbbec camera %s first frame ready in %.3f s",
+                    spec.image_key,
+                    time.monotonic() - started_at,
+                )
+                first_frame = False
     finally:
         pipeline.stop()
 
@@ -433,6 +571,15 @@ class _OrbbecCameraWorker:
             )
             return image.copy()
 
+    def snapshot_versioned(self) -> tuple[int, np.ndarray] | None:
+        with self._frame_lock:
+            if self._frame_count.value == 0:
+                return None
+            image = np.frombuffer(self._frame_buffer, dtype=np.uint8).reshape(
+                (self.spec.height, self.spec.width, 3)
+            )
+            return self._frame_count.value, image.copy()
+
     def status(self) -> str:
         state = _STATE_NAMES[self._state.value]
         last_frame_time = self._last_frame_time.value
@@ -453,6 +600,22 @@ class OrbbecCameraCache:
     def __init__(self, camera_specs: tuple[OrbbecCameraSpec, ...]) -> None:
         context = multiprocessing.get_context("spawn")
         self._stop = context.Event()
+        if any(spec.reset_on_start for spec in camera_specs):
+            reset_process = context.Process(
+                target=_reset_orbbec_camera_process,
+                args=(camera_specs,),
+                name="orbbec-startup-reset",
+            )
+            reset_process.start()
+            reset_process.join(timeout=15)
+            if reset_process.is_alive():
+                reset_process.kill()
+                reset_process.join(timeout=2)
+            exitcode = reset_process.exitcode
+            reset_process.close()
+            if exitcode != 0:
+                raise RuntimeError("Orbbec startup reset failed")
+            self._stop.wait(3.0)
         self._workers = [_OrbbecCameraWorker(spec, context) for spec in camera_specs]
         self._process = context.Process(
             target=_capture_orbbec_cameras,
@@ -470,6 +633,14 @@ class OrbbecCameraCache:
             if image is not None:
                 images[worker.spec.image_key] = image
         return images
+
+    def snapshot_versioned(self) -> tuple[dict, dict]:
+        versions, images = {}, {}
+        for worker in self._workers:
+            frame = worker.snapshot_versioned()
+            if frame is not None:
+                versions[worker.spec.image_key], images[worker.spec.image_key] = frame
+        return versions, images
 
     def hardware_status(self) -> dict[str, str]:
         if not self._process.is_alive() and not self._stop.is_set():

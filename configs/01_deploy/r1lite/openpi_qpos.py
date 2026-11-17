@@ -1,6 +1,6 @@
 """R1 Lite: openpi policy deploy, qpos action space."""
 
-_base_ = ["openpi_base.py"]
+_base_ = ["_base.py"]
 
 policy = dict(
     type="openpi",
@@ -22,11 +22,6 @@ inference_cfg = dict(
 )
 
 inference_strategies = {
-    "sync": dict(
-        args=dict(
-            execute_horizon=50,
-        ),
-    ),
     "async": dict(
         args=dict(
             latency_k=4,

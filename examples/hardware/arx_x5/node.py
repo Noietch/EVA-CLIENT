@@ -2,6 +2,7 @@
 """ARX X5 execution-layer node for EVA's ZMQ transport."""
 
 from __future__ import annotations
+from core.devices.camera import CameraPublisher, CameraSource
 
 import argparse
 import dataclasses
@@ -31,7 +32,6 @@ DEFAULT_RIGHT_CAN_PORT = "can3"
 DEFAULT_ARM_TYPE = 2
 DEFAULT_GRIPPER_OPEN_POS = -3.4
 DEFAULT_GRIPPER_CLOSE_POS = 0.1
-ARX_X5_LIGHTING_PROFILES: tuple[str, ...] = ("day", "night")
 DEFAULT_ALICIA_PORT = ""
 DEFAULT_LEFT_ALICIA_PORT = "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5C4C192742-if00"
 DEFAULT_RIGHT_ALICIA_PORT = "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5C4C192642-if00"
@@ -311,7 +311,7 @@ class ArxX5TeleopSource:
 class ArxX5ZmqNode:
     """Bridge EVA ZMQ wire messages to an ARX X5-controlled dual-arm pair."""
 
-    def __init__(self, config: ArxX5ZmqConfig) -> None:
+    def __init__(self, config: ArxX5ZmqConfig, camera_endpoint: str = "") -> None:
         self._config = config
         # JAX initializes and compiles lazily. Warm up the collection FK path before
         # the ARX X5 SDK and RealSense start their native worker threads.
@@ -334,7 +334,9 @@ class ArxX5ZmqNode:
         if robot_cls is None:
             robot_cls = _robot_module().ArxX5DualArm
         self._robot = robot_cls(cast(Any, config))
-        self._cameras = self._build_camera_cache(config)
+        self._cameras = (
+            CameraSource(camera_endpoint) if camera_endpoint else self._build_camera_cache(config)
+        )
         self._teleop_source = ArxX5TeleopSource(config)
         self._collection_active = False
         self._collection_control_source = COLLECTION_CONTROL_TRANSPORT
@@ -460,7 +462,10 @@ class ArxX5ZmqNode:
             if action.target == HIL_STOP_TARGET:
                 self.stop_hil()
                 continue
-            if action.target == "sim":
+            if action.target != "real":
+                # Sim previews and on-demand image requests share this channel but carry
+                # no robot command (an image request is a zero placeholder). Applying one
+                # would overwrite the cached gripper state that is reported to the policy.
                 continue
             if self._collection_active and self._config.passive_collection:
                 continue
@@ -596,6 +601,8 @@ class ArxX5ZmqNode:
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--camera-only", action="store_true")
+    parser.add_argument("--camera-endpoint", default="")
     parser.add_argument("--obs-endpoint", default="tcp://127.0.0.1:5555")
     parser.add_argument("--action-endpoint", default="tcp://127.0.0.1:5556")
     parser.add_argument("--left-can-port", default=DEFAULT_LEFT_CAN_PORT)
@@ -697,10 +704,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--realsense-fps", type=int, default=30)
     parser.add_argument("--realsense-timeout-ms", type=int, default=1000)
     parser.add_argument(
-        "--realsense-profile",
-        choices=ARX_X5_LIGHTING_PROFILES,
-        default="day",
-        help="D405 lighting profile; day avoids the longer night exposure.",
+        "--realsense-color-profiles",
+        type=_camera_module().parse_realsense_color_profiles_json,
+        default=None,
+        metavar="JSON",
+        help="Per-camera D405 color settings; defaults to the day combination in config.yaml.",
     )
     parser.add_argument(
         "--status-log-interval",
@@ -722,18 +730,19 @@ def build_config(args: argparse.Namespace) -> ArxX5ZmqConfig:
     cli_disabled = parse_name_list(args.disabled_camera)
     disabled_cameras = tuple(dict.fromkeys(configured_disabled + cli_disabled))
     resolution = camera.parse_resolution(args.realsense_resolution)
+    color_profiles = args.realsense_color_profiles or camera.load_default_realsense_color_profiles()
     default_cameras = camera.default_realsense_camera_specs(
         resolution=resolution,
         fps=int(args.realsense_fps),
         timeout_ms=int(args.realsense_timeout_ms),
-        profile=args.realsense_profile,
+        color_profiles=color_profiles,
     )
     override_cameras = camera.parse_realsense_camera_specs(
         args.realsense_camera,
         resolution=resolution,
         fps=int(args.realsense_fps),
         timeout_ms=int(args.realsense_timeout_ms),
-        profile=args.realsense_profile,
+        color_profiles=color_profiles,
     )
     cameras = camera.merge_realsense_camera_specs(
         default_cameras,
@@ -782,7 +791,13 @@ def main() -> None:
     node: ArxX5ZmqNode | None = None
     try:
         config = build_config(args)
-        node = ArxX5ZmqNode(config)
+        if args.camera_only:
+            CameraPublisher(
+                (_camera_module().RealSenseCameraCache(config.realsense_cameras),),
+                args.camera_endpoint,
+            ).run()
+            return
+        node = ArxX5ZmqNode(config, args.camera_endpoint)
 
         def _stop(_signum: int, _frame: Any) -> None:
             assert node is not None

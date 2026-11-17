@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
+import sys
 import time
+from pathlib import Path
 from typing import Any
 
+# The vendored SDK-V2 root has to be importable as ``bimanual``. run_hardware.sh
+# exports it through PYTHONPATH; the console starts the node directly, so add it here.
+SDK_ROOT = Path(__file__).resolve().parent / "SDK" / "X5"
+if str(SDK_ROOT) not in sys.path:
+    sys.path.insert(0, str(SDK_ROOT))
 
 ARX_X5_2025_GRIPPER_MOTOR_ID = 8
 ARX_X5_MOTOR_CLEAR_ERROR_COMMAND = b"\xff\xff\xff\xff\xff\xff\xff\xfb"

@@ -7,15 +7,33 @@ import json
 import threading
 from collections import OrderedDict, defaultdict
 from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from core.utils.dataset_upload import (
+    uploaded_source_episode_indices,
+    uploaded_source_episode_indices_for_export,
+)
+from core.utils.qc import qc_state, replay_report_signature, replay_validation
+from tools.conversion import DATASET_EXPORT_FORMATS
+
 _DATASET_CACHE_MAX = 32
 _DATASET_CACHE_LOCK = threading.RLock()
-_DATASET_CACHE: OrderedDict[
-    tuple[str, str, tuple[tuple[str, int, int, int], ...]],
-    tuple[dict[str, Any], dict[str, int], list[dict[str, Any]]],
-] = OrderedDict()
+_COLLECTION_ROOT_NAMES = frozenset({"collection", "data_collection"})
+
+
+@dataclass
+class _DatasetRecords:
+    metadata_signatures: tuple[tuple[str, int, int, int], ...]
+    info: dict[str, Any]
+    requirements: dict[str, int]
+    sources: list[dict[str, Any]]
+    report_signature: tuple[int, ...]
+    records: list[dict[str, Any]]
+
+
+_DATASET_CACHE: OrderedDict[tuple[str, str], _DatasetRecords] = OrderedDict()
 
 
 def _file_signature(path: Path) -> tuple[str, int, int, int]:
@@ -82,34 +100,94 @@ def _duration(row: dict[str, Any], fps: float) -> float:
         return 0.0
 
 
-def _dataset_mode(raw_dir: Path) -> str | None:
-    if raw_dir.parent.name == "episodes":
+def _frame_count(row: dict[str, Any]) -> int:
+    """Return the recorded frame count used by LeRobot episode metadata."""
+    value = row.get("length", row.get("frames", row.get("frame_count", 0)))
+    try:
+        return max(0, int(float(value)))
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
+def _local_date(value: dt.datetime | None) -> dt.date | None:
+    if value is None:
+        return None
+    return value.astimezone().date() if value.tzinfo is not None else value.date()
+
+
+def _dataset_mode(dataset_dir: Path) -> str | None:
+    if dataset_dir.parent.name == "episodes":
         return "eval"
-    if "collection" in raw_dir.parts:
+    # Collection datasets live under the shared <data_root>/datasets tree.
+    if (
+        any(part in _COLLECTION_ROOT_NAMES for part in dataset_dir.parts)
+        or "datasets" in dataset_dir.parts
+    ):
         return "collection"
     return None
 
 
-def _dataset_name(raw_dir: Path, mode: str) -> str:
-    if mode == "eval" and raw_dir.parent.name == "episodes":
-        return raw_dir.parent.parent.name
-    return raw_dir.parent.name
+def _dataset_name(dataset_dir: Path, mode: str) -> str:
+    if mode == "eval" and dataset_dir.parent.name == "episodes":
+        return dataset_dir.parent.parent.name
+    return dataset_dir.name
 
 
 def discover_raw_datasets(roots: Iterable[Path]) -> list[tuple[Path, str]]:
-    """Find explicit ``raw`` LeRobot datasets, never export derivatives."""
+    """Find LeRobot source datasets, never their converted export copies."""
     found: dict[Path, str] = {}
     for root in roots:
         if not root.exists():
             continue
-        candidates = [root] if root.name == "raw" else []
-        candidates.extend(path.parent.parent for path in root.rglob("raw/meta/episodes.jsonl"))
+        candidates = []
+        if (root / "meta" / "episodes.jsonl").is_file():
+            candidates.append(root)
+        candidates.extend(path.parent.parent for path in root.rglob("meta/episodes.jsonl"))
         for raw_dir in candidates:
             resolved = raw_dir.resolve()
             mode = _dataset_mode(resolved)
             if mode is not None and (resolved / "meta" / "episodes.jsonl").is_file():
                 found[resolved] = mode
     return sorted(found.items(), key=lambda item: str(item[0]))
+
+
+def _dataset_export(dataset_dir: Path, output_dir: Path) -> dict[str, Any] | None:
+    """A converted copy of ``dataset_dir`` named ``<name>_<format>`` beside it."""
+    dataset_format = output_dir.name.removeprefix(f"{dataset_dir.name}_")
+    if (
+        not output_dir.is_dir()
+        or dataset_format not in DATASET_EXPORT_FORMATS
+        or not (output_dir / "meta" / "episodes.jsonl").is_file()
+    ):
+        return None
+    episodes = sum(
+        1
+        for line in (output_dir / "meta" / "episodes.jsonl").read_text().splitlines()
+        if line.strip()
+    )
+    uploaded_indices = uploaded_source_episode_indices_for_export(output_dir, dataset_dir)
+    return {
+        "dataset": dataset_dir.name,
+        "source_dir": str(dataset_dir),
+        "output_dir": str(output_dir),
+        "dataset_format": dataset_format,
+        "episodes": episodes,
+        "uploaded_episodes": len(uploaded_indices),
+        "not_uploaded_episodes": max(0, episodes - len(uploaded_indices)),
+    }
+
+
+def discover_dashboard_upload_candidates(roots: Iterable[Path]) -> list[dict[str, Any]]:
+    """Find converted exports of discovered collection datasets."""
+    candidates: list[dict[str, Any]] = []
+    for dataset_dir, mode in discover_raw_datasets(roots):
+        if mode != "collection":
+            continue
+        for output_dir in sorted(dataset_dir.parent.glob(f"{dataset_dir.name}_*")):
+            candidate = _dataset_export(dataset_dir, output_dir)
+            if candidate is not None:
+                candidates.append(candidate)
+    return candidates
 
 
 def _episode_record(
@@ -130,19 +208,21 @@ def _episode_record(
         ended = started + dt.timedelta(seconds=duration)
     task_values = row.get("tasks") or []
     task = str(row.get("prompt") or (task_values[0] if task_values else ""))
-    quality = str(row.get("quality") or "green").lower()
-    qc_verdict = str(row.get("qc_verdict") or "").lower()
     status = str(row.get("status") or "valid").lower()
-    valid = (
-        quality != "red"
-        and qc_verdict != "fail"
-        and status
-        not in {
-            "invalid",
-            "cancelled",
-            "failed",
-        }
-    )
+    quality = str(row.get("quality") or "green").lower()
+    qc_verdict = str(row.get("qc_verdict") or ("fail" if status == "failed" else "")).lower()
+    replay_verified, replay_reason = replay_validation(raw_dir, row)
+    valid = qc_state(
+        qc_verdict,
+        quality,
+        replay_verified,
+        bool(replay_reason) or replay_verified is not None,
+        row.get("qc_auto_verdict"),
+    ) != "failed" and status not in {
+        "invalid",
+        "cancelled",
+        "failed",
+    }
     robot_id = str(row.get("robot_id") or info.get("robot_type") or "unknown")
     result = row.get("eval_result")
     if result is None and mode == "eval" and row.get("score") is not None:
@@ -160,14 +240,24 @@ def _episode_record(
         "dataset": _dataset_name(raw_dir, source_mode),
         "dataset_dir": str(raw_dir),
         "task": task,
+        "task_set": str(
+            row.get("task_set")
+            or (_dataset_name(raw_dir, source_mode) if mode == "collection" else "")
+        ),
+        "task_id": str(row.get("task_id") or ""),
+        "scene_id": str(row.get("scene_id") or ""),
         "required_episodes": requirements.get(task, 0),
         "robot_id": robot_id,
         "started_at": _iso(started),
         "ended_at": _iso(ended),
         "duration_seconds": round(duration, 3),
+        "frames": _frame_count(row),
         "session_id": str(row.get("session_id") or ""),
         "valid": valid,
         "quality": quality,
+        "qc_verdict": qc_verdict,
+        "qc_reason": str(row.get("qc_reason") or row.get("reason") or ""),
+        "qc_note": str(row.get("qc_note") or row.get("notes") or ""),
         "result": str(result or ""),
     }
 
@@ -180,39 +270,52 @@ def _load_dataset_records(
         raw_dir / "meta" / "info.json",
         raw_dir / "meta" / "tasks.jsonl",
         raw_dir / "meta" / "episodes.jsonl",
+        raw_dir / "meta" / "qc.jsonl",
     )
     signatures = tuple(_file_signature(path) for path in paths)
-    key = (str(raw_dir.resolve()), mode, signatures)
+    key = (str(raw_dir.resolve()), mode)
     with _DATASET_CACHE_LOCK:
         cached = _DATASET_CACHE.get(key)
         if cached is not None:
             _DATASET_CACHE.move_to_end(key)
-            return cached
 
-    info = _read_json(paths[0])
-    requirements = {
-        str(row.get("task") or ""): int(row.get("required_episodes") or 0)
-        for row in _read_jsonl(paths[1])
-        if row.get("task")
-    }
+    source_cache = (
+        cached if cached is not None and cached.metadata_signatures[:3] == signatures[:3] else None
+    )
+    if cached is not None and cached.metadata_signatures == signatures:
+        report_signature = replay_report_signature(raw_dir, cached.sources)
+        if cached.report_signature == report_signature:
+            return cached.info, cached.requirements, cached.records
+
+    info = source_cache.info if source_cache is not None else _read_json(paths[0])
+    requirements = (
+        source_cache.requirements
+        if source_cache is not None
+        else {
+            str(row.get("task") or ""): int(row.get("required_episodes") or 0)
+            for row in _read_jsonl(paths[1])
+            if row.get("task")
+        }
+    )
+    qc_by_episode = {int(row["episode_index"]): row for row in _read_jsonl(paths[3])}
+    sources = source_cache.sources if source_cache is not None else _read_jsonl(paths[2])
+    report_signature = replay_report_signature(raw_dir, sources)
     records = []
-    for row in _read_jsonl(paths[2]):
-        record = _episode_record(row, raw_dir, mode, info, requirements)
+    for row in sources:
+        qc = qc_by_episode.get(int(row.get("episode_index", -1)), {})
+        qc_fields = {key: value for key, value in qc.items() if key.startswith("qc_")}
+        record = _episode_record({**row, **qc_fields}, raw_dir, mode, info, requirements)
         if record is not None:
             records.append(record)
-    value = (info, requirements, records)
+    value = _DatasetRecords(signatures, info, requirements, sources, report_signature, records)
     with _DATASET_CACHE_LOCK:
-        existing = _DATASET_CACHE.get(key)
-        if existing is not None:
-            _DATASET_CACHE.move_to_end(key)
-            return existing
         _DATASET_CACHE[key] = value
         while len(_DATASET_CACHE) > _DATASET_CACHE_MAX:
             _DATASET_CACHE.popitem(last=False)
-    return value
+    return info, requirements, records
 
 
-def _summary(episodes: list[dict[str, Any]]) -> dict[str, Any]:
+def _metrics(episodes: list[dict[str, Any]]) -> dict[str, Any]:
     duration = sum(float(row["duration_seconds"]) for row in episodes)
     valid_rows = [row for row in episodes if row["valid"]]
     valid_duration = sum(float(row["duration_seconds"]) for row in valid_rows)
@@ -224,7 +327,10 @@ def _summary(episodes: list[dict[str, Any]]) -> dict[str, Any]:
         ended = _parse_time(row["ended_at"])
         if started is None or ended is None or ended < started:
             continue
-        fallback = f"{row['dataset']}:{started.date().isoformat()}"
+        local_started_date = _local_date(started)
+        if local_started_date is None:
+            continue
+        fallback = f"{row['dataset']}:{local_started_date.isoformat()}"
         key = (str(row["mode"]), str(row["robot_id"]), str(row["session_id"] or fallback))
         sessions[key].append((started, ended))
     active_span = sum(
@@ -232,25 +338,54 @@ def _summary(episodes: list[dict[str, Any]]) -> dict[str, Any]:
         for values in sessions.values()
     )
 
-    by_day: dict[str, dict[str, Any]] = {}
-    for row in episodes:
-        started = _parse_time(row["started_at"])
-        day = started.date().isoformat() if started is not None else "unknown"
-        bucket = by_day.setdefault(
-            day,
-            {"date": day, "episodes": 0, "valid_episodes": 0, "duration_seconds": 0.0},
-        )
-        bucket["episodes"] += 1
-        bucket["valid_episodes"] += int(bool(row["valid"]))
-        bucket["duration_seconds"] += float(row["duration_seconds"])
-    trend = []
-    for day in sorted(by_day):
-        bucket = by_day[day]
-        bucket["duration_seconds"] = round(bucket["duration_seconds"], 3)
-        trend.append(bucket)
-
     eval_rows = [row for row in episodes if row["mode"] == "eval" and row["result"]]
     eval_success = sum(row["result"] == "success" for row in eval_rows)
+    uploaded_episodes = sum(bool(row.get("uploaded")) for row in episodes)
+    return {
+        "episodes": len(episodes),
+        "frames": sum(_frame_count(row) for row in episodes),
+        "valid_episodes": len(valid_rows),
+        "duration_seconds": round(duration, 3),
+        "average_duration_seconds": round(duration / len(episodes), 3) if episodes else 0.0,
+        "robots": robots,
+        "robot_count": len(robots),
+        "valid_rate": round(len(valid_rows) / len(episodes), 4) if episodes else 0.0,
+        "efficiency": round(valid_duration / active_span, 4) if active_span > 0 else None,
+        "active_span_seconds": round(active_span, 3),
+        "eval_success_rate": round(eval_success / len(eval_rows), 4) if eval_rows else None,
+        "uploaded_episodes": uploaded_episodes,
+        "not_uploaded_episodes": len(episodes) - uploaded_episodes,
+    }
+
+
+def _summary(
+    episodes: list[dict[str, Any]], *, include_today: bool = False, today: dt.date | None = None
+) -> dict[str, Any]:
+    metrics = _metrics(episodes)
+
+    by_day: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in episodes:
+        started = _parse_time(row["started_at"])
+        local_started_date = _local_date(started)
+        day = local_started_date.isoformat() if local_started_date is not None else "unknown"
+        by_day[day].append(row)
+    if include_today and episodes:
+        today_key = (today or dt.datetime.now().astimezone().date()).isoformat()
+        by_day.setdefault(today_key, [])
+    trend = []
+    daily = []
+    for day in sorted(by_day):
+        day_metrics = _metrics(by_day[day])
+        trend.append(
+            {
+                "date": day,
+                "episodes": day_metrics["episodes"],
+                "valid_episodes": day_metrics["valid_episodes"],
+                "duration_seconds": day_metrics["duration_seconds"],
+            }
+        )
+        daily.append({"date": day, **day_metrics})
+
     task_groups: dict[tuple[str, str, str], dict[str, Any]] = {}
     for row in episodes:
         key = (str(row["robot_id"]), str(row["dataset"]), str(row["task"]))
@@ -273,18 +408,10 @@ def _summary(episodes: list[dict[str, Any]]) -> dict[str, Any]:
     tasks = sorted(task_groups.values(), key=lambda row: (-row["episodes"], row["task"]))
     recent = sorted(episodes, key=lambda row: row["started_at"], reverse=True)[:100]
     return {
-        "episodes": len(episodes),
-        "valid_episodes": len(valid_rows),
-        "duration_seconds": round(duration, 3),
-        "average_duration_seconds": round(duration / len(episodes), 3) if episodes else 0.0,
-        "robots": robots,
-        "robot_count": len(robots),
-        "valid_rate": round(len(valid_rows) / len(episodes), 4) if episodes else 0.0,
-        "efficiency": round(valid_duration / active_span, 4) if active_span > 0 else None,
-        "active_span_seconds": round(active_span, 3),
-        "eval_success_rate": round(eval_success / len(eval_rows), 4) if eval_rows else None,
+        **metrics,
         "tasks": tasks,
         "trend": trend,
+        "daily": daily,
         "recent": recent,
     }
 
@@ -299,24 +426,46 @@ def _date_filter(value: str | None) -> dt.date | None:
 
 
 def build_dashboard(
-    roots: Iterable[Path], *, start_date: str | None = None, end_date: str | None = None
+    roots: Iterable[Path],
+    *,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    scene_scope: str = "",
+    task_set: str = "",
+    task_id: str = "",
+    scene_id: str = "",
 ) -> dict[str, Any]:
     """Aggregate collection/eval metrics from explicit raw datasets under roots."""
+    roots = tuple(Path(root) for root in roots)
     episodes: list[dict[str, Any]] = []
     sources: list[dict[str, Any]] = []
+    scene_mode = {"collect": "collection", "eval": "eval"}.get(scene_scope)
+    scene_filters = {"task_set": task_set, "task_id": task_id, "scene_id": scene_id}
     for raw_dir, mode in discover_raw_datasets(roots):
         _, _, records = _load_dataset_records(raw_dir, mode)
-        episodes.extend(records)
+        uploaded_indices = uploaded_source_episode_indices(raw_dir)
+        dataset_records = [
+            {**row, "uploaded": row["episode_index"] in uploaded_indices}
+            for row in records
+            if row["mode"] != scene_mode
+            or all(not value or row[key] == value for key, value in scene_filters.items())
+        ]
+        episodes.extend(dataset_records)
+        if not dataset_records and records and scene_mode is not None:
+            continue
         sources.append(
             {
                 "dataset": _dataset_name(raw_dir, mode),
                 "dataset_dir": str(raw_dir),
                 "mode": mode,
-                "episodes": len(records),
+                "episodes": len(dataset_records),
+                "uploaded_episodes": sum(row["uploaded"] for row in dataset_records),
             }
         )
     dated = [
-        parsed.date() for row in episodes if (parsed := _parse_time(row["started_at"])) is not None
+        local_date
+        for row in episodes
+        if (local_date := _local_date(_parse_time(row["started_at"]))) is not None
     ]
     available_range = {
         "start": min(dated).isoformat() if dated else "",
@@ -328,10 +477,12 @@ def build_dashboard(
         episodes = [
             row
             for row in episodes
-            if (parsed := _parse_time(row["started_at"])) is not None
-            and (start is None or parsed.date() >= start)
-            and (end is None or parsed.date() <= end)
+            if (local_date := _local_date(_parse_time(row["started_at"]))) is not None
+            and (start is None or local_date >= start)
+            and (end is None or local_date <= end)
         ]
+    today = dt.datetime.now().astimezone().date()
+    include_today = (start is None or start <= today) and (end is None or end >= today)
     return {
         "raw_only": True,
         "generated_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -339,11 +490,22 @@ def build_dashboard(
         "filters": {
             "start": start.isoformat() if start else "",
             "end": end.isoformat() if end else "",
+            "scene_scope": scene_scope,
+            **scene_filters,
         },
         "sources": sources,
+        "upload_candidates": discover_dashboard_upload_candidates(roots),
         "views": {
-            "all": _summary(episodes),
-            "collection": _summary([row for row in episodes if row["mode"] == "collection"]),
-            "eval": _summary([row for row in episodes if row["mode"] == "eval"]),
+            "all": _summary(episodes, include_today=include_today, today=today),
+            "collection": _summary(
+                [row for row in episodes if row["mode"] == "collection"],
+                include_today=include_today,
+                today=today,
+            ),
+            "eval": _summary(
+                [row for row in episodes if row["mode"] == "eval"],
+                include_today=include_today,
+                today=today,
+            ),
         },
     }

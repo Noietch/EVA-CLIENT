@@ -177,8 +177,6 @@ def build_rl_critic_observation(runtime: RuntimeState, observation: dict) -> dic
             image = None
             if camera.observation_key in images:
                 image = images[camera.observation_key]
-            elif camera.name in images:
-                image = images[camera.name]
             if image is not None:
                 raw[f"observation.images.{camera.observation_key}"] = image
         for key, image in images.items():

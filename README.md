@@ -34,15 +34,24 @@
 
 ## 🔥 What's NEW!
 
-<p align="center">
-  <video src="https://github.com/user-attachments/assets/caeabb2f-7896-4863-848d-21f9a5a38dcb" controls muted></video>
-</p>
+<table>
+  <tr>
+    <td><img src="assets/media/console/debug.png" alt="DEBUG tab: Dual YAM 3D scene"></td>
+    <td><img src="assets/media/console/device.png" alt="DEVICE tab: live cameras and Dual YAM arms"></td>
+  </tr>
+  <tr>
+    <td><img src="assets/media/console/dashboard-overview.png" alt="DASHBOARD tab: dataset overview for a Dual YAM collection"></td>
+    <td><img src="assets/media/console/collect-scene.png" alt="COLLECT tab: photo-mode task with collection slots"></td>
+  </tr>
+</table>
+
+* **[2026-11-17] EVA-Client 0.3.0: a redesigned console for the whole data loop.** Run a full collection campaign from one console: plan tasks with or without reference photos, bring up a robot from the new DEVICE tab, collect slot by slot with camera health checks, monitor throughput and QC from the new DASHBOARD, then review, retake, and deliver. Follow the end-to-end [data collection SOP](./docs/data_collection_sop.md) (screenshots above). Evaluation now runs on task sets with milestones and per-attempt tracking, [XPolicyLab](https://github.com/XPolicyLab/XPolicyLab) policies connect natively, and coding-agent skills now live in [`.agents/skills`](./.agents/skills). Client-side EVA-SIM support is in place, with the simulator coming soon. See the [changelog](./CHANGELOG.md) for details.
 
 * **[2026-08-28] EVA-Client 0.2.0** EVA-Client now supports WebXR-based VR controller teleoperation, ARX X5 hardware, dual-YAM leader-follower data collection, export to LeRobot v3.0, MCAP, and HDF5, and multiple coding-agent skills for adding robots, calibrating cameras, and debugging robot SDKs.
 
 * **[2026-08-28] EVA-MHS Preview.** Inspired by Anthropic's [Model Hardware Standard (MHS) research preview](https://www.anthropic.com/news/model-hardware-standard-research-preview), EVA-MHS explores an MHS-style agent-to-hardware interface for robotics. Its MCP service allows coding agents to inspect runtime state, call policy models, and directly control robots. EVA-MHS is available on the `dev/mcp_preview` branch and will be formally released in a future update.
 
-* **[2026-07-22] New RL Workspace.** EVA-Client now supports human-in-the-loop (HIL) intervention during policy rollouts and real-time value-curve visualization. See the [RL workspace and HIL intervention demo](./docs/console.md#rl-workspace-and-hil-intervention).
+* **[2026-07-22] New RL Workspace.** EVA-Client now supports human-in-the-loop (HIL) intervention during policy rollouts and real-time value-curve visualization. See the [RL workspace and HIL intervention demo](./docs/console.md#rl-and-human-intervention).
 
 * **[2026-07-18] Headless CLI + ZMQ control channel.** Drive the full deploy / eval / RL / collect loop from a single `.py` config without the browser — every console button (incl. HIL takeover) mirrored on a ZMQ socket. See [`docs/console.md`](./docs/console.md) and [`docs/control-channel.md`](./docs/control-channel.md).
 * **[2026-07-03] EVA-Client is open-sourced!**
@@ -57,7 +66,7 @@
   backend ([OpenPI](https://github.com/Physical-Intelligence/openpi), [OpenPI-RTC](https://www.pi.website/research/real_time_chunking), [StarVLA](https://github.com/starVLA/starVLA), [GR00T](https://github.com/Nvidia/Isaac-GR00T), mock, replay) → inference
   strategy (sync / [async](https://github.com/OpenDriveLab/kai0#train-deploy-alignment) / naive / [ACT-ensemble](https://github.com/tonyzhaozh/act) / RTC) with live latency
   compensation. **8 robots already** — joint-space or EEF-space (PyRoki IK),
-  all live-switchable from the DEBUG tab.
+  selected and brought up from the DEVICE tab.
 * **📊 Evaluation.** Multi-checkpoint sweeps with per-trial records: every
   rollout captures camera video, 3D URDF scene, per-dimension state charts,
   and per-prompt milestone scores into dataset metadata, then replays
@@ -66,7 +75,9 @@
 * **🎥 Data collection.** Teleop capture straight into [LeRobot](https://github.com/huggingface/lerobot) v2.1 episodes
   from the COLLECT tab — background saver, in-tab QC PASS/FAIL replay, camera
   streams encoded to mp4, per-frame green/red quality flags. Teleop demos and
-  model rollouts share one on-disk layout.
+  model rollouts share one on-disk layout, browsable and QC-able from the
+  DASHBOARD. The [data collection SOP](./docs/data_collection_sop.md) covers
+  the full plan → collect → monitor → QC → repair → deliver loop.
 
 ---
 
@@ -106,6 +117,7 @@
 | Policy backend | StarVLA | WebSocket + msgpack (typed envelope) | ✅ |
 | Policy backend | GR00T | ZeroMQ REQ/REP + msgpack-numpy (Isaac-GR00T) | ✅ |
 | Policy backend | Mock | Local (smooth random actions) | ✅ |
+| Policy backend | XPolicyLab | WebSocket (official XPolicyLab protocol) | ✅ |
 | Policy backend | Replay | Local (recorded trajectory replay) | ✅ |
 
 ---
@@ -126,10 +138,13 @@ Full guides live in [`docs/`](./docs). Start here:
 |-------|---------------|
 | [📦 Installation](./docs/installation.md) | Requirements, `uv` setup, hardware extras, verify |
 | [🚀 Quick start](./docs/quick-start.md) | Two-process bring-up, supported transports, deploy/eval/replay presets |
-| [🧭 Web console](./docs/console.md) | The seven tabs — MANUAL, COLLECT, REPLAY, DEBUG, RL, EVAL, RESULT |
+| [🧭 Web console](./docs/console.md) | The eight tabs — DASHBOARD, DEBUG, DEVICE, COLLECT, REPLAY, RL, EVAL, RESULT |
 | [📚 Core concepts](./docs/concepts.md) | Transports, policy backends, inference strategies, robots, action spaces |
 | [⚙️ Configuration](./docs/configuration.md) | `_base_` inheritance, deep merge, startup pipeline |
-| [🎞️ Recording](./docs/recording.md) | LeRobot v2.1 on-disk layout, QC flags, eval trials |
+| [🎞️ Recording](./docs/recording.md) | On-disk layout, capture checks, QC, export and delivery |
+| [🧾 Data collection SOP](./docs/data_collection_sop.md) | End-to-end campaign: plan, collect, monitor, QC, repair, deliver |
+| [🗂️ Collection scene plans](./docs/collection_scene_plan.md) | Task sets, scenes, objects, and planned collection slots |
+| [🔌 Control channel](./docs/control-channel.md) | Headless ZMQ commands for deploy, eval, RL, and collection |
 | [🔬 Development](./docs/development.md) | Tests, lint, type-check, and how the robot side is faked |
 
 ---

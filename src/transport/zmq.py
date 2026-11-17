@@ -20,10 +20,12 @@ from __future__ import annotations
 import collections
 import dataclasses
 import logging
+import queue
 import tempfile
 import threading
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import msgpack
 import numpy as np
@@ -31,22 +33,34 @@ from openpi_client import msgpack_numpy
 
 from core.config import ConfigDict
 from core.registry import TRANSPORT_REGISTRY
-from core.types import CollectionRawBatch, CollectionRawSample, Observation, RawCollectionSnapshot
-from robots.base import Robot
+from core.types import (
+    CollectionRawBatch,
+    CollectionRawImage,
+    CollectionRawSample,
+    Observation,
+    RawCollectionSnapshot,
+)
 from transport.base import HilStatus, TransportBridge
 from transport.utils import ImageRateTracker, StreamFreshness
+
+if TYPE_CHECKING:
+    from robots.base import Robot
 
 logger = logging.getLogger(__name__)
 
 _PACKER = msgpack_numpy.Packer()
+_PACKER_LOCK = threading.Lock()
 COLLECTION_START_TARGET = "collect_start"
 COLLECTION_STOP_TARGET = "collect_stop"
+IMAGE_REQUEST_TARGET = "image_request"
 HIL_START_TARGET = "hil_start"
 HIL_STOP_TARGET = "hil_stop"
 COLLECTION_CONTROL_REPEATS = 5
 COLLECTION_CONTROL_INTERVAL_S = 0.02
 COLLECTION_SOCKET_DRAIN_MAX = 64
+COLLECTION_RECEIVE_HWM = 64
 HIL_ACK_TIMEOUT_S = 1.0
+ACTION_APPLIED_TIMEOUT_S = 2.0
 
 
 # --- wire protocol -------------------------------------------------------------
@@ -64,6 +78,9 @@ class WireObservation:
             mode only), used as action_qpos by the collection API.
         eef: optional actuator group_name -> end-effector pose array.
         action_eef: optional teleop end-effector action aligned with this frame.
+        sim_state: optional simulator trace for this frame. Real-robot publishers omit
+            it; simulator publishers use a JSON-shaped dict with object poses and the
+            action applied by the previous physics step.
     """
 
     t: float
@@ -72,6 +89,7 @@ class WireObservation:
     action: np.ndarray | None = None
     eef: dict[str, np.ndarray] | None = None
     action_eef: np.ndarray | None = None
+    sim_state: dict[str, Any] | None = None
     hil_supported: bool = False
     hil_active: bool = False
     hil_error: str = ""
@@ -95,6 +113,7 @@ class WireAction:
     action: np.ndarray
     target: str = "real"
     mode: str | None = None
+    world_instance_id: str | None = None
 
 
 def pack_observation(obs: WireObservation) -> bytes:
@@ -120,6 +139,8 @@ def pack_observation(obs: WireObservation) -> bytes:
         payload["eef"] = {k: np.asarray(v, dtype=np.float32) for k, v in obs.eef.items()}
     if obs.action_eef is not None:
         payload["action_eef"] = np.asarray(obs.action_eef, dtype=np.float32)
+    if obs.sim_state is not None:
+        payload["sim_state"] = obs.sim_state
     payload["hil_supported"] = bool(obs.hil_supported)
     payload["hil_active"] = bool(obs.hil_active)
     if obs.hil_error:
@@ -127,7 +148,8 @@ def pack_observation(obs: WireObservation) -> bytes:
     if obs.operator_event:
         payload["operator_event"] = str(obs.operator_event)
         payload["operator_event_id"] = int(obs.operator_event_id)
-    return _PACKER.pack(payload)
+    with _PACKER_LOCK:
+        return _PACKER.pack(payload)
 
 
 def unpack_observation(payload: bytes) -> WireObservation:
@@ -146,6 +168,7 @@ def unpack_observation(payload: bytes) -> WireObservation:
     action = raw.get("action")
     eef = raw.get("eef")
     action_eef = raw.get("action_eef")
+    sim_state = raw.get("sim_state")
     return WireObservation(
         t=float(raw["t"]),
         images={k: np.asarray(v) for k, v in raw["images"].items()},
@@ -153,6 +176,7 @@ def unpack_observation(payload: bytes) -> WireObservation:
         action=None if action is None else np.asarray(action, dtype=np.float32),
         eef=(None if eef is None else {k: np.asarray(v, dtype=np.float32) for k, v in eef.items()}),
         action_eef=None if action_eef is None else np.asarray(action_eef, dtype=np.float32),
+        sim_state=sim_state,
         hil_supported=bool(raw.get("hil_supported", False)),
         hil_active=bool(raw.get("hil_active", False)),
         hil_error=str(raw.get("hil_error", "")),
@@ -205,7 +229,10 @@ def pack_action(action: WireAction) -> bytes:
     }
     if action.mode is not None:
         payload["mode"] = action.mode
-    return _PACKER.pack(payload)
+    if action.world_instance_id is not None:
+        payload["world_instance_id"] = action.world_instance_id
+    with _PACKER_LOCK:
+        return _PACKER.pack(payload)
 
 
 def unpack_action(payload: bytes) -> WireAction:
@@ -216,6 +243,7 @@ def unpack_action(payload: bytes) -> WireAction:
         action=np.asarray(raw["action"], dtype=np.float32),
         target=str(raw.get("target", "real")),
         mode=None if raw.get("mode") is None else str(raw["mode"]),
+        world_instance_id=raw.get("world_instance_id"),
     )
 
 
@@ -223,31 +251,75 @@ def unpack_action(payload: bytes) -> WireAction:
 
 
 class _WireCaptureJournal:
-    """Byte-preserving disk journal for selected collection snapshots awaiting save."""
+    """Byte-preserving journal whose file writes stay off the capture thread."""
 
     def __init__(self, directory: Path | None = None) -> None:
         if directory is not None:
             directory.mkdir(parents=True, exist_ok=True)
-        self._file = tempfile.TemporaryFile(
+        self._file = tempfile.NamedTemporaryFile(
             prefix="eva-zmq-wire-",
             dir=directory,
             buffering=0,
         )
-        self._lock = threading.Lock()
+        self._state = threading.Condition()
+        self._file_lock = threading.Lock()
+        self._pending: queue.SimpleQueue[bytes | None] = queue.SimpleQueue()
         self._size = 0
+        self._written_size = 0
+        self._error: BaseException | None = None
+        self._finished = False
+        self._writer = threading.Thread(
+            target=self._write_pending,
+            name="eva-zmq-wire-journal",
+            daemon=True,
+        )
+        self._writer.start()
 
     def append(self, payload: bytes) -> _WireJournalEntry:
-        with self._lock:
+        with self._state:
+            if self._finished:
+                raise RuntimeError("ZMQ wire journal is already finished")
+            if self._error is not None:
+                raise RuntimeError("ZMQ wire journal writer failed") from self._error
             offset = self._size
-            self._file.seek(offset)
-            written = self._file.write(payload)
-            if written != len(payload):
-                raise OSError(f"short write to ZMQ wire journal: {written}/{len(payload)}")
-            self._size += written
-        return _WireJournalEntry(self, offset, written)
+            self._size += len(payload)
+            self._pending.put(payload)
+        return _WireJournalEntry(self, offset, len(payload))
+
+    def finish(self) -> None:
+        with self._state:
+            if self._finished:
+                return
+            self._finished = True
+            self._pending.put(None)
+
+    def _write_pending(self) -> None:
+        try:
+            while True:
+                payload = self._pending.get()
+                if payload is None:
+                    return
+                with self._file_lock:
+                    self._file.seek(self._written_size)
+                    written = self._file.write(payload)
+                if written != len(payload):
+                    raise OSError(f"short write to ZMQ wire journal: {written}/{len(payload)}")
+                with self._state:
+                    self._written_size += written
+                    self._state.notify_all()
+        except BaseException as error:
+            with self._state:
+                self._error = error
+                self._state.notify_all()
 
     def read(self, offset: int, size: int) -> bytes:
-        with self._lock:
+        with self._state:
+            self._state.wait_for(
+                lambda: self._error is not None or self._written_size >= offset + size
+            )
+            if self._error is not None:
+                raise RuntimeError("ZMQ wire journal writer failed") from self._error
+        with self._file_lock:
             self._file.seek(offset)
             payload = self._file.read(size)
         if len(payload) != size:
@@ -281,13 +353,17 @@ class _ObservationReader:
         robot: Robot,
         zmq_mod,
         preserve_collection_backlog: bool = False,
-        conflate: bool = False,
     ) -> None:
         self._robot = robot
         self._zmq = zmq_mod
+        self._ctx = zmq_mod.Context.instance()
+        self._sub_endpoint = config.transport.sub_endpoint
         self._latest: WireObservation | None = None
+        self._latest_complete_image: WireObservation | None = None
+        self._image_revision = 0
         self._latest_images: dict[str, np.ndarray] = {}
         self._preserve_collection_backlog = preserve_collection_backlog
+        self._capture_latest_only = False
         self._collection_queue: collections.deque[WireObservation] = collections.deque()
         self._raw_collection_queue: collections.deque[bytes] = collections.deque()
         self._freshness = StreamFreshness()
@@ -300,6 +376,7 @@ class _ObservationReader:
 
         self._disabled_cameras = set(config.transport.disabled_cameras)
         self._disabled_groups = set(config.transport.disabled_groups)
+        self._image_mode = str(getattr(config.transport, "image_mode", "stream"))
         # Per-group slice of the robot's initial qpos, used to fill state for
         # groups disabled in this deployment (e.g. an unused arm).
         self._group_initial_qpos: dict[str, np.ndarray] = {}
@@ -310,20 +387,22 @@ class _ObservationReader:
             )
             offset += group.dof
 
-        ctx = zmq_mod.Context.instance()
-        self._sub = ctx.socket(zmq_mod.SUB)
-        if conflate:
-            # Collection capture only consumes the freshest complete observation.
-            # Conflation prevents an idle reader from replaying pre-START frames
-            # that are still buffered below the application-level drain.
-            self._sub.setsockopt(zmq_mod.CONFLATE, 1)
-        self._sub.setsockopt(zmq_mod.SUBSCRIBE, b"")
-        self._sub.setsockopt(zmq_mod.RCVTIMEO, 0)  # non-blocking drain
-        self._sub.connect(config.transport.sub_endpoint)
+        self._sub = self._create_subscriber()
+
+    def _create_subscriber(self) -> Any:
+        subscriber = self._ctx.socket(self._zmq.SUB)
+        if self._preserve_collection_backlog:
+            subscriber.setsockopt(self._zmq.RCVHWM, COLLECTION_RECEIVE_HWM)
+        subscriber.setsockopt(self._zmq.SUBSCRIBE, b"")
+        subscriber.setsockopt(self._zmq.RCVTIMEO, 0)
+        subscriber.connect(self._sub_endpoint)
+        return subscriber
 
     def _drain_latest(self) -> WireObservation | None:
         """Pop all queued SUB messages, keeping only the newest by timestamp."""
         with self._lock:
+            if self._closed:
+                return self._latest
             newest = self._latest
             got_message = False
             while True:
@@ -331,16 +410,47 @@ class _ObservationReader:
                     payload = self._sub.recv(self._zmq.NOBLOCK)
                 except self._zmq.Again:
                     break
+                except self._zmq.ZMQError:
+                    # A request can race with close() during application shutdown.
+                    if self._closed:
+                        break
+                    raise
                 got_message = True
                 obs = unpack_observation(payload)
                 self._image_rate.mark_many(obs.images.keys(), obs.t)
                 self._cache_images_locked(obs)
+                if self._has_complete_images(obs):
+                    self._latest_complete_image = obs
+                    self._image_revision += 1
                 if newest is None or obs.t >= newest.t:
                     newest = obs
             if got_message:
                 self._freshness.mark()
             self._latest = newest
             return newest
+
+    def _has_complete_images(self, obs: WireObservation) -> bool:
+        disabled_cameras = getattr(self, "_disabled_cameras", set())
+        required = {
+            camera.observation_key
+            for camera in self._robot.observation_schema.cameras
+            if camera.observation_key not in disabled_cameras
+        }
+        return required.issubset(obs.images)
+
+    def image_revision(self) -> int:
+        """Return the number of complete image observations received by this reader."""
+        with self._lock:
+            return self._image_revision
+
+    def get_frame_after_image_revision(self, revision: int) -> Observation | None:
+        """Return a complete image observation newer than ``revision``."""
+        self._drain_latest()
+        with self._lock:
+            if self._image_revision <= revision or self._latest_complete_image is None:
+                return None
+            wire_obs = self._latest_complete_image
+        return self._wire_to_observation(wire_obs)
 
     def _drain_collection_queue(self) -> WireObservation | None:
         with self._lock:
@@ -407,9 +517,22 @@ class _ObservationReader:
         return observation.operator_event
 
     def clear_collection_backlog(self) -> float | None:
-        """Drain the socket and drop queued collection frames captured pre-recording."""
+        """Discard pre-episode data, including messages still in the ZMQ/TCP pipe."""
         with self._lock:
+            journal = getattr(self, "_collection_journal", None)
             self._collection_journal = None
+            if journal is not None:
+                journal.finish()
+            if self._preserve_collection_backlog:
+                # Draining recv(NOBLOCK) only empties messages currently visible to
+                # Python. Old messages can arrive later from the upstream pipe.
+                self._sub.close(linger=0)
+                self._sub = self._create_subscriber()
+                self._collection_queue.clear()
+                self._raw_collection_queue.clear()
+                self._latest = None
+                logger.info("[COLLECTION_BACKLOG] reset subscriber before new episode")
+                return None
             cutoff = None
             if self._collection_queue:
                 cutoff = max(obs.t for obs in self._collection_queue)
@@ -528,9 +651,14 @@ class _ObservationReader:
         Returns:
             [qpos_dim] float32 joint position vector, or None.
         """
+        return self.get_control_feedback()[0]
+
+    def get_control_feedback(self) -> tuple[np.ndarray | None, str | None]:
+        """Read qpos and world identity from the same snapshot without decoding images."""
         wire_obs = self._drain_latest()
         if wire_obs is None:
-            return None
+            return None, None
+        world_id = (wire_obs.sim_state or {}).get("world_instance_id")
         parts: list[np.ndarray] = []
         for group in self._robot.actuator_groups:
             if group.name in self._disabled_groups:
@@ -538,9 +666,44 @@ class _ObservationReader:
                 continue
             part = wire_obs.state.get(group.name)
             if part is None:
-                return None
+                return None, world_id
             parts.append(np.asarray(part, dtype=np.float32))
-        return np.concatenate(parts, axis=0)
+        return np.concatenate(parts, axis=0), world_id
+
+    def wait_action_applied(self, action_time: float, timeout: float) -> bool:
+        """Wait for the action timestamp or execution ending before it can apply."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            wire_obs = self._drain_latest()
+            if wire_obs is not None and wire_obs.sim_state is not None:
+                if wire_obs.sim_state.get("execution_complete", False):
+                    return True
+                applied_time = wire_obs.sim_state.get("action_time")
+                if applied_time is not None and float(applied_time) == action_time:
+                    return True
+            time.sleep(0.001)
+        latest = self._drain_latest()
+        state = {} if latest is None or latest.sim_state is None else latest.sim_state
+        logger.error(
+            "[ACTION_ACK_TIMEOUT] expected_t=%.9f last_obs_t=%s recv_age_s=%s "
+            "last_applied_t=%s execution_complete=%s frame_id=%s scene_revision=%s world=%s",
+            action_time,
+            None if latest is None else latest.t,
+            self._freshness.seconds_since(),
+            state.get("action_time"),
+            state.get("execution_complete"),
+            state.get("frame_id"),
+            state.get("scene_revision"),
+            state.get("world_instance_id"),
+        )
+        return False
+
+    def execution_complete(self) -> bool:
+        """Return the latest execution-complete marker, if one was published."""
+        wire_obs = self._drain_latest()
+        if wire_obs is None or wire_obs.sim_state is None:
+            return False
+        return bool(wire_obs.sim_state.get("execution_complete", False))
 
     def _concat_group_fields(
         self, mapping: dict[str, np.ndarray] | None, groups: tuple | None = None
@@ -588,7 +751,9 @@ class _ObservationReader:
     def _drain_raw_collection(self) -> bytes | None:
         """Return one raw payload while honoring the collection backlog mode."""
         with self._lock:
-            if getattr(self, "_preserve_collection_backlog", False):
+            if getattr(self, "_preserve_collection_backlog", False) and not getattr(
+                self, "_capture_latest_only", False
+            ):
                 if self._raw_collection_queue:
                     payload = self._raw_collection_queue.popleft()
                 else:
@@ -600,14 +765,25 @@ class _ObservationReader:
                 payload = self._raw_collection_queue.pop() if self._raw_collection_queue else None
                 self._raw_collection_queue.clear()
                 got_message = payload is not None
+                on_demand = self._image_mode == "on_demand"
+                latest_complete = None
                 while True:
                     try:
                         payload = self._sub.recv(self._zmq.NOBLOCK)
                     except self._zmq.Again:
                         break
                     got_message = True
+                    if on_demand:
+                        try:
+                            observation = unpack_observation(payload)
+                        except Exception:
+                            observation = None
+                        if observation is not None and self._has_complete_images(observation):
+                            latest_complete = payload
                 if not got_message or payload is None:
                     return None
+                if on_demand and latest_complete is not None:
+                    payload = latest_complete
             self._freshness.mark()
             return payload
 
@@ -625,13 +801,23 @@ class _ObservationReader:
             journal = _WireCaptureJournal(getattr(self, "_collection_journal_dir", None))
             self._collection_journal = journal
         entry = journal.append(payload)
+        latest_only = self._capture_latest_only
 
         def decode_raw(entry: _WireJournalEntry = entry) -> CollectionRawBatch:
             wire_obs = unpack_observation(entry.read())
             batch = CollectionRawBatch()
             for key, image in wire_obs.images.items():
+                value = (
+                    CollectionRawImage(
+                        decoder=lambda key=key, entry=entry: np.asarray(
+                            unpack_observation(entry.read()).images[key]
+                        )
+                    )
+                    if latest_only
+                    else np.asarray(image)
+                )
                 batch.images.setdefault(key, []).append(
-                    CollectionRawSample(timestamp=wire_obs.t, value=np.asarray(image))
+                    CollectionRawSample(timestamp=wire_obs.t, value=value)
                 )
             for group_name, state in wire_obs.state.items():
                 batch.vectors.setdefault(f"state_qpos:{group_name}", []).append(
@@ -662,6 +848,13 @@ class _ObservationReader:
                         value=np.asarray(wire_obs.action_eef, dtype=np.float32),
                     )
                 )
+            if wire_obs.sim_state is not None:
+                batch.sim_states.append(
+                    CollectionRawSample(
+                        timestamp=wire_obs.t,
+                        value={**wire_obs.sim_state, "wire_timestamp": wire_obs.t},
+                    )
+                )
             return batch
 
         return RawCollectionSnapshot(timestamp=timestamp, decode_raw=decode_raw)
@@ -673,16 +866,27 @@ class _ObservationReader:
         with self._lock:
             self._collection_journal_dir = Path(directory)
 
+    def set_collection_capture_latest_only(self, enabled: bool) -> None:
+        """Sample live policy video without accumulating a slower consumer's backlog."""
+        with self._lock:
+            self._capture_latest_only = enabled
+
     def finish_collection_capture(self) -> None:
         """Detach the active journal; queued snapshots retain it until save completes."""
         with self._lock:
+            self._capture_latest_only = False
+            journal = self._collection_journal
             self._collection_journal = None
+            if journal is not None:
+                journal.finish()
 
     def close(self) -> None:
         """Close this reader's SUB socket (idempotent)."""
         if self._closed:
             return
         self._closed = True
+        if self._collection_journal is not None:
+            self._collection_journal.finish()
         self._collection_journal = None
         self._sub.close(linger=0)
 
@@ -751,6 +955,10 @@ class ZmqTransport(TransportBridge):
         """Place the next raw wire journal on the active recorder's filesystem."""
         self._collection_reader.prepare_collection_capture(directory)
 
+    def set_collection_capture_latest_only(self, enabled: bool) -> None:
+        """Select live sampling for policy video or complete FIFO capture for collection."""
+        self._collection_reader.set_collection_capture_latest_only(enabled)
+
     def finish_collection_capture(self) -> None:
         """Release the reader's reference to the completed raw wire journal."""
         self._collection_reader.finish_collection_capture()
@@ -758,6 +966,10 @@ class ZmqTransport(TransportBridge):
     def get_latest_qpos(self) -> np.ndarray | None:
         """Latest joint state [qpos_dim] float32 from the dedicated qpos reader."""
         return self._qpos_reader.get_latest_qpos()
+
+    def get_control_feedback(self) -> tuple[np.ndarray | None, str | None]:
+        """Return joint state and world identity from one dedicated-reader snapshot."""
+        return self._qpos_reader.get_control_feedback()
 
     def hil_status(self) -> HilStatus:
         """Return the latest HIL capability reported by the execution node."""
@@ -850,8 +1062,73 @@ class ZmqTransport(TransportBridge):
             action: [action_dim] float32 flat action vector.
             target: "real" or "sim" routing tag carried on the wire.
         """
-        message = WireAction(t=time.monotonic(), action=np.asarray(action), target=target)
+        self._publish_action(action, target, None)
+
+    def publish_teleop_action(self, action: np.ndarray, world_instance_id: str | None) -> None:
+        """Tag teleop motion with the world that supplied its feedback and IK seed."""
+        self._publish_action(action, "real", world_instance_id)
+
+    def _publish_action(
+        self, action: np.ndarray, target: str, world_instance_id: str | None
+    ) -> None:
+        action_time = time.monotonic()
+        message = WireAction(
+            t=action_time,
+            action=np.asarray(action),
+            target=target,
+            world_instance_id=world_instance_id,
+        )
         self._pub.send(pack_action(message))
+        wait_for_ack = bool(self._config.transport.get("wait_action_applied", False))
+        if target == "real" and wait_for_ack:
+            timeout = float(
+                self._config.transport.get("action_ack_timeout_s", ACTION_APPLIED_TIMEOUT_S)
+            )
+            if not self._qpos_reader.wait_action_applied(action_time, timeout):
+                logger.error(
+                    "Timed out waiting for applied action t=%.9f after %.2fs",
+                    action_time,
+                    timeout,
+                )
+                raise TimeoutError(f"timed out waiting for applied action t={action_time:.9f}")
+
+    @property
+    def execution_complete(self) -> bool:
+        """Return the latest execution-complete marker from the qpos reader."""
+        return self._qpos_reader.execution_complete()
+
+    def _publish_image_request(self) -> None:
+        action = np.zeros(self._robot.total_action_dim, dtype=np.float32)
+        self._pub.send(
+            pack_action(
+                WireAction(
+                    t=time.monotonic(),
+                    action=action,
+                    target=IMAGE_REQUEST_TARGET,
+                )
+            )
+        )
+
+    def get_policy_frame(self) -> Observation | None:
+        """Return a policy frame, requesting a fresh image in on-demand mode."""
+        mode = str(getattr(self._config.transport, "image_mode", "stream"))
+        if mode == "stream":
+            return self._reader.get_frame()
+        if mode != "on_demand":
+            raise ValueError(f"unsupported transport.image_mode: {mode!r}")
+
+        revision = self._reader.image_revision()
+        self._publish_image_request()
+        deadline = time.monotonic() + float(
+            getattr(self._config.transport, "image_request_timeout_s", 2.0)
+        )
+        while not self.is_shutdown() and time.monotonic() < deadline:
+            frame = self._reader.get_frame_after_image_revision(revision)
+            if frame is not None:
+                return frame
+            time.sleep(0.001)
+        logger.warning("Timed out waiting for on-demand image observation")
+        return None
 
     def _send_collection_control(self, target: str, mode: str | None = None) -> None:
         action = np.zeros(self._robot.total_action_dim, dtype=np.float32)

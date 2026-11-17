@@ -25,13 +25,12 @@ frames, and consumes EVA `WireAction` commands.
 
 ## Requirements
 
-Run from the EVA client virtual environment:
-
-```bash
-source .venv/bin/activate
-```
-
-The base EVA package provides the common runtime dependencies used by this node:
+Both real and fake launchers use the existing Python 3.11 environment at
+`examples/hardware/arx_r5/.venv`, independently of the root EVA environment.
+Run EVA itself with the root `.venv/bin/eva`. This directory's `pyproject.toml`
+declares the runtime dependencies, including the local Alicia-D SDK and the
+platform-specific `pyorbbecsdk2==2.1.1` wheel (`import pyorbbecsdk`).
+Common runtime dependencies include:
 
 ```text
 numpy
@@ -55,10 +54,11 @@ source setup.sh        # exports LD_LIBRARY_PATH for the shared libs
 `run_hardware.sh` adds `SDK/ARX_R5_python` to `PYTHONPATH` and the SDK `lib` dirs
 to `LD_LIBRARY_PATH`, so `import bimanual` resolves at launch.
 
-`pyorbbecsdk` is not declared in `pyproject.toml`. It is expected to already be
-available on the real robot host that has the Orbbec SDK installed. The node
-imports `pyorbbecsdk` lazily, so deployments with all Orbbec cameras disabled can
-still start without that package.
+The node imports `pyorbbecsdk` lazily, so deployments with all Orbbec cameras
+disabled can still start without that package. The legacy `setup_env.sh`
+recreates its target environment; do not run it against an existing environment
+under the repository policy. Add only missing dependencies after checking that
+the installation plan preserves installed versions and files.
 
 ```bash
 bash examples/hardware/arx_r5/run_hardware.sh \
@@ -75,7 +75,7 @@ protocol:
 ```bash
 bash examples/hardware/arx_r5/run_fake_node.sh
 # then, in another shell:
-eva --config configs/01_deploy/arx_r5/openpi_qpos.py --web-port 8080
+.venv/bin/eva --config configs/01_deploy/arx_r5/openpi_qpos.py --web-port 8080
 ```
 
 Endpoint / rate overrides:
@@ -97,7 +97,7 @@ Run it on the robot host before starting EVA:
 
 ```bash
 bash examples/hardware/arx_r5/run_hardware.sh
-eva --config configs/01_deploy/arx_r5/openpi_qpos.py --web-port 8080
+.venv/bin/eva --config configs/01_deploy/arx_r5/openpi_qpos.py --web-port 8080
 ```
 
 By default `run_hardware.sh` reads `configs/01_deploy/arx_r5/openpi_qpos.py`. Use
@@ -147,8 +147,8 @@ are shared across configured cameras:
 ```bash
 bash examples/hardware/arx_r5/run_hardware.sh \
   --orbbec-camera cam_high=index:0 \
-  --orbbec-camera cam_left_wrist=<LEFT_WRIST_SERIAL> \
-  --orbbec-camera cam_right_wrist=<RIGHT_WRIST_SERIAL> \
+  --orbbec-camera cam_left_wrist="<LEFT_WRIST_SERIAL>" \
+  --orbbec-camera cam_right_wrist="<RIGHT_WRIST_SERIAL>" \
   --orbbec-resolution 640x480 \
   --orbbec-fps 30 \
   --orbbec-color-format MJPG
@@ -268,7 +268,14 @@ transport:
 
 ## Teleop Collection
 
-For `configs/02_collection/arx_r5.py`, `node.py` listens for EVA's
+Use `configs/02_collection/arx_r5.py`. DEVICE offers `VR`, `EVA-VR (PICO)`, and
+`Leader`; VR is the default. Select Operation explicitly and apply it before
+starting the corresponding processes. The current DEVICE Robot launcher includes
+`--passive-collection`, so that launch observes without commanding the followers
+during collection. For collection that commands the arms, use the standalone
+`run_hardware.sh` launcher below, whose default is active collection control.
+
+With physical leaders selected, `node.py` listens for EVA's
 collection start/stop control actions. During an active collection episode it
 reads the two Alicia-D leader arms, maps them to the ARX qpos action layout,
 commands the ARX followers, and publishes the aligned collection fields:
@@ -278,10 +285,9 @@ commands the ARX followers, and publishes the aligned collection fields:
 - `action`: Alicia leader command mapped into ARX joint/gripper space.
 - `action_eef`: FK from that mapped Alicia action.
 
-### X5 WebXR VR collection
+### R5 VR collection
 
-Use `configs/02_collection/arx_x5_vr.py` when EVA Client WebXR controls the X5
-followers directly. R5 collection uses the transport teleop flow above. The ZMQ `collect_start`
+Select `VR` or `EVA-VR (PICO)` for R5. The ZMQ `collect_start`
 message carries `mode=client`; the ARX node then skips Alicia-D setup, continues
 publishing real arm/camera state, and accepts EVA's `target=real` actions. Do not
 launch the node with `--passive-collection`, because passive mode intentionally
@@ -289,16 +295,15 @@ blocks motion commands during collection.
 
 ```bash
 bash examples/hardware/arx_r5/run_hardware.sh
-python examples/input_sources/vr_webxr/node.py \
-  --host 127.0.0.1 \
-  --port 43876 \
-  --endpoint tcp://127.0.0.1:8765 \
-  --ack-endpoint tcp://127.0.0.1:8766
-eva --config configs/02_collection/arx_x5_vr.py --web-port 8080
+# In another terminal, start EVA and use Operation Start for VR:
+.venv/bin/eva --config configs/02_collection/arx_r5.py --web-port 8080
 ```
 
-The VR config writes to `work_dirs/collection/arx_x5_vr` so X5 VR episodes do
-not mix with R5 transport-teleop collection output.
+R5 runtime logs use `work_dirs/collection/arx_r5`. Datasets default to
+`<data_root>/datasets/real_robot/arx_r5/<dataset>`; a task set's `collection_dir`
+can override that location. See [Recording](../../../docs/recording.md).
+For X5 hardware use the separate [`../arx_x5/README.md`](../arx_x5/README.md)
+adapter and config.
 
 Default Alicia ports match `teleop.py`:
 
@@ -309,8 +314,8 @@ Override them on `run_hardware.sh` through normal node arguments:
 
 ```bash
 bash examples/hardware/arx_r5/run_hardware.sh \
-  --left-alicia-port /dev/serial/by-id/<left> \
-  --right-alicia-port /dev/serial/by-id/<right>
+  --left-alicia-port "/dev/serial/by-id/<left>" \
+  --right-alicia-port "/dev/serial/by-id/<right>"
 ```
 
 ## Status

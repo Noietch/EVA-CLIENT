@@ -1,15 +1,12 @@
 """ARX R5 RL workspace with independent policy and critic selection."""
 
-_base_ = ["../01_deploy/arx_r5/openpi_qpos.py"]
+_base_ = ["../01_deploy/arx_r5/openpi_qpos.py", "../00_base/rl.py"]
 
 console = dict(
     initial_tab="rl",
 )
 
 rl_cfg = dict(
-    cli_mode="real",
-    inference_strategy="async",
-    tasks=["placeholder task — replace with the real RL task prompt"],
     policies=[
         dict(
             name="arx_r5_openpi_qpos",
@@ -24,17 +21,8 @@ rl_cfg = dict(
             type="websocket",
             host="127.0.0.1",
             port=9100,
-            backend_options={},
+            backend_options=dict(),
         ),
     ],
-    data=dict(
-        format="lerobot",
-        storage=dict(
-            log_dir="work_dirs/rl/arx_r5",
-            fps=30,
-            save_queue_max=15,
-            async_save=True,
-        ),
-    ),
-    intervention=dict(control_mode="relative"),
+    data=dict(storage=dict(log_dir="work_dirs/rl/arx_r5")),
 )

@@ -9,11 +9,58 @@ The DatasetTransport (transport/dataset.py) holds one of these for its own reads
 from __future__ import annotations
 
 import json
+import os
+from collections.abc import Callable, Iterable
+from datetime import UTC, datetime, timedelta
+from functools import lru_cache
 from pathlib import Path
+from typing import Any
+from uuid import uuid4
 
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
+
+from core.utils.dataset_lock import dataset_lock
+
+DEFAULT_STORAGE_LAYOUT = {
+    "chunks_size": 1000,
+    "data_path": "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet",
+    "video_path": "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4",
+}
+
+
+@lru_cache(maxsize=8)
+def _read_episode_file_stems(path: Path, signature: tuple[int, int, int]) -> dict[int, str]:
+    """Cache only episode identities; invalidate on metadata replacement or append."""
+    stems: dict[int, str] = {}
+    with path.open() as stream:
+        for line in stream:
+            if line.strip():
+                row = json.loads(line)
+                stems[int(row["episode_index"])] = str(row.get("file_stem") or "")
+    return stems
+
+
+def _write_jsonl_atomic(path: Path, rows: Iterable[dict[str, Any]]) -> None:
+    """Replace one JSONL file after serializing its complete rows."""
+    replacement = path.with_suffix(f"{path.suffix}.tmp-{uuid4().hex}")
+    try:
+        body = "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows)
+        replacement.write_text(body, encoding="utf-8")
+        os.replace(replacement, path)
+    finally:
+        replacement.unlink(missing_ok=True)
+
+
+def _write_json_atomic(path: Path, payload: Any) -> None:
+    """Replace one JSON file after serializing it, so readers never see it torn."""
+    replacement = path.with_suffix(f"{path.suffix}.tmp-{uuid4().hex}")
+    try:
+        replacement.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        os.replace(replacement, path)
+    finally:
+        replacement.unlink(missing_ok=True)
 
 
 class LeRobotDatasetIO:
@@ -33,24 +80,29 @@ class LeRobotDatasetIO:
     def __init__(self, dataset_dir: str | Path) -> None:
         self.root = Path(dataset_dir)
 
+    def storage_layout(self) -> dict[str, Any]:
+        """Read the dataset's path templates, including defaults for a new dataset."""
+        try:
+            info = json.loads((self.root / "meta" / "info.json").read_text())
+        except FileNotFoundError:
+            info = {}
+        return {key: info.get(key, value) for key, value in DEFAULT_STORAGE_LAYOUT.items()}
+
+    def episode_path(self, episode_id: int, path_key: str, video_key: str = "") -> Path:
+        """Resolve a data_path or video_path before or after its file is written."""
+        layout = self.storage_layout()
+        return self.root / layout[path_key].format(
+            episode_chunk=episode_id // layout["chunks_size"],
+            episode_index=episode_id,
+            episode_file=self.episode_file_stem(episode_id),
+            video_key=video_key,
+        )
+
     def episode_parquet(self, episode_id: int) -> Path:
         """Resolve the parquet path for one episode from the dataset's info.json layout."""
         info_path = self.root / "meta" / "info.json"
         if info_path.exists():
-            with open(info_path) as f:
-                info = json.load(f)
-            chunks_size = info.get("chunks_size", 1000)
-            episode_chunk = episode_id // chunks_size
-            episode_file = self.episode_file_stem(episode_id)
-            data_path_tpl = info.get(
-                "data_path",
-                "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet",
-            )
-            return self.root / data_path_tpl.format(
-                episode_chunk=episode_chunk,
-                episode_index=episode_id,
-                episode_file=episode_file,
-            )
+            return self.episode_path(episode_id, "data_path")
         return self.root / f"episode_{episode_id:06d}.parquet"
 
     def episode_video_paths(
@@ -67,23 +119,10 @@ class LeRobotDatasetIO:
         Returns:
             Existing video paths keyed by the caller camera key.
         """
-        info_path = self.root / "meta" / "info.json"
-        if info_path.exists():
-            with open(info_path) as f:
-                info = json.load(f)
-            chunks_size = info.get("chunks_size", 1000)
-            episode_chunk = episode_id // chunks_size
-            episode_file = self.episode_file_stem(episode_id)
-            video_path_tpl = info.get(
-                "video_path",
-                "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4",
-            )
-        else:
-            episode_chunk = 0
-            episode_file = f"episode_{episode_id:06d}"
-            video_path_tpl = (
-                "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4"
-            )
+        layout = self.storage_layout()
+        episode_chunk = episode_id // layout["chunks_size"]
+        episode_file = self.episode_file_stem(episode_id)
+        video_path_tpl = layout["video_path"]
 
         out: dict[str, Path] = {}
         for cam_key, video_key in video_keys.items():
@@ -114,11 +153,16 @@ class LeRobotDatasetIO:
         return rows
 
     def episode_file_stem(self, episode_id: int) -> str:
-        row = self._episode_rows_by_index().get(episode_id, {})
-        stem = row.get("file_stem")
-        if stem:
-            return str(stem)
-        return f"episode_{episode_id:06d}"
+        stems = self._episode_file_stems()
+        return stems.get(episode_id) or f"episode_{episode_id:06d}"
+
+    def _episode_file_stems(self) -> dict[int, str]:
+        path = (self.root / "meta" / "episodes.jsonl").resolve()
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            return {}
+        return _read_episode_file_stems(path, (stat.st_ino, stat.st_mtime_ns, stat.st_size))
 
     def tasks_by_index(self) -> dict[int, str]:
         # tasks.jsonl maps task_index -> task text; a parquet's task_index column then
@@ -186,37 +230,139 @@ class LeRobotDatasetIO:
                 return int(total)
         return len(list(self.root.glob("data/**/*.parquet")))
 
-    def mark_qc(self, episode: int, verdict: str, note: str = "") -> bool:
-        """Write a quality-check verdict onto an episode's meta/episodes.jsonl row.
+    def mark_qc(
+        self, episode: int, verdict: str, note: str = "", reason: str = "", auto: bool = False
+    ) -> bool:
+        """Write a quality-check verdict onto the episode's meta/qc.jsonl row.
 
-        Merges ``qc_verdict`` ("pass"/"fail") and ``qc_note`` into the matching row in
-        place, leaving the recorded trajectory untouched. An empty ``verdict`` keeps the
-        existing verdict so a note can be saved on its own. Returns False when the dataset
-        has no episodes.jsonl or the episode index is absent.
+        Merges ``qc_verdict`` ("pass"/"fail"), ``qc_note``, ``qc_reason``, and the
+        ``qc_auto`` provenance flag into the matching row in place, leaving the recorded
+        trajectory untouched. An empty ``verdict`` keeps the existing verdict so a note
+        can be saved on its own. A human verdict always wins over a machine one, which is
+        kept beside it in ``qc_auto_verdict``/``qc_auto_note``/``qc_auto_reason``; a
+        machine verdict only becomes effective while no human verdict stands. Returns
+        False when the dataset has no episodes.jsonl or the episode index is absent.
         """
-        path = self.root / "meta" / "episodes.jsonl"
-        if not path.exists():
-            return False
-        rows = []
-        with path.open() as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    rows.append(json.loads(line))
-        patched = False
-        for row in rows:
-            if int(row.get("episode_index", -1)) == episode:
-                if verdict:
-                    row["qc_verdict"] = verdict
-                row["qc_note"] = note
-                patched = True
-                break
-        if not patched:
-            return False
-        with path.open("w") as f:
-            for row in rows:
-                f.write(json.dumps(row, ensure_ascii=False) + "\n")
-        return True
+
+        def edit(row: dict) -> bool:
+            if auto:
+                if row.get("qc_verdict") in {"pass", "fail"} and row.get("qc_auto") is not True:
+                    row.update(qc_auto_verdict=verdict, qc_auto_note=note, qc_auto_reason=reason)
+                else:
+                    row.update(qc_verdict=verdict, qc_note=note, qc_reason=reason, qc_auto=True)
+                    self._drop_auto_fields(row)
+                return True
+            if verdict:
+                if row.get("qc_auto") is True:
+                    row.update(
+                        qc_auto_verdict=row.get("qc_verdict", ""),
+                        qc_auto_note=row.get("qc_note", ""),
+                        qc_auto_reason=row.get("qc_reason", ""),
+                    )
+                row.update(qc_verdict=verdict, qc_auto=False)
+            row.update(qc_note=note, qc_reason=reason)
+            return True
+
+        return self._edit_qc(episode, edit)
+
+    def reset_qc(self, episode: int) -> bool:
+        """Start a saved retake's review without inheriting the previous take's QC."""
+
+        def edit(row: dict) -> bool:
+            row.update(qc_verdict="unreviewed", qc_note="", qc_reason="", qc_auto=False)
+            self._drop_auto_fields(row)
+            return True
+
+        return self._edit_qc(episode, edit)
+
+    def drop_auto_qc(self, episode: int) -> bool:
+        """Remove a machine verdict once a scan stops reporting the issue.
+
+        A human verdict is untouched; a machine verdict returns the episode to
+        unreviewed so the review queue reflects the fixed recording.
+        """
+
+        def edit(row: dict) -> bool:
+            recorded = any(key.startswith("qc_auto_") for key in row)
+            if not recorded and row.get("qc_auto") is not True:
+                return False
+            self._drop_auto_fields(row)
+            if row.get("qc_auto") is True:
+                row.update(qc_verdict="unreviewed", qc_note="", qc_reason="", qc_auto=False)
+            return True
+
+        return self._edit_qc(episode, edit)
+
+    @staticmethod
+    def _drop_auto_fields(row: dict) -> None:
+        for key in ("qc_auto_verdict", "qc_auto_note", "qc_auto_reason"):
+            row.pop(key, None)
+
+    def _edit_qc(self, episode: int, edit: Callable[[dict], bool]) -> bool:
+        """Apply ``edit`` to one episode's QC row and persist a canonical ledger.
+
+        QC rows are keyed by episode index. Keep that key unique and sort the file
+        after every write so a newly reviewed episode cannot appear to move another
+        episode when the console reloads the ledger. The ledger is rewritten whole,
+        so the read and the write hold the dataset lock: two stations reviewing at
+        once would otherwise each drop the other's rows.
+        """
+        qc_path = self.root / "meta" / "qc.jsonl"
+        with dataset_lock(self.root).acquire():
+            if episode not in self._episode_file_stems():
+                return False
+            qc_by_episode = self._read_qc_by_episode(qc_path)
+            qc_row: dict[str, Any] | None = qc_by_episode.get(episode)
+            if qc_row is None:
+                qc_row = {"episode_index": episode}
+                qc_by_episode[episode] = qc_row
+            if not edit(qc_row):
+                return False
+            timestamp = datetime.now(UTC)
+            if "qc_updated_at" in qc_row:
+                previous = datetime.fromisoformat(qc_row["qc_updated_at"].replace("Z", "+00:00"))
+                timestamp = max(timestamp, previous + timedelta(microseconds=1))
+            qc_row["qc_updated_at"] = timestamp.isoformat(timespec="microseconds")
+            self._write_canonical_qc(qc_path, qc_by_episode)
+            return True
+
+    @staticmethod
+    def _read_qc_by_episode(qc_path: Path) -> dict[int, dict]:
+        by_episode: dict[int, dict] = {}
+        if not qc_path.exists():
+            return by_episode
+        for line in qc_path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+                row_episode = int(row["episode_index"])
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+                continue
+            previous = by_episode.get(row_episode)
+            previous_at = str(previous.get("qc_updated_at", "")) if previous else ""
+            current_at = str(row.get("qc_updated_at", ""))
+            if previous is None or current_at >= previous_at:
+                by_episode[row_episode] = row
+        return by_episode
+
+    @staticmethod
+    def _write_canonical_qc(qc_path: Path, by_episode: dict[int, dict]) -> None:
+        qc_path.parent.mkdir(parents=True, exist_ok=True)
+        _write_jsonl_atomic(qc_path, (by_episode[index] for index in sorted(by_episode)))
+
+    def drop_qc(self, episode: int) -> bool:
+        """Forget one episode's QC row so a fresh take starts unreviewed."""
+        qc_path = self.root / "meta" / "qc.jsonl"
+        with dataset_lock(self.root).acquire():
+            if not qc_path.exists():
+                return False
+            by_episode = self._read_qc_by_episode(qc_path)
+            if episode not in by_episode:
+                return False
+            del by_episode[episode]
+            self._write_canonical_qc(qc_path, by_episode)
+            return True
 
     def read_annotation(self, episode: int) -> str:
         """Read an episode's stored language annotation from meta/episodes.jsonl.
@@ -249,31 +395,31 @@ class LeRobotDatasetIO:
         Returns False when the dataset has no episodes.jsonl or the episode is absent.
         """
         path = self.root / "meta" / "episodes.jsonl"
-        if not path.exists():
-            return False
-        rows = []
-        with path.open() as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    rows.append(json.loads(line))
-        patched = False
-        for row in rows:
-            if int(row.get("episode_index", -1)) == episode:
-                row[self._ANNOTATION_KEY] = annotation
-                patched = True
-                break
-        if not patched:
-            return False
-        with path.open("w") as f:
+        with dataset_lock(self.root).acquire():
+            if not path.exists():
+                return False
+            rows = []
+            with path.open() as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        rows.append(json.loads(line))
+            patched = False
             for row in rows:
-                f.write(json.dumps(row, ensure_ascii=False) + "\n")
-        self._write_annotation_parquet_column(episode, annotation)
-        self._declare_annotation_feature()
-        return True
+                if int(row.get("episode_index", -1)) == episode:
+                    row[self._ANNOTATION_KEY] = annotation
+                    patched = True
+                    break
+            if not patched:
+                return False
+            _write_jsonl_atomic(path, rows)
+            self._write_annotation_parquet_column(episode, annotation)
+            self._declare_annotation_feature()
+            return True
 
     def _write_annotation_parquet_column(self, episode: int, annotation: str) -> None:
-        # Rewrite the episode parquet's constant language_annotation string column in place.
+        # Rewrite the episode parquet's constant language_annotation string column,
+        # replacing the file in one step so a concurrent reader sees old or new.
         parquet_path = self.episode_parquet(episode)
         if not parquet_path.exists():
             return
@@ -285,7 +431,12 @@ class LeRobotDatasetIO:
             )
         else:
             table = table.append_column(self._ANNOTATION_KEY, arr)
-        pq.write_table(table, str(parquet_path))
+        replacement = parquet_path.with_suffix(f"{parquet_path.suffix}.tmp-{uuid4().hex}")
+        try:
+            pq.write_table(table, str(replacement))
+            os.replace(replacement, parquet_path)
+        finally:
+            replacement.unlink(missing_ok=True)
 
     def _declare_annotation_feature(self) -> None:
         # Declare language_annotation in info.json features (idempotent), matching the
@@ -298,8 +449,7 @@ class LeRobotDatasetIO:
         features = info.setdefault("features", {})
         if self._ANNOTATION_KEY not in features:
             features[self._ANNOTATION_KEY] = {"dtype": "string", "shape": [1], "names": None}
-            with open(info_path, "w") as f:
-                json.dump(info, f, indent=2, ensure_ascii=False)
+            _write_json_atomic(info_path, info)
 
     def infer_keys(self) -> dict:
         """Guess image / state / action column roles from the dataset's info.json features.

@@ -1,0 +1,184 @@
+robot:
+  dual_yam:
+    label: Dual YAM
+    defaults: {teleop: vr_webxr, camera: yam_d405_orbbec}
+    repeat:
+    - follower_can
+    launch:
+      python: examples/hardware/yam/.venv/bin/python
+      module: examples.hardware.yam.node
+      fixed:
+      - --idle-mode
+      - hold_position
+    settings:
+      obs_endpoint: tcp://127.0.0.1:5555
+      action_endpoint: tcp://127.0.0.1:5556
+      camera_endpoint: tcp://127.0.0.1:5557
+      follower_can:
+      - left_arm=can0
+      - right_arm=can1
+      gripper_limits_override: []
+      allow_gripper_calibration: true
+      gripper_kp: 5.0
+      gripper_damping: 0.5
+      gripper_close_torque_limit: 0.29
+      gripper_open_torque_limit: 0.29
+      gripper_max_speed: 2.0
+      rate: 60
+    config:
+      robot:
+        type: dual_yam
+        initial_qpos: [0.0, 1.58, 0.49, 1.15, 0.0, 0.0, 1.0, 0.0, 1.58, 0.49, 1.15, 0.0, 0.0, 1.0]
+        safe_qpos: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+        eef_reference_frame: base_link
+        gripper_threshold: null
+        gripper_open: 1.0
+        gripper_close: 0.0
+      transport:
+        type: zmq
+        node_name: eva_client
+        disabled_cameras: []
+        disabled_groups: []
+        topics: {}
+      collection:
+        schema:
+          robot_type: dual_yam
+          arms:
+            left_arm: left
+            right_arm: right
+          cameras:
+            cam_high: observation.images.cam_high
+            cam_left_wrist: observation.images.cam_left_wrist
+            cam_right_wrist: observation.images.cam_right_wrist
+        transport:
+          ros1:
+            primary_camera: ''
+            max_frame_skew_sec: 0.1
+            groups: {}
+          ros2:
+            primary_camera: ''
+            max_frame_skew_sec: 0.1
+            groups: {}
+      inference_cfg:
+        manual_max_qpos_step: 0.005
+        manual_settle_duration: 2.0
+      operator_control:
+        enabled: false
+        action_topic: /eva/operator_action
+camera_devices:
+  d405_high:
+    repeat:
+    - camera
+    settings:
+      camera:
+      - cam_high=260422275306
+      camera_width: 640
+      camera_height: 480
+      camera_auto_exposure_limit_us: 16000
+      camera_auto_gain_limit: 32
+      camera_warmup_frames: 90
+  orbbec_355_high:
+    repeat:
+    - orbbec_camera
+    settings:
+      orbbec_camera:
+      - cam_high=CP0HC530000Z
+      orbbec_width: 640
+      orbbec_height: 480
+      orbbec_brightness: 25
+      orbbec_power_line_frequency: 50
+      orbbec_reset_on_start: true
+  orbbec_305_left_wrist:
+    repeat:
+    - orbbec_camera
+    - orbbec_camera_brightness
+    - orbbec_camera_exposure
+    - orbbec_camera_gain
+    - orbbec_startup_timeout
+    settings:
+      orbbec_camera:
+      - cam_left_wrist=CV2L360000CL
+      orbbec_startup_timeout:
+      - cam_left_wrist=3
+      orbbec_width: 640
+      orbbec_height: 480
+      orbbec_camera_brightness:
+      - cam_left_wrist=0
+      orbbec_camera_exposure:
+      - cam_left_wrist=100
+      orbbec_camera_gain:
+      - cam_left_wrist=16
+      orbbec_power_line_frequency: 50
+      orbbec_reset_on_start: true
+  orbbec_305_right_wrist:
+    repeat:
+    - orbbec_camera
+    - orbbec_camera_brightness
+    - orbbec_camera_exposure
+    - orbbec_camera_gain
+    settings:
+      orbbec_camera:
+      - cam_right_wrist=CV2R1610003Z
+      orbbec_width: 640
+      orbbec_height: 480
+      orbbec_camera_brightness:
+      - cam_right_wrist=0
+      orbbec_camera_exposure:
+      - cam_right_wrist=100
+      orbbec_camera_gain:
+      - cam_right_wrist=16
+      orbbec_power_line_frequency: 50
+      orbbec_reset_on_start: true
+camera:
+  yam_d405_orbbec:
+    separate: true
+    label: 1 D405 + 2 Orbbec 305
+    settings:
+      camera_fps: 60
+      orbbec_fps: 60
+      orbbec_color_format: YUYV
+    robots:
+    - dual_yam
+    cameras:
+    - d405_high
+    - orbbec_305_left_wrist
+    - orbbec_305_right_wrist
+  yam_orbbec:
+    separate: true
+    label: 2 Orbbec 305 + 1 Orbbec 355
+    settings:
+      orbbec_fps: 30
+    robots:
+    - dual_yam
+    cameras:
+    - orbbec_355_high
+    - orbbec_305_left_wrist
+    - orbbec_305_right_wrist
+  none: {}
+  external:
+    hidden: true
+teleop:
+  yam_leader:
+    label: Leader
+    operation: leader
+    repeat:
+    - leader_gripper_endpoint
+    robots:
+    - dual_yam
+    settings:
+      leader_cans:
+      - can0
+      - can3
+      leader_gripper_endpoint:
+      - left_arm=-0.698132,0.0
+      - right_arm=-0.698132,0.0
+  vr_webxr:
+    client:
+      arms:
+        left_arm:
+          controller: left
+        right_arm:
+          controller: right
+      gripper:
+        open_value: 1.0
+        close_value: 0.0

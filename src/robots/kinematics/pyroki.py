@@ -40,7 +40,6 @@ the robot zoo needs:
 from __future__ import annotations
 
 import logging
-import time
 from collections.abc import Callable, Sequence
 from functools import partial
 from pathlib import Path
@@ -63,8 +62,6 @@ from robots.kinematics.solver import (
 
 # jaxls logs an INFO block on every problem.analyze(); silence it for streaming.
 logging.getLogger("jaxls").setLevel(logging.WARNING)
-
-_logger = logging.getLogger(__name__)
 
 
 @partial(jax.jit, static_argnames=("max_iterations",))
@@ -347,9 +344,7 @@ class PyrokiSingleArm:
 
         sol = np.empty((n_frames, self._n_act), dtype=np.float64)
         prev_cfg = start_full
-        t_start = time.perf_counter()
         for t in range(n_frames):
-            t0 = time.perf_counter()
             cfg = np.asarray(
                 _solve_frame_jax(
                     self._robot,
@@ -367,20 +362,10 @@ class PyrokiSingleArm:
                     self._dt,
                     self._max_iterations,
                 )
-            )
-            _logger.info(
-                "ik frame %d/%d solved in %.1f ms",
-                t + 1,
-                n_frames,
-                (time.perf_counter() - t0) * 1e3,
-            )
+            ).copy()
+            cfg[self._arm_cols] = np.clip(cfg[self._arm_cols], self._arm_lower, self._arm_upper)
             sol[t] = cfg
             prev_cfg = cfg
-        _logger.info(
-            "ik chunk: %d frames in %.1f ms",
-            n_frames,
-            (time.perf_counter() - t_start) * 1e3,
-        )
         return sol[:, self._arm_cols]
 
 
@@ -479,6 +464,8 @@ def pyroki_arms(
     urdf_path: Path,
     arms: list[dict[str, Any]],
     *,
+    eef_links: Sequence[str] | None = None,
+    reg_weight: float = 1.0,
     fixed_joints: dict[str, float] | None = None,
     default_reference_frame: str | None = None,
     supported_reference_frames: tuple[str, ...] = (),
@@ -494,6 +481,8 @@ def pyroki_arms(
         arms: one dict per arm (1 = single, 2 = dual), each with ``joints`` (ordered
             actuated joints solved), ``eef_link`` (the EEF link), and optional
             ``reference_frame``.
+        eef_links: target link per arm, overriding the robot's declared EEF links.
+        reg_weight: rest-pose weight used by each arm's inverse kinematics.
         fixed_joints: actuated joint name -> pinned value, applied to every arm.
         default_reference_frame: reference frame used when the runtime kwarg is unset,
             active only when ``supported_reference_frames`` is non-empty.
@@ -506,6 +495,8 @@ def pyroki_arms(
         A PyrokiDualArm (2 arms) or PyrokiSingleArmChunk (1 arm).
     """
     fixed = {k: float(v) for k, v in (fixed_joints or {}).items()}
+    if eef_links is not None:
+        arms = [{**arm, "eef_link": link} for arm, link in zip(arms, eef_links, strict=True)]
     kwargs.pop("frame_name", None)
     reference_frame = kwargs.pop("reference_frame", None)
 
@@ -525,6 +516,7 @@ def pyroki_arms(
             arm_cfg["eef_link"],
             reference_frame=resolve_frame(arm_cfg.get("reference_frame")),
             fixed_joints=fixed,
+            reg_weight=reg_weight,
         )
 
     if len(arms) == 2:

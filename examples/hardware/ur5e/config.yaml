@@ -1,0 +1,82 @@
+robot:
+  ur5e:
+    label: UR5e
+    defaults: {teleop: vr_webxr, camera: external}
+    launch:
+      python: examples/hardware/ur5e/.venv/bin/python
+      module: examples.hardware.ur5e.node
+    settings:
+      obs_endpoint: tcp://127.0.0.1:5555
+      action_endpoint: tcp://127.0.0.1:5556
+      camera_endpoint: tcp://127.0.0.1:5557
+      robot_ip: 127.0.0.1
+      gripper_port: /dev/ttyUSB1
+      rate: 25
+    config:
+      robot:
+        type: ur5e
+        initial_qpos: [-3.3475797812091272, -1.2882714432528992, 1.4286816755877894,
+                       1.5116821962543945, 1.6023021936416626, -0.21513206163515264, 1.0]
+        safe_qpos: [-3.3475797812091272, -1.2882714432528992, 1.4286816755877894,
+                   1.5116821962543945, 1.6023021936416626, -0.21513206163515264, 1.0]
+        eef_reference_frame: base_link
+        gripper_threshold: 0.5
+        gripper_open: 1.0
+        gripper_close: 0.0
+      transport:
+        type: zmq
+        node_name: eva_client
+        disabled_cameras: []
+        disabled_groups: []
+        topics: {}
+      collection:
+        schema:
+          robot_type: ur5e
+          arms:
+            arm: arm
+          cameras:
+            cam_high: observation.images.cam_high
+            cam_wrist: observation.images.cam_wrist
+        transport:
+          ros1:
+            primary_camera: ''
+            max_frame_skew_sec: 0.1
+            groups: {}
+          ros2:
+            primary_camera: ''
+            max_frame_skew_sec: 0.1
+            groups: {}
+      operator_control:
+        enabled: false
+        action_topic: /eva/operator_action
+camera:
+  ur5e_opencv:
+    separate: true
+    label: USB cameras
+    repeat:
+    - camera
+    robots:
+    - ur5e
+    settings:
+      camera:
+      - wrist_image:2:1280:720:25:0
+      - exterior_image:0:1280:720:25:0
+  none: {}
+  external: {}
+teleop:
+  ur5e_leader:
+    label: Leader
+    operation: leader
+    robots:
+    - ur5e
+    settings:
+      teleop_port: /dev/ttyACM0
+      teleop_joint_coef: 1,-1,-1,-1,-1,-1
+  vr_webxr:
+    client:
+      arms:
+        arm:
+          controller: right
+      gripper:
+        open_value: 1.0
+        close_value: 0.0

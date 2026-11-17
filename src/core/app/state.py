@@ -16,10 +16,8 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from core.config import ConfigDict
-from core.recorder.episode import EpisodeLogger
 from core.types import RawCollectionSnapshot, RolloutInterventionSegment
 from policy_client.base import PolicyClient
-from robots.base import Robot
 from strategy.base_strategy import BaseInferStrategy
 from transport.base import TransportBridge
 
@@ -27,7 +25,9 @@ if TYPE_CHECKING:
     from tqdm import tqdm
 
     from core.app.collection_capture import CollectionCaptureRunner
+    from core.recorder.episode import EpisodeLogger
     from critic_client.runner import CriticRunner
+    from robots.base import Robot
     from transport.dataset import DatasetTransport
 
 logger = logging.getLogger(__name__)
@@ -95,6 +95,11 @@ class SessionState:
         selected_collect_task: Operator-selected COLLECT task; None until chosen.
         selected_collect_set: Dataset set containing the selected collection task.
         selected_collect_task_index: Task position within the selected collection set.
+        collection_scene_id: Scene selected for the next collection episode.
+        collection_scene_round: Collection round for the selected scene.
+        collection_slot_id: Stable Scene + Task + Round slot selected for capture.
+        collection_task_id: Scene-plan task identifier for the selected slot.
+        collection_sim_metadata: Simulator metadata bound to the next collection episode.
         interrupt_requested: True when a motion interrupt has been requested.
         follow_human_gripper: When True, mirror the human teleop gripper state.
         gripper_locks: Per-arm gripper override values keyed by arm name.
@@ -120,6 +125,12 @@ class SessionState:
     selected_collect_task: str | None = None
     selected_collect_set: str | None = None
     selected_collect_task_index: int | None = None
+    collection_scene_id: str | None = None
+    collection_scene_round: int | None = None
+    collection_slot_id: str | None = None
+    collection_task_id: str | None = None
+    collection_sim_metadata: dict[str, Any] | None = None
+    collection_scene_reset_requests: int = 0
     interrupt_requested: bool = False
     follow_human_gripper: bool = False
     gripper_locks: dict[str, float] = dataclasses.field(default_factory=dict)
@@ -185,6 +196,7 @@ class RuntimeState:
         ckpt_order: blind multi-ckpt — ckpt_order[slot] -> index into
             config.eval.checkpoints.
         active_ckpt_slot: operator-facing checkpoint slot (0->Model A, 1->Model B, ...).
+        active_model_index: index of the selected deploy policy in the authored model list.
         eval_output_dir: eval results root (work_dirs/<eval config>/). Each model records
             into a per-model lerobot dataset at <eval_output_dir>/<model_name>/episodes,
             so a model's prior eval episodes (and their embedded scores) auto-resume next
@@ -236,6 +248,7 @@ class RuntimeState:
     prompt_ready: threading.Event | None = None
     infer_strategy: BaseInferStrategy | None = None  # pyright: ignore[reportGeneralTypeIssues]
     episode_logger: EpisodeLogger | None = None
+    collection_review_events: tuple[dict[str, object], ...] = ()
     collection_teleop_armed: bool = False
     collection_teleop_active: bool = False
     teleop_client: Any | None = None
@@ -261,6 +274,18 @@ class RuntimeState:
     needs_pre_start_reset: bool = False
     ckpt_order: list[int] = dataclasses.field(default_factory=list)
     active_ckpt_slot: int | None = None
+    active_model_index: int = 0
+    local_history_store: Any = None
+    local_session_id: str | None = None
+    local_rollout_id: str | None = None
+    local_current_rollout_id: str | None = None
+    local_rollout_start_step: int = 0
+    local_rollout_previous_steps: int = 0
+    local_run_generation: int = 0
+    debug_record_enabled: bool | None = None
+    debug_record_dataset_dir: str = ""
+    step_operation: str = ""
+    step_preview_version: int = 0
     eval_output_dir: str = ""
     active_config: ConfigDict | None = None
     replay_source: DatasetTransport | None = None
@@ -313,11 +338,20 @@ class RuntimeState:
     # Shared ConsoleContext, set by start_console_server. The ZMQ control channel reads
     # it so external callers see the exact tab/arm/collect state the web console does.
     console_ctx: Any | None = None
+    # The console server is owned by the current EVA run. Keep the handles here so a
+    # device-selection restart can close the listening socket before execv starts the
+    # replacement process.
+    console_server: Any | None = None
+    console_server_thread: threading.Thread | None = None
     # EVAL-tab INIT panel: when init_qpos is set, the arm's reset target becomes this
     # recorded start pose instead of robot.initial_qpos (home). init_ready latches once
     # the operator clicks DONE, gating RUN until the arm is positioned + gripper set.
     init_qpos: np.ndarray | None = None
     init_ready: bool = False
+    # Start gripper value per arm group chosen with the INIT panel's OPEN/CLOSE. A
+    # reset drives each gripper back to it; a group without a choice starts at the
+    # robot's home gripper value.
+    init_gripper: dict[str, float] = dataclasses.field(default_factory=dict)
 
 
 # --- state-transition helpers (log every transition uniformly) ---
@@ -371,8 +405,8 @@ def format_task_label(task: str | None) -> str:
 
 
 def default_inference_strategy_key(config: ConfigDict) -> str:
-    """Return the default inference strategy key (first entry in the configured mapping)."""
-    return next(iter(config.inference_strategies))
+    """Return the explicit default, falling back to the first configured strategy."""
+    return config.inference_cfg.get("default_strategy") or next(iter(config.inference_strategies))
 
 
 def resolve_inference_strategy_label(

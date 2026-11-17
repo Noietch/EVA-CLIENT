@@ -10,6 +10,8 @@ const query = new URLSearchParams(window.location.search);
 const token = query.get("token") || "";
 const sessionMode = query.get("mode") === "ar" ? "immersive-ar" : "immersive-vr";
 const passthrough = sessionMode === "immersive-ar";
+const hapticTest = query.get("haptic_test") === "1";
+const hapticResults = { left: "", right: "" };
 
 const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: passthrough });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -102,15 +104,16 @@ let reconnectTimer = null;
 let lastHapticCapabilityKey = null;
 
 function setConnection(online, label) {
-  statusLabel.textContent = label;
+  statusLabel.textContent = hapticTest ? "HAPTIC TEST (NO TELEOP)" : label;
   statusDot.classList.toggle("online", online);
-  enterButton.disabled = !online || !navigator.xr;
+  enterButton.disabled = (!online && !hapticTest) || !navigator.xr;
 }
 
 function describeGamepad(gamepad) {
   return {
     hasGamepad: Boolean(gamepad),
     mapping: gamepad?.mapping || "",
+    id: gamepad?.id || "",
     hapticActuators: Number(gamepad?.hapticActuators?.length || 0),
     vibrationActuator: Boolean(gamepad?.vibrationActuator),
   };
@@ -136,10 +139,9 @@ function updateHapticDiagnostics(reason) {
     if (info.hapticActuators > 0 || info.vibrationActuator) return "yes";
     return "no";
   };
-  if (hapticStatus) {
-    hapticStatus.textContent = `HAPTIC L:${formatHand(hands.left)} R:${formatHand(hands.right)}`;
-  }
-  drawHapticHud(`HAPTIC L:${formatHand(hands.left)} R:${formatHand(hands.right)}`);
+  const label = `HAPTIC L:${hapticResults.left || formatHand(hands.left)} R:${hapticResults.right || formatHand(hands.right)}`;
+  if (hapticStatus) hapticStatus.textContent = label;
+  drawHapticHud(label);
   const capabilityKey = sources
     .filter((source) => source.hand === "left" || source.hand === "right")
     .map((source) => `${source.hand}:${source.hasGamepad}:${source.hapticActuators}:${source.vibrationActuator}`)
@@ -147,38 +149,51 @@ function updateHapticDiagnostics(reason) {
     .join(",");
   if (capabilityKey !== lastHapticCapabilityKey) {
     lastHapticCapabilityKey = capabilityKey;
-    console.info("[WebXR haptics] capabilities", { reason, sources });
+    console.info("[WebXR haptics] capabilities", { reason, sources, userAgent: navigator.userAgent, mode: sessionMode });
   }
   return { hands, sources };
 }
 
-function pulseGamepad(gamepad, intensity, durationMs) {
+async function pulseGamepad(gamepad, intensity, durationMs, hand = "none") {
+  const session = xrSession;
   const info = describeGamepad(gamepad);
   const attempts = [];
   const actuator = gamepad?.hapticActuators?.[0];
-  if (actuator?.pulse) {
-    attempts.push("hapticActuator.pulse");
-    try {
-      Promise.resolve(actuator.pulse(intensity, durationMs))
-        .then(() => console.info("[WebXR haptics] hapticActuator.pulse resolved"))
-        .catch((error) => console.warn("[WebXR haptics] hapticActuator.pulse rejected", error));
-    } catch (error) {
-      console.warn("[WebXR haptics] hapticActuator.pulse threw", error);
-    }
-  }
   const vibration = gamepad?.vibrationActuator;
-  if (vibration?.playEffect) {
-    attempts.push("vibrationActuator.playEffect");
+  const candidates = [];
+  if (typeof actuator?.pulse === "function") {
+    candidates.push(["pulse", () => actuator.pulse(intensity, durationMs)]);
+  }
+  if (typeof vibration?.playEffect === "function") {
+    candidates.push(["playEffect", () => vibration.playEffect("dual-rumble", {
+      startDelay: 0, duration: durationMs,
+      strongMagnitude: intensity, weakMagnitude: intensity,
+    })]);
+  }
+  const showResult = (result) => {
+    if (session !== xrSession) return;
+    if (hand === "left" || hand === "right") hapticResults[hand] = result;
+    updateHapticDiagnostics("result");
+  };
+  if (!candidates.length) showResult("no-api");
+  // Try one API at a time so a second call cannot preempt a working pulse.
+  for (const [api, call] of candidates) {
+    showResult("pending");
     try {
-      Promise.resolve(vibration.playEffect("dual-rumble", {
-        duration: durationMs,
-        strongMagnitude: intensity,
-        weakMagnitude: intensity,
-      }))
-        .then(() => console.info("[WebXR haptics] vibrationActuator.playEffect resolved"))
-        .catch((error) => console.warn("[WebXR haptics] vibrationActuator.playEffect rejected", error));
+      // A few Android XR runtimes expose pulse() but leave its Promise pending.
+      // Do not let that prevent the alternate Gamepad haptics API from running.
+      const result = await Promise.race([
+        Promise.resolve().then(call),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 600)),
+      ]);
+      attempts.push({ api, result });
+      console.info("[WebXR haptics] result", { hand, api, result, intensity, durationMs });
+      showResult(result === undefined || result === true || result === "complete" ? "API-ok" : `API-${String(result)}`);
+      if (result === undefined || result === true || result === "complete") break;
     } catch (error) {
-      console.warn("[WebXR haptics] vibrationActuator.playEffect threw", error);
+      attempts.push({ api, error: String(error) });
+      console.warn("[WebXR haptics] rejected", { hand, api, error });
+      showResult("error");
     }
   }
   return { ...info, attempts };
@@ -187,19 +202,29 @@ function pulseGamepad(gamepad, intensity, durationMs) {
 function pulseControllers(intensity, durationMs) {
   if (!xrSession) return;
   for (const source of xrSession.inputSources) {
-    pulseGamepad(source.gamepad, intensity, durationMs);
+    void pulseGamepad(source.gamepad, intensity, durationMs, source.handedness);
   }
 }
 
-function pulseController(hand, intensity, durationMs) {
+if (hapticTest) {
+  window.__evaHapticTest = () => pulseControllers(1.0, 500);
+  window.__evaHapticState = () => updateHapticDiagnostics("devtools");
+}
+
+// A direct XR gesture probe isolates haptics from server feedback and teleop.
+function installGestureHapticProbe(session) {
+  if (!hapticTest) return;
+  session.addEventListener("selectstart", (event) => {
+    const source = event.inputSource;
+    void pulseGamepad(source?.gamepad, 1.0, 300, source?.handedness);
+  });
+}
+
+async function pulseController(hand, intensity, durationMs) {
   if (!xrSession || (hand !== "left" && hand !== "right")) return [];
-  const matches = [];
-  for (const source of xrSession.inputSources) {
-    if (source.handedness === hand) {
-      matches.push({ hand, ...pulseGamepad(source.gamepad, intensity, durationMs) });
-    }
-  }
-  return matches;
+  return Promise.all(Array.from(xrSession.inputSources)
+    .filter((source) => source.handedness === hand)
+    .map(async (source) => ({ hand, ...await pulseGamepad(source.gamepad, intensity, durationMs, hand) })));
 }
 
 function connect() {
@@ -212,13 +237,14 @@ function connect() {
     reconnectTimer = setTimeout(connect, 1000);
   });
   socket.addEventListener("error", () => setConnection(false, "CONNECTION ERROR"));
-  socket.addEventListener("message", (message) => {
+  socket.addEventListener("message", async (message) => {
+    if (hapticTest) return;
     let payload;
     try { payload = JSON.parse(message.data); } catch (_) { return; }
     if (payload.type === "haptic") {
       const intensity = Math.max(0, Math.min(1, Number(payload.intensity) || 0));
       const durationMs = Math.max(1, Math.min(1000, Number(payload.duration_ms) || 80));
-      const matches = pulseController(payload.hand, intensity, durationMs);
+      const matches = await pulseController(payload.hand, intensity, durationMs);
       console.info("[WebXR haptics] request", {
         hand: payload.hand,
         intensity,
@@ -230,7 +256,6 @@ function connect() {
     if (payload.type !== "event_ack") return;
     statusLabel.textContent = payload.accepted ? (payload.message || "ACCEPTED") : "REJECTED";
     errorLabel.textContent = payload.accepted ? "" : (payload.message || "COMMAND REJECTED");
-    pulseControllers(payload.accepted ? 0.45 : 1.0, payload.accepted ? 90 : 240);
   });
 }
 
@@ -262,6 +287,10 @@ function controllerValue(source, frame) {
 }
 
 function sendFrame(timestamp, frame) {
+  if (hapticTest) {
+    updateHapticDiagnostics("test-frame");
+    return;
+  }
   if (!frame || !xrSession || !referenceSpace || socket?.readyState !== WebSocket.OPEN) return;
   updateHapticDiagnostics("frame");
   if (socket.bufferedAmount > 65536) return;
@@ -292,17 +321,20 @@ renderer.setAnimationLoop((timestamp, frame) => {
 enterButton.addEventListener("click", async () => {
   errorLabel.textContent = "";
   try {
+    hapticResults.left = hapticResults.right = "";
     xrSession = await navigator.xr.requestSession(sessionMode, { requiredFeatures: ["local-floor"] });
     referenceSpace = await xrSession.requestReferenceSpace("local-floor");
     referenceSpaceType = "local-floor";
     await renderer.xr.setSession(xrSession);
     updateHapticDiagnostics("session-start");
+    installGestureHapticProbe(xrSession);
     xrSession.addEventListener("inputsourceschange", () => updateHapticDiagnostics("inputsourceschange"));
     setConnection(socket?.readyState === WebSocket.OPEN, "STREAMING");
     enterButton.textContent = "VR ACTIVE";
     enterButton.disabled = true;
     xrSession.addEventListener("end", () => {
       xrSession = null;
+      hapticResults.left = hapticResults.right = "";
       referenceSpace = null;
       updateHapticDiagnostics("session-end");
       enterButton.textContent = passthrough ? "ENTER MR" : "ENTER VR";
@@ -320,5 +352,6 @@ window.addEventListener("resize", () => {
 });
 
 if (passthrough) enterButton.textContent = "ENTER MR";
+if (hapticTest) errorLabel.textContent = "Pull each trigger: 300 ms pulse. API-ok is not physical confirmation.";
 if (!navigator.xr) errorLabel.textContent = "WEBXR UNAVAILABLE";
 connect();
