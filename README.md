@@ -34,10 +34,6 @@
 
 ## 🔥 What's NEW!
 
-* **[2026-11-17] EVA-Client 0.3.0: unified devices, scene-aware evaluation, and dataset dashboard.**
-  * Pick a robot from the DEVICE tab or `eva device`; evaluate with task sets, milestones, and attempt tracking; review, QC, and deliver data from the new DASHBOARD. See [`docs/quick-start.md`](./docs/quick-start.md) and [`docs/console.md`](./docs/console.md).
-  * Native [XPolicyLab](https://github.com/XPolicyLab/XPolicyLab) policy client, Dual YAM EEF configs, a refreshed console UI, and client-side EVA-SIM recording (simulator coming soon). Full list in [`CHANGELOG.md`](./CHANGELOG.md).
-
 <table>
   <tr>
     <td><img src="assets/media/console/debug.png" alt="DEBUG tab: Dual YAM 3D scene"></td>
@@ -48,6 +44,10 @@
     <td><img src="assets/media/console/replay.png" alt="REPLAY tab: episode replay"></td>
   </tr>
 </table>
+
+* **[2026-11-17] EVA-Client 0.3.0: unified devices, scene-aware evaluation, and dataset dashboard.**
+  * Pick a robot from the DEVICE tab or `eva device`; evaluate with task sets, milestones, and attempt tracking; review, QC, and deliver data from the new DASHBOARD. See [`docs/quick-start.md`](./docs/quick-start.md) and [`docs/console.md`](./docs/console.md).
+  * Native [XPolicyLab](https://github.com/XPolicyLab/XPolicyLab) policy client, Dual YAM EEF configs, a refreshed console UI, and client-side EVA-SIM recording (simulator coming soon). Full list in [`CHANGELOG.md`](./CHANGELOG.md).
 
 * **[2026-08-28] EVA-Client 0.2.0** EVA-Client now supports WebXR-based VR controller teleoperation, ARX X5 hardware, dual-YAM leader-follower data collection, export to LeRobot v3.0, MCAP, and HDF5, and multiple coding-agent skills for adding robots, calibrating cameras, and debugging robot SDKs.
 
